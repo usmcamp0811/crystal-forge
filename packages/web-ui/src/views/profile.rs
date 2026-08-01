@@ -2,8 +2,14 @@
 
 use dioxus::prelude::*;
 
-use crate::api::client::logout;
-use crate::api::models::{AuthMode, Role, UpdateUserPreferences};
+use crate::api::client::{
+    fetch_notification_preferences, fetch_user_sessions, logout, revoke_all_user_sessions,
+    revoke_user_session, update_notification_preferences,
+};
+use crate::api::models::{
+    AuthMode, NotificationDeliveryChannel, NotificationPreferencesDto, Role,
+    UpdateNotificationPreferences, UpdateUserPreferences, UserSessionDto,
+};
 use crate::components::layout::sidebar::{PreferencesContext, SidebarContext};
 use crate::components::{Icon, IconName};
 use crate::routes::Route;
@@ -30,6 +36,12 @@ pub fn ProfileView() -> Element {
     let mut default_view = prefs_ctx.default_systems_view;
     let save_error = prefs_ctx.save_error;
     let mut logout_error = use_signal(|| None::<String>);
+    let mut notification_prefs = use_signal(|| None::<NotificationPreferencesDto>);
+    let mut notification_error = use_signal(|| None::<String>);
+    let mut sessions = use_signal(Vec::<UserSessionDto>::new);
+    let mut sessions_loading = use_signal(|| true);
+    let mut sessions_error = use_signal(|| None::<String>);
+    let mut revoke_all_confirm = use_signal(|| false);
 
     // Only display identity values supplied by the authenticated context.
     let user_name = auth_context
@@ -79,6 +91,38 @@ pub fn ProfileView() -> Element {
         AuthMode::Local => "local",
         AuthMode::Oidc => "oidc",
         AuthMode::Dev => "dev",
+    });
+
+    use_effect(move || {
+        spawn(async move {
+            match fetch_notification_preferences().await {
+                Ok(preferences) => {
+                    notification_prefs.set(Some(preferences));
+                    notification_error.set(None);
+                }
+                Err(err) => {
+                    notification_error.set(Some(format!(
+                        "Could not load notification preferences: {err}"
+                    )));
+                }
+            }
+        });
+    });
+
+    use_effect(move || {
+        spawn(async move {
+            sessions_loading.set(true);
+            match fetch_user_sessions().await {
+                Ok(response) => {
+                    sessions.set(response.sessions);
+                    sessions_error.set(None);
+                }
+                Err(err) => {
+                    sessions_error.set(Some(format!("Could not load active sessions: {err}")));
+                }
+            }
+            sessions_loading.set(false);
+        });
     });
 
     let is_oidc = auth_context
@@ -274,18 +318,83 @@ pub fn ProfileView() -> Element {
                     }
                 }
 
-                // Notifications card - disabled until backend integration
                 div {
                     class: "card",
-                    style: "padding: 8px 18px 14px; opacity: 0.6; pointer-events: none;",
+                    style: "padding: 8px 18px 14px;",
                     h3 {
                         style: "font-size: 13px; font-weight: 600; margin: 14px 0 4px;",
                         "Notifications"
                     }
-                    div {
-                        class: "help",
-                        style: "margin: 12px 0;",
-                        "Notification preferences will be available once backend integration is complete."
+                    if let Some(prefs) = notification_prefs() {
+                        NotificationToggleRow {
+                            title: "Deploy failures",
+                            checked: prefs.deploy_failures,
+                            on_change: move |checked| save_notification_pref(
+                                notification_prefs,
+                                notification_error,
+                                UpdateNotificationPreferences { deploy_failures: Some(checked), ..UpdateNotificationPreferences::default() },
+                            ),
+                        }
+                        NotificationToggleRow {
+                            title: "Build failures",
+                            checked: prefs.build_failures,
+                            on_change: move |checked| save_notification_pref(
+                                notification_prefs,
+                                notification_error,
+                                UpdateNotificationPreferences { build_failures: Some(checked), ..UpdateNotificationPreferences::default() },
+                            ),
+                        }
+                        NotificationToggleRow {
+                            title: "New critical CVEs",
+                            checked: prefs.critical_cves,
+                            on_change: move |checked| save_notification_pref(
+                                notification_prefs,
+                                notification_error,
+                                UpdateNotificationPreferences { critical_cves: Some(checked), ..UpdateNotificationPreferences::default() },
+                            ),
+                        }
+                        NotificationToggleRow {
+                            title: "Policy violations",
+                            checked: prefs.policy_violations,
+                            on_change: move |checked| save_notification_pref(
+                                notification_prefs,
+                                notification_error,
+                                UpdateNotificationPreferences { policy_violations: Some(checked), ..UpdateNotificationPreferences::default() },
+                            ),
+                        }
+                        NotificationToggleRow {
+                            title: "Heartbeat lost",
+                            checked: prefs.heartbeat_lost,
+                            on_change: move |checked| save_notification_pref(
+                                notification_prefs,
+                                notification_error,
+                                UpdateNotificationPreferences { heartbeat_lost: Some(checked), ..UpdateNotificationPreferences::default() },
+                            ),
+                        }
+                        NotificationToggleRow {
+                            title: "Weekly digest email",
+                            checked: prefs.weekly_digest,
+                            disabled: !prefs.email_available,
+                            on_change: move |checked| save_notification_pref(
+                                notification_prefs,
+                                notification_error,
+                                UpdateNotificationPreferences { weekly_digest: Some(checked), ..UpdateNotificationPreferences::default() },
+                            ),
+                        }
+                        PrefRow {
+                            title: "Delivery",
+                            desc: prefs.email_unavailable_reason.clone(),
+                            div { class: "seg", style: "width: fit-content;",
+                                button { class: if prefs.delivery_channel == NotificationDeliveryChannel::InApp { "active" } else { "" }, onclick: move |_| save_notification_pref(notification_prefs, notification_error, UpdateNotificationPreferences { delivery_channel: Some(NotificationDeliveryChannel::InApp), ..UpdateNotificationPreferences::default() }), "In-app" }
+                                button { disabled: !prefs.email_available, class: if prefs.delivery_channel == NotificationDeliveryChannel::Email { "active" } else { "" }, onclick: move |_| save_notification_pref(notification_prefs, notification_error, UpdateNotificationPreferences { delivery_channel: Some(NotificationDeliveryChannel::Email), ..UpdateNotificationPreferences::default() }), "Email" }
+                                button { disabled: !prefs.email_available, class: if prefs.delivery_channel == NotificationDeliveryChannel::Both { "active" } else { "" }, onclick: move |_| save_notification_pref(notification_prefs, notification_error, UpdateNotificationPreferences { delivery_channel: Some(NotificationDeliveryChannel::Both), ..UpdateNotificationPreferences::default() }), "Both" }
+                            }
+                        }
+                    } else {
+                        div { class: "help", style: "margin: 12px 0;", "Loading notification preferences..." }
+                    }
+                    if let Some(error) = notification_error() {
+                        div { class: "help", style: "color: var(--cf-critical); margin: 8px 0 4px;", "{error}" }
                     }
                 }
 
@@ -353,17 +462,54 @@ pub fn ProfileView() -> Element {
                     }
                 }
 
-                // Active sessions card - disabled until session management implemented
                 div {
                     class: "card",
-                    style: "padding: 18px; opacity: 0.6;",
+                    style: "padding: 18px;",
                     h3 {
                         style: "font-size: 13px; font-weight: 600; margin: 0 0 12px;",
                         "Active sessions"
                     }
-                    div {
-                        class: "help",
-                        "Session management will be available in a future release."
+                    if sessions_loading() {
+                        div { class: "help", "Loading active sessions..." }
+                    } else if let Some(error) = sessions_error() {
+                        div { class: "help", style: "color: var(--cf-critical);", "{error}" }
+                    } else if sessions().is_empty() {
+                        div { class: "help", "No active sessions were returned for this account." }
+                    } else {
+                        div { style: "display: grid; gap: 8px;",
+                            for session in sessions() {
+                                SessionRow { session: session.clone(), sessions, sessions_error }
+                            }
+                        }
+                        button {
+                            class: "btn ghost",
+                            style: "margin-top: 12px; color: var(--cf-critical); border-color: color-mix(in srgb, var(--cf-critical) 45%, transparent);",
+                            onclick: move |_| revoke_all_confirm.set(true),
+                            "Sign out everywhere"
+                        }
+                    }
+                    if revoke_all_confirm() {
+                        div { class: "modal-backdrop",
+                            div { class: "card", style: "padding: 18px; max-width: 420px;",
+                                h3 { style: "font-size: 13px; font-weight: 600; margin: 0 0 8px;", "Sign out everywhere?" }
+                                p { class: "help", "This will sign out all computers and browsers, including this one." }
+                                div { style: "display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px;",
+                                    button { class: "btn ghost", onclick: move |_| revoke_all_confirm.set(false), "Cancel" }
+                                    button {
+                                        class: "btn",
+                                        onclick: move |_| {
+                                            spawn(async move {
+                                                match revoke_all_user_sessions().await {
+                                                    Ok(()) => { nav.replace(Route::LoginView {}); }
+                                                    Err(err) => sessions_error.set(Some(format!("Could not sign out everywhere: {err}"))),
+                                                }
+                                            });
+                                        },
+                                        "Sign out everywhere"
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -374,6 +520,123 @@ pub fn ProfileView() -> Element {
 // ============================================================================
 // UI Components
 // ============================================================================
+
+fn save_notification_pref(
+    mut prefs_signal: Signal<Option<NotificationPreferencesDto>>,
+    mut error_signal: Signal<Option<String>>,
+    update: UpdateNotificationPreferences,
+) {
+    if let Some(mut prefs) = prefs_signal() {
+        if let Some(value) = update.deploy_failures {
+            prefs.deploy_failures = value;
+        }
+        if let Some(value) = update.build_failures {
+            prefs.build_failures = value;
+        }
+        if let Some(value) = update.critical_cves {
+            prefs.critical_cves = value;
+        }
+        if let Some(value) = update.policy_violations {
+            prefs.policy_violations = value;
+        }
+        if let Some(value) = update.heartbeat_lost {
+            prefs.heartbeat_lost = value;
+        }
+        if let Some(value) = update.weekly_digest {
+            prefs.weekly_digest = value;
+        }
+        if let Some(value) = update.delivery_channel {
+            prefs.delivery_channel = value;
+        }
+        prefs_signal.set(Some(prefs));
+    }
+
+    spawn(async move {
+        match update_notification_preferences(&update).await {
+            Ok(saved) => {
+                prefs_signal.set(Some(saved));
+                error_signal.set(None);
+            }
+            Err(err) => {
+                error_signal.set(Some(format!(
+                    "Could not save notification preferences: {err}"
+                )));
+            }
+        }
+    });
+}
+
+#[component]
+fn NotificationToggleRow(
+    title: &'static str,
+    checked: bool,
+    disabled: Option<bool>,
+    on_change: EventHandler<bool>,
+) -> Element {
+    let is_disabled = disabled.unwrap_or(false);
+    rsx! {
+        PrefRow {
+            title,
+            desc: None::<String>,
+            label {
+                style: "display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--cf-text-muted);",
+                input {
+                    r#type: "checkbox",
+                    checked,
+                    disabled: is_disabled,
+                    onchange: move |evt| on_change.call(evt.checked()),
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SessionRow(
+    session: UserSessionDto,
+    mut sessions: Signal<Vec<UserSessionDto>>,
+    mut sessions_error: Signal<Option<String>>,
+) -> Element {
+    let session_id = session.id;
+    let label = session.device_label.clone();
+    rsx! {
+        div {
+            style: "display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 8px; background: var(--cf-surface-muted);",
+            div { style: "display: flex; gap: 10px; min-width: 0;",
+                Icon { name: IconName::Server, size: 16 }
+                div { style: "min-width: 0;",
+                    div { style: "display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600;",
+                        "{session.device_label}"
+                        if session.current {
+                            span { class: "chip chip-healthy", style: "font-size: 10px;", "this device" }
+                        }
+                    }
+                    div { style: "font-size: 10px; color: var(--cf-text-muted); font-family: var(--cf-font-mono); margin-top: 2px;",
+                        "{session.ip_address.clone().unwrap_or_else(|| \"unknown IP\".to_string())} · last active {session.last_seen_at}"
+                    }
+                }
+            }
+            if !session.current {
+                button {
+                    class: "btn ghost",
+                    aria_label: "Revoke session {label}",
+                    onclick: move |_| {
+                        spawn(async move {
+                            match revoke_user_session(session_id).await {
+                                Ok(()) => {
+                                    sessions.write().retain(|item| item.id != session_id);
+                                    sessions_error.set(None);
+                                }
+                                Err(err) => sessions_error.set(Some(format!("Could not revoke session: {err}"))),
+                            }
+                        });
+                    },
+                    "Revoke"
+                }
+            }
+        }
+    }
+}
 
 #[component]
 fn PrefRow(title: String, desc: Option<String>, children: Element) -> Element {

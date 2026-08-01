@@ -163,6 +163,57 @@ pub struct ServerConfig {
     ///   need direct Git remote access.
     #[serde(default = "default_source_delivery_mode")]
     pub source_delivery_mode: SourceInputDeliveryMode,
+
+    /// Enables outbound notification email when transport details are also
+    /// configured and external delivery is permitted. Disabled by default so
+    /// newly deployed instances never send unsolicited email.
+    #[serde(default)]
+    pub notification_email_enabled: bool,
+
+    /// Deployment classification/external-delivery policy gate for email.
+    /// Keep this false on restricted deployments even if SMTP is configured.
+    #[serde(default)]
+    pub notification_email_external_delivery_allowed: bool,
+
+    /// SMTP endpoint or provider URL used by the notification email worker.
+    #[serde(default)]
+    pub notification_email_endpoint: Option<String>,
+
+    /// Sender email address used for notification email.
+    #[serde(default)]
+    pub notification_email_sender_address: Option<String>,
+
+    /// Human-readable sender display name.
+    #[serde(default = "default_notification_email_sender_name")]
+    pub notification_email_sender_name: String,
+
+    /// TLS mode for the configured SMTP/provider endpoint.
+    #[serde(default = "default_notification_email_tls_mode")]
+    pub notification_email_tls_mode: String,
+
+    /// Optional username for SMTP/provider authentication.
+    #[serde(default)]
+    pub notification_email_username: Option<String>,
+
+    /// Path to a secret file containing SMTP/provider credentials.
+    #[serde(default)]
+    pub notification_email_password_file: Option<PathBuf>,
+
+    /// Poll interval for immediate notification delivery worker.
+    #[serde(default = "default_notification_email_worker_interval_seconds")]
+    pub notification_email_worker_interval_seconds: u64,
+
+    /// Maximum send attempts before a delivery is permanently failed.
+    #[serde(default = "default_notification_email_max_attempts")]
+    pub notification_email_max_attempts: i32,
+
+    /// Session last-seen update throttle in seconds.
+    #[serde(default = "default_session_last_seen_throttle_seconds")]
+    pub session_last_seen_throttle_seconds: u64,
+
+    /// Retention period for expired/revoked session rows.
+    #[serde(default = "default_session_retention_days")]
+    pub session_retention_days: i32,
 }
 
 fn default_remote_build_execution_strategy() -> RemoteBuildExecutionStrategy {
@@ -179,6 +230,30 @@ fn default_source_archive_root() -> PathBuf {
 
 fn default_source_delivery_mode() -> SourceInputDeliveryMode {
     SourceInputDeliveryMode::LocalGitWorktree
+}
+
+fn default_notification_email_sender_name() -> String {
+    "Crystal Forge".to_string()
+}
+
+fn default_notification_email_tls_mode() -> String {
+    "starttls".to_string()
+}
+
+fn default_notification_email_worker_interval_seconds() -> u64 {
+    60
+}
+
+fn default_notification_email_max_attempts() -> i32 {
+    5
+}
+
+fn default_session_last_seen_throttle_seconds() -> u64 {
+    300
+}
+
+fn default_session_retention_days() -> i32 {
+    30
 }
 
 // Default value functions for serde
@@ -241,6 +316,19 @@ impl Default for ServerConfig {
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
             source_archive_root: default_source_archive_root(),
             source_delivery_mode: default_source_delivery_mode(),
+            notification_email_enabled: false,
+            notification_email_external_delivery_allowed: false,
+            notification_email_endpoint: None,
+            notification_email_sender_address: None,
+            notification_email_sender_name: default_notification_email_sender_name(),
+            notification_email_tls_mode: default_notification_email_tls_mode(),
+            notification_email_username: None,
+            notification_email_password_file: None,
+            notification_email_worker_interval_seconds:
+                default_notification_email_worker_interval_seconds(),
+            notification_email_max_attempts: default_notification_email_max_attempts(),
+            session_last_seen_throttle_seconds: default_session_last_seen_throttle_seconds(),
+            session_retention_days: default_session_retention_days(),
         }
     }
 }
@@ -305,6 +393,49 @@ impl ServerConfig {
 
         if self.build_log_retention_days <= 0 || self.failed_build_log_retention_days <= 0 {
             return Err("build log retention days must be greater than 0".to_string());
+        }
+
+        if self.notification_email_enabled {
+            if self
+                .notification_email_endpoint
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+            {
+                return Err(
+                    "notification_email_endpoint is required when notification email is enabled"
+                        .to_string(),
+                );
+            }
+            if self
+                .notification_email_sender_address
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+            {
+                return Err(
+                    "notification_email_sender_address is required when notification email is enabled"
+                        .to_string(),
+                );
+            }
+        }
+
+        if self.notification_email_worker_interval_seconds == 0 {
+            return Err("notification email worker interval must be greater than 0".to_string());
+        }
+
+        if self.notification_email_max_attempts <= 0 {
+            return Err("notification email max attempts must be greater than 0".to_string());
+        }
+
+        if self.session_last_seen_throttle_seconds == 0 {
+            return Err("session last-seen throttle must be greater than 0".to_string());
+        }
+
+        if self.session_retention_days <= 0 {
+            return Err("session retention days must be greater than 0".to_string());
         }
 
         if self.execution_mode.is_mock() && self.auth_mode != "local" {

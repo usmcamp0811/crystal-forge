@@ -1102,6 +1102,14 @@ pub fn spawn_background_tasks(
         cfg.server.commit_cache_retention_days,
     ));
 
+    let notification_email_pool = pool.clone();
+    tokio::spawn(
+        crate::tasks::user_notification_email::run_user_notification_email_loop(
+            notification_email_pool,
+            cfg.server.clone(),
+        ),
+    );
+
     tokio::spawn(spawn_deployment_policy_manager(
         cfg.clone(),
         deployment_pool,

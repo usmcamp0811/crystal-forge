@@ -2797,6 +2797,7 @@ mod tests {
             Utc::now() + chrono::Duration::hours(1),
             Some("test-agent".to_string()),
             Some("127.0.0.1".to_string()),
+            "local".to_string(),
         )
         .await
         .expect("create_user_session should succeed");

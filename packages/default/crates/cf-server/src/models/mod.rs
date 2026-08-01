@@ -19,5 +19,6 @@ pub mod scan_packages;
 pub mod system_events;
 pub mod system_states;
 pub mod systems;
+pub mod user_notifications;
 pub mod user_preferences;
 pub mod users;

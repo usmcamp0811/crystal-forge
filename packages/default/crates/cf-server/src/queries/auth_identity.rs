@@ -51,6 +51,7 @@ pub struct NewUserSession {
     pub expires_at: DateTime<Utc>,
     pub user_agent: Option<String>,
     pub ip_address: Option<String>,
+    pub auth_source: String,
 }
 
 pub struct AuthIdentityRepository<'a> {
@@ -153,15 +154,16 @@ impl<'a> AuthIdentityRepository<'a> {
         session: &NewUserSession,
     ) -> Result<UserSession, AuthRepositoryError> {
         let created_session = sqlx::query_as::<_, UserSession>(
-            "INSERT INTO user_sessions (user_id, session_token_hash, expires_at, user_agent, ip_address)
-             VALUES ($1, $2, $3, $4, $5)
-             RETURNING id, user_id, session_token_hash, issued_at, expires_at, last_seen_at, invalidated_at, user_agent, ip_address",
+            "INSERT INTO user_sessions (user_id, session_token_hash, expires_at, user_agent, ip_address, auth_source)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING id, user_id, session_token_hash, issued_at, expires_at, last_seen_at, invalidated_at, user_agent, ip_address, auth_source",
         )
         .bind(session.user_id)
         .bind(&session.session_token_hash)
         .bind(session.expires_at)
         .bind(&session.user_agent)
         .bind(&session.ip_address)
+        .bind(&session.auth_source)
         .fetch_one(self.pool)
         .await?;
 
@@ -173,7 +175,7 @@ impl<'a> AuthIdentityRepository<'a> {
         session_token_hash: &str,
     ) -> Result<Option<UserSession>, AuthRepositoryError> {
         let session = sqlx::query_as::<_, UserSession>(
-            "SELECT id, user_id, session_token_hash, issued_at, expires_at, last_seen_at, invalidated_at, user_agent, ip_address
+            "SELECT id, user_id, session_token_hash, issued_at, expires_at, last_seen_at, invalidated_at, user_agent, ip_address, auth_source
              FROM user_sessions
              WHERE session_token_hash = $1
                AND invalidated_at IS NULL
@@ -270,6 +272,7 @@ pub async fn create_user_session(
     expires_at: DateTime<Utc>,
     user_agent: Option<String>,
     ip_address: Option<String>,
+    auth_source: String,
 ) -> Result<UserSession, AuthRepositoryError> {
     let repo = AuthIdentityRepository::new(pool);
     let session = NewUserSession {
@@ -278,6 +281,7 @@ pub async fn create_user_session(
         expires_at,
         user_agent,
         ip_address,
+        auth_source,
     };
     repo.create_session(&session).await
 }
@@ -306,7 +310,7 @@ pub async fn get_session_by_token_hash(
     session_token_hash: &str,
 ) -> Result<Option<UserSession>, AuthRepositoryError> {
     let session = sqlx::query_as::<_, UserSession>(
-        "SELECT id, user_id, session_token_hash, issued_at, expires_at, last_seen_at, invalidated_at, user_agent, ip_address
+        "SELECT id, user_id, session_token_hash, issued_at, expires_at, last_seen_at, invalidated_at, user_agent, ip_address, auth_source
          FROM user_sessions
          WHERE session_token_hash = $1",
     )
@@ -315,6 +319,78 @@ pub async fn get_session_by_token_hash(
     .await?;
 
     Ok(session)
+}
+
+pub async fn list_active_sessions_for_user(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Vec<UserSession>, AuthRepositoryError> {
+    let sessions = sqlx::query_as::<_, UserSession>(
+        "SELECT id, user_id, session_token_hash, issued_at, expires_at, last_seen_at, invalidated_at, user_agent, ip_address, auth_source
+         FROM user_sessions
+         WHERE user_id = $1
+           AND invalidated_at IS NULL
+           AND expires_at > NOW()
+         ORDER BY last_seen_at DESC, issued_at DESC",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(sessions)
+}
+
+pub async fn invalidate_user_session_by_id(
+    pool: &PgPool,
+    user_id: Uuid,
+    session_id: Uuid,
+) -> Result<bool, AuthRepositoryError> {
+    let result = sqlx::query(
+        "UPDATE user_sessions
+         SET invalidated_at = COALESCE(invalidated_at, NOW())
+         WHERE id = $1 AND user_id = $2",
+    )
+    .bind(session_id)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn invalidate_all_user_sessions(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<u64, AuthRepositoryError> {
+    let result = sqlx::query(
+        "UPDATE user_sessions
+         SET invalidated_at = COALESCE(invalidated_at, NOW())
+         WHERE user_id = $1 AND invalidated_at IS NULL AND expires_at > NOW()",
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
+pub async fn touch_session_last_seen(
+    pool: &PgPool,
+    session_id: Uuid,
+    throttle_seconds: i64,
+) -> Result<(), AuthRepositoryError> {
+    sqlx::query(
+        "UPDATE user_sessions
+         SET last_seen_at = NOW()
+         WHERE id = $1
+           AND last_seen_at < NOW() - make_interval(secs => $2)",
+    )
+    .bind(session_id)
+    .bind(throttle_seconds.clamp(60, 86_400) as f64)
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 /// Get all roles for a user.

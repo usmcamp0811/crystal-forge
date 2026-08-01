@@ -1,26 +1,18 @@
 //! Top bar layout component.
 
-use crate::api::models::UpdateUserPreferences;
+use crate::api::client::{
+    dismiss_user_notification, fetch_user_notifications, mark_all_user_notifications_read,
+    mark_user_notification_read,
+};
+use crate::api::models::{NotificationCategory, UpdateUserPreferences, UserNotificationDto};
 use crate::components::layout::sidebar::{PreferencesContext, SidebarContext};
 use crate::routes::Route;
 use crate::state::app_state::AppState;
-use crate::state::auth;
 use crate::state::preferences;
 use crate::state::theme::UiTheme;
 use crate::theme;
+use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
-
-#[derive(Clone)]
-struct NotificationItem {
-    id: u8,
-    title: &'static str,
-    subtitle: &'static str,
-    age: &'static str,
-    color: &'static str,
-    unread: bool,
-    route: Option<Route>,
-    kind: NotificationKind,
-}
 
 #[derive(Clone, Copy)]
 enum NotificationKind {
@@ -31,20 +23,6 @@ enum NotificationKind {
     Evaluation,
 }
 
-fn admin_only_route(route: &Option<Route>) -> bool {
-    matches!(
-        route,
-        Some(Route::CvesView { .. } | Route::ScanningView { .. } | Route::AdminView { .. })
-    )
-}
-
-fn visible_notifications(is_admin_user: bool) -> Vec<NotificationItem> {
-    notifications()
-        .into_iter()
-        .filter(|item| is_admin_user || !admin_only_route(&item.route))
-        .collect()
-}
-
 fn set_root_attr(name: &str, value: &str) {
     if let Some(document) = web_sys::window().and_then(|w| w.document()) {
         if let Some(root) = document.document_element() {
@@ -53,59 +31,52 @@ fn set_root_attr(name: &str, value: &str) {
     }
 }
 
-fn notifications() -> Vec<NotificationItem> {
-    vec![
-        NotificationItem {
-            id: 1,
-            title: "3 systems awaiting deploy approval",
-            subtitle: "production · manual policy",
-            age: "2m ago",
-            color: "#fbbf24",
-            unread: true,
-            route: Some(Route::SystemsView {}),
-            kind: NotificationKind::Deploy,
-        },
-        NotificationItem {
-            id: 2,
-            title: "Build failed: openssl-3.3.2",
-            subtitle: "hydra-02 · attempt 3",
-            age: "12m ago",
-            color: "#f87171",
-            unread: true,
-            route: Some(Route::BuildsView {}),
-            kind: NotificationKind::Build,
-        },
-        NotificationItem {
-            id: 3,
-            title: "New critical CVE: CVE-2026-31822",
-            subtitle: "affects 6 systems · openssl",
-            age: "38m ago",
-            color: "#f87171",
-            unread: true,
-            route: Some(Route::CvesView {}),
-            kind: NotificationKind::Shield,
-        },
-        NotificationItem {
-            id: 4,
-            title: "Heartbeat lost: edge-fra-01",
-            subtitle: "no signal for 6h",
-            age: "1h ago",
-            color: "#fbbf24",
-            unread: false,
-            route: Some(Route::SystemsView {}),
-            kind: NotificationKind::Warning,
-        },
-        NotificationItem {
-            id: 5,
-            title: "Eval complete: infrastructure@a3f8c12",
-            subtitle: "12 systems · all policies passed",
-            age: "2h ago",
-            color: "#34d399",
-            unread: false,
-            route: Some(Route::EvaluationsView {}),
-            kind: NotificationKind::Evaluation,
-        },
-    ]
+fn notification_kind(category: NotificationCategory) -> NotificationKind {
+    match category {
+        NotificationCategory::DeployFailures => NotificationKind::Deploy,
+        NotificationCategory::BuildFailures => NotificationKind::Build,
+        NotificationCategory::CriticalCves => NotificationKind::Shield,
+        NotificationCategory::PolicyViolations => NotificationKind::Evaluation,
+        NotificationCategory::HeartbeatLost => NotificationKind::Warning,
+    }
+}
+
+fn notification_color(category: NotificationCategory) -> &'static str {
+    match category {
+        NotificationCategory::DeployFailures
+        | NotificationCategory::BuildFailures
+        | NotificationCategory::CriticalCves => "#f87171",
+        NotificationCategory::PolicyViolations | NotificationCategory::HeartbeatLost => "#fbbf24",
+    }
+}
+
+fn notification_route(route: &str) -> Option<Route> {
+    if route.starts_with("/systems") {
+        Some(Route::SystemsView {})
+    } else if route.starts_with("/builds") {
+        Some(Route::BuildsView {})
+    } else if route.starts_with("/cves") {
+        Some(Route::CvesView {})
+    } else if route.starts_with("/evaluations") {
+        Some(Route::EvaluationsView {})
+    } else if route.starts_with("/profile") {
+        Some(Route::ProfileView {})
+    } else {
+        None
+    }
+}
+
+fn relative_time(timestamp: DateTime<Utc>) -> String {
+    let delta = Utc::now().signed_duration_since(timestamp);
+    if delta.num_minutes() < 1 {
+        "now".to_string()
+    } else if delta.num_hours() < 1 {
+        format!("{}m ago", delta.num_minutes())
+    } else if delta.num_days() < 1 {
+        format!("{}h ago", delta.num_hours())
+    } else {
+        format!("{}d ago", delta.num_days())
+    }
 }
 
 /// Header bar displaying the current page title and optional actions.
@@ -117,7 +88,10 @@ pub fn TopBar(title: String) -> Element {
     let breadcrumb_override = use_context::<Signal<Option<(String, String)>>>();
     let app_state = use_context::<Signal<AppState>>();
     let auth_context = app_state.read().auth.clone();
-    let is_admin_user = auth::is_admin(&auth_context);
+    let auth_user_id = auth_context
+        .as_ref()
+        .and_then(|ctx| ctx.user.as_ref())
+        .map(|user| user.id.clone());
 
     let sidebar_ctx = use_context::<SidebarContext>();
     let mut is_mobile_drawer_open = sidebar_ctx.is_mobile_drawer_open;
@@ -130,12 +104,10 @@ pub fn TopBar(title: String) -> Element {
 
     let mut tweaks_open = use_signal(|| false);
     let mut notifications_open = use_signal(|| false);
-    let mut notification_items = use_signal(|| visible_notifications(is_admin_user));
-    let unread_count = notification_items
-        .read()
-        .iter()
-        .filter(|item| item.unread)
-        .count();
+    let mut notification_items = use_signal(Vec::<UserNotificationDto>::new);
+    let mut notifications_loading = use_signal(|| false);
+    let mut notifications_error = use_signal(|| None::<String>);
+    let mut unread_count = use_signal(|| 0_i64);
     let (crumb_parent, crumb_current) =
         if let Some((parent, current)) = breadcrumb_override.read().clone() {
             (Some(parent), current)
@@ -167,7 +139,26 @@ pub fn TopBar(title: String) -> Element {
     });
 
     use_effect(move || {
-        notification_items.set(visible_notifications(is_admin_user));
+        let auth_user_id = auth_user_id.clone();
+        spawn(async move {
+            if auth_user_id.is_none() {
+                notification_items.set(Vec::new());
+                unread_count.set(0);
+                return;
+            }
+            notifications_loading.set(true);
+            match fetch_user_notifications(Some(10), None, false).await {
+                Ok(response) => {
+                    notification_items.set(response.notifications);
+                    unread_count.set(response.unread_count);
+                    notifications_error.set(None);
+                }
+                Err(err) => {
+                    notifications_error.set(Some(format!("Could not load notifications: {err}")))
+                }
+            }
+            notifications_loading.set(false);
+        });
     });
 
     rsx! {
@@ -230,7 +221,7 @@ pub fn TopBar(title: String) -> Element {
                 button {
                     "data-testid": "topbar-notifications-button",
                     class: "btn-icon focus-ring topbar-bell",
-                    "aria-label": "Notifications",
+                    "aria-label": "Notifications ({unread_count()} unread)",
                     title: "Notifications",
                     onclick: move |_| {
                         notifications_open.set(!notifications_open());
@@ -245,11 +236,11 @@ pub fn TopBar(title: String) -> Element {
                             d: "M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
                         }
                     }
-                    if unread_count > 0 {
+                    if unread_count() > 0 {
                         span {
                             "data-testid": "topbar-notifications-badge",
                             class: "topbar-bell-badge",
-                            "{unread_count}"
+                            "{unread_count()}"
                         }
                     }
                 }
@@ -271,8 +262,16 @@ pub fn TopBar(title: String) -> Element {
                                 title: "Mark all read",
                                 style: "padding: 4px;",
                                 onclick: move |_| {
-                                    notification_items.write().iter_mut().for_each(|item| {
-                                        item.unread = false;
+                                    spawn(async move {
+                                        if mark_all_user_notifications_read().await.is_ok() {
+                                            notification_items.write().iter_mut().for_each(|item| {
+                                                item.read_at = Some(Utc::now());
+                                            });
+                                            unread_count.set(0);
+                                            notifications_error.set(None);
+                                        } else {
+                                            notifications_error.set(Some("Could not mark notifications read".to_string()));
+                                        }
                                     });
                                 },
                                 svg {
@@ -287,32 +286,48 @@ pub fn TopBar(title: String) -> Element {
                         }
                         div {
                             class: "notif-list",
-                            for item in notification_items.read().clone() {
-                                button {
-                                    key: "notif-{item.id}",
-                                    class: if item.unread { "notif-item unread focus-ring" } else { "notif-item focus-ring" },
+                            if notifications_loading() {
+                                div { class: "help", style: "padding: 12px;", "Loading notifications..." }
+                            } else if let Some(error) = notifications_error() {
+                                div { class: "help", style: "padding: 12px; color: var(--cf-critical);", "{error}" }
+                            } else if notification_items.read().is_empty() {
+                                div { class: "help", style: "padding: 12px;", "No notifications yet." }
+                            } else {
+                                for item in notification_items.read().clone() {
+                                    div {
+                                        key: "notif-{item.id}",
+                                        class: if item.read_at.is_none() { "notif-item unread focus-ring" } else { "notif-item focus-ring" },
+                                        role: "button",
+                                        tabindex: "0",
                                     onclick: {
                                         let nav = nav.clone();
-                                        let route = item.route.clone();
+                                        let route = notification_route(&item.route);
                                         let item_id = item.id;
                                         move |_| {
-                                            if let Some(clicked) = notification_items
-                                                .write()
-                                                .iter_mut()
-                                                .find(|candidate| candidate.id == item_id)
-                                            {
-                                                clicked.unread = false;
-                                            }
-                                            notifications_open.set(false);
-                                            if let Some(route) = route.clone() {
-                                                nav.push(route);
-                                            }
+                                            let route = route.clone();
+                                            spawn(async move {
+                                                let _ = mark_user_notification_read(item_id).await;
+                                                if let Some(clicked) = notification_items
+                                                    .write()
+                                                    .iter_mut()
+                                                    .find(|candidate| candidate.id == item_id)
+                                                {
+                                                    if clicked.read_at.is_none() {
+                                                        unread_count.set((unread_count() - 1).max(0));
+                                                    }
+                                                    clicked.read_at = Some(Utc::now());
+                                                }
+                                                notifications_open.set(false);
+                                                if let Some(route) = route.clone() {
+                                                    nav.push(route);
+                                                }
+                                            });
                                         }
                                     },
                                     span {
                                         class: "notif-icon",
-                                        style: "color: {item.color}; background: color-mix(in oklab, {item.color} 16%, transparent);",
-                                        match item.kind {
+                                        style: "color: {notification_color(item.category)}; background: color-mix(in oklab, {notification_color(item.category)} 16%, transparent);",
+                                        match notification_kind(item.category) {
                                             NotificationKind::Deploy => rsx!(
                                                 svg {
                                                     class: "w-3.5 h-3.5",
@@ -376,14 +391,41 @@ pub fn TopBar(title: String) -> Element {
                                         }
                                         span {
                                             class: "notif-sub",
-                                            "{item.subtitle}"
+                                            "{item.summary}"
                                         }
                                     }
                                     span {
                                         class: "notif-at",
-                                        "{item.age}"
+                                        title: "{item.created_at}",
+                                        "{relative_time(item.created_at)}"
+                                    }
+                                    button {
+                                        class: "btn-icon focus-ring",
+                                        title: "Dismiss notification",
+                                        onclick: move |evt| {
+                                            evt.stop_propagation();
+                                            spawn(async move {
+                                                match dismiss_user_notification(item.id).await {
+                                                    Ok(()) => {
+                                                        let was_unread = notification_items
+                                                            .read()
+                                                            .iter()
+                                                            .find(|candidate| candidate.id == item.id)
+                                                            .map(|candidate| candidate.read_at.is_none())
+                                                            .unwrap_or(false);
+                                                        notification_items.write().retain(|candidate| candidate.id != item.id);
+                                                        if was_unread {
+                                                            unread_count.set((unread_count() - 1).max(0));
+                                                        }
+                                                    }
+                                                    Err(err) => notifications_error.set(Some(format!("Could not dismiss notification: {err}"))),
+                                                }
+                                            });
+                                        },
+                                        "×"
                                     }
                                 }
+                            }
                             }
                         }
                         div {
@@ -395,7 +437,7 @@ pub fn TopBar(title: String) -> Element {
                                 title: "Notification settings",
                                 onclick: move |_| {
                                     notifications_open.set(false);
-                                    tweaks_open.set(true);
+                                    nav.push(Route::ProfileView {});
                                 },
                                 "Notification settings"
                             }

@@ -70,7 +70,7 @@ pub async fn dev_login(
 
             // Establish session cookies
             let session_cookies =
-                match establish_user_session(&pool, user.id, user_agent, ip_address).await {
+                match establish_user_session(&pool, user.id, user_agent, ip_address, "dev").await {
                     Ok(cookies) => cookies,
                     Err(_) => {
                         error!("Failed to establish session for dev user {}", user.email);

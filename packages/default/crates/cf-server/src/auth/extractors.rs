@@ -15,7 +15,12 @@ use uuid::Uuid;
 
 use crate::auth::session::{SESSION_COOKIE_NAME, extract_cookie, hash_token};
 use crate::models::auth_identity::AuthRole;
-use crate::queries::auth_identity::{find_active_session_by_token_hash, find_user_roles};
+use crate::queries::auth_identity::{
+    find_active_session_by_token_hash, find_user_roles, touch_session_last_seen,
+};
+
+const LAST_SEEN_THROTTLE_ENV: &str = "CRYSTAL_FORGE_SESSION_LAST_SEEN_THROTTLE_SECONDS";
+const DEFAULT_LAST_SEEN_THROTTLE_SECONDS: i64 = 5 * 60;
 
 /// Authorization error response with consistent JSON structure
 #[derive(Debug)]
@@ -121,6 +126,12 @@ where
             })?
             .ok_or(AuthError::Unauthorized)?;
 
+        if let Err(err) =
+            touch_session_last_seen(&pool, session.id, session_last_seen_throttle_seconds()).await
+        {
+            tracing::warn!(%err, session_id = %session.id, "failed to update throttled session last_seen_at");
+        }
+
         // Fetch user roles
         let role_assignments = find_user_roles(&pool, session.user_id).await.map_err(|e| {
             tracing::error!("failed to query user roles for {}: {}", session.user_id, e);
@@ -134,6 +145,14 @@ where
             roles,
         })
     }
+}
+
+fn session_last_seen_throttle_seconds() -> i64 {
+    std::env::var(LAST_SEEN_THROTTLE_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_LAST_SEEN_THROTTLE_SECONDS)
 }
 
 /// Extractor that requires an authenticated user with at least one role.

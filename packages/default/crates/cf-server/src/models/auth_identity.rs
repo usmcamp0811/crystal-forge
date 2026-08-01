@@ -43,6 +43,7 @@ pub struct UserSession {
     pub invalidated_at: Option<DateTime<Utc>>,
     pub user_agent: Option<String>,
     pub ip_address: Option<String>,
+    pub auth_source: String,
 }
 
 impl UserSession {

@@ -596,7 +596,7 @@ pub async fn oidc_callback(
         );
     }
 
-    let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address)
+    let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address, "oidc")
         .await
         .map_err(|_| OidcError::SessionCreationFailed)?;
     // TODO: Update external_identity claims on each login (keep profile fresh)

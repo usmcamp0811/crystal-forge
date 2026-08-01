@@ -31,6 +31,7 @@ pub async fn establish_user_session(
     user_id: Uuid,
     user_agent: Option<String>,
     ip_address: Option<String>,
+    auth_source: &str,
 ) -> Result<SessionCookies, SessionError> {
     let ttl_seconds = session_ttl_seconds();
     let session_token = generate_token();
@@ -45,6 +46,7 @@ pub async fn establish_user_session(
         expires_at,
         user_agent,
         ip_address,
+        auth_source.to_string(),
     )
     .await
     .map_err(|_| SessionError::Database)?;

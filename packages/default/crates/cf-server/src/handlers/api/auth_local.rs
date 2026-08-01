@@ -187,7 +187,7 @@ pub async fn login(
 
     let ip_address = Some(addr.ip().to_string());
 
-    let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address)
+    let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address, "local")
         .await
         .map_err(|_| LocalAuthError::SessionCreationFailed)?;
 

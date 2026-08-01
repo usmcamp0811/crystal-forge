@@ -3115,6 +3115,95 @@ pub struct UpdateUserPreferences {
     pub default_systems_view: Option<SystemsViewPreference>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationDeliveryChannel {
+    InApp,
+    Email,
+    Both,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NotificationPreferencesDto {
+    pub deploy_failures: bool,
+    pub build_failures: bool,
+    pub critical_cves: bool,
+    pub policy_violations: bool,
+    pub heartbeat_lost: bool,
+    pub weekly_digest: bool,
+    pub delivery_channel: NotificationDeliveryChannel,
+    pub email_available: bool,
+    pub delivery_email: Option<String>,
+    pub email_unavailable_reason: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateNotificationPreferences {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deploy_failures: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_failures: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub critical_cves: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_violations: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heartbeat_lost: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weekly_digest: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_channel: Option<NotificationDeliveryChannel>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationCategory {
+    DeployFailures,
+    BuildFailures,
+    CriticalCves,
+    PolicyViolations,
+    HeartbeatLost,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserNotificationDto {
+    pub id: Uuid,
+    pub category: NotificationCategory,
+    pub title: String,
+    pub summary: String,
+    pub route: String,
+    pub created_at: DateTime<Utc>,
+    pub read_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserNotificationsResponse {
+    pub notifications: Vec<UserNotificationDto>,
+    pub unread_count: i64,
+    pub next_cursor: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserSessionDto {
+    pub id: Uuid,
+    pub current: bool,
+    pub device_label: String,
+    pub browser: String,
+    pub operating_system: String,
+    pub device_class: String,
+    pub ip_address: Option<String>,
+    pub auth_source: String,
+    pub created_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserSessionsResponse {
+    pub sessions: Vec<UserSessionDto>,
+}
+
 /// Admin users list item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdminUserSummary {

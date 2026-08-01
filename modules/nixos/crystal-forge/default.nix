@@ -44,6 +44,24 @@
             cfg.server.allow_private_cache_test_targets;
           trust_forwarded_builder_https =
             cfg.server.trust_forwarded_builder_https;
+          notification_email_enabled = cfg.server.notificationEmail.enable;
+          notification_email_external_delivery_allowed =
+            cfg.server.notificationEmail.externalDeliveryAllowed;
+          notification_email_endpoint = cfg.server.notificationEmail.endpoint;
+          notification_email_sender_address = cfg.server.notificationEmail.senderAddress;
+          notification_email_sender_name = cfg.server.notificationEmail.senderName;
+          notification_email_tls_mode = cfg.server.notificationEmail.tlsMode;
+          notification_email_username = cfg.server.notificationEmail.username;
+          notification_email_password_file =
+            if cfg.server.notificationEmail.passwordFile != null
+            then toString cfg.server.notificationEmail.passwordFile
+            else null;
+          notification_email_worker_interval_seconds =
+            cfg.server.notificationEmail.workerIntervalSeconds;
+          notification_email_max_attempts = cfg.server.notificationEmail.maxAttempts;
+          session_last_seen_throttle_seconds =
+            cfg.server.sessionLastSeenThrottleSeconds;
+          session_retention_days = cfg.server.sessionRetentionDays;
           remote_build_execution_strategy = cfg.build.remote_execution_strategy;
           source_delivery_mode = cfg.build.source_delivery_mode;
           source_archive_root = toString cfg.build.source_archive_root;
@@ -1749,6 +1767,94 @@ in {
           an HTTPS-terminating reverse proxy (e.g. nginx, Caddy) that you
           control, and builders only reach the server through that proxy.
         '';
+      };
+
+      notificationEmail = {
+        enable = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = lib.mdDoc ''
+            Enable outbound account notification email. This only enables the
+            server-side delivery path when the endpoint, sender address, and
+            external delivery policy also permit email. Disabled by default to
+            avoid unsolicited email from new deployments.
+          '';
+        };
+
+        externalDeliveryAllowed = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = lib.mdDoc ''
+            Permit notification email to leave the deployment boundary. Keep
+            this disabled for classified or otherwise restricted deployments.
+          '';
+        };
+
+        endpoint = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "smtp://mail.example.com:587";
+          description = "SMTP or provider endpoint for notification email.";
+        };
+
+        senderAddress = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "crystal-forge@example.com";
+          description = "Sender email address for account notifications.";
+        };
+
+        senderName = lib.mkOption {
+          type = lib.types.str;
+          default = "Crystal Forge";
+          description = "Sender display name for account notifications.";
+        };
+
+        tlsMode = lib.mkOption {
+          type = lib.types.enum ["none" "starttls" "tls"];
+          default = "starttls";
+          description = "TLS mode for notification email transport.";
+        };
+
+        username = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          description = "Optional SMTP/provider username for notification email.";
+        };
+
+        passwordFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.path;
+          default = null;
+          description = lib.mdDoc ''
+            Path to a file containing SMTP/provider credentials. The module
+            passes only the path to Crystal Forge and does not copy the secret
+            into the generated TOML.
+          '';
+        };
+
+        workerIntervalSeconds = lib.mkOption {
+          type = lib.types.ints.positive;
+          default = 60;
+          description = "Polling interval for the immediate email delivery worker.";
+        };
+
+        maxAttempts = lib.mkOption {
+          type = lib.types.ints.positive;
+          default = 5;
+          description = "Maximum notification email send attempts before terminal failure.";
+        };
+      };
+
+      sessionLastSeenThrottleSeconds = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 300;
+        description = "Minimum interval between writes to user session last-seen timestamps.";
+      };
+
+      sessionRetentionDays = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 30;
+        description = "Retention period for expired or revoked account session records.";
       };
 
       role_mapping = lib.mkOption {
