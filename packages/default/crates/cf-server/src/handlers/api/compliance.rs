@@ -206,10 +206,7 @@ pub struct PolicyInterchangeExportRequest {
 /// Accepts a multipart XML or ZIP upload, validates structure and limits, and
 /// returns metadata without persisting anything. The full parser is implemented
 /// in phase 4; this handler enforces upload limits and returns a structured stub.
-pub async fn xccdf_preview(
-    State(pool): State<PgPool>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+pub async fn xccdf_preview(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
     let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
@@ -235,10 +232,7 @@ pub async fn xccdf_preview(
 ///
 /// Accepts the same file plus an import plan and commits atomically.
 /// Full implementation arrives in phase 4.
-pub async fn xccdf_import(
-    State(pool): State<PgPool>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+pub async fn xccdf_import(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
     let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };

@@ -38,10 +38,9 @@ pub async fn load_policies() -> PolicyLoadResult {
                 .collect();
             PolicyLoadResult::Ok(definitions)
         }
-        Err(ApiClientError::Status { code, body }) => PolicyLoadResult::Err(format!(
-            "Server returned {}: {}",
-            code, body
-        )),
+        Err(ApiClientError::Status { code, body }) => {
+            PolicyLoadResult::Err(format!("Server returned {}: {}", code, body))
+        }
         Err(ApiClientError::Network(msg)) => {
             PolicyLoadResult::Err(format!("Network error: {}", msg))
         }
