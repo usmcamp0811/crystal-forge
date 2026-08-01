@@ -393,6 +393,33 @@ pub async fn touch_session_last_seen(
     Ok(())
 }
 
+pub async fn cleanup_retained_user_sessions(
+    pool: &PgPool,
+    retention_days: i64,
+    limit: i64,
+) -> Result<u64, AuthRepositoryError> {
+    let result = sqlx::query(
+        r#"
+        WITH expired AS (
+            SELECT id
+            FROM user_sessions
+            WHERE COALESCE(invalidated_at, expires_at) < NOW() - make_interval(days => $1)
+            ORDER BY COALESCE(invalidated_at, expires_at) ASC
+            LIMIT $2
+        )
+        DELETE FROM user_sessions s
+        USING expired
+        WHERE s.id = expired.id
+        "#,
+    )
+    .bind(retention_days.clamp(1, 3650) as i32)
+    .bind(limit.clamp(1, 10_000))
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
 /// Get all roles for a user.
 pub async fn get_user_roles(
     pool: &PgPool,

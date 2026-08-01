@@ -14,13 +14,11 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::auth::session::{SESSION_COOKIE_NAME, extract_cookie, hash_token};
+use crate::config::ServerConfig;
 use crate::models::auth_identity::AuthRole;
 use crate::queries::auth_identity::{
     find_active_session_by_token_hash, find_user_roles, touch_session_last_seen,
 };
-
-const LAST_SEEN_THROTTLE_ENV: &str = "CRYSTAL_FORGE_SESSION_LAST_SEEN_THROTTLE_SECONDS";
-const DEFAULT_LAST_SEEN_THROTTLE_SECONDS: i64 = 5 * 60;
 
 /// Authorization error response with consistent JSON structure
 #[derive(Debug)]
@@ -103,6 +101,8 @@ impl<S> FromRequestParts<S> for AuthenticatedUser
 where
     S: Send + Sync,
     PgPool: FromRef<S>,
+    ServerConfig: FromRef<S>,
+    ServerConfig: FromRef<S>,
 {
     type Rejection = AuthError;
 
@@ -116,6 +116,7 @@ where
 
         // Get database pool from state
         let pool = PgPool::from_ref(state);
+        let server_config = ServerConfig::from_ref(state);
 
         // Look up active session
         let session = find_active_session_by_token_hash(&pool, &session_hash)
@@ -126,8 +127,12 @@ where
             })?
             .ok_or(AuthError::Unauthorized)?;
 
-        if let Err(err) =
-            touch_session_last_seen(&pool, session.id, session_last_seen_throttle_seconds()).await
+        if let Err(err) = touch_session_last_seen(
+            &pool,
+            session.id,
+            server_config.session_last_seen_throttle_seconds as i64,
+        )
+        .await
         {
             tracing::warn!(%err, session_id = %session.id, "failed to update throttled session last_seen_at");
         }
@@ -145,14 +150,6 @@ where
             roles,
         })
     }
-}
-
-fn session_last_seen_throttle_seconds() -> i64 {
-    std::env::var(LAST_SEEN_THROTTLE_ENV)
-        .ok()
-        .and_then(|raw| raw.parse::<i64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_LAST_SEEN_THROTTLE_SECONDS)
 }
 
 /// Extractor that requires an authenticated user with at least one role.
@@ -176,6 +173,7 @@ impl<S> FromRequestParts<S> for RequireAuth
 where
     S: Send + Sync,
     PgPool: FromRef<S>,
+    ServerConfig: FromRef<S>,
 {
     type Rejection = AuthError;
 
@@ -212,6 +210,7 @@ impl<S> FromRequestParts<S> for RequireOperator
 where
     S: Send + Sync,
     PgPool: FromRef<S>,
+    ServerConfig: FromRef<S>,
 {
     type Rejection = AuthError;
 
@@ -248,6 +247,7 @@ impl<S> FromRequestParts<S> for RequireAdmin
 where
     S: Send + Sync,
     PgPool: FromRef<S>,
+    ServerConfig: FromRef<S>,
 {
     type Rejection = AuthError;
 

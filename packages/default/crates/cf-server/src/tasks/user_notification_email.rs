@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use sqlx::{FromRow, PgPool};
+use std::{future::Future, pin::Pin};
 use tokio::time::{Duration, interval};
 use uuid::Uuid;
 
@@ -43,7 +45,21 @@ pub async fn run_user_notification_email_loop(pool: PgPool, config: ServerConfig
     let mut ticker = interval(Duration::from_secs(interval_seconds));
 
     loop {
-        if let Err(err) = process_due_email_deliveries(&pool, &config, DEFAULT_BATCH_SIZE).await {
+        if let Err(err) =
+            crate::queries::user_notifications::materialize_all_user_notifications(&pool).await
+        {
+            tracing::warn!(%err, "notification producer pass failed");
+        }
+        if let Err(err) =
+            crate::queries::user_notifications::enqueue_due_weekly_digest_deliveries(&pool).await
+        {
+            tracing::warn!(%err, "weekly digest producer pass failed");
+        }
+
+        let transport = HttpEmailTransport::new(config.clone());
+        if let Err(err) =
+            process_due_email_deliveries(&pool, &config, &transport, DEFAULT_BATCH_SIZE).await
+        {
             tracing::warn!(%err, "notification email worker pass failed");
         }
         ticker.tick().await;
@@ -53,6 +69,7 @@ pub async fn run_user_notification_email_loop(pool: PgPool, config: ServerConfig
 pub async fn process_due_email_deliveries(
     pool: &PgPool,
     config: &ServerConfig,
+    transport: &(dyn EmailTransport + Send + Sync),
     batch_size: i64,
 ) -> Result<u64, sqlx::Error> {
     if !email_transport_available(config) {
@@ -62,7 +79,7 @@ pub async fn process_due_email_deliveries(
     let deliveries = claim_due_email_deliveries(pool, batch_size.clamp(1, 100)).await?;
     let mut processed = 0;
     for delivery in deliveries {
-        process_claimed_delivery(pool, config, delivery).await?;
+        process_claimed_delivery(pool, config, transport, delivery).await?;
         processed += 1;
     }
     Ok(processed)
@@ -108,6 +125,7 @@ async fn claim_due_email_deliveries(
 async fn process_claimed_delivery(
     pool: &PgPool,
     config: &ServerConfig,
+    transport: &(dyn EmailTransport + Send + Sync),
     delivery: ClaimedEmailDelivery,
 ) -> Result<(), sqlx::Error> {
     let Some(recipient) = load_email_recipient(pool, delivery.user_id).await? else {
@@ -148,22 +166,92 @@ async fn process_claimed_delivery(
         _ => None,
     };
 
-    let Some(_rendered) = rendered else {
+    let Some((subject, text_body, html_body)) = rendered else {
         cancel_delivery(pool, delivery.id, "delivery content is no longer available").await?;
         return Ok(());
     };
 
-    // The durable queue and retry lifecycle are implemented here; the transport
-    // abstraction intentionally accepts configured deliveries in-process until a
-    // concrete SMTP/provider crate is introduced. Do not log rendered content.
-    tracing::info!(
-        delivery_id = %delivery.id,
-        delivery_type = %delivery.delivery_type,
-        endpoint = %config.notification_email_endpoint.as_deref().unwrap_or("configured"),
-        "notification email delivery accepted by configured transport"
-    );
-    mark_delivery_sent(pool, delivery.id).await?;
+    let message = EmailMessage {
+        to: recipient.email,
+        from: config
+            .notification_email_sender_address
+            .clone()
+            .unwrap_or_default(),
+        subject,
+        text_body,
+        html_body,
+    };
+
+    match transport.send(message).await {
+        Ok(receipt) => {
+            tracing::info!(delivery_id = %delivery.id, %receipt, "notification email accepted by transport");
+            mark_delivery_sent(pool, delivery.id).await?;
+        }
+        Err(err) => {
+            fail_delivery_for_retry(
+                pool,
+                &delivery,
+                config.notification_email_max_attempts,
+                &err,
+            )
+            .await?;
+        }
+    }
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EmailMessage {
+    pub to: String,
+    pub from: String,
+    pub subject: String,
+    pub text_body: String,
+    pub html_body: String,
+}
+
+pub trait EmailTransport {
+    fn send<'a>(
+        &'a self,
+        message: EmailMessage,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
+}
+
+#[derive(Debug, Clone)]
+struct HttpEmailTransport {
+    config: ServerConfig,
+}
+
+impl HttpEmailTransport {
+    fn new(config: ServerConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl EmailTransport for HttpEmailTransport {
+    fn send<'a>(
+        &'a self,
+        message: EmailMessage,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let endpoint = self
+                .config
+                .notification_email_endpoint
+                .as_deref()
+                .ok_or_else(|| "email endpoint is not configured".to_string())?;
+            let response = reqwest::Client::new()
+                .post(endpoint)
+                .json(&message)
+                .send()
+                .await
+                .map_err(|err| format!("email transport request failed: {err}"))?;
+            let status = response.status();
+            if status.is_success() {
+                Ok(format!("http:{status}"))
+            } else {
+                Err(format!("email transport rejected message with {status}"))
+            }
+        })
+    }
 }
 
 async fn load_email_recipient(
@@ -187,7 +275,7 @@ async fn render_immediate_delivery(
     pool: &PgPool,
     delivery: &ClaimedEmailDelivery,
     recipient_email: &str,
-) -> Result<Option<(String, String)>, sqlx::Error> {
+) -> Result<Option<(String, String, String)>, sqlx::Error> {
     let Some(notification_id) = delivery.notification_id else {
         return Ok(None);
     };
@@ -196,6 +284,7 @@ async fn render_immediate_delivery(
         SELECT title, summary, category::text AS category, route, created_at
         FROM user_notifications
         WHERE id = $1 AND user_id = $2 AND dismissed_at IS NULL
+          AND notification_visible_to_user($2, source_type, source_id)
         "#,
     )
     .bind(notification_id)
@@ -204,14 +293,15 @@ async fn render_immediate_delivery(
     .await?;
 
     Ok(row.map(|notification| {
-        render_immediate_email(
+        let (text, html) = render_immediate_email(
             recipient_email,
             &notification.title,
             &notification.summary,
             &notification.category,
             &notification.route,
             notification.created_at,
-        )
+        );
+        (notification.title, text, html)
     }))
 }
 
@@ -219,17 +309,29 @@ async fn render_digest_delivery(
     pool: &PgPool,
     delivery: &ClaimedEmailDelivery,
     recipient_email: &str,
-) -> Result<Option<(String, String)>, sqlx::Error> {
+) -> Result<Option<(String, String, String)>, sqlx::Error> {
     let items = sqlx::query_as::<_, NotificationEmailRow>(
         r#"
+        WITH digest_period AS (
+            SELECT period_start, period_end
+            FROM user_notification_weekly_digest_runs
+            WHERE delivery_id = $2
+              AND user_id = $1
+            LIMIT 1
+        )
         SELECT title, summary, category::text AS category, route, created_at
         FROM user_notifications
+        CROSS JOIN digest_period dp
         WHERE user_id = $1 AND dismissed_at IS NULL
+          AND created_at >= dp.period_start
+          AND created_at < dp.period_end
+          AND notification_visible_to_user($1, source_type, source_id)
         ORDER BY created_at DESC
         LIMIT 20
         "#,
     )
     .bind(delivery.user_id)
+    .bind(delivery.id)
     .fetch_all(pool)
     .await?;
 
@@ -237,10 +339,16 @@ async fn render_digest_delivery(
         return Ok(None);
     }
 
-    Ok(Some(render_digest_email(recipient_email, &items)))
+    let (text, html) = render_digest_email(recipient_email, &items);
+    Ok(Some((
+        "Crystal Forge weekly digest".to_string(),
+        text,
+        html,
+    )))
 }
 
 async fn mark_delivery_sent(pool: &PgPool, delivery_id: Uuid) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
     sqlx::query(
         r#"
         UPDATE user_notification_email_deliveries
@@ -249,8 +357,19 @@ async fn mark_delivery_sent(pool: &PgPool, delivery_id: Uuid) -> Result<(), sqlx
         "#,
     )
     .bind(delivery_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    sqlx::query(
+        r#"
+        UPDATE user_notification_weekly_digest_runs
+        SET status = 'sent', sent_at = NOW(), error_details = NULL
+        WHERE delivery_id = $1
+        "#,
+    )
+    .bind(delivery_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -259,6 +378,7 @@ async fn cancel_delivery(
     delivery_id: Uuid,
     reason: &str,
 ) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
     sqlx::query(
         r#"
         UPDATE user_notification_email_deliveries
@@ -268,12 +388,23 @@ async fn cancel_delivery(
     )
     .bind(delivery_id)
     .bind(reason)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    sqlx::query(
+        r#"
+        UPDATE user_notification_weekly_digest_runs
+        SET status = 'skipped', error_details = $2
+        WHERE delivery_id = $1
+        "#,
+    )
+    .bind(delivery_id)
+    .bind(reason)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
-#[allow(dead_code)]
 async fn fail_delivery_for_retry(
     pool: &PgPool,
     delivery: &ClaimedEmailDelivery,
@@ -283,6 +414,7 @@ async fn fail_delivery_for_retry(
     let terminal = delivery.attempt_count >= max_attempts;
     let backoff_seconds =
         60_i64.saturating_mul(2_i64.pow(delivery.attempt_count.clamp(0, 10) as u32));
+    let mut tx = pool.begin().await?;
     sqlx::query(
         r#"
         UPDATE user_notification_email_deliveries
@@ -297,8 +429,22 @@ async fn fail_delivery_for_retry(
     .bind(terminal)
     .bind(backoff_seconds)
     .bind(reason)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    sqlx::query(
+        r#"
+        UPDATE user_notification_weekly_digest_runs
+        SET status = CASE WHEN $2 THEN 'failed' ELSE 'pending' END,
+            error_details = $3
+        WHERE delivery_id = $1
+        "#,
+    )
+    .bind(delivery.id)
+    .bind(terminal)
+    .bind(reason)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -370,8 +516,222 @@ fn escape_html(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_html, render_immediate_email};
+    use super::{
+        EmailMessage, EmailTransport, escape_html, process_due_email_deliveries,
+        render_immediate_email,
+    };
     use chrono::Utc;
+    use sqlx::{PgPool, postgres::PgPoolOptions};
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::{Arc, Mutex},
+    };
+    use uuid::Uuid;
+
+    #[derive(Clone)]
+    struct FakeEmailTransport {
+        result: Result<String, String>,
+        messages: Arc<Mutex<Vec<EmailMessage>>>,
+    }
+
+    impl FakeEmailTransport {
+        fn accepting() -> Self {
+            Self {
+                result: Ok("fake-accepted".to_string()),
+                messages: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn rejecting(error: &str) -> Self {
+            Self {
+                result: Err(error.to_string()),
+                messages: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn sent_count(&self) -> usize {
+            self.messages.lock().expect("fake messages lock").len()
+        }
+
+        fn text_bodies(&self) -> Vec<String> {
+            self.messages
+                .lock()
+                .expect("fake messages lock")
+                .iter()
+                .map(|message| message.text_body.clone())
+                .collect()
+        }
+    }
+
+    impl EmailTransport for FakeEmailTransport {
+        fn send<'a>(
+            &'a self,
+            message: EmailMessage,
+        ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
+            Box::pin(async move {
+                self.messages
+                    .lock()
+                    .expect("fake messages lock")
+                    .push(message);
+                self.result.clone()
+            })
+        }
+    }
+
+    fn test_database_url() -> String {
+        std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .expect(
+                "CRYSTAL_FORGE_TEST_DATABASE_URL or DATABASE_URL must be set for database tests",
+            )
+    }
+
+    async fn test_pool() -> PgPool {
+        PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&test_database_url())
+            .await
+            .expect("failed to connect to test database")
+    }
+
+    fn email_config(max_attempts: i32) -> crate::config::ServerConfig {
+        crate::config::ServerConfig {
+            notification_email_enabled: true,
+            notification_email_external_delivery_allowed: true,
+            notification_email_endpoint: Some("http://127.0.0.1:9/fake".to_string()),
+            notification_email_sender_address: Some("noreply@example.test".to_string()),
+            notification_email_max_attempts: max_attempts,
+            ..Default::default()
+        }
+    }
+
+    async fn insert_queued_immediate_delivery(pool: &PgPool, attempt_count: i32) -> (Uuid, Uuid) {
+        let user_id = Uuid::new_v4();
+        let notification_id = Uuid::new_v4();
+        let source_id = Uuid::new_v4().to_string();
+
+        sqlx::query(
+            "INSERT INTO users (id, username, first_name, last_name, email)
+             VALUES ($1, $2, 'Email', 'Tester', $3)",
+        )
+        .bind(user_id)
+        .bind(format!("email-{user_id}"))
+        .bind(format!("{user_id}@example.test"))
+        .execute(pool)
+        .await
+        .expect("insert test user");
+
+        sqlx::query(
+            "INSERT INTO user_notification_preferences (user_id, delivery_channel)
+             VALUES ($1, 'email')",
+        )
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("insert notification preferences");
+
+        sqlx::query(
+            "INSERT INTO user_notifications
+                (id, user_id, category, source_type, source_id, title, summary, route, in_app_visible)
+             VALUES ($1, $2, 'build_failures', 'builds', $3, 'Build failed', 'The build failed.', '/builds', FALSE)",
+        )
+        .bind(notification_id)
+        .bind(user_id)
+        .bind(source_id)
+        .execute(pool)
+        .await
+        .expect("insert notification");
+
+        let (delivery_id,): (Uuid,) = sqlx::query_as(
+            "INSERT INTO user_notification_email_deliveries
+                (user_id, notification_id, delivery_type, idempotency_key, attempt_count, next_attempt_at)
+             VALUES ($1, $2, 'immediate', $3, $4, NOW() - INTERVAL '1 second')
+             RETURNING id",
+        )
+        .bind(user_id)
+        .bind(notification_id)
+        .bind(format!("test-immediate:{notification_id}"))
+        .bind(attempt_count)
+        .fetch_one(pool)
+        .await
+        .expect("insert email delivery");
+
+        (delivery_id, user_id)
+    }
+
+    async fn insert_queued_weekly_digest_delivery(pool: &PgPool) -> Uuid {
+        let user_id = Uuid::new_v4();
+        let in_period_id = Uuid::new_v4();
+        let outside_period_id = Uuid::new_v4();
+        let period_start = Utc::now() - chrono::Duration::days(7);
+        let period_end = Utc::now();
+
+        sqlx::query(
+            "INSERT INTO users (id, username, first_name, last_name, email)
+             VALUES ($1, $2, 'Digest', 'Tester', $3)",
+        )
+        .bind(user_id)
+        .bind(format!("digest-{user_id}"))
+        .bind(format!("digest-{user_id}@example.test"))
+        .execute(pool)
+        .await
+        .expect("insert test user");
+
+        sqlx::query(
+            "INSERT INTO user_notification_preferences (user_id, weekly_digest, delivery_channel)
+             VALUES ($1, TRUE, 'email')",
+        )
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("insert notification preferences");
+
+        sqlx::query(
+            "INSERT INTO user_notifications
+                (id, user_id, category, source_type, source_id, title, summary, route, created_at)
+             VALUES
+                ($1, $2, 'build_failures', 'builds', $3, 'Included digest item', 'Inside period.', '/builds', $4),
+                ($5, $2, 'build_failures', 'builds', $6, 'Excluded digest item', 'Outside period.', '/builds', $7)",
+        )
+        .bind(in_period_id)
+        .bind(user_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(period_start + chrono::Duration::hours(1))
+        .bind(outside_period_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(period_start - chrono::Duration::hours(1))
+        .execute(pool)
+        .await
+        .expect("insert digest notifications");
+
+        let (delivery_id,): (Uuid,) = sqlx::query_as(
+            "INSERT INTO user_notification_email_deliveries
+                (user_id, delivery_type, idempotency_key, next_attempt_at)
+             VALUES ($1, 'weekly_digest', $2, NOW() - INTERVAL '1 second')
+             RETURNING id",
+        )
+        .bind(user_id)
+        .bind(format!("test-weekly-digest:{user_id}"))
+        .fetch_one(pool)
+        .await
+        .expect("insert weekly digest delivery");
+
+        sqlx::query(
+            "INSERT INTO user_notification_weekly_digest_runs
+                (user_id, period_start, period_end, status, delivery_id)
+             VALUES ($1, $2, $3, 'pending', $4)",
+        )
+        .bind(user_id)
+        .bind(period_start)
+        .bind(period_end)
+        .bind(delivery_id)
+        .execute(pool)
+        .await
+        .expect("insert weekly digest run");
+
+        delivery_id
+    }
 
     #[test]
     fn user_notifications_email_html_escapes_controlled_values() {
@@ -396,5 +756,119 @@ mod tests {
             escape_html("'quoted' & \"double\""),
             "&#39;quoted&#39; &amp; &quot;double&quot;"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn user_notifications_email_worker_marks_sent_only_after_transport_acceptance() {
+        let pool = test_pool().await;
+        let (delivery_id, _user_id) = insert_queued_immediate_delivery(&pool, 0).await;
+        let transport = FakeEmailTransport::accepting();
+
+        let processed = process_due_email_deliveries(&pool, &email_config(3), &transport, 10)
+            .await
+            .expect("process due deliveries");
+
+        assert_eq!(processed, 1);
+        assert_eq!(transport.sent_count(), 1);
+        let (state, attempt_count, sent): (String, i32, bool) = sqlx::query_as(
+            "SELECT state, attempt_count, sent_at IS NOT NULL
+             FROM user_notification_email_deliveries
+             WHERE id = $1",
+        )
+        .bind(delivery_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load delivery state");
+        assert_eq!(state, "sent");
+        assert_eq!(attempt_count, 1);
+        assert!(sent);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn user_notifications_email_worker_retries_transport_rejection() {
+        let pool = test_pool().await;
+        let (delivery_id, _user_id) = insert_queued_immediate_delivery(&pool, 0).await;
+        let transport = FakeEmailTransport::rejecting("provider unavailable");
+
+        let processed = process_due_email_deliveries(&pool, &email_config(3), &transport, 10)
+            .await
+            .expect("process due deliveries");
+
+        assert_eq!(processed, 1);
+        assert_eq!(transport.sent_count(), 1);
+        let (state, attempt_count, sent, last_error): (String, i32, bool, Option<String>) =
+            sqlx::query_as(
+                "SELECT state, attempt_count, sent_at IS NOT NULL, last_error
+             FROM user_notification_email_deliveries
+             WHERE id = $1",
+            )
+            .bind(delivery_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load delivery state");
+        assert_eq!(state, "pending");
+        assert_eq!(attempt_count, 1);
+        assert!(!sent);
+        assert_eq!(last_error.as_deref(), Some("provider unavailable"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn user_notifications_email_worker_terminally_fails_at_max_attempts() {
+        let pool = test_pool().await;
+        let (delivery_id, _user_id) = insert_queued_immediate_delivery(&pool, 2).await;
+        let transport = FakeEmailTransport::rejecting("provider rejected");
+
+        let processed = process_due_email_deliveries(&pool, &email_config(3), &transport, 10)
+            .await
+            .expect("process due deliveries");
+
+        assert_eq!(processed, 1);
+        let (state, attempt_count, sent, last_error): (String, i32, bool, Option<String>) =
+            sqlx::query_as(
+                "SELECT state, attempt_count, sent_at IS NOT NULL, last_error
+             FROM user_notification_email_deliveries
+             WHERE id = $1",
+            )
+            .bind(delivery_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load delivery state");
+        assert_eq!(state, "failed");
+        assert_eq!(attempt_count, 3);
+        assert!(!sent);
+        assert_eq!(last_error.as_deref(), Some("provider rejected"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn user_notifications_weekly_digest_respects_recorded_period() {
+        let pool = test_pool().await;
+        let delivery_id = insert_queued_weekly_digest_delivery(&pool).await;
+        let transport = FakeEmailTransport::accepting();
+
+        let processed = process_due_email_deliveries(&pool, &email_config(3), &transport, 10)
+            .await
+            .expect("process due deliveries");
+
+        assert_eq!(processed, 1);
+        let bodies = transport.text_bodies();
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].contains("Included digest item"));
+        assert!(!bodies[0].contains("Excluded digest item"));
+        let (delivery_state, run_status): (String, String) = sqlx::query_as(
+            "SELECT d.state, r.status
+             FROM user_notification_email_deliveries d
+             JOIN user_notification_weekly_digest_runs r ON r.delivery_id = d.id
+             WHERE d.id = $1",
+        )
+        .bind(delivery_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load digest state");
+        assert_eq!(delivery_state, "sent");
+        assert_eq!(run_status, "sent");
     }
 }

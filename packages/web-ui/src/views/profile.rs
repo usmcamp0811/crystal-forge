@@ -38,6 +38,8 @@ pub fn ProfileView() -> Element {
     let mut logout_error = use_signal(|| None::<String>);
     let mut notification_prefs = use_signal(|| None::<NotificationPreferencesDto>);
     let mut notification_error = use_signal(|| None::<String>);
+    let notification_saving = use_signal(|| false);
+    let notification_pending_update = use_signal(|| None::<UpdateNotificationPreferences>);
     let mut sessions = use_signal(Vec::<UserSessionDto>::new);
     let mut sessions_loading = use_signal(|| true);
     let mut sessions_error = use_signal(|| None::<String>);
@@ -93,35 +95,65 @@ pub fn ProfileView() -> Element {
         AuthMode::Dev => "dev",
     });
 
+    let auth_user_id = auth_context
+        .as_ref()
+        .and_then(|ctx| ctx.user.as_ref())
+        .map(|user| user.id.clone());
+
+    let notification_load_user_id = auth_user_id.clone();
     use_effect(move || {
+        let requested_user_id = notification_load_user_id.clone();
         spawn(async move {
+            if requested_user_id.is_none() {
+                notification_prefs.set(None);
+                notification_error.set(None);
+                return;
+            }
             match fetch_notification_preferences().await {
                 Ok(preferences) => {
-                    notification_prefs.set(Some(preferences));
-                    notification_error.set(None);
+                    if current_profile_user_id(app_state) == requested_user_id {
+                        notification_prefs.set(Some(preferences));
+                        notification_error.set(None);
+                    }
                 }
                 Err(err) => {
-                    notification_error.set(Some(format!(
-                        "Could not load notification preferences: {err}"
-                    )));
+                    if current_profile_user_id(app_state) == requested_user_id {
+                        notification_error.set(Some(format!(
+                            "Could not load notification preferences: {err}"
+                        )));
+                    }
                 }
             }
         });
     });
 
+    let session_load_user_id = auth_user_id.clone();
     use_effect(move || {
+        let requested_user_id = session_load_user_id.clone();
         spawn(async move {
+            if requested_user_id.is_none() {
+                sessions.set(Vec::new());
+                sessions_error.set(None);
+                sessions_loading.set(false);
+                return;
+            }
             sessions_loading.set(true);
             match fetch_user_sessions().await {
                 Ok(response) => {
-                    sessions.set(response.sessions);
-                    sessions_error.set(None);
+                    if current_profile_user_id(app_state) == requested_user_id {
+                        sessions.set(response.sessions);
+                        sessions_error.set(None);
+                    }
                 }
                 Err(err) => {
-                    sessions_error.set(Some(format!("Could not load active sessions: {err}")));
+                    if current_profile_user_id(app_state) == requested_user_id {
+                        sessions_error.set(Some(format!("Could not load active sessions: {err}")));
+                    }
                 }
             }
-            sessions_loading.set(false);
+            if current_profile_user_id(app_state) == requested_user_id {
+                sessions_loading.set(false);
+            }
         });
     });
 
@@ -332,6 +364,9 @@ pub fn ProfileView() -> Element {
                             on_change: move |checked| save_notification_pref(
                                 notification_prefs,
                                 notification_error,
+                                notification_saving,
+                                notification_pending_update,
+                                app_state,
                                 UpdateNotificationPreferences { deploy_failures: Some(checked), ..UpdateNotificationPreferences::default() },
                             ),
                         }
@@ -341,6 +376,9 @@ pub fn ProfileView() -> Element {
                             on_change: move |checked| save_notification_pref(
                                 notification_prefs,
                                 notification_error,
+                                notification_saving,
+                                notification_pending_update,
+                                app_state,
                                 UpdateNotificationPreferences { build_failures: Some(checked), ..UpdateNotificationPreferences::default() },
                             ),
                         }
@@ -350,6 +388,9 @@ pub fn ProfileView() -> Element {
                             on_change: move |checked| save_notification_pref(
                                 notification_prefs,
                                 notification_error,
+                                notification_saving,
+                                notification_pending_update,
+                                app_state,
                                 UpdateNotificationPreferences { critical_cves: Some(checked), ..UpdateNotificationPreferences::default() },
                             ),
                         }
@@ -359,6 +400,9 @@ pub fn ProfileView() -> Element {
                             on_change: move |checked| save_notification_pref(
                                 notification_prefs,
                                 notification_error,
+                                notification_saving,
+                                notification_pending_update,
+                                app_state,
                                 UpdateNotificationPreferences { policy_violations: Some(checked), ..UpdateNotificationPreferences::default() },
                             ),
                         }
@@ -368,6 +412,9 @@ pub fn ProfileView() -> Element {
                             on_change: move |checked| save_notification_pref(
                                 notification_prefs,
                                 notification_error,
+                                notification_saving,
+                                notification_pending_update,
+                                app_state,
                                 UpdateNotificationPreferences { heartbeat_lost: Some(checked), ..UpdateNotificationPreferences::default() },
                             ),
                         }
@@ -378,6 +425,9 @@ pub fn ProfileView() -> Element {
                             on_change: move |checked| save_notification_pref(
                                 notification_prefs,
                                 notification_error,
+                                notification_saving,
+                                notification_pending_update,
+                                app_state,
                                 UpdateNotificationPreferences { weekly_digest: Some(checked), ..UpdateNotificationPreferences::default() },
                             ),
                         }
@@ -385,9 +435,9 @@ pub fn ProfileView() -> Element {
                             title: "Delivery",
                             desc: prefs.email_unavailable_reason.clone(),
                             div { class: "seg", style: "width: fit-content;",
-                                button { class: if prefs.delivery_channel == NotificationDeliveryChannel::InApp { "active" } else { "" }, onclick: move |_| save_notification_pref(notification_prefs, notification_error, UpdateNotificationPreferences { delivery_channel: Some(NotificationDeliveryChannel::InApp), ..UpdateNotificationPreferences::default() }), "In-app" }
-                                button { disabled: !prefs.email_available, class: if prefs.delivery_channel == NotificationDeliveryChannel::Email { "active" } else { "" }, onclick: move |_| save_notification_pref(notification_prefs, notification_error, UpdateNotificationPreferences { delivery_channel: Some(NotificationDeliveryChannel::Email), ..UpdateNotificationPreferences::default() }), "Email" }
-                                button { disabled: !prefs.email_available, class: if prefs.delivery_channel == NotificationDeliveryChannel::Both { "active" } else { "" }, onclick: move |_| save_notification_pref(notification_prefs, notification_error, UpdateNotificationPreferences { delivery_channel: Some(NotificationDeliveryChannel::Both), ..UpdateNotificationPreferences::default() }), "Both" }
+                                button { class: if prefs.delivery_channel == NotificationDeliveryChannel::InApp { "active" } else { "" }, onclick: move |_| save_notification_pref(notification_prefs, notification_error, notification_saving, notification_pending_update, app_state, UpdateNotificationPreferences { delivery_channel: Some(NotificationDeliveryChannel::InApp), ..UpdateNotificationPreferences::default() }), "In-app" }
+                                button { disabled: !prefs.email_available, class: if prefs.delivery_channel == NotificationDeliveryChannel::Email { "active" } else { "" }, onclick: move |_| save_notification_pref(notification_prefs, notification_error, notification_saving, notification_pending_update, app_state, UpdateNotificationPreferences { delivery_channel: Some(NotificationDeliveryChannel::Email), ..UpdateNotificationPreferences::default() }), "Email" }
+                                button { disabled: !prefs.email_available, class: if prefs.delivery_channel == NotificationDeliveryChannel::Both { "active" } else { "" }, onclick: move |_| save_notification_pref(notification_prefs, notification_error, notification_saving, notification_pending_update, app_state, UpdateNotificationPreferences { delivery_channel: Some(NotificationDeliveryChannel::Both), ..UpdateNotificationPreferences::default() }), "Both" }
                             }
                         }
                     } else {
@@ -524,8 +574,12 @@ pub fn ProfileView() -> Element {
 fn save_notification_pref(
     mut prefs_signal: Signal<Option<NotificationPreferencesDto>>,
     mut error_signal: Signal<Option<String>>,
+    mut saving_signal: Signal<bool>,
+    mut pending_signal: Signal<Option<UpdateNotificationPreferences>>,
+    app_state: Signal<AppState>,
     update: UpdateNotificationPreferences,
 ) {
+    let requested_user_id = current_profile_user_id(app_state);
     if let Some(mut prefs) = prefs_signal() {
         if let Some(value) = update.deploy_failures {
             prefs.deploy_failures = value;
@@ -551,19 +605,138 @@ fn save_notification_pref(
         prefs_signal.set(Some(prefs));
     }
 
+    pending_signal.with_mut(|pending| merge_notification_update(pending, update.clone()));
+    if saving_signal() {
+        return;
+    }
+
     spawn(async move {
-        match update_notification_preferences(&update).await {
-            Ok(saved) => {
-                prefs_signal.set(Some(saved));
-                error_signal.set(None);
-            }
-            Err(err) => {
-                error_signal.set(Some(format!(
-                    "Could not save notification preferences: {err}"
-                )));
+        saving_signal.set(true);
+        loop {
+            let next = pending_signal.with_mut(|pending| pending.take());
+            let Some(next_update) = next else {
+                break;
+            };
+
+            match update_notification_preferences(&next_update).await {
+                Ok(saved) => {
+                    if current_profile_user_id(app_state) == requested_user_id {
+                        prefs_signal.set(Some(saved));
+                        error_signal.set(None);
+                    } else {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    if current_profile_user_id(app_state) == requested_user_id {
+                        error_signal.set(Some(format!(
+                            "Could not save notification preferences: {err}"
+                        )));
+                    }
+                    break;
+                }
             }
         }
+        saving_signal.set(false);
     });
+}
+
+fn merge_notification_update(
+    pending: &mut Option<UpdateNotificationPreferences>,
+    update: UpdateNotificationPreferences,
+) {
+    let target = pending.get_or_insert_with(UpdateNotificationPreferences::default);
+    if update.deploy_failures.is_some() {
+        target.deploy_failures = update.deploy_failures;
+    }
+    if update.build_failures.is_some() {
+        target.build_failures = update.build_failures;
+    }
+    if update.critical_cves.is_some() {
+        target.critical_cves = update.critical_cves;
+    }
+    if update.policy_violations.is_some() {
+        target.policy_violations = update.policy_violations;
+    }
+    if update.heartbeat_lost.is_some() {
+        target.heartbeat_lost = update.heartbeat_lost;
+    }
+    if update.weekly_digest.is_some() {
+        target.weekly_digest = update.weekly_digest;
+    }
+    if update.delivery_channel.is_some() {
+        target.delivery_channel = update.delivery_channel;
+    }
+}
+
+fn current_profile_user_id(app_state: Signal<AppState>) -> Option<String> {
+    app_state
+        .read()
+        .auth
+        .as_ref()
+        .and_then(|ctx| ctx.user.as_ref())
+        .map(|user| user.id.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_notification_update;
+    use crate::api::models::{NotificationDeliveryChannel, UpdateNotificationPreferences};
+
+    #[test]
+    fn notification_preference_merge_preserves_last_action_per_field() {
+        let mut pending = None;
+
+        merge_notification_update(
+            &mut pending,
+            UpdateNotificationPreferences {
+                delivery_channel: Some(NotificationDeliveryChannel::Email),
+                build_failures: Some(false),
+                ..UpdateNotificationPreferences::default()
+            },
+        );
+        merge_notification_update(
+            &mut pending,
+            UpdateNotificationPreferences {
+                delivery_channel: Some(NotificationDeliveryChannel::Both),
+                critical_cves: Some(false),
+                ..UpdateNotificationPreferences::default()
+            },
+        );
+
+        let pending = pending.expect("pending update");
+        assert_eq!(
+            pending.delivery_channel,
+            Some(NotificationDeliveryChannel::Both)
+        );
+        assert_eq!(pending.build_failures, Some(false));
+        assert_eq!(pending.critical_cves, Some(false));
+    }
+
+    #[test]
+    fn notification_preference_merge_does_not_clear_omitted_fields() {
+        let mut pending = Some(UpdateNotificationPreferences {
+            weekly_digest: Some(true),
+            delivery_channel: Some(NotificationDeliveryChannel::Email),
+            ..UpdateNotificationPreferences::default()
+        });
+
+        merge_notification_update(
+            &mut pending,
+            UpdateNotificationPreferences {
+                heartbeat_lost: Some(true),
+                ..UpdateNotificationPreferences::default()
+            },
+        );
+
+        let pending = pending.expect("pending update");
+        assert_eq!(pending.weekly_digest, Some(true));
+        assert_eq!(
+            pending.delivery_channel,
+            Some(NotificationDeliveryChannel::Email)
+        );
+        assert_eq!(pending.heartbeat_lost, Some(true));
+    }
 }
 
 #[component]

@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use chrono::{DateTime, Utc};
@@ -15,6 +15,7 @@ use crate::api::models::{
 };
 use crate::auth::extractors::AuthenticatedUser;
 use crate::config::ServerConfig;
+use crate::handlers::api::auth_session::validate_csrf;
 use crate::queries::admin::insert_admin_audit_event;
 use crate::queries::auth_identity::get_user_by_id;
 use crate::queries::user_notifications::{
@@ -55,8 +56,13 @@ pub async fn patch_notification_preferences(
     user: AuthenticatedUser,
     State(pool): State<PgPool>,
     State(server_config): State<ServerConfig>,
+    headers: HeaderMap,
     Json(update): Json<UpdateNotificationPreferences>,
 ) -> impl IntoResponse {
+    if let Err(err) = validate_csrf(&headers) {
+        return err.into_response();
+    }
+
     let email_capability = notification_email_capability(&pool, user.user_id, &server_config).await;
     if matches!(
         update.delivery_channel,
@@ -166,8 +172,13 @@ pub async fn get_notifications(
 pub async fn read_notification(
     user: AuthenticatedUser,
     State(pool): State<PgPool>,
+    headers: HeaderMap,
     Path(notification_id): Path<Uuid>,
 ) -> impl IntoResponse {
+    if let Err(err) = validate_csrf(&headers) {
+        return err.into_response();
+    }
+
     match mark_notification_read(&pool, user.user_id, notification_id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => StatusCode::NOT_FOUND.into_response(),
@@ -178,7 +189,12 @@ pub async fn read_notification(
 pub async fn read_all_notifications(
     user: AuthenticatedUser,
     State(pool): State<PgPool>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    if let Err(err) = validate_csrf(&headers) {
+        return err.into_response();
+    }
+
     match mark_all_notifications_read(&pool, user.user_id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(err) => server_error(err, "notifications_mark_all_read_failed"),
@@ -188,8 +204,13 @@ pub async fn read_all_notifications(
 pub async fn delete_notification(
     user: AuthenticatedUser,
     State(pool): State<PgPool>,
+    headers: HeaderMap,
     Path(notification_id): Path<Uuid>,
 ) -> impl IntoResponse {
+    if let Err(err) = validate_csrf(&headers) {
+        return err.into_response();
+    }
+
     match dismiss_notification(&pool, user.user_id, notification_id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => StatusCode::NOT_FOUND.into_response(),

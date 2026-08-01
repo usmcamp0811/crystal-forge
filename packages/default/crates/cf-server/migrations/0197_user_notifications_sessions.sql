@@ -35,6 +35,7 @@ CREATE TABLE user_notifications (
     title TEXT NOT NULL,
     summary TEXT NOT NULL,
     route TEXT NOT NULL,
+    in_app_visible BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     read_at TIMESTAMPTZ,
     dismissed_at TIMESTAMPTZ,
@@ -44,15 +45,55 @@ CREATE TABLE user_notifications (
 
 CREATE INDEX idx_user_notifications_unread
     ON user_notifications (user_id, created_at DESC)
-    WHERE read_at IS NULL AND dismissed_at IS NULL;
+    WHERE in_app_visible AND read_at IS NULL AND dismissed_at IS NULL;
 
 CREATE INDEX idx_user_notifications_visible
     ON user_notifications (user_id, created_at DESC)
-    WHERE dismissed_at IS NULL;
+    WHERE in_app_visible AND dismissed_at IS NULL;
 
 CREATE INDEX idx_user_notifications_source_occurrence
     ON user_notifications (source_occurrence_id)
     WHERE source_occurrence_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION notification_visible_to_user(
+    p_user_id UUID,
+    p_source_type TEXT,
+    p_source_id TEXT
+) RETURNS BOOLEAN
+LANGUAGE SQL
+STABLE
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+        FROM user_role_assignments ura
+        WHERE ura.user_id = p_user_id
+          AND ura.role = 'admin'
+    )
+    OR p_source_type NOT IN ('systems', 'system_event')
+    OR (
+        p_source_type = 'systems'
+        AND EXISTS (
+            SELECT 1
+            FROM systems s
+            JOIN user_environment_memberships uem
+              ON uem.environment_id = s.environment_id
+             AND uem.user_id = p_user_id
+            WHERE s.id::text = p_source_id
+        )
+    )
+    OR (
+        p_source_type = 'system_event'
+        AND EXISTS (
+            SELECT 1
+            FROM system_events se
+            JOIN systems s ON s.id = se.system_id
+            JOIN user_environment_memberships uem
+              ON uem.environment_id = s.environment_id
+             AND uem.user_id = p_user_id
+            WHERE se.id::text = p_source_id
+        )
+    );
+$$;
 
 CREATE TABLE user_notification_email_deliveries (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

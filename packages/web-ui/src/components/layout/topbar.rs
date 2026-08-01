@@ -79,6 +79,15 @@ fn relative_time(timestamp: DateTime<Utc>) -> String {
     }
 }
 
+fn current_topbar_user_id(app_state: Signal<AppState>) -> Option<String> {
+    app_state
+        .read()
+        .auth
+        .as_ref()
+        .and_then(|ctx| ctx.user.as_ref())
+        .map(|user| user.id.clone())
+}
+
 /// Header bar displaying the current page title and optional actions.
 #[component]
 pub fn TopBar(title: String) -> Element {
@@ -149,15 +158,21 @@ pub fn TopBar(title: String) -> Element {
             notifications_loading.set(true);
             match fetch_user_notifications(Some(10), None, false).await {
                 Ok(response) => {
-                    notification_items.set(response.notifications);
-                    unread_count.set(response.unread_count);
-                    notifications_error.set(None);
+                    if current_topbar_user_id(app_state) == auth_user_id {
+                        notification_items.set(response.notifications);
+                        unread_count.set(response.unread_count);
+                        notifications_error.set(None);
+                    }
                 }
                 Err(err) => {
-                    notifications_error.set(Some(format!("Could not load notifications: {err}")))
+                    if current_topbar_user_id(app_state) == auth_user_id {
+                        notifications_error.set(Some(format!("Could not load notifications: {err}")))
+                    }
                 }
             }
-            notifications_loading.set(false);
+            if current_topbar_user_id(app_state) == auth_user_id {
+                notifications_loading.set(false);
+            }
         });
     });
 
