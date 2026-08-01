@@ -1275,6 +1275,8 @@ Verification run in this slice:
 - `node --check checks/web-ui/tests/integration-test.js` passed.
 
 Remaining limitations unchanged: DB-backed ignored tests still require `CRYSTAL_FORGE_TEST_DATABASE_URL`; SQLx metadata has not been refreshed in this session; MR pipeline/Nix web-ui check still need final verification.
+
+Committed and pushed MR !314 review-fix commit `46c3177a` (`Fix notification delivery races`) to branch `TASK-414-account-notifications-sessions`. Active task worktree status is clean after push. Remaining limitations unchanged: DB-backed ignored tests require `CRYSTAL_FORGE_TEST_DATABASE_URL`; SQLx metadata has not been refreshed; MR pipeline/Nix web-ui check still need final verification before moving TASK-414 to Review.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
