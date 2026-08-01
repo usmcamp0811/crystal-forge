@@ -15,6 +15,7 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
     if (initialFlake) { setFlake(initialFlake); onClearInitialFlake?.(); }
   }, [initialFlake]);
   const isAttention = (s) => s.health === "critical" || s.health === "offline";
+  const needsAttention = (s) => s.health === "critical" || s.health === "offline" || s.health === "warning" || s.health === "drifted";
   const flashAttention = useAttentionFlash("systems", SYSTEMS.some(isAttention));
 
   React.useEffect(() => {setView(defaultView);}, [defaultView]);
@@ -30,6 +31,7 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
       if (status === "offline" && s.health !== "offline") return false;
       if (status === "warning" && s.health !== "warning" && s.health !== "drifted") return false;
       if (status === "critical" && s.health !== "critical") return false;
+      if (status === "attention" && !needsAttention(s)) return false;
     }
     if (query) {
       const q = query.toLowerCase();
@@ -59,7 +61,7 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
         <div>
           <h1 className="page-title">Systems</h1>
           <p className="page-subtitle">
-            {counts.total} systems · {counts.healthy} healthy · {counts.warning + counts.critical + counts.offline} needing attention
+            {counts.total} systems · {counts.healthy} healthy · <span className="link-action" onClick={() => setStatus("attention")}>{counts.warning + counts.critical + counts.offline} needing attention</span>
           </p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -135,6 +137,7 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
           <option value="warning">Warning / drift</option>
           <option value="critical">Critical</option>
           <option value="offline">Offline</option>
+          <option value="attention">Needs attention</option>
         </select>
         <select className="input filter-select focus-ring" style={{ width: "auto" }} value={flake} onChange={(e) => setFlake(e.target.value)}>
           <option value="all">All flakes</option>
@@ -171,6 +174,7 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
           sys={sys}
           compact={compact}
           flash={flashAttention && isAttention(sys)}
+          pendingApproval={(typeof APPROVAL_QUEUE !== "undefined" ? APPROVAL_QUEUE.find(a => a.system_id === sys.id && a.status === "pending") : null)}
           onOpen={setSelected}
           onDeploy={(s) => onOpenDetail(s, "deploy")}
           onEdit={setEditTarget} />
@@ -199,6 +203,7 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
               sys={sys}
               compact={compact}
               flash={flashAttention && isAttention(sys)}
+              pendingApproval={(typeof APPROVAL_QUEUE !== "undefined" ? APPROVAL_QUEUE.find(a => a.system_id === sys.id && a.status === "pending") : null)}
               selected={selected?.id === sys.id}
               onOpen={setSelected}
               onDeploy={(s) => onOpenDetail(s, "deploy")}
@@ -391,7 +396,7 @@ function App() {
           {topView === "builds" && <BuildsView focus={buildFocus} onClearFocus={() => setBuildFocus(null)} />}
           {topView === "evals" && <EvalsView focus={evalFocus} onClearFocus={() => setEvalFocus(null)} onOpenSystem={(s) => { setTopView("systems"); openDetail(s); }} onOpenPolicy={(id) => { setPolicyFocus(id); setTopView("policies"); }} />}
           {topView === "flakes" && <FlakesView defaultView={defaultView} focus={flakeFocus} onClearFocus={() => setFlakeFocus(null)} onOpenEval={(c) => { setEvalFocus(c); setTopView("evals"); }} onOpenBuild={(c) => { setBuildFocus(c); setTopView("builds"); }} onOpenSystems={(flakeName) => { setSysFlake(flakeName); setTopView("systems"); }} />}
-          {topView === "environments" && <EnvironmentsView defaultView={defaultView} onOpenCache={(c) => { setCacheFocus(c); setTopView("caches"); }} onOpenSystem={(s) => { setTopView("systems"); openDetail(s); }} onOpenBundle={(id) => { setComplianceBundleId(id); setTopView("compliance"); }} />}
+          {topView === "environments" && <EnvironmentsView defaultView={defaultView} onOpenCache={(c) => { setCacheFocus(c); setTopView("caches"); }} onOpenSystem={(s) => { setTopView("systems"); openDetail(s, s._tab); }} onOpenBundle={(id) => { setComplianceBundleId(id); setTopView("compliance"); }} />}
           {topView === "caches" && <CachesView focus={cacheFocus} onClearFocus={() => setCacheFocus(null)} onOpenSystem={(s) => { setTopView("systems"); openDetail(s); }} />}
           {topView === "builders" && <BuildersView defaultView={defaultView} />}
           {topView === "policies" && <PoliciesView onOpenSystem={(s)=>{ setTopView("systems"); openDetail(s); }} focus={policyFocus} onClearFocus={() => setPolicyFocus(null)} />}

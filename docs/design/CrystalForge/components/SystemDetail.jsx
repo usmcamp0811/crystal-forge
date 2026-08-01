@@ -552,6 +552,31 @@ function DeployTab({ sys, onDeploy, onOpenCommit }) {
   const [mode, setMode] = React.useState("commit"); // 'commit' | 'generation'
   const [target, setTarget] = React.useState(null); // {kind, id, label, sub, sha?}
   const [showDiff, setShowDiff] = React.useState(false);
+  const [approvalQueue, setApprovalQueue] = React.useState(() => (typeof APPROVAL_QUEUE !== "undefined" ? APPROVAL_QUEUE : []));
+  const [attestations, setAttestations] = React.useState(() => (typeof ATTESTATION_RECORDS !== "undefined" ? ATTESTATION_RECORDS : []));
+  const [reviewApproval, setReviewApproval] = React.useState(null);
+  const [reviewAttestation, setReviewAttestation] = React.useState(null);
+
+  const pendingApproval = approvalQueue.find(a => a.system_id === sys.id && a.status === "pending");
+  const attestationRecord = attestations.find(r => r.system_id === sys.id);
+  const needsAttestationDecision = attestationRecord && ["unauthorized_artifact","unknown_artifact","agent_identity_invalid"].includes(attestationRecord.classification) && !attestationRecord.resolution;
+
+  const decideApproval = (req, action, note) => {
+    setApprovalQueue(prev => prev.map(a => {
+      if (a.id !== req.id) return a;
+      if (action === "reject") return { ...a, status:"rejected", note };
+      const approvals = [...a.approvals, { by:"you@crystal-forge", at:new Date().toISOString(), note }];
+      return { ...a, approvals, status: approvals.length >= a.neededApprovals ? "approved" : "pending" };
+    }));
+    setReviewApproval(null);
+  };
+  const resolveAttestation = (record, decision, note) => {
+    setAttestations(prev => prev.map(r => r.system_id === record.system_id ? {
+      ...r, resolution: { decision, by:"you@crystal-forge", at:new Date().toISOString(), note },
+      classification: decision === "adopt" ? "authorized_current" : r.classification,
+    } : r));
+    setReviewAttestation(null);
+  };
 
   const commits = React.useMemo(() => {
     const msgs = [
@@ -605,6 +630,38 @@ function DeployTab({ sys, onDeploy, onOpenCommit }) {
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+      {(pendingApproval || needsAttestationDecision) && (
+        <section className="card sd-card" style={{ borderColor:"#f87171", padding:16 }}>
+          {pendingApproval && (
+            <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:12, marginBottom: needsAttestationDecision ? 12 : 0, paddingBottom: needsAttestationDecision ? 12 : 0, borderBottom: needsAttestationDecision ? "1px solid var(--cf-divider)" : "none" }}>
+              <div style={{ display:"flex", gap:10 }}>
+                <Icon name="deploy" size={16} style={{ color:"#fbbf24", flexShrink:0, marginTop:2 }}/>
+                <div>
+                  <div style={{ fontWeight:600, fontSize:13 }}>Deploy awaiting approval</div>
+                  <div style={{ fontSize:12, color:"var(--cf-text-muted)" }}>
+                    Commit <span className="mono">{pendingApproval.commit}</span> gated by <span className="chip chip-unknown">{pendingApproval.policyId}</span> policy — {pendingApproval.approvals.length}/{pendingApproval.neededApprovals} approved, requested by {pendingApproval.requestedBy}.
+                  </div>
+                </div>
+              </div>
+              <button className="btn btn-primary xs focus-ring" onClick={()=>setReviewApproval(pendingApproval)}>Review</button>
+            </div>
+          )}
+          {needsAttestationDecision && (
+            <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:12 }}>
+              <div style={{ display:"flex", gap:10 }}>
+                <Icon name="warn" size={16} style={{ color:"#ef4444", flexShrink:0, marginTop:2 }}/>
+                <div>
+                  <div style={{ fontWeight:600, fontSize:13 }}>{ATTESTATION_CLASSIFICATIONS[attestationRecord.classification].label}</div>
+                  <div style={{ fontSize:12, color:"var(--cf-text-muted)" }}>
+                    Signed attestation shows a running artifact CF has no matching deployment authorization for. First observed {timeAgoShort(attestationRecord.firstObserved)}.
+                  </div>
+                </div>
+              </div>
+              <button className="btn btn-primary xs focus-ring" onClick={()=>setReviewAttestation(attestationRecord)}>Decide</button>
+            </div>
+          )}
+        </section>
+      )}
       {/* Gate panel — shows policy evaluation outcomes for the selected target */}
       <DeployGatePanel sys={sys} commitSha={selected.sha} userRole="operator"/>
 
@@ -776,6 +833,86 @@ nix-env --switch-generation ${selected.id} --profile /nix/var/nix/profiles/syste
         </div>
       </section>
     </div>
+    {reviewApproval && <ApprovalReviewModal request={reviewApproval} onClose={()=>setReviewApproval(null)} onDecide={decideApproval}/>}
+    {reviewAttestation && <ResolveAttestationModal record={reviewAttestation} onClose={()=>setReviewAttestation(null)} onResolve={resolveAttestation}/>}
+    </div>
+  );
+}
+
+/* ---------- Deploy approval / attestation review (shared modals) ---------- */
+function ApprovalReviewModal({ request, onClose, onDecide }) {
+  const [note, setNote] = React.useState("");
+  const policy = (typeof POLICIES !== "undefined" ? POLICIES : []).find(p => p.id === request.policyId);
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(480px,94vw)" }}>
+        <div className="modal-head">
+          <h2>Review deploy — {request.hostname}</h2>
+          <p>Gated by the <span className="chip chip-unknown">{policy?.name || request.policyId}</span> policy. {request.neededApprovals > 1 ? `Requires ${request.neededApprovals} distinct approvers — ${request.approvals.length} so far.` : "Requires one approver."}</p>
+        </div>
+        <div className="modal-body">
+          <div className="card" style={{ padding:12, marginBottom:12 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:12.5 }}><span style={{ color:"var(--cf-text-muted)" }}>Commit</span><span className="mono">{request.commit}</span></div>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:12.5, marginTop:4 }}><span style={{ color:"var(--cf-text-muted)" }}>Requested by</span><span>{request.requestedBy}</span></div>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:12.5, marginTop:4 }}><span style={{ color:"var(--cf-text-muted)" }}>Flake</span><span className="mono">{request.flake}</span></div>
+          </div>
+          {request.approvals.length > 0 && (
+            <div style={{ marginBottom:12 }}>
+              {request.approvals.map((a,i)=>(
+                <div key={i} style={{ fontSize:11.5, color:"var(--cf-text-muted)" }}>✓ approved by {a.by} · {timeAgoShort(a.at)}</div>
+              ))}
+            </div>
+          )}
+          <div className="field">
+            <label>Note (optional)</label>
+            <textarea className="input focus-ring" rows={2} value={note} onChange={e=>setNote(e.target.value)} placeholder="Context for the audit trail…"/>
+          </div>
+        </div>
+        <div className="modal-foot">
+          <button className="btn btn-ghost focus-ring" onClick={()=>onDecide(request,"reject",note)} style={{ color:"#f87171" }}>Reject</button>
+          <button className="btn btn-primary focus-ring" onClick={()=>onDecide(request,"approve",note)}><Icon name="check" size={13}/> Approve</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ResolveAttestationModal({ record, onClose, onResolve }) {
+  const [decision, setDecision] = React.useState("investigate");
+  const [note, setNote] = React.useState("");
+  const meta = ATTESTATION_CLASSIFICATIONS[record.classification];
+  const options = [
+    { k:"adopt", label:"Adopt as authorized", desc:"This artifact is legitimate — create a new deployment authorization matching what's running." },
+    { k:"replace", label:"Replace with authorized build", desc:"Redeploy the last known-authorized artifact to this system now." },
+    { k:"investigate", label:"Mark under investigation", desc:"Keep the attention item open; log that a human is looking into it." },
+  ];
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(520px,94vw)" }}>
+        <div className="modal-head">
+          <h2>Decide: {record.hostname}</h2>
+          <p>{meta.label} — this system's running artifact does not match a deployment authorization Crystal Forge has on record.</p>
+        </div>
+        <div className="modal-body">
+          {options.map(o => (
+            <label key={o.k} className="card" style={{ display:"flex", gap:10, padding:"11px 13px", marginBottom:8, cursor:"pointer", border: decision===o.k ? "1px solid var(--cf-brand-purple)" : undefined }}>
+              <input type="radio" name="att-decision" checked={decision===o.k} onChange={()=>setDecision(o.k)} style={{ marginTop:2 }}/>
+              <div>
+                <div style={{ fontSize:13, fontWeight:600 }}>{o.label}</div>
+                <div style={{ fontSize:11.5, color:"var(--cf-text-muted)" }}>{o.desc}</div>
+              </div>
+            </label>
+          ))}
+          <div className="field" style={{ marginTop:8 }}>
+            <label>Note (optional)</label>
+            <textarea className="input focus-ring" rows={2} value={note} onChange={e=>setNote(e.target.value)} placeholder="Context for the audit trail…"/>
+          </div>
+        </div>
+        <div className="modal-foot">
+          <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary focus-ring" onClick={()=>onResolve(record, decision, note)}><Icon name="check" size={13}/> Confirm</button>
+        </div>
+      </div>
     </div>
   );
 }

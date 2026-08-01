@@ -223,6 +223,8 @@ body {
   min-width: 0;
   overflow: hidden;
 }
+.sidebar-nav-scroll { flex: 0 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: none; -ms-overflow-style: none; }
+.sidebar-nav-scroll::-webkit-scrollbar { display: none; }
 .sidebar-brand {
   display: flex;
   align-items: center;
@@ -621,6 +623,8 @@ body {
 }
 .io-menu-item:hover { background: var(--cf-subtle-bg); }
 .io-menu-divider { height: 1px; background: var(--cf-divider); margin: 4px 2px; }
+.link-action { cursor: pointer; text-decoration: underline; text-underline-offset: 2px; text-decoration-color: color-mix(in oklab, currentColor 40%, transparent); }
+.link-action:hover { color: var(--cf-text-primary); }
 .pol-select-box {
   position: absolute; bottom: 12px; right: 12px; width: 18px; height: 18px; border-radius: 5px;
   border: 1.5px solid var(--cf-text-muted); background: var(--cf-card-bg);

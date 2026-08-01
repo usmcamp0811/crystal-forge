@@ -99,10 +99,28 @@ const DASHBOARD_WIDGETS = {
     defaultCols: 1,
     minCols: 1,
   },
+  deployApprovals: {
+    id: "deployApprovals",
+    title: "Deploy Approvals",
+    description: "Deploys waiting on policy-required sign-off",
+    icon: "deploy",
+    defaultCols: 1,
+    minCols: 1,
+  },
+  attestationTrust: {
+    id: "attestationTrust",
+    title: "Attestation Trust",
+    description: "Signed running-state artifacts CF can't reconcile to an authorization",
+    icon: "key",
+    defaultCols: 1,
+    minCols: 1,
+  },
 };
 
 const DEFAULT_DASHBOARD_LAYOUT = [
   { id: "fleetHealth",     cols: 2 },
+  { id: "attestationTrust", cols: 1 },
+  { id: "deployApprovals", cols: 1 },
   { id: "cveSummary",      cols: 1 },
   { id: "buildQueue",      cols: 1 },
   { id: "evalQueue",       cols: 1 },

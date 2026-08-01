@@ -356,7 +356,7 @@ function CveBar({ cves }) {
 }
 
 // System card
-function SystemCard({ sys, compact, flash, onOpen, onDeploy, onEdit }) {
+function SystemCard({ sys, compact, flash, pendingApproval, onOpen, onDeploy, onEdit }) {
   return (
     <div className={`sys-card${flash ? " attention-flash" : ""}`} style={compact ? { padding: 12, gap: 8 } : null} onClick={() => onOpen(sys)}>
       <div className="status-rail" style={{ "--status-color": sys.statusColor }} />
@@ -408,6 +408,11 @@ function SystemCard({ sys, compact, flash, onOpen, onDeploy, onEdit }) {
           <StatusChip sys={sys} />
           <DeploymentChip state={sys.deploymentState} />
           <CveChips cves={sys.cves} compact />
+          {pendingApproval && (
+            <span className="chip chip-warning" style={{ cursor:"pointer" }} title="Deploy awaiting approval" onClick={(e)=>{ e.stopPropagation(); onDeploy(sys); }}>
+              <Icon name="deploy" size={10}/> awaiting approval
+            </span>
+          )}
         </div>
         <button
           className="btn btn-subtle focus-ring"
@@ -422,7 +427,7 @@ function SystemCard({ sys, compact, flash, onOpen, onDeploy, onEdit }) {
 }
 
 // Table row
-function SystemRow({ sys, compact, selected, flash, onOpen, onDeploy, onEdit }) {
+function SystemRow({ sys, compact, selected, flash, pendingApproval, onOpen, onDeploy, onEdit }) {
   return (
     <tr className={`${selected ? "selected" : ""}${flash ? " attention-flash" : ""}`} onClick={() => onOpen(sys)}>
       <td>
@@ -435,7 +440,16 @@ function SystemRow({ sys, compact, selected, flash, onOpen, onDeploy, onEdit }) 
         </div>
       </td>
       <td><EnvBadge env={sys.environment} /></td>
-      <td><StatusChip sys={sys} /></td>
+      <td>
+        <div style={{ display:"flex", gap:5, flexWrap:"wrap", alignItems:"center" }}>
+          <StatusChip sys={sys} />
+          {pendingApproval && (
+            <span className="chip chip-warning" style={{ cursor:"pointer" }} title="Deploy awaiting approval" onClick={(e)=>{ e.stopPropagation(); onDeploy(sys); }}>
+              <Icon name="deploy" size={10}/> approval
+            </span>
+          )}
+        </div>
+      </td>
       <td>
         <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.3 }}>
           <span className="mono" style={{ fontSize: 12 }}>{sys.flake}</span>

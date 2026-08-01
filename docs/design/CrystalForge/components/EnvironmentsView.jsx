@@ -60,6 +60,7 @@ const ENV_META = {
 
 function envStats(env) {
   const sys = SYSTEMS.filter(s => s.environment === env);
+  const pendingApprovals = (typeof APPROVAL_QUEUE !== "undefined" ? APPROVAL_QUEUE.filter(a => a.environment === env && a.status === "pending") : []);
   return {
     total: sys.length,
     healthy: sys.filter(s => s.health === "healthy").length,
@@ -68,6 +69,7 @@ function envStats(env) {
     offline: sys.filter(s => s.health === "offline").length,
     cveTotal: sys.reduce((a,s) => a + s.cves.critical + s.cves.high, 0),
     flakes: [...new Set(sys.map(s => s.flake))],
+    pendingApprovals,
   };
 }
 
@@ -101,7 +103,7 @@ function EnvironmentsView({ defaultView, onOpenCache, onOpenSystem, onOpenBundle
     return {
       systems: a.systems + s.total,
       caches:  a.caches + (ENV_META[e.name]?.cache ? 1 : 0),
-      pendingApproval: a.pendingApproval + (ENV_META[e.name]?.requiresApproval ? s.warning : 0),
+      pendingApproval: a.pendingApproval + s.pendingApprovals.length,
     };
   }, { systems: 0, caches: 0, pendingApproval: 0 });
 
@@ -127,7 +129,7 @@ function EnvironmentsView({ defaultView, onOpenCache, onOpenSystem, onOpenBundle
           { label:"Systems",       val:totals.systems,      color:"#60a5fa" },
           { label:"Caches",        val:`${totals.caches}/${ENVIRONMENTS.length}`, color:"#34d399" },
           { label:"Manual policy", val:ENVIRONMENTS.filter(e => ENV_META[e.name]?.defaultPolicy === "manual").length, color:"#fbbf24" },
-          { label:"Auto-sync off", val:ENVIRONMENTS.filter(e => ENV_META[e.name]?.autoSync === false).length, color:"#f87171" },
+          { label:"Awaiting approval", val:totals.pendingApproval, color: totals.pendingApproval > 0 ? "#f87171" : "#9ca3af" },
         ].map(s => (
           <div key={s.label} className="stat">
             <span className="stat-accent" style={{ "--stat-color": s.color }}/>
@@ -220,6 +222,7 @@ function EnvRow({ env, onEdit, flash }) {
       </td>
       <td>
         <span className={`chip ${env.defaultPolicy === "manual" ? "chip-warning" : "chip-healthy"}`}>{env.defaultPolicy || "—"}</span>
+        {env.stats.pendingApprovals.length > 0 && <span className="chip chip-warning" style={{ marginLeft:5 }}><Icon name="deploy" size={9}/> {env.stats.pendingApprovals.length} approval</span>}
       </td>
       <td>
         <div style={{ display:"flex", gap:6, alignItems:"center", flexWrap:"wrap" }}>
@@ -286,6 +289,7 @@ function EnvCard({ env, onEdit, flash }) {
         <div className="env-card-stat-label">systems</div>
         <div style={{ flex:1 }}/>
         <div className="env-card-flakes">
+          {env.stats.pendingApprovals.length > 0 && <span className="chip chip-warning" style={{ fontSize:10 }}><Icon name="deploy" size={9}/> {env.stats.pendingApprovals.length} awaiting approval</span>}
           {env.stats.flakes.slice(0,3).map(f => (
             <span key={f} className="chip chip-unknown mono" style={{ fontSize:10 }}>{f}</span>
           ))}
@@ -373,6 +377,22 @@ function EnvPanel({ env, onClose, onEdit, onOpenCache, onOpenSystem, onOpenBundl
               {env.requiresApproval ? <span className="chip chip-warning">approval required</span> : <span className="chip chip-healthy">no approval needed</span>}
             </div>
           </section>
+
+          {env.stats.pendingApprovals.length > 0 && (
+            <section className="panel-section">
+              <h3>Awaiting approval ({env.stats.pendingApprovals.length})</h3>
+              <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                {env.stats.pendingApprovals.map(a => (
+                  <div key={a.id} className="sd-commit-sha-link" style={{ display:"flex", alignItems:"center", gap:8, fontSize:12.5, padding:"5px 6px", margin:"-3px -4px" }} onClick={() => { const full = SYSTEMS.find(x=>x.id===a.system_id); if (full) onOpenSystem?.({ ...full, _tab:"deploy" }); }}>
+                    <Icon name="deploy" size={12} style={{ color:"#fbbf24" }}/>
+                    <span className="mono truncate" style={{ flex:1 }}>{a.hostname}</span>
+                    <span className="chip chip-unknown" style={{ fontSize:10 }}>{a.commit}</span>
+                    <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{a.approvals.length}/{a.neededApprovals}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
 
           <section className="panel-section">
             <h3>Health</h3>

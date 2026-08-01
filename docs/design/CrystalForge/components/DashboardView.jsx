@@ -5,7 +5,11 @@ function DashboardView({ onNavigate }) {
   const [layout, setLayout] = React.useState(() => {
     try {
       const saved = localStorage.getItem("cf-dashboard-layout");
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (!parsed.find(w => w.id === "attestationTrust")) parsed.splice(1, 0, { id:"attestationTrust", cols:1 }, { id:"deployApprovals", cols:1 });
+        return parsed;
+      }
     } catch {}
     return DEFAULT_DASHBOARD_LAYOUT;
   });
@@ -184,6 +188,8 @@ function Widget({ id, editMode, onNavigate, rows }) {
     case "cacheHealth":     return <WCacheHealth onNavigate={onNavigate}/>;
     case "envBreakdown":    return <WEnvBreakdown onNavigate={onNavigate}/>;
     case "quickActions":    return <WQuickActions onNavigate={onNavigate}/>;
+    case "deployApprovals": return <WDeployApprovals onNavigate={onNavigate}/>;
+    case "attestationTrust": return <WAttestationTrust onNavigate={onNavigate}/>;
     default: return <div style={{ padding:14 }}>Unknown widget</div>;
   }
 }
@@ -203,6 +209,59 @@ function WidgetHeader({ icon, title, action, onAction }) {
 }
 
 /* ── Individual widgets ── */
+function WDeployApprovals({ onNavigate }) {
+  const queue = typeof APPROVAL_QUEUE !== "undefined" ? APPROVAL_QUEUE : [];
+  const pending = queue.filter(a => a.status === "pending");
+  const waitingLong = pending.filter(a => Date.now() - new Date(a.requestedAt).getTime() > 3600_000).length;
+  return (
+    <>
+      <WidgetHeader icon="deploy" title="Deploy Approvals" action="Review →" onAction={() => onNavigate("systems")}/>
+      <div className="dash-w-body" style={{ display:"flex", flexDirection:"column", gap:10 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline" }}>
+          <span style={{ fontSize:32, fontWeight:700, color: pending.length > 0 ? "#fbbf24" : "#34d399", lineHeight:1, fontVariantNumeric:"tabular-nums" }}>{pending.length}</span>
+          <span style={{ fontSize:12, color:"var(--cf-text-muted)" }}>awaiting approval</span>
+        </div>
+        {waitingLong > 0 && (
+          <div style={{ padding:"8px 10px", borderRadius:6, background:"rgba(251,191,36,0.08)", border:"1px solid rgba(251,191,36,0.25)", fontSize:11, color:"#fcd34d" }}>
+            {waitingLong} waiting over 1h
+          </div>
+        )}
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, fontSize:11 }}>
+          <div className="dash-w-mini"><span>Two-approver</span><strong>{pending.filter(a=>a.neededApprovals>1).length}</strong></div>
+          <div className="dash-w-mini"><span>Partially signed</span><strong>{pending.filter(a=>a.approvals.length>0).length}</strong></div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function WAttestationTrust({ onNavigate }) {
+  const records = typeof ATTESTATION_RECORDS !== "undefined" ? ATTESTATION_RECORDS : [];
+  const flagged = records.filter(r => ["unauthorized_artifact","unknown_artifact","agent_identity_invalid"].includes(r.classification) && !r.resolution);
+  const staleEvidence = records.filter(r => r.classification === "authorized_but_evidence_stale" || r.classification === "agent_attestation_stale").length;
+  const authorizedCurrent = records.filter(r => r.classification === "authorized_current").length;
+  return (
+    <>
+      <WidgetHeader icon="key" title="Attestation Trust" action="Review →" onAction={() => onNavigate("systems")}/>
+      <div className="dash-w-body" style={{ display:"flex", flexDirection:"column", gap:10 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline" }}>
+          <span style={{ fontSize:32, fontWeight:700, color: flagged.length > 0 ? "#ef4444" : "#34d399", lineHeight:1, fontVariantNumeric:"tabular-nums" }}>{flagged.length}</span>
+          <span style={{ fontSize:12, color:"var(--cf-text-muted)" }}>flagged artifacts</span>
+        </div>
+        {flagged.length > 0 && (
+          <div style={{ padding:"8px 10px", borderRadius:6, background:"rgba(239,68,68,0.08)", border:"1px solid rgba(239,68,68,0.25)", fontSize:11, color:"#fca5a5" }}>
+            Unauthorized or unidentified — needs a decision
+          </div>
+        )}
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, fontSize:11 }}>
+          <div className="dash-w-mini"><span>Authorized</span><strong style={{ color:"#34d399" }}>{authorizedCurrent}</strong></div>
+          <div className="dash-w-mini"><span>Stale evidence</span><strong style={{ color: staleEvidence > 0 ? "#60a5fa" : undefined }}>{staleEvidence}</strong></div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 function WFleetHealth({ onNavigate }) {
   const counts = {
     healthy: SYSTEMS.filter(s => s.health === "healthy").length,

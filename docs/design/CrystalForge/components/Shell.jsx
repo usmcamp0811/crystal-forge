@@ -67,6 +67,16 @@ function latestPerFlake(list) {
 }
 window.latestPerFlake = latestPerFlake;
 
+function timeAgoShort(iso) {
+  if (!iso) return "";
+  const mins = Math.round((Date.now() - new Date(iso).getTime())/60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins/60);
+  if (hrs < 48) return `${hrs}h ago`;
+  return `${Math.round(hrs/24)}d ago`;
+}
+
 // Shared "Import / Export" dropdown — consolidates sharing actions behind one button
 // instead of a row of standalone buttons. items: [{label, icon, onClick, danger}] or "divider".
 function IOMenu({ label = "Import / Export", icon = "upload", items }) {
@@ -291,9 +301,17 @@ function ClassificationBanner({ level, text, position }) {
 }
 window.ClassificationBanner = ClassificationBanner;
 
-// ─── Sidebar badge counts ───
-// Every badge is a "needs attention" signal (red) or an informational total (gray),
-// and every badge carries a tooltip spelling out exactly what it counts.
+// ─── Sidebar badges vs. the notification bell ───
+// Two different jobs, on purpose — see docs/alerts-and-notifications.md for the full writeup:
+//   Sidebar badge  = live ROLLUP of unresolved state for that section right now (e.g. "6 systems
+//                    need attention"). Recomputed from current data every render, auto-clears the
+//                    moment the count hits zero OR the operator visits that section (acknowledged).
+//                    No history, no per-item dismiss — it's a mirror of "is this section OK?".
+//   Notification bell = chronological EVENT LOG — discrete things that happened (a build failed,
+//                    a CVE was discovered, a deploy needs approval). Each is its own dismissible
+//                    item with a timestamp; it does NOT disappear just because the underlying
+//                    condition got fixed — you have to read/act on it. It's the "what happened"
+//                    audit trail, the sidebar is the "what's wrong right now" gauge.
 function _cnt(list, pred) { return (typeof list !== "undefined" ? list : []).filter(pred).length; }
 const _sysAttention = _cnt(typeof SYSTEMS !== "undefined" ? SYSTEMS : [], s => s.health === "critical" || s.health === "offline");
 const _sysTotal     = typeof SYSTEMS !== "undefined" ? SYSTEMS.length : 0;
@@ -304,12 +322,14 @@ const _envAttentionList = (typeof ENVIRONMENTS !== "undefined" ? ENVIRONMENTS : 
   (typeof SYSTEMS !== "undefined" ? SYSTEMS : []).some(s => s.environment === e.name && (s.health === "critical" || s.health === "offline")));
 const _envAttention = _envAttentionList.length;
 const _cveCritical  = (typeof CVE_STATS !== "undefined" && CVE_STATS) ? CVE_STATS.critical : 0;
+const _attentionCount = (typeof ATTESTATION_RECORDS !== "undefined" ? ATTESTATION_RECORDS.filter(r => ["unauthorized_artifact","unknown_artifact","agent_identity_invalid"].includes(r.classification) && !r.resolution).length : 0);
+const _approvalCount = (typeof APPROVAL_QUEUE !== "undefined" ? APPROVAL_QUEUE.filter(a => a.status === "pending").length : 0);
 
 const NAV = [
   { key: "dashboard", label: "Dashboard", icon: "dashboard", count: null, route: "dashboard" },
   { key: "systems",   label: "Systems",   icon: "server",
-    count: _sysAttention || null, attention: _sysAttention > 0,
-    countTitle: `${_sysAttention} of ${_sysTotal} systems need attention (critical or offline)` },
+    count: (_sysAttention + _attentionCount + _approvalCount) || null, attention: (_sysAttention + _attentionCount + _approvalCount) > 0,
+    countTitle: `${_sysAttention} of ${_sysTotal} systems need attention · ${_approvalCount} awaiting deploy approval · ${_attentionCount} unauthorized/unknown artifacts` },
   { key: "flakes",    label: "Flakes",    icon: "git",
     count: _flakeErrors || null, attention: _flakeErrors > 0,
     countTitle: _flakeErrors > 0 ? `${_flakeErrors} of ${_flakeTotal} flakes failing to sync` : `${_flakeTotal} flakes tracked` },
@@ -384,6 +404,7 @@ function Sidebar({ rail, topView, onNav, onToggleRail }) {
           <Icon name={rail ? "chevron-right" : "chevron-left"} size={15} />
         </button>
       </div>
+      <div className="sidebar-nav-scroll">
       <div className="nav-section-label">Fleet</div>
       {NAV.map(i => <NavItem key={i.key} item={{ ...i, route: i.route || (["systems","flakes","environments"].includes(i.key) ? i.key : undefined) }} />)}
       <div className="nav-section-label">Pipeline</div>
@@ -392,6 +413,7 @@ function Sidebar({ rail, topView, onNav, onToggleRail }) {
       {NAV_COMPLIANCE.map(i => <NavItem key={i.key} item={i} />)}
       <div className="nav-section-label">System</div>
       {NAV_SYS.map(i => <NavItem key={i.key} item={{ ...i, route: i.route }} />)}
+      </div>
       <div style={{ flex: 1 }} />
       <div
         className={`nav-item${topView === "profile" ? " active" : ""} focus-ring`}
@@ -512,13 +534,31 @@ function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult })
     return () => { document.removeEventListener("mousedown", onDoc); window.removeEventListener("keydown", onKey); };
   }, [notifOpen]);
 
-  const NOTIFS = [
-    { id:1, icon:"deploy", color:"#fbbf24", title:"3 systems awaiting deploy approval", sub:"production · manual policy", at:"2m ago", route:"systems", unread:true },
-    { id:2, icon:"build",  color:"#f87171", title:"Build failed: openssl-3.3.2", sub:"hydra-02 · attempt 3", at:"12m ago", route:"builds", unread:true },
-    { id:3, icon:"shield", color:"#f87171", title:"New critical CVE: CVE-2026-31822", sub:"affects 6 systems · openssl", at:"38m ago", route:"cves", unread:true },
-    { id:4, icon:"warn",   color:"#fbbf24", title:"Heartbeat lost: edge-fra-01", sub:"no signal for 6h", at:"1h ago", route:"systems", unread:false },
-    { id:5, icon:"eval",   color:"#34d399", title:"Eval complete: infrastructure@a3f8c12", sub:"12 systems · all policies passed", at:"2h ago", route:"evals", unread:false },
-  ];
+  const NOTIFS = React.useMemo(() => {
+    const items = [];
+    if (typeof APPROVAL_QUEUE !== "undefined") {
+      APPROVAL_QUEUE.filter(a => a.status === "pending").forEach(a => {
+        items.push({ id:`apr-${a.id}`, icon:"deploy", color:"#fbbf24",
+          title:`${a.hostname} awaiting deploy approval`, sub:`${a.environment} · ${a.policyId} policy · ${a.approvals.length}/${a.neededApprovals} approved`,
+          at: timeAgoShort(a.requestedAt), route:"systems", unread:true });
+      });
+    }
+    if (typeof ATTESTATION_RECORDS !== "undefined") {
+      ATTESTATION_RECORDS.filter(r => ["unauthorized_artifact","unknown_artifact","agent_identity_invalid"].includes(r.classification) && !r.resolution).forEach(r => {
+        const meta = ATTESTATION_CLASSIFICATIONS[r.classification];
+        items.push({ id:`att-${r.system_id}`, icon: r.classification==="agent_identity_invalid"?"key":"warn", color: meta.color,
+          title:`${meta.label}: ${r.hostname}`, sub:`${r.environment} · ${r.flake} · needs a decision`,
+          at: timeAgoShort(r.lastObserved), route:"systems", unread:true });
+      });
+    }
+    items.push(
+      { id:"b1", icon:"build",  color:"#f87171", title:"Build failed: openssl-3.3.2", sub:"hydra-02 · attempt 3", at:"12m ago", route:"builds", unread:true },
+      { id:"c1", icon:"shield", color:"#f87171", title:"New critical CVE: CVE-2026-31822", sub:"affects 6 systems · openssl", at:"38m ago", route:"cves", unread:true },
+      { id:"h1", icon:"warn",   color:"#fbbf24", title:"Heartbeat lost: edge-fra-01", sub:"no signal for 6h", at:"1h ago", route:"systems", unread:false },
+      { id:"e1", icon:"eval",   color:"#34d399", title:"Eval complete: infrastructure@a3f8c12", sub:"12 systems · all policies passed", at:"2h ago", route:"evals", unread:false },
+    );
+    return items;
+  }, []);
   const unread = NOTIFS.filter(n => n.unread).length;
 
   return (
@@ -570,9 +610,6 @@ function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult })
       </div>
       <button className="btn-icon focus-ring" aria-label="Toggle theme" title="Toggle theme" onClick={onTheme}>
         <Icon name={theme === "dark" ? "sun" : "moon"} size={16} />
-      </button>
-      <button className="btn-icon focus-ring" aria-label="Tweaks" title="Tweaks" onClick={onTweaks}>
-        <Icon name="tweaks" size={16} />
       </button>
     </div>
   );
