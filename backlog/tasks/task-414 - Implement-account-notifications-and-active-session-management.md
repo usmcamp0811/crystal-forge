@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-01 21:32'
+updated_date: '2026-08-01 22:11'
 labels:
   - frontend
   - web-ui
@@ -1255,6 +1255,26 @@ Verification for this slice:
 Remaining limitations: requested DB transition tests and the existing DB-backed ignored email tests still require a migrated `CRYSTAL_FORGE_TEST_DATABASE_URL` and were not run in this session; SQLx metadata has not been refreshed; the P2 graceful worker shutdown item remains deferred because the current server background-task wiring does not expose a shutdown signal to pass through without a broader server lifecycle change.
 
 Committed and pushed latest review-fix commit `859e2ecc` (`Guard notification email opt-in`) to branch `TASK-414-account-notifications-sessions` for MR !314. Worktree status after push is clean. Remaining limitations unchanged: DB-backed ignored tests and requested DB transition tests require `CRYSTAL_FORGE_TEST_DATABASE_URL`; SQLx metadata has not been refreshed; MR pipeline status has not been verified in this session; P2 graceful worker shutdown remains deferred pending a broader server shutdown-signal wiring change.
+
+Continued MR !314 P1 review-fix work:
+- Centralized notification email URL validation in `cf-config` with `url::Url`, exact loopback host semantics, strict HTTPS public base URL origin checks, and reused it from server capability/worker paths.
+- Added runtime token-file readability/non-empty validation to notification email capability reporting.
+- Added email delivery claim tokens and compare-and-swap sent/cancel/retry transitions so stale workers cannot overwrite a newer claim result.
+- Added category-specific in-app enablement cutoffs to avoid replaying disabled-interval events after in-app/category re-enable.
+- Rechecked immediate and digest email category cutoffs at render/send time.
+- Allowed first partial weekly digest periods when digest is enabled midweek by selecting users with `weekly_digest_enabled_at < period_end` and rendering/enqueueing from `GREATEST(period_start, weekly_digest_enabled_at)`.
+- Fixed failed older notification preference saves to merge under newer pending updates, preserving last action wins.
+
+Verification run in this slice:
+- `nix develop -c rustfmt --edition 2024 packages/default/crates/cf-config/src/config/server.rs packages/default/crates/cf-server/src/handlers/api/user_notifications.rs packages/default/crates/cf-server/src/queries/user_notifications.rs packages/default/crates/cf-server/src/tasks/user_notification_email.rs packages/web-ui/src/views/profile.rs && git diff --check` passed.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml'` passed with existing warnings.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_notifications --lib'` passed: 4 passed, 4 ignored.
+- `nix develop -c bash -c 'cargo test --manifest-path packages/default/crates/cf-config/Cargo.toml server::tests --lib'` passed: 8 passed.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` passed with existing warnings.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo test --bin crystal-forge-ui notification_preference_merge'` passed: 2 passed.
+- `node --check checks/web-ui/tests/integration-test.js` passed.
+
+Remaining limitations unchanged: DB-backed ignored tests still require `CRYSTAL_FORGE_TEST_DATABASE_URL`; SQLx metadata has not been refreshed in this session; MR pipeline/Nix web-ui check still need final verification.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
