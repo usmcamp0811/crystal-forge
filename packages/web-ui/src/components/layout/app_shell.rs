@@ -4,10 +4,11 @@ use dioxus::prelude::*;
 
 use crate::api::client::{
     fetch_classification_config, fetch_config_health, fetch_user_preferences,
-    initialize_user_preferences,
+    initialize_user_preferences, update_user_preferences,
 };
 use crate::api::models::{
-    AuthContext, AuthMode, AuthUser, ClassificationBannerConfig, Role, UserPreferencesDto,
+    AuthContext, AuthMode, AuthUser, ClassificationBannerConfig, Role, UpdateUserPreferences,
+    UserPreferencesDto,
 };
 use crate::components::layout::TopBar;
 use crate::components::layout::sidebar::{
@@ -161,6 +162,20 @@ pub fn AppShell() -> Element {
     let mut save_error = use_signal(|| None::<String>);
     let mut preference_bootstrap = use_signal(|| PreferenceBootstrapState::Idle);
     let mut preference_bootstrap_attempt = use_signal(|| 0_u64);
+    let mut preference_save_pending = use_signal(|| None::<UpdateUserPreferences>);
+    let mut preference_save_in_flight = use_signal(|| false);
+    let mut preference_save_user_id = use_signal(|| None::<String>);
+    let mut preference_save_generation = use_signal(|| 0_u64);
+    let save_update = Callback::new(move |update: UpdateUserPreferences| {
+        save_error.set(None);
+        preference_save_pending.with_mut(|pending| {
+            if let Some(pending) = pending.as_mut() {
+                preferences::merge_update(pending, update);
+            } else {
+                *pending = Some(update);
+            }
+        });
+    });
 
     // Provide sidebar context
     use_context_provider(|| SidebarContext {
@@ -173,6 +188,7 @@ pub fn AppShell() -> Element {
         density,
         default_systems_view,
         save_error,
+        save_update,
     });
 
     let breadcrumb_override = use_signal(|| None::<(String, String)>);
@@ -320,6 +336,70 @@ pub fn AppShell() -> Element {
                     preference_bootstrap.set(PreferenceBootstrapState::Error);
                 }
             }
+        });
+    });
+
+    use_effect(move || {
+        let current_user_id = {
+            let state = app_state.read();
+            if matches!(state.auth_fetch_state, AuthFetchState::Loaded)
+                && auth::is_authenticated(&state.auth)
+            {
+                state
+                    .auth
+                    .as_ref()
+                    .and_then(|auth| auth.user.as_ref().map(|user| user.id.clone()))
+            } else {
+                None
+            }
+        };
+
+        if preference_save_user_id() != current_user_id {
+            preference_save_user_id.set(current_user_id.clone());
+            preference_save_generation.set(preference_save_generation() + 1);
+            preference_save_pending.set(None);
+            preference_save_in_flight.set(false);
+        }
+
+        let Some(user_id) = current_user_id else {
+            return;
+        };
+
+        if preference_save_in_flight() {
+            return;
+        }
+
+        let Some(update) = preference_save_pending.write().take() else {
+            return;
+        };
+
+        preference_save_in_flight.set(true);
+        let generation = preference_save_generation();
+        spawn(async move {
+            let result = update_user_preferences(&update).await;
+
+            if preference_save_user_id() != Some(user_id)
+                || preference_save_generation() != generation
+            {
+                return;
+            }
+
+            match result {
+                Ok(response) => {
+                    if let Some(preferences) = response.preferences {
+                        preferences::mirror_to_storage(&preferences);
+                        save_error.set(None);
+                    } else {
+                        save_error.set(Some(
+                            "Could not save preferences: server returned no preferences"
+                                .to_string(),
+                        ));
+                    }
+                }
+                Err(err) => save_error.set(Some(format!("Could not save preferences: {err}"))),
+            }
+
+            preference_save_in_flight.set(false);
         });
     });
 

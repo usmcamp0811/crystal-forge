@@ -1,7 +1,3 @@
-use dioxus::prelude::*;
-use std::cell::RefCell;
-
-use crate::api::client::update_user_preferences;
 use crate::api::models::{
     SystemsViewPreference, UiDensityPreference, UiThemePreference, UpdateUserPreferences,
     UserPreferencesDto,
@@ -138,60 +134,7 @@ pub fn mirror_to_storage(preferences: &UserPreferencesDto) {
     write_storage(SYSTEMS_VIEW_KEY, &preferences.default_systems_view);
 }
 
-#[derive(Default)]
-struct PreferenceSaveState {
-    in_flight: bool,
-    pending: Option<UpdateUserPreferences>,
-}
-
-thread_local! {
-    static PREFERENCE_SAVE_STATE: RefCell<PreferenceSaveState> = RefCell::new(PreferenceSaveState::default());
-}
-
-#[derive(Default)]
-struct PreferenceSaveWorkerGuard {
-    current: Option<UpdateUserPreferences>,
-    finished: bool,
-}
-
-impl PreferenceSaveWorkerGuard {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    fn set_current(&mut self, update: UpdateUserPreferences) {
-        self.current = Some(update);
-    }
-
-    fn clear_current(&mut self) {
-        self.current = None;
-    }
-
-    fn finish(&mut self) {
-        self.finished = true;
-    }
-}
-
-impl Drop for PreferenceSaveWorkerGuard {
-    fn drop(&mut self) {
-        if self.finished {
-            return;
-        }
-
-        PREFERENCE_SAVE_STATE.with(|state| {
-            let mut state = state.borrow_mut();
-            if let Some(mut current) = self.current.take() {
-                if let Some(pending) = state.pending.take() {
-                    merge_update(&mut current, pending);
-                }
-                state.pending = Some(current);
-            }
-            state.in_flight = false;
-        });
-    }
-}
-
-fn merge_update(target: &mut UpdateUserPreferences, update: UpdateUserPreferences) {
+pub fn merge_update(target: &mut UpdateUserPreferences, update: UpdateUserPreferences) {
     if update.theme.is_some() {
         target.theme = update.theme;
     }
@@ -204,79 +147,6 @@ fn merge_update(target: &mut UpdateUserPreferences, update: UpdateUserPreference
     if update.default_systems_view.is_some() {
         target.default_systems_view = update.default_systems_view;
     }
-}
-
-fn take_next_pending_update() -> Option<UpdateUserPreferences> {
-    PREFERENCE_SAVE_STATE.with(|state| state.borrow_mut().pending.take())
-}
-
-fn mark_save_worker_finished_if_idle() -> bool {
-    PREFERENCE_SAVE_STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        if state.pending.is_some() {
-            false
-        } else {
-            state.in_flight = false;
-            true
-        }
-    })
-}
-
-pub fn save_update(update: UpdateUserPreferences, mut save_error: Signal<Option<String>>) {
-    save_error.set(None);
-
-    let should_start_worker = PREFERENCE_SAVE_STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        if let Some(pending) = state.pending.as_mut() {
-            merge_update(pending, update);
-        } else {
-            state.pending = Some(update);
-        }
-
-        if state.in_flight {
-            false
-        } else {
-            state.in_flight = true;
-            true
-        }
-    });
-
-    if !should_start_worker {
-        return;
-    }
-
-    spawn(async move {
-        let mut guard = PreferenceSaveWorkerGuard::new();
-
-        loop {
-            let Some(update) = take_next_pending_update() else {
-                if mark_save_worker_finished_if_idle() {
-                    guard.finish();
-                    break;
-                }
-                continue;
-            };
-
-            guard.set_current(update.clone());
-            let result = update_user_preferences(&update).await;
-            guard.clear_current();
-
-            match result {
-                Ok(response) => {
-                    if let Some(preferences) = response.preferences {
-                        mirror_to_storage(&preferences);
-                        save_error.set(None);
-                    } else {
-                        save_error.set(Some(
-                            "Could not save preferences: server returned no preferences"
-                                .to_string(),
-                        ));
-                    }
-                }
-                Err(err) => save_error.set(Some(format!("Could not save preferences: {err}"))),
-            }
-        }
-    });
 }
 
 pub fn write_storage(key: &str, value: &str) {
@@ -385,35 +255,5 @@ mod tests {
             pending.default_systems_view,
             Some(SystemsViewPreference::Cards)
         );
-    }
-
-    #[test]
-    fn dropped_save_worker_releases_in_flight_and_requeues_current_update() {
-        PREFERENCE_SAVE_STATE.with(|state| {
-            *state.borrow_mut() = PreferenceSaveState {
-                in_flight: true,
-                pending: Some(UpdateUserPreferences {
-                    density: Some(UiDensityPreference::Compact),
-                    ..UpdateUserPreferences::default()
-                }),
-            };
-        });
-
-        {
-            let mut guard = PreferenceSaveWorkerGuard::new();
-            guard.set_current(UpdateUserPreferences {
-                theme: Some(UiThemePreference::Light),
-                density: Some(UiDensityPreference::Comfortable),
-                ..UpdateUserPreferences::default()
-            });
-        }
-
-        PREFERENCE_SAVE_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(!state.in_flight);
-            let pending = state.pending.as_ref().expect("update should be requeued");
-            assert_eq!(pending.theme, Some(UiThemePreference::Light));
-            assert_eq!(pending.density, Some(UiDensityPreference::Compact));
-        });
     }
 }

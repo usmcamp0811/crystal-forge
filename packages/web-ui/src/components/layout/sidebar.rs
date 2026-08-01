@@ -8,7 +8,7 @@ use crate::api::models::UpdateUserPreferences;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
-use crate::state::preferences::{self, save_update};
+use crate::state::preferences;
 use crate::theme;
 
 /// Context for sidebar state shared between components
@@ -20,11 +20,12 @@ pub struct SidebarContext {
 
 /// Shared UI preference signals (density, default systems view).
 /// Created in AppShell and consumed by TopBar, ProfileView, etc.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct PreferencesContext {
     pub density: Signal<String>,
     pub default_systems_view: Signal<String>,
     pub save_error: Signal<Option<String>>,
+    pub save_update: Callback<UpdateUserPreferences>,
 }
 
 /// Sidebar edge toggle button — rendered as a sibling of SidebarNav in the shell,
@@ -33,7 +34,6 @@ pub struct PreferencesContext {
 pub fn SidebarEdgeToggle() -> Element {
     let mut sidebar_ctx = use_context::<SidebarContext>();
     let prefs_ctx = use_context::<PreferencesContext>();
-    let save_error = prefs_ctx.save_error;
     let is_collapsed = (sidebar_ctx.is_collapsed)();
 
     let toggle_sidebar = move |_| {
@@ -43,13 +43,10 @@ pub fn SidebarEdgeToggle() -> Element {
             preferences::SIDEBAR_COLLAPSED_KEY,
             if new_state { "true" } else { "false" },
         );
-        save_update(
-            UpdateUserPreferences {
-                sidebar_collapsed: Some(new_state),
-                ..UpdateUserPreferences::default()
-            },
-            save_error,
-        );
+        prefs_ctx.save_update.call(UpdateUserPreferences {
+            sidebar_collapsed: Some(new_state),
+            ..UpdateUserPreferences::default()
+        });
     };
 
     let nav_width = if is_collapsed { "4rem" } else { "16rem" };
@@ -87,7 +84,6 @@ pub fn SidebarNav() -> Element {
     // Get sidebar context
     let sidebar_ctx = use_context::<SidebarContext>();
     let prefs_ctx = use_context::<PreferencesContext>();
-    let save_error = prefs_ctx.save_error;
     let is_collapsed = (sidebar_ctx.is_collapsed)();
     let mut collapsed_signal = sidebar_ctx.is_collapsed;
 
@@ -240,13 +236,10 @@ pub fn SidebarNav() -> Element {
                             preferences::SIDEBAR_COLLAPSED_KEY,
                             if new_state { "true" } else { "false" },
                         );
-                        save_update(
-                            UpdateUserPreferences {
-                                sidebar_collapsed: Some(new_state),
-                                ..UpdateUserPreferences::default()
-                            },
-                            save_error,
-                        );
+                        prefs_ctx.save_update.call(UpdateUserPreferences {
+                            sidebar_collapsed: Some(new_state),
+                            ..UpdateUserPreferences::default()
+                        });
                     },
                     title: if is_collapsed { "Expand sidebar" } else { "Collapse sidebar" },
                     "aria-label": if is_collapsed { "Expand sidebar" } else { "Collapse sidebar" },

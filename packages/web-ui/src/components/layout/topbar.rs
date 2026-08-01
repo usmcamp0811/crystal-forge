@@ -5,7 +5,7 @@ use crate::components::layout::sidebar::{PreferencesContext, SidebarContext};
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
-use crate::state::preferences::{self, save_update};
+use crate::state::preferences;
 use crate::state::theme::UiTheme;
 use crate::theme;
 use dioxus::prelude::*;
@@ -411,13 +411,10 @@ pub fn TopBar(title: String) -> Element {
                 onclick: move |_| {
                     let next = ui_theme().toggle();
                     ui_theme.set(next);
-                    save_update(
-                        UpdateUserPreferences {
-                            theme: Some(preferences::theme_to_preference(next)),
-                            ..UpdateUserPreferences::default()
-                        },
-                        save_error,
-                    );
+                    prefs_ctx.save_update.call(UpdateUserPreferences {
+                        theme: Some(preferences::theme_to_preference(next)),
+                        ..UpdateUserPreferences::default()
+                    });
                 },
                 if ui_theme() == UiTheme::Dark {
                     svg {
@@ -497,13 +494,10 @@ pub fn TopBar(title: String) -> Element {
                             on_change: move |value: String| {
                                 let next = if value == "light" { UiTheme::Light } else { UiTheme::Dark };
                                 ui_theme.set(next);
-                                save_update(
-                                    UpdateUserPreferences {
-                                        theme: Some(preferences::theme_to_preference(next)),
-                                        ..UpdateUserPreferences::default()
-                                    },
-                                    save_error,
-                                );
+                                prefs_ctx.save_update.call(UpdateUserPreferences {
+                                    theme: Some(preferences::theme_to_preference(next)),
+                                    ..UpdateUserPreferences::default()
+                                });
                             }
                         }
                         TweakRow {
@@ -514,13 +508,10 @@ pub fn TopBar(title: String) -> Element {
                                 density.set(value.clone());
                                 preferences::write_storage(preferences::DENSITY_KEY, &value);
                                 set_root_attr("data-density", &value);
-                                save_update(
-                                    UpdateUserPreferences {
-                                        density: Some(preferences::density_from_storage(Some(&value))),
-                                        ..UpdateUserPreferences::default()
-                                    },
-                                    save_error,
-                                );
+                                prefs_ctx.save_update.call(UpdateUserPreferences {
+                                    density: Some(preferences::density_from_storage(Some(&value))),
+                                    ..UpdateUserPreferences::default()
+                                });
                             }
                         }
                         TweakRow {
@@ -530,13 +521,10 @@ pub fn TopBar(title: String) -> Element {
                             on_change: move |value: String| {
                                 default_view.set(value.clone());
                                 preferences::write_storage(preferences::SYSTEMS_VIEW_KEY, &value);
-                                save_update(
-                                    UpdateUserPreferences {
-                                        default_systems_view: Some(preferences::systems_view_from_storage(Some(&value))),
-                                        ..UpdateUserPreferences::default()
-                                    },
-                                    save_error,
-                                );
+                                prefs_ctx.save_update.call(UpdateUserPreferences {
+                                    default_systems_view: Some(preferences::systems_view_from_storage(Some(&value))),
+                                    ..UpdateUserPreferences::default()
+                                });
                             }
                         }
                         TweakRow {
@@ -550,13 +538,10 @@ pub fn TopBar(title: String) -> Element {
                                     preferences::SIDEBAR_COLLAPSED_KEY,
                                     if collapsed { "true" } else { "false" },
                                 );
-                                save_update(
-                                    UpdateUserPreferences {
-                                        sidebar_collapsed: Some(collapsed),
-                                        ..UpdateUserPreferences::default()
-                                    },
-                                    save_error,
-                                );
+                                prefs_ctx.save_update.call(UpdateUserPreferences {
+                                    sidebar_collapsed: Some(collapsed),
+                                    ..UpdateUserPreferences::default()
+                                });
                             }
                         }
                         if let Some(error) = save_error() {

@@ -8,7 +8,7 @@ use crate::components::layout::sidebar::{PreferencesContext, SidebarContext};
 use crate::components::{Icon, IconName};
 use crate::routes::Route;
 use crate::state::app_state::AppState;
-use crate::state::preferences::{self, save_update};
+use crate::state::preferences;
 use crate::state::theme;
 
 #[component]
@@ -203,13 +203,10 @@ pub fn ProfileView() -> Element {
                             options: vec![theme::UiTheme::Dark, theme::UiTheme::Light],
                             on_change: move |new_theme| {
                                 theme_pref.set(new_theme);
-                                save_update(
-                                    UpdateUserPreferences {
-                                        theme: Some(preferences::theme_to_preference(new_theme)),
-                                        ..UpdateUserPreferences::default()
-                                    },
-                                    save_error,
-                                );
+                                prefs_ctx.save_update.call(UpdateUserPreferences {
+                                    theme: Some(preferences::theme_to_preference(new_theme)),
+                                    ..UpdateUserPreferences::default()
+                                });
                             },
                         }
                     }
@@ -223,13 +220,10 @@ pub fn ProfileView() -> Element {
                             on_change: move |value: String| {
                                 density.set(value.clone());
                                 preferences::write_storage(preferences::DENSITY_KEY, &value);
-                                save_update(
-                                    UpdateUserPreferences {
-                                        density: Some(preferences::density_from_storage(Some(&value))),
-                                        ..UpdateUserPreferences::default()
-                                    },
-                                    save_error,
-                                );
+                                prefs_ctx.save_update.call(UpdateUserPreferences {
+                                    density: Some(preferences::density_from_storage(Some(&value))),
+                                    ..UpdateUserPreferences::default()
+                                });
                             },
                         }
                     }
@@ -247,13 +241,10 @@ pub fn ProfileView() -> Element {
                                     preferences::SIDEBAR_COLLAPSED_KEY,
                                     if collapsed { "true" } else { "false" },
                                 );
-                                save_update(
-                                    UpdateUserPreferences {
-                                        sidebar_collapsed: Some(collapsed),
-                                        ..UpdateUserPreferences::default()
-                                    },
-                                    save_error,
-                                );
+                                prefs_ctx.save_update.call(UpdateUserPreferences {
+                                    sidebar_collapsed: Some(collapsed),
+                                    ..UpdateUserPreferences::default()
+                                });
                             },
                         }
                     }
@@ -267,13 +258,10 @@ pub fn ProfileView() -> Element {
                             on_change: move |value: String| {
                                 default_view.set(value.clone());
                                 preferences::write_storage(preferences::SYSTEMS_VIEW_KEY, &value);
-                                save_update(
-                                    UpdateUserPreferences {
-                                        default_systems_view: Some(preferences::systems_view_from_storage(Some(&value))),
-                                        ..UpdateUserPreferences::default()
-                                    },
-                                    save_error,
-                                );
+                                prefs_ctx.save_update.call(UpdateUserPreferences {
+                                    default_systems_view: Some(preferences::systems_view_from_storage(Some(&value))),
+                                    ..UpdateUserPreferences::default()
+                                });
                             },
                         }
                     }

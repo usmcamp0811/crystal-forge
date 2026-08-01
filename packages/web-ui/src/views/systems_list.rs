@@ -38,7 +38,7 @@ use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
 use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
-use crate::state::preferences::{self, save_update};
+use crate::state::preferences;
 use crate::systems::adapter::{
     create_system_via_api, deactivate_system_via_api, fallback_flake_names,
     load_flake_context_with_fallback, load_flake_names_with_fallback,
@@ -138,7 +138,6 @@ pub fn SystemsListView() -> Element {
     let prefs_ctx = use_context::<PreferencesContext>();
     let mut default_view = prefs_ctx.default_systems_view;
     let mut density = prefs_ctx.density;
-    let save_error = prefs_ctx.save_error;
 
     let query_view = prefers_view_from_query();
     let container_id = use_memo(|| format!("systems-filters-{}", uuid::Uuid::new_v4()));
@@ -149,15 +148,10 @@ pub fn SystemsListView() -> Element {
             let value = mode.as_storage().to_string();
             default_view.set(value.clone());
             preferences::write_storage(preferences::SYSTEMS_VIEW_KEY, &value);
-            save_update(
-                UpdateUserPreferences {
-                    default_systems_view: Some(preferences::systems_view_from_storage(Some(
-                        &value,
-                    ))),
-                    ..UpdateUserPreferences::default()
-                },
-                save_error,
-            );
+            prefs_ctx.save_update.call(UpdateUserPreferences {
+                default_systems_view: Some(preferences::systems_view_from_storage(Some(&value))),
+                ..UpdateUserPreferences::default()
+            });
         }
     });
 
@@ -780,13 +774,10 @@ pub fn SystemsListView() -> Element {
                                 let value = "cards".to_string();
                                 default_view.set(value.clone());
                                 preferences::write_storage(preferences::SYSTEMS_VIEW_KEY, &value);
-                                save_update(
-                                    UpdateUserPreferences {
-                                        default_systems_view: Some(preferences::systems_view_from_storage(Some(&value))),
-                                        ..UpdateUserPreferences::default()
-                                    },
-                                    save_error,
-                                );
+                                prefs_ctx.save_update.call(UpdateUserPreferences {
+                                    default_systems_view: Some(preferences::systems_view_from_storage(Some(&value))),
+                                    ..UpdateUserPreferences::default()
+                                });
                             },
                             svg {
                                 class: "w-3 h-3",
@@ -807,13 +798,10 @@ pub fn SystemsListView() -> Element {
                                 let value = "table".to_string();
                                 default_view.set(value.clone());
                                 preferences::write_storage(preferences::SYSTEMS_VIEW_KEY, &value);
-                                save_update(
-                                    UpdateUserPreferences {
-                                        default_systems_view: Some(preferences::systems_view_from_storage(Some(&value))),
-                                        ..UpdateUserPreferences::default()
-                                    },
-                                    save_error,
-                                );
+                                prefs_ctx.save_update.call(UpdateUserPreferences {
+                                    default_systems_view: Some(preferences::systems_view_from_storage(Some(&value))),
+                                    ..UpdateUserPreferences::default()
+                                });
                             },
                             svg {
                                 class: "w-3 h-3",
