@@ -76,6 +76,13 @@ pub fn parse_xccdf(
                 }
             }
             Ok(Event::Eof) => break,
+            Ok(Event::DocType(_)) => {
+                state.errors.push(Diagnostic::error(
+                    "DTD_FORBIDDEN",
+                    "DOCTYPE declarations and DTDs are not accepted",
+                ));
+                break;
+            }
             Ok(Event::Empty(ref e)) => {
                 let name = std::str::from_utf8(e.name().local_name().into_inner()).unwrap_or("");
                 state.handle_start(name, e);
@@ -205,8 +212,15 @@ impl ParserState {
         self.current_element = name.to_string();
         self.current_text.clear();
 
+        // Detect namespace prefix on this element.
+        let is_cf = e.name().prefix()
+            .and_then(|p| std::str::from_utf8(p.as_ref()).ok().map(String::from))
+            .as_deref()
+            .map(|p| p == "cf")
+            .unwrap_or(false);
+
         // Detect namespace via xmlns attribute on Benchmark.
-        if name == "Benchmark" {
+        if name == "Benchmark" && !is_cf {
             self.in_xccdf = true;
             if let Some(ns) = e.try_get_attribute("xmlns").ok().flatten() {
                 if let Ok(val) = std::str::from_utf8(&ns.value) {
@@ -228,8 +242,8 @@ impl ParserState {
                 .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from));
         }
 
-        // Detect CF extension namespace.
-        if name.starts_with("cf:") || name == "cf:bundle" || name == "cf:policy" {
+        // Detect CF extension namespace via prefix.
+        if is_cf {
             self.in_cf_ns = true;
         }
 
@@ -292,13 +306,13 @@ impl ParserState {
                     value: String::new(),
                 });
             }
-            // CF extension elements.
-            "cf:bundle" => self.parse_cf_bundle_start(e),
-            "cf:policy-identity" => self.parse_cf_policy_identity_start(e),
-            "cf:policy" => { /* policy body handled by text/CData */ }
-            "cf:framework" => {}
-            "cf:content-digest" => {}
-            "cf:execution" => {
+            // CF extension elements (detected by prefix, matched by local name).
+            "bundle" if is_cf => self.parse_cf_bundle_start(e),
+            "policy-identity" if is_cf => self.parse_cf_policy_identity_start(e),
+            "policy" if is_cf => { /* policy body; child elements handled below */ }
+            "framework" if is_cf => {}
+            "content-digest" if is_cf => {}
+            "execution" if is_cf => {
                 if let Some(ref mut meta) = self
                     .current_rule
                     .as_mut()
@@ -429,23 +443,23 @@ impl ParserState {
                     rule.rationale = Some(self.current_text.clone());
                 }
             }
-            "cf:bundle" => { /* bundle meta already parsed */ }
-            "cf:framework" => {
+            "bundle" if self.in_cf_ns => { /* bundle meta already parsed */ }
+            "framework" if self.in_cf_ns => {
                 if let Some(ref mut meta) = self.cf_bundle_meta {
                     meta.framework = Some(self.current_text.clone());
                 }
             }
-            "cf:layer" => {
+            "layer" if self.in_cf_ns => {
                 if let Some(ref mut meta) = self.cf_bundle_meta {
                     meta.layer = Some(self.current_text.clone());
                 }
             }
-            "cf:owner" => {
+            "owner" if self.in_cf_ns => {
                 if let Some(ref mut meta) = self.cf_bundle_meta {
                     meta.owner = Some(self.current_text.clone());
                 }
             }
-            "cf:content-digest" => {
+            "content-digest" if self.in_cf_ns => {
                 if let Some(ref mut meta) = self
                     .current_rule
                     .as_mut()
@@ -457,7 +471,7 @@ impl ParserState {
                     meta.digest = Some(self.current_text.clone());
                 }
             }
-            "cf:policy-version" => {
+            "policy-version" if self.in_cf_ns => {
                 if let Some(ref mut meta) = self
                     .current_rule
                     .as_mut()
@@ -470,7 +484,7 @@ impl ParserState {
         }
 
         // Reset CF namespace tracking when leaving an element.
-        if name.starts_with("cf:") || name == "cf:bundle" {
+        if self.in_cf_ns {
             self.in_cf_ns = false;
         }
 

@@ -207,14 +207,17 @@ pub fn PoliciesView() -> Element {
                                 "Policy import API coming in next PR",
                             ),
                             IOMenuItem::Separator,
-                            IOMenuItem::action("Export all custom policies"),
+                            IOMenuItem::disabled(
+                                "Export all custom policies",
+                                "Policy export API not yet wired to download",
+                            ),
                             IOMenuItem::disabled(
                                 "Export selected policies…",
                                 "Select policies using the checkboxes first",
                             ),
                         ],
                         on_action: move |_idx: usize| {
-                            // Export all custom policies coming when the interchange API is fully wired.
+                            // All items disabled until interchange API is fully wired.
                         },
                     }
                     button {
