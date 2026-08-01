@@ -1067,3 +1067,199 @@ CREATE TRIGGER trigger_prevent_source_artifact_delete_when_referenced
     BEFORE DELETE ON compliance_source_artifacts
     FOR EACH ROW
     EXECUTE FUNCTION prevent_source_artifact_delete_when_referenced();
+
+-- ── 20. Invalidate assignment overlays on membership change (P1 #1) ───────────
+-- The membership trigger must also mark every assignment_overlay_digest for the
+-- affected bundle version as pending, because assignment resolution reads the
+-- baseline membership.  On UPDATE, if bundle_version_id changed, invalidate
+-- both the old and new parent.
+
+CREATE OR REPLACE FUNCTION invalidate_bundle_digest_on_membership_change()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    v_old_bvid uuid;
+    v_new_bvid uuid;
+BEGIN
+    IF TG_OP IN ('UPDATE', 'DELETE') THEN
+        v_old_bvid := OLD.bundle_version_id;
+    END IF;
+    IF TG_OP IN ('INSERT', 'UPDATE') THEN
+        v_new_bvid := NEW.bundle_version_id;
+    END IF;
+
+    -- Invalidate bundle digest for the old parent (losing a row).
+    IF v_old_bvid IS NOT NULL THEN
+        UPDATE compliance_bundle_versions
+        SET semantic_digest = 'pending'
+        WHERE id = v_old_bvid
+          AND publication_state IN ('incomplete', 'draft', 'interim');
+
+        UPDATE compliance_bundle_assignments
+        SET assignment_overlay_digest = 'pending'
+        WHERE bundle_version_id = v_old_bvid;
+    END IF;
+
+    -- Invalidate bundle digest and assignments for the new parent (gaining a row
+    -- or having its membership changed in-place).
+    IF v_new_bvid IS NOT NULL
+       AND (v_new_bvid IS DISTINCT FROM v_old_bvid OR TG_OP <> 'UPDATE')
+    THEN
+        UPDATE compliance_bundle_versions
+        SET semantic_digest = 'pending'
+        WHERE id = v_new_bvid
+          AND publication_state IN ('incomplete', 'draft', 'interim');
+
+        UPDATE compliance_bundle_assignments
+        SET assignment_overlay_digest = 'pending'
+        WHERE bundle_version_id = v_new_bvid;
+    END IF;
+
+    RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trigger_invalidate_bundle_digest_membership
+    ON compliance_bundle_version_policies;
+
+CREATE TRIGGER trigger_invalidate_bundle_digest_membership
+    AFTER INSERT OR UPDATE OR DELETE ON compliance_bundle_version_policies
+    FOR EACH ROW
+    EXECUTE FUNCTION invalidate_bundle_digest_on_membership_change();
+
+-- ── 21. Invalidate assignment overlay on enforcement_mode change (P1 #2) ──────
+
+CREATE OR REPLACE FUNCTION invalidate_assignment_on_digest_field_change()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    -- enforcement_mode is the only digest-covered field on the assignment row
+    -- itself that can change; all other semantics live in child tables.
+    IF NEW.enforcement_mode IS DISTINCT FROM OLD.enforcement_mode THEN
+        NEW.assignment_overlay_digest = 'pending';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trigger_invalidate_assignment_on_digest_change
+    BEFORE UPDATE ON compliance_bundle_assignments
+    FOR EACH ROW
+    EXECUTE FUNCTION invalidate_assignment_on_digest_field_change();
+
+-- Fix child-table overlay triggers: invalidate both old and new parent on
+-- reparenting (P1 #2).
+
+CREATE OR REPLACE FUNCTION invalidate_overlay_on_child_change()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    v_old_aid uuid;
+    v_new_aid uuid;
+BEGIN
+    IF TG_OP IN ('UPDATE', 'DELETE') THEN
+        v_old_aid := OLD.assignment_id;
+    END IF;
+    IF TG_OP IN ('INSERT', 'UPDATE') THEN
+        v_new_aid := NEW.assignment_id;
+    END IF;
+
+    IF v_old_aid IS NOT NULL THEN
+        UPDATE compliance_bundle_assignments
+        SET assignment_overlay_digest = 'pending'
+        WHERE id = v_old_aid;
+    END IF;
+
+    IF v_new_aid IS NOT NULL
+       AND v_new_aid IS DISTINCT FROM v_old_aid
+    THEN
+        UPDATE compliance_bundle_assignments
+        SET assignment_overlay_digest = 'pending'
+        WHERE id = v_new_aid;
+    END IF;
+
+    RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trigger_invalidate_overlay_exclusion
+    ON compliance_assignment_exclusions;
+DROP TRIGGER IF EXISTS trigger_invalidate_overlay_addition
+    ON compliance_assignment_additions;
+DROP TRIGGER IF EXISTS trigger_invalidate_overlay_override
+    ON compliance_assignment_value_overrides;
+
+CREATE TRIGGER trigger_invalidate_overlay_exclusion
+    AFTER INSERT OR UPDATE OR DELETE ON compliance_assignment_exclusions
+    FOR EACH ROW
+    EXECUTE FUNCTION invalidate_overlay_on_child_change();
+
+CREATE TRIGGER trigger_invalidate_overlay_addition
+    AFTER INSERT OR UPDATE OR DELETE ON compliance_assignment_additions
+    FOR EACH ROW
+    EXECUTE FUNCTION invalidate_overlay_on_child_change();
+
+CREATE TRIGGER trigger_invalidate_overlay_override
+    AFTER INSERT OR UPDATE OR DELETE ON compliance_assignment_value_overrides
+    FOR EACH ROW
+    EXECUTE FUNCTION invalidate_overlay_on_child_change();
+
+-- ── 22. Include import provenance in immutable artifact fields (P1 #3) ────────
+
+CREATE OR REPLACE FUNCTION guard_source_artifact_integrity()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.sha256 <> encode(digest(NEW.content, 'sha256'), 'hex') THEN
+            RAISE EXCEPTION
+                'Source artifact %: supplied sha256 does not match content hash.',
+                NEW.id;
+        END IF;
+    ELSIF TG_OP = 'UPDATE' THEN
+        IF NEW.content   IS DISTINCT FROM OLD.content
+        OR NEW.filename  IS DISTINCT FROM OLD.filename
+        OR NEW.media_type IS DISTINCT FROM OLD.media_type
+        OR NEW.sha256    IS DISTINCT FROM OLD.sha256
+        OR NEW.parser_version IS DISTINCT FROM OLD.parser_version
+        OR NEW.detected_xccdf_version IS DISTINCT FROM OLD.detected_xccdf_version
+        OR NEW.package_context IS DISTINCT FROM OLD.package_context
+        OR NEW.imported_by IS DISTINCT FROM OLD.imported_by
+        OR NEW.imported_at IS DISTINCT FROM OLD.imported_at
+        THEN
+            RAISE EXCEPTION
+                'Source artifact % is immutable. Only signature_details may change.',
+                OLD.id;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- ── 23. Protect source-object mappings from cascade deletion (P1 #4) ──────────
+
+ALTER TABLE compliance_source_object_mappings
+    DROP CONSTRAINT IF EXISTS
+        compliance_source_object_mappings_source_artifact_id_fkey;
+
+ALTER TABLE compliance_source_object_mappings
+    ADD CONSTRAINT compliance_source_object_mappings_source_artifact_id_fkey
+        FOREIGN KEY (source_artifact_id)
+        REFERENCES compliance_source_artifacts(id)
+        ON DELETE RESTRICT;
+
+-- Include mappings in the deletion guard so every reference, direct or indirect,
+-- blocks artifact removal.
+CREATE OR REPLACE FUNCTION prevent_source_artifact_delete_when_referenced()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM deployment_policy_versions  WHERE source_artifact_id = OLD.id
+    ) OR EXISTS (
+        SELECT 1 FROM compliance_bundle_versions   WHERE source_artifact_id = OLD.id
+    ) OR EXISTS (
+        SELECT 1 FROM compliance_source_object_mappings WHERE source_artifact_id = OLD.id
+    ) THEN
+        RAISE EXCEPTION
+            'Cannot delete source artifact %: it is still referenced.',
+            OLD.id;
+    END IF;
+    RETURN OLD;
+END;
+$$;
