@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-01 13:37'
+updated_date: '2026-08-01 13:40'
 labels:
   - frontend
   - web-ui
@@ -31,6 +31,8 @@ references:
   - packages/default/crates/cf-server/src/auth/
   - packages/default/crates/cf-server/src/handlers/api/
   - packages/default/crates/cf-server/migrations/0196_user_preferences.sql
+  - 'merge-request:314'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/314'
 modified_files:
   - packages/default/crates/cf-server/migrations/
   - packages/default/crates/cf-server/src/api/
@@ -1182,6 +1184,8 @@ Diagnosed the prior `nix build .#checks.x86_64-linux.web-ui --no-link` failure: 
 - `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_notifications --lib'` — passed: 4 passed, 0 failed.
 - `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_sessions --lib'` — passed: 3 passed, 0 failed.
 Remaining limitations: DB-backed ignored tests were not run because `CRYSTAL_FORGE_TEST_DATABASE_URL` is not set; SQLx metadata has not been refreshed in this session. Implementation remains uncommitted/unpushed pending authorization.
+
+Committed and pushed TASK-414 implementation commit `7efeaedb` (`Implement account notifications and sessions`) to branch `TASK-414-account-notifications-sessions`. Opened MR !314 for review: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/314. Task remains In Progress rather than Review because required DB-backed ignored tests have not been run locally (`CRYSTAL_FORGE_TEST_DATABASE_URL` unavailable) and SQLx metadata was not refreshed in this session; MR is open for early human/dev-server review and iteration.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
