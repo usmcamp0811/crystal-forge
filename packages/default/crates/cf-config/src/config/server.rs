@@ -428,17 +428,17 @@ impl ServerConfig {
                         .to_string(),
                 );
             }
-            if endpoint.starts_with("http://")
-                && !(self.notification_email_allow_insecure_loopback
-                    && is_loopback_http_url(endpoint))
-            {
+            if !notification_provider_endpoint_allowed(
+                endpoint,
+                self.notification_email_allow_insecure_loopback,
+            ) {
                 return Err(
                     "notification_email_endpoint must use https:// unless notification_email_allow_insecure_loopback is true and the endpoint host is loopback"
                         .to_string(),
                 );
             }
             let public_base_url = self.public_base_url.as_deref().unwrap_or("").trim();
-            if !is_safe_public_base_url(public_base_url) {
+            if !notification_public_base_url_allowed(public_base_url) {
                 return Err(
                     "public_base_url is required for email and must be an https:// origin without path, query, or fragment"
                         .to_string(),
@@ -527,27 +527,35 @@ impl ServerConfig {
     }
 }
 
-fn is_loopback_http_url(value: &str) -> bool {
-    let Some(rest) = value.strip_prefix("http://") else {
+pub fn notification_provider_endpoint_allowed(value: &str, allow_insecure_loopback: bool) -> bool {
+    let Ok(url) = url::Url::parse(value.trim()) else {
         return false;
     };
-    let host_port = rest.split('/').next().unwrap_or_default();
-    let host = host_port
-        .strip_prefix('[')
-        .and_then(|value| value.split(']').next())
-        .unwrap_or_else(|| host_port.split(':').next().unwrap_or_default());
-    matches!(host, "localhost" | "127.0.0.1" | "::1") || host.starts_with("127.")
+    match url.scheme() {
+        "https" => true,
+        "http" if allow_insecure_loopback => url
+            .host()
+            .map(|host| match host {
+                url::Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
+                url::Host::Ipv4(addr) => addr.is_loopback(),
+                url::Host::Ipv6(addr) => addr.is_loopback(),
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
-fn is_safe_public_base_url(value: &str) -> bool {
-    let Some(rest) = value.strip_prefix("https://") else {
+pub fn notification_public_base_url_allowed(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value.trim()) else {
         return false;
     };
-    !rest.is_empty()
-        && !rest.contains('/')
-        && !rest.contains('?')
-        && !rest.contains('#')
-        && !rest.contains('@')
+    url.scheme() == "https"
+        && url.host().is_some()
+        && (url.path().is_empty() || url.path() == "/")
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
 }
 
 #[cfg(test)]

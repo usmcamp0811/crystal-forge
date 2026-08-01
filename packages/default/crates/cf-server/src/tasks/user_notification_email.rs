@@ -6,6 +6,9 @@ use tokio::time::{Duration, interval};
 use uuid::Uuid;
 
 use crate::config::ServerConfig;
+use cf_config::config::{
+    notification_provider_endpoint_allowed, notification_public_base_url_allowed,
+};
 
 const DEFAULT_BATCH_SIZE: i64 = 25;
 const STALE_CLAIM_SECONDS: i64 = 15 * 60;
@@ -13,6 +16,7 @@ const STALE_CLAIM_SECONDS: i64 = 15 * 60;
 #[derive(Debug, Clone, FromRow)]
 struct ClaimedEmailDelivery {
     id: Uuid,
+    claim_token: Uuid,
     user_id: Uuid,
     notification_id: Option<Uuid>,
     delivery_type: String,
@@ -113,11 +117,12 @@ async fn claim_due_email_deliveries(
         UPDATE user_notification_email_deliveries d
         SET state = 'sending',
             claimed_at = NOW(),
+            claim_token = gen_random_uuid(),
             attempt_count = d.attempt_count + 1,
             updated_at = NOW()
         FROM due
         WHERE d.id = due.id
-        RETURNING d.id, d.user_id, d.notification_id, d.delivery_type, d.attempt_count,
+        RETURNING d.id, d.claim_token, d.user_id, d.notification_id, d.delivery_type, d.attempt_count,
                   d.idempotency_key
         "#,
     )
@@ -136,7 +141,7 @@ async fn process_claimed_delivery(
     let Some(recipient) = load_email_recipient(pool, delivery.user_id).await? else {
         cancel_delivery(
             pool,
-            delivery.id,
+            &delivery,
             "recipient email or preferences unavailable",
         )
         .await?;
@@ -148,7 +153,7 @@ async fn process_claimed_delivery(
     {
         cancel_delivery(
             pool,
-            delivery.id,
+            &delivery,
             "email delivery disabled by current preferences",
         )
         .await?;
@@ -158,7 +163,7 @@ async fn process_claimed_delivery(
     if delivery.delivery_type == "weekly_digest" && !recipient.weekly_digest {
         cancel_delivery(
             pool,
-            delivery.id,
+            &delivery,
             "weekly digest disabled by current preferences",
         )
         .await?;
@@ -174,7 +179,7 @@ async fn process_claimed_delivery(
     };
 
     let Some((subject, text_body, html_body)) = rendered else {
-        cancel_delivery(pool, delivery.id, "delivery content is no longer available").await?;
+        cancel_delivery(pool, &delivery, "delivery content is no longer available").await?;
         return Ok(());
     };
 
@@ -194,7 +199,7 @@ async fn process_claimed_delivery(
     match transport.send(message).await {
         Ok(receipt) => {
             tracing::info!(delivery_id = %delivery.id, %receipt, "notification email accepted by transport");
-            mark_delivery_sent(pool, delivery.id).await?;
+            mark_delivery_sent(pool, &delivery).await?;
         }
         Err(err) => {
             fail_delivery_for_retry(
@@ -320,6 +325,13 @@ async fn render_immediate_delivery(
              OR (user_notifications.category = 'policy_violations' AND p.policy_violations)
              OR (user_notifications.category = 'heartbeat_lost' AND p.heartbeat_lost)
           )
+          AND user_notifications.created_at >= CASE user_notifications.category
+                WHEN 'deploy_failures' THEN p.deploy_failures_email_enabled_at
+                WHEN 'build_failures' THEN p.build_failures_email_enabled_at
+                WHEN 'critical_cves' THEN p.critical_cves_email_enabled_at
+                WHEN 'policy_violations' THEN p.policy_violations_email_enabled_at
+                WHEN 'heartbeat_lost' THEN p.heartbeat_lost_email_enabled_at
+          END
         "#,
     )
     .bind(notification_id)
@@ -347,9 +359,15 @@ async fn render_digest_delivery(
     recipient_email: &str,
 ) -> Result<Option<(String, String, String)>, sqlx::Error> {
     let Some((period_start, period_end)) = sqlx::query_as::<_, (DateTime<Utc>, DateTime<Utc>)>(
-        "SELECT period_start, period_end
-         FROM user_notification_weekly_digest_runs
-         WHERE delivery_id = $1 AND user_id = $2
+        "SELECT GREATEST(r.period_start, p.weekly_digest_enabled_at), r.period_end
+         FROM user_notification_weekly_digest_runs r
+         JOIN user_notification_preferences p ON p.user_id = r.user_id
+         WHERE r.delivery_id = $1
+           AND r.user_id = $2
+           AND p.weekly_digest = TRUE
+           AND p.delivery_channel IN ('email', 'both')
+           AND p.weekly_digest_enabled_at IS NOT NULL
+           AND p.weekly_digest_enabled_at < r.period_end
          LIMIT 1",
     )
     .bind(delivery.id)
@@ -378,6 +396,13 @@ async fn render_digest_delivery(
              OR (user_notifications.category = 'policy_violations' AND p.policy_violations)
              OR (user_notifications.category = 'heartbeat_lost' AND p.heartbeat_lost)
           )
+          AND user_notifications.created_at >= CASE user_notifications.category
+                WHEN 'deploy_failures' THEN p.deploy_failures_email_enabled_at
+                WHEN 'build_failures' THEN p.build_failures_email_enabled_at
+                WHEN 'critical_cves' THEN p.critical_cves_email_enabled_at
+                WHEN 'policy_violations' THEN p.policy_violations_email_enabled_at
+                WHEN 'heartbeat_lost' THEN p.heartbeat_lost_email_enabled_at
+          END
         GROUP BY user_notifications.category
         ORDER BY user_notifications.category
         "#,
@@ -408,6 +433,13 @@ async fn render_digest_delivery(
              OR (user_notifications.category = 'policy_violations' AND p.policy_violations)
              OR (user_notifications.category = 'heartbeat_lost' AND p.heartbeat_lost)
           )
+          AND user_notifications.created_at >= CASE user_notifications.category
+                WHEN 'deploy_failures' THEN p.deploy_failures_email_enabled_at
+                WHEN 'build_failures' THEN p.build_failures_email_enabled_at
+                WHEN 'critical_cves' THEN p.critical_cves_email_enabled_at
+                WHEN 'policy_violations' THEN p.policy_violations_email_enabled_at
+                WHEN 'heartbeat_lost' THEN p.heartbeat_lost_email_enabled_at
+          END
         ORDER BY user_notifications.created_at DESC
         LIMIT 20
         "#,
@@ -434,18 +466,27 @@ async fn render_digest_delivery(
     )))
 }
 
-async fn mark_delivery_sent(pool: &PgPool, delivery_id: Uuid) -> Result<(), sqlx::Error> {
+async fn mark_delivery_sent(
+    pool: &PgPool,
+    delivery: &ClaimedEmailDelivery,
+) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
-    sqlx::query(
+    let updated = sqlx::query(
         r#"
         UPDATE user_notification_email_deliveries
-        SET state = 'sent', sent_at = NOW(), updated_at = NOW(), last_error = NULL
-        WHERE id = $1
+        SET state = 'sent', sent_at = NOW(), updated_at = NOW(), last_error = NULL, claim_token = NULL
+        WHERE id = $1 AND claim_token = $2 AND state = 'sending'
         "#,
     )
-    .bind(delivery_id)
+    .bind(delivery.id)
+    .bind(delivery.claim_token)
     .execute(&mut *tx)
     .await?;
+    if updated.rows_affected() == 0 {
+        tx.rollback().await?;
+        tracing::warn!(delivery_id = %delivery.id, "notification email completion ignored after stale claim");
+        return Ok(());
+    }
     sqlx::query(
         r#"
         UPDATE user_notification_weekly_digest_runs
@@ -453,7 +494,7 @@ async fn mark_delivery_sent(pool: &PgPool, delivery_id: Uuid) -> Result<(), sqlx
         WHERE delivery_id = $1
         "#,
     )
-    .bind(delivery_id)
+    .bind(delivery.id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -462,21 +503,27 @@ async fn mark_delivery_sent(pool: &PgPool, delivery_id: Uuid) -> Result<(), sqlx
 
 async fn cancel_delivery(
     pool: &PgPool,
-    delivery_id: Uuid,
+    delivery: &ClaimedEmailDelivery,
     reason: &str,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
-    sqlx::query(
+    let updated = sqlx::query(
         r#"
         UPDATE user_notification_email_deliveries
-        SET state = 'cancelled', last_error = $2, updated_at = NOW()
-        WHERE id = $1
+        SET state = 'cancelled', last_error = $3, updated_at = NOW(), claim_token = NULL
+        WHERE id = $1 AND claim_token = $2 AND state = 'sending'
         "#,
     )
-    .bind(delivery_id)
+    .bind(delivery.id)
+    .bind(delivery.claim_token)
     .bind(reason)
     .execute(&mut *tx)
     .await?;
+    if updated.rows_affected() == 0 {
+        tx.rollback().await?;
+        tracing::warn!(delivery_id = %delivery.id, "notification email cancellation ignored after stale claim");
+        return Ok(());
+    }
     sqlx::query(
         r#"
         UPDATE user_notification_weekly_digest_runs
@@ -484,7 +531,7 @@ async fn cancel_delivery(
         WHERE delivery_id = $1
         "#,
     )
-    .bind(delivery_id)
+    .bind(delivery.id)
     .bind(reason)
     .execute(&mut *tx)
     .await?;
@@ -502,22 +549,29 @@ async fn fail_delivery_for_retry(
     let backoff_seconds =
         60_i64.saturating_mul(2_i64.pow(delivery.attempt_count.clamp(0, 10) as u32));
     let mut tx = pool.begin().await?;
-    sqlx::query(
+    let updated = sqlx::query(
         r#"
         UPDATE user_notification_email_deliveries
         SET state = CASE WHEN $2 THEN 'failed' ELSE 'pending' END,
             next_attempt_at = CASE WHEN $2 THEN next_attempt_at ELSE NOW() + ($3 * INTERVAL '1 second') END,
             last_error = $4,
-            updated_at = NOW()
-        WHERE id = $1
+            updated_at = NOW(),
+            claim_token = NULL
+        WHERE id = $1 AND claim_token = $5 AND state = 'sending'
         "#,
     )
     .bind(delivery.id)
     .bind(terminal)
     .bind(backoff_seconds)
     .bind(reason)
+    .bind(delivery.claim_token)
     .execute(&mut *tx)
     .await?;
+    if updated.rows_affected() == 0 {
+        tx.rollback().await?;
+        tracing::warn!(delivery_id = %delivery.id, "notification email failure ignored after stale claim");
+        return Ok(());
+    }
     sqlx::query(
         r#"
         UPDATE user_notification_weekly_digest_runs
@@ -542,13 +596,16 @@ fn email_transport_available(config: &ServerConfig) -> bool {
             .notification_email_endpoint
             .as_deref()
             .map(|value| {
-                provider_endpoint_allowed(value, config.notification_email_allow_insecure_loopback)
+                notification_provider_endpoint_allowed(
+                    value,
+                    config.notification_email_allow_insecure_loopback,
+                )
             })
             .unwrap_or(false)
         && config
             .public_base_url
             .as_deref()
-            .map(is_safe_public_base_url)
+            .map(notification_public_base_url_allowed)
             .unwrap_or(false)
         && config
             .notification_email_provider_token_file
@@ -590,34 +647,6 @@ fn absolute_email_link(config: &ServerConfig, route: &str) -> String {
         format!("/{route}")
     };
     format!("{base}{route}")
-}
-
-fn provider_endpoint_allowed(value: &str, allow_insecure_loopback: bool) -> bool {
-    let value = value.trim();
-    value.starts_with("https://") || (allow_insecure_loopback && is_loopback_http_url(value))
-}
-
-fn is_loopback_http_url(value: &str) -> bool {
-    let Some(rest) = value.strip_prefix("http://") else {
-        return false;
-    };
-    let host_port = rest.split('/').next().unwrap_or_default();
-    let host = host_port
-        .strip_prefix('[')
-        .and_then(|value| value.split(']').next())
-        .unwrap_or_else(|| host_port.split(':').next().unwrap_or_default());
-    matches!(host, "localhost" | "127.0.0.1" | "::1") || host.starts_with("127.")
-}
-
-fn is_safe_public_base_url(value: &str) -> bool {
-    let Some(rest) = value.trim().strip_prefix("https://") else {
-        return false;
-    };
-    !rest.is_empty()
-        && !rest.contains('/')
-        && !rest.contains('?')
-        && !rest.contains('#')
-        && !rest.contains('@')
 }
 
 fn render_immediate_email(

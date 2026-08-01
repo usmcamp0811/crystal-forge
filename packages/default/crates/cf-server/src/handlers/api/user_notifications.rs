@@ -24,6 +24,9 @@ use crate::queries::user_notifications::{
     materialize_attention_notifications_for_user, unread_notification_count,
     update_notification_preferences,
 };
+use cf_config::config::{
+    notification_provider_endpoint_allowed, notification_public_base_url_allowed,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct ListNotificationsParams {
@@ -241,6 +244,8 @@ async fn notification_email_capability(
         .map(|u| u.email)
         .filter(|email| !email.trim().is_empty());
 
+    let token_file_usable = notification_provider_token_file_usable(server_config).await;
+
     let unavailable_reason = if !server_config.notification_email_enabled {
         Some("Email delivery is not configured for this deployment".to_string())
     } else if !server_config.notification_email_external_delivery_allowed {
@@ -249,7 +254,7 @@ async fn notification_email_capability(
         .notification_email_endpoint
         .as_deref()
         .map(|endpoint| {
-            provider_endpoint_allowed(
+            notification_provider_endpoint_allowed(
                 endpoint,
                 server_config.notification_email_allow_insecure_loopback,
             )
@@ -258,13 +263,9 @@ async fn notification_email_capability(
         || !server_config
             .public_base_url
             .as_deref()
-            .map(is_safe_public_base_url)
+            .map(notification_public_base_url_allowed)
             .unwrap_or(false)
-        || !server_config
-            .notification_email_provider_token_file
-            .as_ref()
-            .map(|path| !path.as_os_str().is_empty() && !path.starts_with("/nix/store"))
-            .unwrap_or(false)
+        || !token_file_usable
         || !server_config
             .notification_email_sender_address
             .as_deref()
@@ -285,30 +286,18 @@ async fn notification_email_capability(
     }
 }
 
-fn provider_endpoint_allowed(value: &str, allow_insecure_loopback: bool) -> bool {
-    let value = value.trim();
-    value.starts_with("https://") || (allow_insecure_loopback && is_loopback_http_url(value))
-}
-
-fn is_loopback_http_url(value: &str) -> bool {
-    let Some(rest) = value.strip_prefix("http://") else {
+async fn notification_provider_token_file_usable(server_config: &ServerConfig) -> bool {
+    let Some(path) = server_config
+        .notification_email_provider_token_file
+        .as_ref()
+    else {
         return false;
     };
-    let host_port = rest.split('/').next().unwrap_or_default();
-    let host = host_port
-        .strip_prefix('[')
-        .and_then(|value| value.split(']').next())
-        .unwrap_or_else(|| host_port.split(':').next().unwrap_or_default());
-    matches!(host, "localhost" | "127.0.0.1" | "::1") || host.starts_with("127.")
-}
-
-fn is_safe_public_base_url(value: &str) -> bool {
-    let Some(rest) = value.trim().strip_prefix("https://") else {
+    if path.as_os_str().is_empty() || path.starts_with("/nix/store") {
         return false;
-    };
-    !rest.is_empty()
-        && !rest.contains('/')
-        && !rest.contains('?')
-        && !rest.contains('#')
-        && !rest.contains('@')
+    }
+    tokio::fs::read_to_string(path)
+        .await
+        .map(|token| !token.trim().is_empty())
+        .unwrap_or(false)
 }

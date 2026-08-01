@@ -670,10 +670,11 @@ fn save_notification_pref(
                     if current_profile_user_id(app_state) == requested_user_id
                         && current_profile_auth_generation(app_state) == requested_generation
                     {
-                        let had_newer_pending = pending_signal.with(|pending| pending.is_some());
-                        if had_newer_pending {
+                        let newer_pending = pending_signal.with_mut(|pending| pending.take());
+                        if let Some(newer_pending) = newer_pending {
                             pending_signal.with_mut(|pending| {
-                                merge_notification_update(pending, next_update.clone())
+                                merge_notification_update(pending, next_update.clone());
+                                merge_notification_update(pending, newer_pending);
                             });
                         } else {
                             prefs_signal.set(confirmed_before_update.clone());

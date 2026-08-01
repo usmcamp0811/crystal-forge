@@ -33,7 +33,12 @@ pub async fn materialize_attention_notifications_for_user(
                 'attention_occurrence' AS identity_type,
                 ao.id::text AS identity_id,
                 ao.opened_at,
-                p.delivery_channel IN ('in_app', 'both') AS in_app_visible,
+                COALESCE((p.delivery_channel IN ('in_app', 'both') AND ao.opened_at >= CASE ao.category
+                    WHEN 'builds' THEN p.build_failures_in_app_enabled_at
+                    WHEN 'evals' THEN p.policy_violations_in_app_enabled_at
+                    WHEN 'cves' THEN p.critical_cves_in_app_enabled_at
+                    WHEN 'systems' THEN p.heartbeat_lost_in_app_enabled_at
+                END), FALSE) AS in_app_visible,
                 CASE ao.category
                     WHEN 'builds' THEN 'Build failed'
                     WHEN 'evals' THEN 'Policy or evaluation failure'
@@ -63,12 +68,32 @@ pub async fn materialize_attention_notifications_for_user(
              AND scoped_system.id::text = ao.subject_id
             WHERE ao.opened_at >= p.initialized_at
               AND ao.category IN ('builds', 'evals', 'cves', 'systems')
-              AND p.delivery_channel IN ('in_app', 'email', 'both')
-              AND (
+               AND p.delivery_channel IN ('in_app', 'email', 'both')
+               AND (
                     (ao.category = 'builds' AND p.build_failures)
                  OR (ao.category = 'evals' AND p.policy_violations)
                  OR (ao.category = 'cves' AND p.critical_cves)
                  OR (ao.category = 'systems' AND p.heartbeat_lost)
+               )
+              AND (
+                    (
+                        p.delivery_channel IN ('in_app', 'both')
+                        AND ao.opened_at >= CASE ao.category
+                            WHEN 'builds' THEN p.build_failures_in_app_enabled_at
+                            WHEN 'evals' THEN p.policy_violations_in_app_enabled_at
+                            WHEN 'cves' THEN p.critical_cves_in_app_enabled_at
+                            WHEN 'systems' THEN p.heartbeat_lost_in_app_enabled_at
+                        END
+                    )
+                 OR (
+                        p.delivery_channel IN ('email', 'both')
+                        AND ao.opened_at >= CASE ao.category
+                            WHEN 'builds' THEN p.build_failures_email_enabled_at
+                            WHEN 'evals' THEN p.policy_violations_email_enabled_at
+                            WHEN 'cves' THEN p.critical_cves_email_enabled_at
+                            WHEN 'systems' THEN p.heartbeat_lost_email_enabled_at
+                        END
+                    )
               )
               AND (
                     a.is_admin
@@ -89,7 +114,7 @@ pub async fn materialize_attention_notifications_for_user(
                 'system_event' AS identity_type,
                 se.id::text AS identity_id,
                 se.occurred_at AS opened_at,
-                p.delivery_channel IN ('in_app', 'both') AS in_app_visible,
+                COALESCE((p.delivery_channel IN ('in_app', 'both') AND se.occurred_at >= p.deploy_failures_in_app_enabled_at), FALSE) AS in_app_visible,
                 'Deployment failed' AS title,
                 'A deployment entered a failed terminal state.' AS summary,
                 '/systems' AS route
@@ -101,6 +126,10 @@ pub async fn materialize_attention_notifications_for_user(
               AND se.occurred_at >= p.initialized_at
               AND p.delivery_channel IN ('in_app', 'email', 'both')
               AND p.deploy_failures
+              AND (
+                    (p.delivery_channel IN ('in_app', 'both') AND se.occurred_at >= p.deploy_failures_in_app_enabled_at)
+                 OR (p.delivery_channel IN ('email', 'both') AND se.occurred_at >= p.deploy_failures_email_enabled_at)
+              )
               AND (
                     a.is_admin
                  OR EXISTS (
@@ -284,9 +313,9 @@ pub async fn enqueue_due_weekly_digest_deliveries(
          WHERE weekly_digest = TRUE
            AND delivery_channel IN ('email', 'both')
            AND weekly_digest_enabled_at IS NOT NULL
-           AND weekly_digest_enabled_at <= $1",
+           AND weekly_digest_enabled_at < $1",
     )
-    .bind(period_start)
+    .bind(period_end)
     .fetch_all(pool)
     .await?;
 
@@ -316,9 +345,8 @@ pub async fn enqueue_weekly_digest_delivery(
             FROM user_notifications
             WHERE user_id = $1
               AND dismissed_at IS NULL
-              AND created_at >= $2
+              AND created_at >= GREATEST($2, (SELECT weekly_digest_enabled_at FROM prefs))
               AND created_at < $3
-              AND created_at >= (SELECT weekly_digest_enabled_at FROM prefs)
               AND notification_visible_to_user($1, source_type, source_id)
             LIMIT 1
         ), delivery AS (
@@ -333,7 +361,7 @@ pub async fn enqueue_weekly_digest_delivery(
             WHERE weekly_digest = TRUE
               AND delivery_channel IN ('email', 'both')
               AND weekly_digest_enabled_at IS NOT NULL
-              AND weekly_digest_enabled_at <= $2
+              AND weekly_digest_enabled_at < $3
               AND EXISTS (SELECT 1 FROM digest_items)
             ON CONFLICT (idempotency_key) DO NOTHING
             RETURNING id
@@ -365,10 +393,13 @@ pub async fn get_or_create_notification_preferences(
          ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id
          RETURNING user_id, deploy_failures, build_failures, critical_cves, policy_violations,
                    heartbeat_lost, weekly_digest, delivery_channel,
-                   deploy_failures_email_enabled_at, build_failures_email_enabled_at,
-                   critical_cves_email_enabled_at, policy_violations_email_enabled_at,
-                   heartbeat_lost_email_enabled_at, weekly_digest_enabled_at,
-                   initialized_at, updated_at",
+                    deploy_failures_email_enabled_at, build_failures_email_enabled_at,
+                    critical_cves_email_enabled_at, policy_violations_email_enabled_at,
+                    heartbeat_lost_email_enabled_at,
+                    deploy_failures_in_app_enabled_at, build_failures_in_app_enabled_at,
+                    critical_cves_in_app_enabled_at, policy_violations_in_app_enabled_at,
+                    heartbeat_lost_in_app_enabled_at, weekly_digest_enabled_at,
+                    initialized_at, updated_at",
     )
     .bind(user_id)
     .fetch_one(pool)
@@ -413,12 +444,37 @@ pub async fn update_notification_preferences(
                  WHEN policy_violations_email_enabled_at IS NULL OR NOT policy_violations OR delivery_channel NOT IN ('email', 'both') THEN NOW()
                  ELSE policy_violations_email_enabled_at
              END,
-             heartbeat_lost_email_enabled_at = CASE
-                 WHEN NOT COALESCE($6, heartbeat_lost) OR COALESCE($8, delivery_channel) NOT IN ('email', 'both') THEN NULL
-                 WHEN heartbeat_lost_email_enabled_at IS NULL OR NOT heartbeat_lost OR delivery_channel NOT IN ('email', 'both') THEN NOW()
-                 ELSE heartbeat_lost_email_enabled_at
-             END,
-             weekly_digest_enabled_at = CASE
+              heartbeat_lost_email_enabled_at = CASE
+                  WHEN NOT COALESCE($6, heartbeat_lost) OR COALESCE($8, delivery_channel) NOT IN ('email', 'both') THEN NULL
+                  WHEN heartbeat_lost_email_enabled_at IS NULL OR NOT heartbeat_lost OR delivery_channel NOT IN ('email', 'both') THEN NOW()
+                  ELSE heartbeat_lost_email_enabled_at
+              END,
+              deploy_failures_in_app_enabled_at = CASE
+                  WHEN NOT COALESCE($2, deploy_failures) OR COALESCE($8, delivery_channel) NOT IN ('in_app', 'both') THEN NULL
+                  WHEN deploy_failures_in_app_enabled_at IS NULL OR NOT deploy_failures OR delivery_channel NOT IN ('in_app', 'both') THEN NOW()
+                  ELSE deploy_failures_in_app_enabled_at
+              END,
+              build_failures_in_app_enabled_at = CASE
+                  WHEN NOT COALESCE($3, build_failures) OR COALESCE($8, delivery_channel) NOT IN ('in_app', 'both') THEN NULL
+                  WHEN build_failures_in_app_enabled_at IS NULL OR NOT build_failures OR delivery_channel NOT IN ('in_app', 'both') THEN NOW()
+                  ELSE build_failures_in_app_enabled_at
+              END,
+              critical_cves_in_app_enabled_at = CASE
+                  WHEN NOT COALESCE($4, critical_cves) OR COALESCE($8, delivery_channel) NOT IN ('in_app', 'both') THEN NULL
+                  WHEN critical_cves_in_app_enabled_at IS NULL OR NOT critical_cves OR delivery_channel NOT IN ('in_app', 'both') THEN NOW()
+                  ELSE critical_cves_in_app_enabled_at
+              END,
+              policy_violations_in_app_enabled_at = CASE
+                  WHEN NOT COALESCE($5, policy_violations) OR COALESCE($8, delivery_channel) NOT IN ('in_app', 'both') THEN NULL
+                  WHEN policy_violations_in_app_enabled_at IS NULL OR NOT policy_violations OR delivery_channel NOT IN ('in_app', 'both') THEN NOW()
+                  ELSE policy_violations_in_app_enabled_at
+              END,
+              heartbeat_lost_in_app_enabled_at = CASE
+                  WHEN NOT COALESCE($6, heartbeat_lost) OR COALESCE($8, delivery_channel) NOT IN ('in_app', 'both') THEN NULL
+                  WHEN heartbeat_lost_in_app_enabled_at IS NULL OR NOT heartbeat_lost OR delivery_channel NOT IN ('in_app', 'both') THEN NOW()
+                  ELSE heartbeat_lost_in_app_enabled_at
+              END,
+              weekly_digest_enabled_at = CASE
                  WHEN NOT COALESCE($7, weekly_digest) OR COALESCE($8, delivery_channel) NOT IN ('email', 'both') THEN NULL
                  WHEN weekly_digest_enabled_at IS NULL OR NOT weekly_digest OR delivery_channel NOT IN ('email', 'both') THEN NOW()
                  ELSE weekly_digest_enabled_at
@@ -427,10 +483,13 @@ pub async fn update_notification_preferences(
          WHERE user_id = $1
          RETURNING user_id, deploy_failures, build_failures, critical_cves, policy_violations,
                    heartbeat_lost, weekly_digest, delivery_channel,
-                   deploy_failures_email_enabled_at, build_failures_email_enabled_at,
-                   critical_cves_email_enabled_at, policy_violations_email_enabled_at,
-                   heartbeat_lost_email_enabled_at, weekly_digest_enabled_at,
-                   initialized_at, updated_at",
+                    deploy_failures_email_enabled_at, build_failures_email_enabled_at,
+                    critical_cves_email_enabled_at, policy_violations_email_enabled_at,
+                    heartbeat_lost_email_enabled_at,
+                    deploy_failures_in_app_enabled_at, build_failures_in_app_enabled_at,
+                    critical_cves_in_app_enabled_at, policy_violations_in_app_enabled_at,
+                    heartbeat_lost_in_app_enabled_at, weekly_digest_enabled_at,
+                    initialized_at, updated_at",
     )
     .bind(user_id)
     .bind(update.deploy_failures)
