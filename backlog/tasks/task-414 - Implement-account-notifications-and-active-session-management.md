@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-01 04:41'
+updated_date: '2026-08-01 04:59'
 labels:
   - frontend
   - web-ui
@@ -1143,6 +1143,23 @@ Implemented first backend/UI foundation slice:
 Verification run so far:
 - `nix develop -c bash -c 'SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml'` passed with existing warnings.
 - `nix develop -c bash -c 'cd packages/web-ui && cargo fmt && cargo check --target wasm32-unknown-unknown'` passed with existing warnings, but running workspace fmt touched unrelated server files; those unrelated formatting-only changes were reverted.
+
+Continued TASK-414 implementation:
+- Added server configuration fields for notification email enablement, endpoint, sender, TLS mode, credential file path, worker interval, max attempts, external-delivery policy gate, session last-seen throttle, and session retention.
+- Added matching NixOS module options under `services.crystal-forge.server.notificationEmail`, plus session throttle/retention options, and wired them into generated TOML without copying credentials.
+- Updated notification preference API to report real email capability from server config + user email and to allow `email`/`both`/weekly digest only when configured and policy-allowed.
+- Extended attention notification materialization to enqueue durable idempotent immediate email delivery rows for `email`/`both` preferences.
+- Added weekly digest enqueue query with no-empty-digest and one-run-per-period uniqueness semantics.
+- Fixed Android user-agent parsing so Android is not mislabeled as Linux.
+- Added focused unit tests for notification email capability DTO behavior and session user-agent parsing.
+
+Verification in this slice:
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml'` passed with existing warnings.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` passed with existing warnings.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_notifications --lib'` passed: 2 tests.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_sessions --lib'` passed: 3 tests.
+
+Note: an earlier parallel test run timed out while waiting on Cargo/Nix locks; the same targeted test commands were rerun serially and passed.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
