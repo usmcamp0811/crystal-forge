@@ -391,8 +391,7 @@ pub async fn get_scan_deployed(pool: &PgPool, limit: i64) -> Result<ScanDeployed
         "#,
     )
     .fetch_one(pool)
-    .await
-    .unwrap_or(items.len() as i64);
+    .await?;
 
     let returned = items.len() as i64;
     Ok(ScanDeployedResult {

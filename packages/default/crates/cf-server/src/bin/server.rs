@@ -147,6 +147,13 @@ async fn main() -> anyhow::Result<()> {
     let background_pool = pool.clone();
     let deployment_pool = pool.clone();
     let flake_init_pool = pool.clone();
+
+    // Backfill any compliance digest rows set to 'pending' by migrations.
+    // This runs once at startup and fails fast if any row cannot be computed.
+    crystal_forge::compliance::digest::backfill_pending_digests(&pool)
+        .await
+        .context("Failed to backfill compliance semantic digests")?;
+
     // TODO: Update this to get the first N commits on the first time
     reset_non_terminal_derivations(&pool).await?;
     initialize_flake_commits(&flake_init_pool, &cfg.flakes.watched).await?;

@@ -1,9 +1,12 @@
-use crate::compliance::digest::refresh_bundle_version_digest;
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
+
+use crate::compliance::digest::{
+    BundleVersionCanonical, load_bundle_policy_version_ids, write_bundle_version_digest,
+};
 
 // ─── Typed validation error ───────────────────────────────────────────────────
 
@@ -233,12 +236,43 @@ pub async fn create_bundle(
         .await?;
     }
 
-    tx.commit().await?;
+    // Compute and persist the canonical bundle digest inside the transaction
+    // (before commit) so a digest failure rolls back the entire mutation.
+    // Fetch the draft version id first, then read its membership.
+    let draft_version_id: Uuid =
+        sqlx::query_scalar("SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1")
+            .bind(bundle_id)
+            .fetch_one(&mut *tx)
+            .await?;
 
-    // Refresh the Rust-canonical bundle digest after triggers have settled.
-    if let Err(e) = refresh_bundle_version_digest(pool, bundle_id).await {
-        tracing::warn!(bundle_id = %bundle_id, "Failed to refresh bundle version digest: {e:#}");
-    }
+    let policy_version_ids = load_bundle_policy_version_ids(&mut tx, draft_version_id).await?;
+
+    let layer = request
+        .layer
+        .as_deref()
+        .unwrap_or("fleet")
+        .trim()
+        .to_string();
+    let canonical = BundleVersionCanonical {
+        name: request.name.trim().to_string(),
+        framework: request.framework.trim().to_string(),
+        framework_version: request.version.as_deref().map(str::trim).map(String::from),
+        description: request
+            .description
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        layer: if layer.is_empty() {
+            "fleet".to_string()
+        } else {
+            layer
+        },
+        owner: "Platform Security".to_string(),
+        policy_version_ids,
+    };
+    write_bundle_version_digest(&mut tx, bundle_id, &canonical).await?;
+
+    tx.commit().await?;
 
     find_bundle(pool, bundle_id)
         .await?
@@ -390,12 +424,35 @@ pub async fn update_bundle(
         .await?;
     }
 
-    tx.commit().await?;
+    // Compute and persist the canonical bundle digest inside the transaction.
+    let draft_version_id: Uuid =
+        sqlx::query_scalar("SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1")
+            .bind(bundle_id)
+            .fetch_one(&mut *tx)
+            .await?;
 
-    // Refresh the Rust-canonical bundle digest after triggers have settled.
-    if let Err(e) = refresh_bundle_version_digest(pool, bundle_id).await {
-        tracing::warn!(bundle_id = %bundle_id, "Failed to refresh bundle version digest: {e:#}");
-    }
+    let policy_version_ids = load_bundle_policy_version_ids(&mut tx, draft_version_id).await?;
+
+    let canonical = BundleVersionCanonical {
+        name: name.to_string(),
+        framework: framework.to_string(),
+        framework_version: if version.is_empty() {
+            None
+        } else {
+            Some(version.to_string())
+        },
+        description: request
+            .description
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        layer: "fleet".to_string(),
+        owner: "Platform Security".to_string(),
+        policy_version_ids,
+    };
+    write_bundle_version_digest(&mut tx, bundle_id, &canonical).await?;
+
+    tx.commit().await?;
 
     find_bundle(pool, bundle_id).await
 }

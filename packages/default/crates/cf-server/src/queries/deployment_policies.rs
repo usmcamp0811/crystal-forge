@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::compliance::digest::refresh_policy_version_digest;
+use crate::compliance::digest::{PolicyVersionCanonical, write_policy_version_digest};
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
 };
@@ -270,13 +270,16 @@ pub async fn get_deployment_policy_by_id(
 
 /// Create a new deployment policy.
 ///
-/// After the SQL trigger creates the draft version row (with `semantic_digest =
-/// 'pending'`), this function computes the real Rust-canonical digest and
-/// persists it so the version row is always authoritative.
+/// Runs entirely within a transaction. The SQL trigger creates the draft
+/// version row with `semantic_digest = 'pending'`; within the same transaction
+/// we compute the real Rust-canonical digest and persist it. A digest failure
+/// rolls back the entire insert.
 pub async fn create_deployment_policy(
     pool: &PgPool,
     request: &CreateDeploymentPolicyRequest,
 ) -> Result<DeploymentPolicyRecord> {
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+
     let policy = sqlx::query_as::<_, DeploymentPolicyRecord>(
         r#"
         INSERT INTO deployment_policies (name, description, policy_type, config, enabled)
@@ -289,46 +292,51 @@ pub async fn create_deployment_policy(
     .bind(&request.policy_type)
     .bind(&request.config)
     .bind(request.enabled.unwrap_or(true))
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .context("Failed to create deployment policy")?;
 
-    // Refresh the Rust-canonical digest on the draft version row.
-    if let Err(e) = refresh_policy_version_digest(
-        pool,
-        policy.id,
-        &policy.name,
-        policy.description.as_deref(),
-        &policy.policy_type,
-        &policy.config,
-    )
-    .await
-    {
-        tracing::warn!(policy_id = %policy.id, "Failed to refresh policy version digest: {e:#}");
-    }
+    // Compute and persist the canonical digest before committing.
+    let canonical = PolicyVersionCanonical {
+        name: policy.name.clone(),
+        description: policy.description.clone(),
+        policy_type: policy.policy_type.clone(),
+        implementation_state: "native".to_string(),
+        execution_phase: "nix-evaluation".to_string(),
+        config: policy.config.clone(),
+        compliance_metadata: serde_json::json!({}),
+        dependencies: serde_json::json!([]),
+    };
+    write_policy_version_digest(&mut tx, policy.id, &canonical)
+        .await
+        .context("Failed to write policy version digest")?;
 
+    tx.commit()
+        .await
+        .context("Failed to commit policy creation")?;
     Ok(policy)
 }
 
 /// Update an existing deployment policy.
 ///
-/// After the SQL trigger updates the draft version row (with `semantic_digest =
-/// 'pending'`), this function computes the real Rust-canonical digest and
-/// persists it.
+/// Runs entirely within a transaction. Digest computation and persistence
+/// happen before commit; a failure rolls back the entire update.
 pub async fn update_deployment_policy(
     pool: &PgPool,
     policy_id: &Uuid,
     request: &UpdateDeploymentPolicyRequest,
 ) -> Result<Option<DeploymentPolicyRecord>> {
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+
     let policy = sqlx::query_as::<_, DeploymentPolicyRecord>(
         r#"
         UPDATE deployment_policies
         SET
-            name = COALESCE($2, name),
+            name        = COALESCE($2, name),
             description = COALESCE($3, description),
             policy_type = COALESCE($4, policy_type),
-            config = COALESCE($5, config),
-            enabled = COALESCE($6, enabled)
+            config      = COALESCE($5, config),
+            enabled     = COALESCE($6, enabled)
         WHERE id = $1
         RETURNING id, name, description, policy_type, config, enabled, created_at, updated_at
         "#,
@@ -339,25 +347,29 @@ pub async fn update_deployment_policy(
     .bind(&request.policy_type)
     .bind(&request.config)
     .bind(request.enabled)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .context("Failed to update deployment policy")?;
 
     if let Some(ref p) = policy {
-        if let Err(e) = refresh_policy_version_digest(
-            pool,
-            p.id,
-            &p.name,
-            p.description.as_deref(),
-            &p.policy_type,
-            &p.config,
-        )
-        .await
-        {
-            tracing::warn!(policy_id = %p.id, "Failed to refresh policy version digest: {e:#}");
-        }
+        let canonical = PolicyVersionCanonical {
+            name: p.name.clone(),
+            description: p.description.clone(),
+            policy_type: p.policy_type.clone(),
+            implementation_state: "native".to_string(),
+            execution_phase: "nix-evaluation".to_string(),
+            config: p.config.clone(),
+            compliance_metadata: serde_json::json!({}),
+            dependencies: serde_json::json!([]),
+        };
+        write_policy_version_digest(&mut tx, p.id, &canonical)
+            .await
+            .context("Failed to write policy version digest")?;
     }
 
+    tx.commit()
+        .await
+        .context("Failed to commit policy update")?;
     Ok(policy)
 }
 
