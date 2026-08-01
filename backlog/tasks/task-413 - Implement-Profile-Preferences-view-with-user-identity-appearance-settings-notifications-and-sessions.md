@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-31 13:46'
-updated_date: '2026-08-01 02:22'
+updated_date: '2026-08-01 02:28'
 labels:
   - web-ui
   - design-parity
@@ -164,4 +164,6 @@ Uncommitted deployed-login hotfix attempt:
 - This does not yet prove the deployed root cause; collect browser Network details for `/api/v1/user/preferences` and `/api/v1/user/preferences/initialize` plus server logs if the deployed issue still appears after this hotfix.
 
 Fixed the deployed-login root cause in `AppShell`: the preference bootstrap effect now reads `app_state` inside the `use_effect`, so it subscribes to `/whoami` auth-state completion and starts `GET /api/v1/user/preferences` after authentication becomes loaded. Preferences no longer block authenticated app rendering; the shell renders with cached/local defaults while server preferences load, and preference timeout/API errors appear via the existing warning banner. Verified with `nix develop -c bash -c 'rustfmt --edition 2024 packages/web-ui/src/components/layout/app_shell.rs && cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` (passed with existing warnings). Committed `25c3e954 Fix preference bootstrap auth reactivity` and pushed to MR !312 source branch `TASK-412-profile-preferences`.
+
+Addressed remaining P1 save-worker cancellation issue. Added `PreferenceSaveWorkerGuard` around the thread-local preference save worker; if a Dioxus-owned spawned save task is canceled during an in-flight PATCH, `Drop` clears `in_flight` and requeues the current update merged with any pending latest values. This prevents later preference changes from being stuck behind a permanently true `in_flight` flag. Added unit coverage for dropping the guard with an in-flight current update and pending update. Verification passed: `nix develop -c bash -c 'rustfmt --edition 2024 packages/web-ui/src/state/preferences.rs && cd packages/web-ui && cargo check --target wasm32-unknown-unknown && cargo test --bin crystal-forge-ui preferences::tests'` (5 preference tests passed; existing warnings). Committed `c0930eb6 Make preference save worker cancellation-safe` and pushed to MR !312 source branch `TASK-412-profile-preferences`.
 <!-- SECTION:NOTES:END -->
