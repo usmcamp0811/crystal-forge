@@ -30,6 +30,8 @@ pub async fn materialize_attention_notifications_for_user(
                 END AS category,
                 ao.category AS source_type,
                 ao.subject_id,
+                'attention_occurrence' AS identity_type,
+                ao.id::text AS identity_id,
                 ao.opened_at,
                 p.delivery_channel IN ('in_app', 'both') AS in_app_visible,
                 CASE ao.category
@@ -85,6 +87,8 @@ pub async fn materialize_attention_notifications_for_user(
                 'deploy_failures' AS category,
                 'system_event' AS subject_type,
                 se.id::text AS subject_id,
+                'system_event' AS identity_type,
+                se.id::text AS identity_id,
                 se.occurred_at AS opened_at,
                 p.delivery_channel IN ('in_app', 'both') AS in_app_visible,
                 'Deployment failed' AS title,
@@ -149,7 +153,9 @@ pub async fn materialize_attention_notifications_for_user(
                     WHEN 'systems' THEN 'heartbeat_lost'
                 END AS category,
                 ao.category AS source_type,
-                ao.subject_id AS source_id
+                ao.subject_id AS source_id,
+                'attention_occurrence' AS identity_type,
+                ao.id::text AS identity_id
             FROM attention_occurrences ao
             CROSS JOIN prefs p
             CROSS JOIN authz a
@@ -181,7 +187,9 @@ pub async fn materialize_attention_notifications_for_user(
                 NULL::uuid AS source_occurrence_id,
                 'deploy_failures' AS category,
                 'system_event' AS subject_type,
-                se.id::text AS subject_id
+                se.id::text AS subject_id,
+                'system_event' AS identity_type,
+                se.id::text AS identity_id
             FROM system_events se
             JOIN systems scoped_system ON scoped_system.id = se.system_id
             CROSS JOIN prefs p
@@ -216,12 +224,14 @@ pub async fn materialize_attention_notifications_for_user(
             $1,
             n.id,
             'immediate',
-            'immediate:' || $1::text || ':' || e.source_type || ':' || e.source_id
+            'immediate:' || $1::text || ':' || e.identity_type || ':' || e.identity_id
         FROM eligible e
         LEFT JOIN existing_notification n
-          ON n.source_type = e.source_type
-         AND n.source_id = e.source_id
-         AND n.category = e.category
+          ON n.category = e.category
+         AND (
+                (e.source_occurrence_id IS NOT NULL AND n.source_occurrence_id = e.source_occurrence_id)
+             OR (e.source_occurrence_id IS NULL AND n.source_type = e.source_type AND n.source_id = e.source_id)
+         )
         WHERE e.category IS NOT NULL
         ON CONFLICT (idempotency_key) DO NOTHING
         "#,
@@ -234,11 +244,10 @@ pub async fn materialize_attention_notifications_for_user(
 }
 
 pub async fn materialize_all_user_notifications(pool: &PgPool) -> Result<u64, sqlx::Error> {
-    let users: Vec<(Uuid,)> = sqlx::query_as(
-        "SELECT DISTINCT user_id FROM user_notification_preferences",
-    )
-    .fetch_all(pool)
-    .await?;
+    let users: Vec<(Uuid,)> =
+        sqlx::query_as("SELECT DISTINCT user_id FROM user_notification_preferences")
+            .fetch_all(pool)
+            .await?;
 
     let mut total = 0;
     for (user_id,) in users {
@@ -247,9 +256,19 @@ pub async fn materialize_all_user_notifications(pool: &PgPool) -> Result<u64, sq
     Ok(total)
 }
 
-pub async fn enqueue_due_weekly_digest_deliveries(pool: &PgPool) -> Result<u64, sqlx::Error> {
-    let period_end = chrono::Utc::now();
-    let period_start = period_end - chrono::Duration::days(7);
+pub async fn enqueue_due_weekly_digest_deliveries(
+    pool: &PgPool,
+    digest_schedule: &str,
+) -> Result<u64, sqlx::Error> {
+    if digest_schedule != "weekly_utc" {
+        return Ok(0);
+    }
+    let (period_start, period_end): (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) =
+        sqlx::query_as(
+            "SELECT date_trunc('week', NOW()) - INTERVAL '7 days', date_trunc('week', NOW())",
+        )
+        .fetch_one(pool)
+        .await?;
     let users: Vec<(Uuid,)> = sqlx::query_as(
         "SELECT user_id
          FROM user_notification_preferences

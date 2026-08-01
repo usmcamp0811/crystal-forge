@@ -13,7 +13,7 @@ use crate::api::models::{
 use crate::components::layout::sidebar::{PreferencesContext, SidebarContext};
 use crate::components::{Icon, IconName};
 use crate::routes::Route;
-use crate::state::app_state::AppState;
+use crate::state::app_state::{AppState, clear_authenticated_context};
 use crate::state::preferences;
 use crate::state::theme;
 
@@ -99,10 +99,12 @@ pub fn ProfileView() -> Element {
         .as_ref()
         .and_then(|ctx| ctx.user.as_ref())
         .map(|user| user.id.clone());
+    let auth_generation = app_state.read().auth_generation;
 
     let notification_load_user_id = auth_user_id.clone();
     use_effect(move || {
         let requested_user_id = notification_load_user_id.clone();
+        let requested_generation = auth_generation;
         spawn(async move {
             if requested_user_id.is_none() {
                 notification_prefs.set(None);
@@ -111,13 +113,17 @@ pub fn ProfileView() -> Element {
             }
             match fetch_notification_preferences().await {
                 Ok(preferences) => {
-                    if current_profile_user_id(app_state) == requested_user_id {
+                    if current_profile_user_id(app_state) == requested_user_id
+                        && current_profile_auth_generation(app_state) == requested_generation
+                    {
                         notification_prefs.set(Some(preferences));
                         notification_error.set(None);
                     }
                 }
                 Err(err) => {
-                    if current_profile_user_id(app_state) == requested_user_id {
+                    if current_profile_user_id(app_state) == requested_user_id
+                        && current_profile_auth_generation(app_state) == requested_generation
+                    {
                         notification_error.set(Some(format!(
                             "Could not load notification preferences: {err}"
                         )));
@@ -130,6 +136,7 @@ pub fn ProfileView() -> Element {
     let session_load_user_id = auth_user_id.clone();
     use_effect(move || {
         let requested_user_id = session_load_user_id.clone();
+        let requested_generation = auth_generation;
         spawn(async move {
             if requested_user_id.is_none() {
                 sessions.set(Vec::new());
@@ -140,18 +147,24 @@ pub fn ProfileView() -> Element {
             sessions_loading.set(true);
             match fetch_user_sessions().await {
                 Ok(response) => {
-                    if current_profile_user_id(app_state) == requested_user_id {
+                    if current_profile_user_id(app_state) == requested_user_id
+                        && current_profile_auth_generation(app_state) == requested_generation
+                    {
                         sessions.set(response.sessions);
                         sessions_error.set(None);
                     }
                 }
                 Err(err) => {
-                    if current_profile_user_id(app_state) == requested_user_id {
+                    if current_profile_user_id(app_state) == requested_user_id
+                        && current_profile_auth_generation(app_state) == requested_generation
+                    {
                         sessions_error.set(Some(format!("Could not load active sessions: {err}")));
                     }
                 }
             }
-            if current_profile_user_id(app_state) == requested_user_id {
+            if current_profile_user_id(app_state) == requested_user_id
+                && current_profile_auth_generation(app_state) == requested_generation
+            {
                 sessions_loading.set(false);
             }
         });
@@ -233,11 +246,16 @@ pub fn ProfileView() -> Element {
                             spawn(async move {
                                 match logout().await {
                                     Ok(()) => {
-                                        // Clear auth state before navigating
-                                        let mut state = app_state.write();
-                                        state.auth = None;
-                                        state.auth_fetch_state = crate::state::app_state::AuthFetchState::Loaded;
-                                        drop(state);
+                                        reset_profile_account_state(
+                                            app_state,
+                                            notification_prefs,
+                                            notification_error,
+                                            notification_saving,
+                                            notification_pending_update,
+                                            sessions,
+                                            sessions_error,
+                                            sessions_loading,
+                                        );
                                         nav.replace(Route::LoginView {});
                                     }
                                     Err(_) => logout_error
@@ -550,7 +568,19 @@ pub fn ProfileView() -> Element {
                                         onclick: move |_| {
                                             spawn(async move {
                                                 match revoke_all_user_sessions().await {
-                                                    Ok(()) => { nav.replace(Route::LoginView {}); }
+                                                    Ok(()) => {
+                                                        reset_profile_account_state(
+                                                            app_state,
+                                                            notification_prefs,
+                                                            notification_error,
+                                                            notification_saving,
+                                                            notification_pending_update,
+                                                            sessions,
+                                                            sessions_error,
+                                                            sessions_loading,
+                                                        );
+                                                        nav.replace(Route::LoginView {});
+                                                    }
                                                     Err(err) => sessions_error.set(Some(format!("Could not sign out everywhere: {err}"))),
                                                 }
                                             });
@@ -580,6 +610,7 @@ fn save_notification_pref(
     update: UpdateNotificationPreferences,
 ) {
     let requested_user_id = current_profile_user_id(app_state);
+    let requested_generation = current_profile_auth_generation(app_state);
     if let Some(mut prefs) = prefs_signal() {
         if let Some(value) = update.deploy_failures {
             prefs.deploy_failures = value;
@@ -609,9 +640,9 @@ fn save_notification_pref(
     if saving_signal() {
         return;
     }
+    saving_signal.set(true);
 
     spawn(async move {
-        saving_signal.set(true);
         loop {
             let next = pending_signal.with_mut(|pending| pending.take());
             let Some(next_update) = next else {
@@ -619,8 +650,15 @@ fn save_notification_pref(
             };
 
             match update_notification_preferences(&next_update).await {
-                Ok(saved) => {
-                    if current_profile_user_id(app_state) == requested_user_id {
+                Ok(mut saved) => {
+                    if current_profile_user_id(app_state) == requested_user_id
+                        && current_profile_auth_generation(app_state) == requested_generation
+                    {
+                        pending_signal.with(|pending| {
+                            if let Some(pending) = pending {
+                                apply_notification_update(&mut saved, pending);
+                            }
+                        });
                         prefs_signal.set(Some(saved));
                         error_signal.set(None);
                     } else {
@@ -628,7 +666,9 @@ fn save_notification_pref(
                     }
                 }
                 Err(err) => {
-                    if current_profile_user_id(app_state) == requested_user_id {
+                    if current_profile_user_id(app_state) == requested_user_id
+                        && current_profile_auth_generation(app_state) == requested_generation
+                    {
                         error_signal.set(Some(format!(
                             "Could not save notification preferences: {err}"
                         )));
@@ -639,6 +679,33 @@ fn save_notification_pref(
         }
         saving_signal.set(false);
     });
+}
+
+fn apply_notification_update(
+    prefs: &mut NotificationPreferencesDto,
+    update: &UpdateNotificationPreferences,
+) {
+    if let Some(value) = update.deploy_failures {
+        prefs.deploy_failures = value;
+    }
+    if let Some(value) = update.build_failures {
+        prefs.build_failures = value;
+    }
+    if let Some(value) = update.critical_cves {
+        prefs.critical_cves = value;
+    }
+    if let Some(value) = update.policy_violations {
+        prefs.policy_violations = value;
+    }
+    if let Some(value) = update.heartbeat_lost {
+        prefs.heartbeat_lost = value;
+    }
+    if let Some(value) = update.weekly_digest {
+        prefs.weekly_digest = value;
+    }
+    if let Some(value) = update.delivery_channel {
+        prefs.delivery_channel = value;
+    }
 }
 
 fn merge_notification_update(
@@ -676,6 +743,30 @@ fn current_profile_user_id(app_state: Signal<AppState>) -> Option<String> {
         .as_ref()
         .and_then(|ctx| ctx.user.as_ref())
         .map(|user| user.id.clone())
+}
+
+fn current_profile_auth_generation(app_state: Signal<AppState>) -> u64 {
+    app_state.read().auth_generation
+}
+
+fn reset_profile_account_state(
+    mut app_state: Signal<AppState>,
+    mut notification_prefs: Signal<Option<NotificationPreferencesDto>>,
+    mut notification_error: Signal<Option<String>>,
+    mut notification_saving: Signal<bool>,
+    mut notification_pending_update: Signal<Option<UpdateNotificationPreferences>>,
+    mut sessions: Signal<Vec<UserSessionDto>>,
+    mut sessions_error: Signal<Option<String>>,
+    mut sessions_loading: Signal<bool>,
+) {
+    clear_authenticated_context(&mut app_state.write());
+    notification_prefs.set(None);
+    notification_error.set(None);
+    notification_saving.set(false);
+    notification_pending_update.set(None);
+    sessions.set(Vec::new());
+    sessions_error.set(None);
+    sessions_loading.set(false);
 }
 
 #[cfg(test)]

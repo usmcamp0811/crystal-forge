@@ -20,7 +20,9 @@ use crate::components::layout::{
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::onboarding::OnboardingCoachPanel;
 use crate::routes::Route;
-use crate::state::app_state::{AppState, AuthFetchState, ConfigHealthFetchState};
+use crate::state::app_state::{
+    AppState, AuthFetchState, ConfigHealthFetchState, set_authenticated_context,
+};
 use crate::state::auth;
 use crate::state::preferences;
 use crate::theme;
@@ -222,7 +224,7 @@ pub fn AppShell() -> Element {
     #[cfg(debug_assertions)]
     if auth_context.is_none() && ui_check_mock_auth_enabled() {
         let mock = ui_check_mock_auth_context();
-        app_state.write().auth = Some(mock.clone());
+        set_authenticated_context(&mut app_state.write(), mock.clone());
         auth_context = Some(mock);
     }
 

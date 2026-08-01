@@ -88,6 +88,10 @@ fn current_topbar_user_id(app_state: Signal<AppState>) -> Option<String> {
         .map(|user| user.id.clone())
 }
 
+fn current_topbar_auth_generation(app_state: Signal<AppState>) -> u64 {
+    app_state.read().auth_generation
+}
+
 /// Header bar displaying the current page title and optional actions.
 #[component]
 pub fn TopBar(title: String) -> Element {
@@ -101,6 +105,7 @@ pub fn TopBar(title: String) -> Element {
         .as_ref()
         .and_then(|ctx| ctx.user.as_ref())
         .map(|user| user.id.clone());
+    let auth_generation = app_state.read().auth_generation;
 
     let sidebar_ctx = use_context::<SidebarContext>();
     let mut is_mobile_drawer_open = sidebar_ctx.is_mobile_drawer_open;
@@ -149,6 +154,7 @@ pub fn TopBar(title: String) -> Element {
 
     use_effect(move || {
         let auth_user_id = auth_user_id.clone();
+        let requested_generation = auth_generation;
         spawn(async move {
             if auth_user_id.is_none() {
                 notification_items.set(Vec::new());
@@ -158,19 +164,26 @@ pub fn TopBar(title: String) -> Element {
             notifications_loading.set(true);
             match fetch_user_notifications(Some(10), None, false).await {
                 Ok(response) => {
-                    if current_topbar_user_id(app_state) == auth_user_id {
+                    if current_topbar_user_id(app_state) == auth_user_id
+                        && current_topbar_auth_generation(app_state) == requested_generation
+                    {
                         notification_items.set(response.notifications);
                         unread_count.set(response.unread_count);
                         notifications_error.set(None);
                     }
                 }
                 Err(err) => {
-                    if current_topbar_user_id(app_state) == auth_user_id {
-                        notifications_error.set(Some(format!("Could not load notifications: {err}")))
+                    if current_topbar_user_id(app_state) == auth_user_id
+                        && current_topbar_auth_generation(app_state) == requested_generation
+                    {
+                        notifications_error
+                            .set(Some(format!("Could not load notifications: {err}")))
                     }
                 }
             }
-            if current_topbar_user_id(app_state) == auth_user_id {
+            if current_topbar_user_id(app_state) == auth_user_id
+                && current_topbar_auth_generation(app_state) == requested_generation
+            {
                 notifications_loading.set(false);
             }
         });
@@ -277,15 +290,20 @@ pub fn TopBar(title: String) -> Element {
                                 title: "Mark all read",
                                 style: "padding: 4px;",
                                 onclick: move |_| {
+                                    let requested_generation = auth_generation;
                                     spawn(async move {
                                         if mark_all_user_notifications_read().await.is_ok() {
-                                            notification_items.write().iter_mut().for_each(|item| {
-                                                item.read_at = Some(Utc::now());
-                                            });
-                                            unread_count.set(0);
-                                            notifications_error.set(None);
+                                            if current_topbar_auth_generation(app_state) == requested_generation {
+                                                notification_items.write().iter_mut().for_each(|item| {
+                                                    item.read_at = Some(Utc::now());
+                                                });
+                                                unread_count.set(0);
+                                                notifications_error.set(None);
+                                            }
                                         } else {
-                                            notifications_error.set(Some("Could not mark notifications read".to_string()));
+                                            if current_topbar_auth_generation(app_state) == requested_generation {
+                                                notifications_error.set(Some("Could not mark notifications read".to_string()));
+                                            }
                                         }
                                     });
                                 },
@@ -318,23 +336,27 @@ pub fn TopBar(title: String) -> Element {
                                         let nav = nav.clone();
                                         let route = notification_route(&item.route);
                                         let item_id = item.id;
+                                        let requested_generation = auth_generation;
                                         move |_| {
                                             let route = route.clone();
                                             spawn(async move {
                                                 let _ = mark_user_notification_read(item_id).await;
-                                                if let Some(clicked) = notification_items
-                                                    .write()
-                                                    .iter_mut()
-                                                    .find(|candidate| candidate.id == item_id)
+                                                if current_topbar_auth_generation(app_state) == requested_generation
                                                 {
-                                                    if clicked.read_at.is_none() {
-                                                        unread_count.set((unread_count() - 1).max(0));
+                                                    if let Some(clicked) = notification_items
+                                                        .write()
+                                                        .iter_mut()
+                                                        .find(|candidate| candidate.id == item_id)
+                                                    {
+                                                        if clicked.read_at.is_none() {
+                                                            unread_count.set((unread_count() - 1).max(0));
+                                                        }
+                                                        clicked.read_at = Some(Utc::now());
                                                     }
-                                                    clicked.read_at = Some(Utc::now());
-                                                }
-                                                notifications_open.set(false);
-                                                if let Some(route) = route.clone() {
-                                                    nav.push(route);
+                                                    notifications_open.set(false);
+                                                    if let Some(route) = route.clone() {
+                                                        nav.push(route);
+                                                    }
                                                 }
                                             });
                                         }
@@ -419,21 +441,28 @@ pub fn TopBar(title: String) -> Element {
                                         title: "Dismiss notification",
                                         onclick: move |evt| {
                                             evt.stop_propagation();
+                                            let requested_generation = auth_generation;
                                             spawn(async move {
                                                 match dismiss_user_notification(item.id).await {
                                                     Ok(()) => {
-                                                        let was_unread = notification_items
-                                                            .read()
-                                                            .iter()
-                                                            .find(|candidate| candidate.id == item.id)
-                                                            .map(|candidate| candidate.read_at.is_none())
-                                                            .unwrap_or(false);
-                                                        notification_items.write().retain(|candidate| candidate.id != item.id);
-                                                        if was_unread {
-                                                            unread_count.set((unread_count() - 1).max(0));
+                                                        if current_topbar_auth_generation(app_state) == requested_generation {
+                                                            let was_unread = notification_items
+                                                                .read()
+                                                                .iter()
+                                                                .find(|candidate| candidate.id == item.id)
+                                                                .map(|candidate| candidate.read_at.is_none())
+                                                                .unwrap_or(false);
+                                                            notification_items.write().retain(|candidate| candidate.id != item.id);
+                                                            if was_unread {
+                                                                unread_count.set((unread_count() - 1).max(0));
+                                                            }
                                                         }
                                                     }
-                                                    Err(err) => notifications_error.set(Some(format!("Could not dismiss notification: {err}"))),
+                                                    Err(err) => {
+                                                        if current_topbar_auth_generation(app_state) == requested_generation {
+                                                            notifications_error.set(Some(format!("Could not dismiss notification: {err}")));
+                                                        }
+                                                    }
                                                 }
                                             });
                                         },

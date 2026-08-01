@@ -50,15 +50,12 @@
           notification_email_endpoint = cfg.server.notificationEmail.endpoint;
           notification_email_sender_address = cfg.server.notificationEmail.senderAddress;
           notification_email_sender_name = cfg.server.notificationEmail.senderName;
-          notification_email_tls_mode = cfg.server.notificationEmail.tlsMode;
-          notification_email_username = cfg.server.notificationEmail.username;
-          notification_email_password_file =
-            if cfg.server.notificationEmail.passwordFile != null
-            then toString cfg.server.notificationEmail.passwordFile
-            else null;
           notification_email_worker_interval_seconds =
             cfg.server.notificationEmail.workerIntervalSeconds;
           notification_email_max_attempts = cfg.server.notificationEmail.maxAttempts;
+          notification_email_request_timeout_seconds =
+            cfg.server.notificationEmail.requestTimeoutSeconds;
+          notification_email_digest_schedule = cfg.server.notificationEmail.digestSchedule;
           session_last_seen_throttle_seconds =
             cfg.server.sessionLastSeenThrottleSeconds;
           session_retention_days = cfg.server.sessionRetentionDays;
@@ -1793,8 +1790,12 @@ in {
         endpoint = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
           default = null;
-          example = "smtp://mail.example.com:587";
-          description = "SMTP or provider endpoint for notification email.";
+          example = "https://mail-provider.internal.example/send-crystal-forge-email";
+          description = lib.mdDoc ''
+            HTTP provider endpoint for notification email. Crystal Forge sends
+            an authenticated-session-independent JSON POST containing the
+            rendered text and HTML bodies and an `Idempotency-Key` header.
+          '';
         };
 
         senderAddress = lib.mkOption {
@@ -1810,28 +1811,6 @@ in {
           description = "Sender display name for account notifications.";
         };
 
-        tlsMode = lib.mkOption {
-          type = lib.types.enum ["none" "starttls" "tls"];
-          default = "starttls";
-          description = "TLS mode for notification email transport.";
-        };
-
-        username = lib.mkOption {
-          type = lib.types.nullOr lib.types.str;
-          default = null;
-          description = "Optional SMTP/provider username for notification email.";
-        };
-
-        passwordFile = lib.mkOption {
-          type = lib.types.nullOr lib.types.path;
-          default = null;
-          description = lib.mdDoc ''
-            Path to a file containing SMTP/provider credentials. The module
-            passes only the path to Crystal Forge and does not copy the secret
-            into the generated TOML.
-          '';
-        };
-
         workerIntervalSeconds = lib.mkOption {
           type = lib.types.ints.positive;
           default = 60;
@@ -1842,6 +1821,18 @@ in {
           type = lib.types.ints.positive;
           default = 5;
           description = "Maximum notification email send attempts before terminal failure.";
+        };
+
+        requestTimeoutSeconds = lib.mkOption {
+          type = lib.types.ints.positive;
+          default = 30;
+          description = "HTTP provider request timeout for notification email delivery.";
+        };
+
+        digestSchedule = lib.mkOption {
+          type = lib.types.enum ["weekly_utc"];
+          default = "weekly_utc";
+          description = "Digest schedule. weekly_utc sends only the previous completed UTC week.";
         };
       };
 

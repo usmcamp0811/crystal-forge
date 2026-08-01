@@ -17,6 +17,7 @@ struct ClaimedEmailDelivery {
     notification_id: Option<Uuid>,
     delivery_type: String,
     attempt_count: i32,
+    idempotency_key: String,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -50,8 +51,11 @@ pub async fn run_user_notification_email_loop(pool: PgPool, config: ServerConfig
         {
             tracing::warn!(%err, "notification producer pass failed");
         }
-        if let Err(err) =
-            crate::queries::user_notifications::enqueue_due_weekly_digest_deliveries(&pool).await
+        if let Err(err) = crate::queries::user_notifications::enqueue_due_weekly_digest_deliveries(
+            &pool,
+            &config.notification_email_digest_schedule,
+        )
+        .await
         {
             tracing::warn!(%err, "weekly digest producer pass failed");
         }
@@ -113,7 +117,8 @@ async fn claim_due_email_deliveries(
             updated_at = NOW()
         FROM due
         WHERE d.id = due.id
-        RETURNING d.id, d.user_id, d.notification_id, d.delivery_type, d.attempt_count
+        RETURNING d.id, d.user_id, d.notification_id, d.delivery_type, d.attempt_count,
+                  d.idempotency_key
         "#,
     )
     .bind(batch_size)
@@ -172,11 +177,13 @@ async fn process_claimed_delivery(
     };
 
     let message = EmailMessage {
+        idempotency_key: delivery.idempotency_key.clone(),
         to: recipient.email,
         from: config
             .notification_email_sender_address
             .clone()
             .unwrap_or_default(),
+        from_name: config.notification_email_sender_name.clone(),
         subject,
         text_body,
         html_body,
@@ -202,8 +209,10 @@ async fn process_claimed_delivery(
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EmailMessage {
+    pub idempotency_key: String,
     pub to: String,
     pub from: String,
+    pub from_name: String,
     pub subject: String,
     pub text_body: String,
     pub html_body: String,
@@ -238,8 +247,17 @@ impl EmailTransport for HttpEmailTransport {
                 .notification_email_endpoint
                 .as_deref()
                 .ok_or_else(|| "email endpoint is not configured".to_string())?;
-            let response = reqwest::Client::new()
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(
+                    self.config
+                        .notification_email_request_timeout_seconds
+                        .max(1),
+                ))
+                .build()
+                .map_err(|err| format!("email transport client build failed: {err}"))?;
+            let response = client
                 .post(endpoint)
+                .header("Idempotency-Key", &message.idempotency_key)
                 .json(&message)
                 .send()
                 .await
@@ -281,10 +299,23 @@ async fn render_immediate_delivery(
     };
     let row = sqlx::query_as::<_, NotificationEmailRow>(
         r#"
-        SELECT title, summary, category::text AS category, route, created_at
+        SELECT user_notifications.title, user_notifications.summary,
+               user_notifications.category::text AS category,
+               user_notifications.route, user_notifications.created_at
         FROM user_notifications
-        WHERE id = $1 AND user_id = $2 AND dismissed_at IS NULL
-          AND notification_visible_to_user($2, source_type, source_id)
+        JOIN user_notification_preferences p
+          ON p.user_id = user_notifications.user_id
+        WHERE user_notifications.id = $1
+          AND user_notifications.user_id = $2
+          AND user_notifications.dismissed_at IS NULL
+          AND notification_visible_to_user($2, user_notifications.source_type, user_notifications.source_id)
+          AND (
+                (user_notifications.category = 'deploy_failures' AND p.deploy_failures)
+             OR (user_notifications.category = 'build_failures' AND p.build_failures)
+             OR (user_notifications.category = 'critical_cves' AND p.critical_cves)
+             OR (user_notifications.category = 'policy_violations' AND p.policy_violations)
+             OR (user_notifications.category = 'heartbeat_lost' AND p.heartbeat_lost)
+          )
         "#,
     )
     .bind(notification_id)
@@ -310,28 +341,47 @@ async fn render_digest_delivery(
     delivery: &ClaimedEmailDelivery,
     recipient_email: &str,
 ) -> Result<Option<(String, String, String)>, sqlx::Error> {
+    let Some((period_start, period_end)) = sqlx::query_as::<_, (DateTime<Utc>, DateTime<Utc>)>(
+        "SELECT period_start, period_end
+         FROM user_notification_weekly_digest_runs
+         WHERE delivery_id = $1 AND user_id = $2
+         LIMIT 1",
+    )
+    .bind(delivery.id)
+    .bind(delivery.user_id)
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Ok(None);
+    };
+
     let items = sqlx::query_as::<_, NotificationEmailRow>(
         r#"
-        WITH digest_period AS (
-            SELECT period_start, period_end
-            FROM user_notification_weekly_digest_runs
-            WHERE delivery_id = $2
-              AND user_id = $1
-            LIMIT 1
-        )
-        SELECT title, summary, category::text AS category, route, created_at
+        SELECT user_notifications.title, user_notifications.summary,
+               user_notifications.category::text AS category,
+               user_notifications.route, user_notifications.created_at
         FROM user_notifications
-        CROSS JOIN digest_period dp
-        WHERE user_id = $1 AND dismissed_at IS NULL
-          AND created_at >= dp.period_start
-          AND created_at < dp.period_end
-          AND notification_visible_to_user($1, source_type, source_id)
-        ORDER BY created_at DESC
+        JOIN user_notification_preferences p
+          ON p.user_id = user_notifications.user_id
+        WHERE user_notifications.user_id = $1
+          AND user_notifications.dismissed_at IS NULL
+          AND user_notifications.created_at >= $2
+          AND user_notifications.created_at < $3
+          AND notification_visible_to_user($1, user_notifications.source_type, user_notifications.source_id)
+          AND (
+                (user_notifications.category = 'deploy_failures' AND p.deploy_failures)
+             OR (user_notifications.category = 'build_failures' AND p.build_failures)
+             OR (user_notifications.category = 'critical_cves' AND p.critical_cves)
+             OR (user_notifications.category = 'policy_violations' AND p.policy_violations)
+             OR (user_notifications.category = 'heartbeat_lost' AND p.heartbeat_lost)
+          )
+        ORDER BY user_notifications.created_at DESC
         LIMIT 20
         "#,
     )
     .bind(delivery.user_id)
-    .bind(delivery.id)
+    .bind(period_start)
+    .bind(period_end)
     .fetch_all(pool)
     .await?;
 
@@ -339,7 +389,7 @@ async fn render_digest_delivery(
         return Ok(None);
     }
 
-    let (text, html) = render_digest_email(recipient_email, &items);
+    let (text, html) = render_digest_email(recipient_email, period_start, period_end, &items);
     Ok(Some((
         "Crystal Forge weekly digest".to_string(),
         text,
@@ -454,7 +504,10 @@ fn email_transport_available(config: &ServerConfig) -> bool {
         && config
             .notification_email_endpoint
             .as_deref()
-            .map(|value| !value.trim().is_empty())
+            .map(|value| {
+                let value = value.trim();
+                value.starts_with("http://") || value.starts_with("https://")
+            })
             .unwrap_or(false)
         && config
             .notification_email_sender_address
@@ -471,14 +524,16 @@ fn render_immediate_email(
     route: &str,
     created_at: DateTime<Utc>,
 ) -> (String, String) {
+    let severity = notification_severity(category);
     let text = format!(
-        "Crystal Forge notification for {}\n\nCategory: {}\nTitle: {}\nTime: {}\nSummary: {}\nLink: {}\n",
-        recipient_email, category, title, created_at, summary, route
+        "Crystal Forge notification for {}\n\nCategory: {}\nSeverity: {}\nTitle: {}\nTime: {}\nSummary: {}\nLink: {}\n",
+        recipient_email, category, severity, title, created_at, summary, route
     );
     let html = format!(
-        "<h1>{}</h1><p><strong>Category:</strong> {}</p><p><strong>Time:</strong> {}</p><p>{}</p><p><a href=\"{}\">Open in Crystal Forge</a></p>",
+        "<h1>{}</h1><p><strong>Category:</strong> {}</p><p><strong>Severity:</strong> {}</p><p><strong>Time:</strong> {}</p><p>{}</p><p><a href=\"{}\">Open in Crystal Forge</a></p>",
         escape_html(title),
         escape_html(category),
+        escape_html(severity),
         escape_html(&created_at.to_rfc3339()),
         escape_html(summary),
         escape_html(route),
@@ -486,9 +541,33 @@ fn render_immediate_email(
     (text, html)
 }
 
-fn render_digest_email(recipient_email: &str, items: &[NotificationEmailRow]) -> (String, String) {
-    let mut text = format!("Crystal Forge weekly digest for {recipient_email}\n\n");
-    let mut html = String::from("<h1>Crystal Forge weekly digest</h1><ul>");
+fn render_digest_email(
+    recipient_email: &str,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+    items: &[NotificationEmailRow],
+) -> (String, String) {
+    let counts = category_counts(items);
+    let mut text = format!(
+        "Crystal Forge weekly digest for {recipient_email}\n\nPeriod: {} to {}\nCounts by category:\n{}\n",
+        period_start.to_rfc3339(),
+        period_end.to_rfc3339(),
+        counts
+            .iter()
+            .map(|(category, count)| format!("- {category}: {count}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let mut html = format!(
+        "<h1>Crystal Forge weekly digest</h1><p><strong>Period:</strong> {} to {}</p><h2>Counts by category</h2><ul>{}</ul><h2>Recent items</h2><ul>",
+        escape_html(&period_start.to_rfc3339()),
+        escape_html(&period_end.to_rfc3339()),
+        counts
+            .iter()
+            .map(|(category, count)| format!("<li>{}: {}</li>", escape_html(category), count))
+            .collect::<Vec<_>>()
+            .join("")
+    );
     for item in items.iter().take(20) {
         text.push_str(&format!(
             "- [{}] {} — {} ({})\n",
@@ -503,6 +582,23 @@ fn render_digest_email(recipient_email: &str, items: &[NotificationEmailRow]) ->
     }
     html.push_str("</ul>");
     (text, html)
+}
+
+fn notification_severity(category: &str) -> &'static str {
+    match category {
+        "critical_cves" => "critical",
+        "deploy_failures" | "build_failures" => "high",
+        "policy_violations" | "heartbeat_lost" => "warning",
+        _ => "info",
+    }
+}
+
+fn category_counts(items: &[NotificationEmailRow]) -> Vec<(String, usize)> {
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for item in items {
+        *counts.entry(item.category.clone()).or_default() += 1;
+    }
+    counts.into_iter().collect()
 }
 
 fn escape_html(input: &str) -> String {

@@ -245,18 +245,19 @@ async fn notification_email_capability(
         Some("Email delivery is not configured for this deployment".to_string())
     } else if !server_config.notification_email_external_delivery_allowed {
         Some("Email delivery is disabled by this deployment's classification policy".to_string())
-    } else if server_config
+    } else if !server_config
         .notification_email_endpoint
         .as_deref()
-        .unwrap_or("")
-        .trim()
-        .is_empty()
-        || server_config
+        .map(|endpoint| {
+            let endpoint = endpoint.trim();
+            endpoint.starts_with("http://") || endpoint.starts_with("https://")
+        })
+        .unwrap_or(false)
+        || !server_config
             .notification_email_sender_address
             .as_deref()
-            .unwrap_or("")
-            .trim()
-            .is_empty()
+            .map(|sender| !sender.trim().is_empty())
+            .unwrap_or(false)
     {
         Some("Email delivery is missing required transport configuration".to_string())
     } else if delivery_email.is_none() {

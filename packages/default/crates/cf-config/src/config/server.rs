@@ -175,7 +175,7 @@ pub struct ServerConfig {
     #[serde(default)]
     pub notification_email_external_delivery_allowed: bool,
 
-    /// SMTP endpoint or provider URL used by the notification email worker.
+    /// HTTPS endpoint used by the notification email HTTP provider worker.
     #[serde(default)]
     pub notification_email_endpoint: Option<String>,
 
@@ -187,18 +187,6 @@ pub struct ServerConfig {
     #[serde(default = "default_notification_email_sender_name")]
     pub notification_email_sender_name: String,
 
-    /// TLS mode for the configured SMTP/provider endpoint.
-    #[serde(default = "default_notification_email_tls_mode")]
-    pub notification_email_tls_mode: String,
-
-    /// Optional username for SMTP/provider authentication.
-    #[serde(default)]
-    pub notification_email_username: Option<String>,
-
-    /// Path to a secret file containing SMTP/provider credentials.
-    #[serde(default)]
-    pub notification_email_password_file: Option<PathBuf>,
-
     /// Poll interval for immediate notification delivery worker.
     #[serde(default = "default_notification_email_worker_interval_seconds")]
     pub notification_email_worker_interval_seconds: u64,
@@ -206,6 +194,14 @@ pub struct ServerConfig {
     /// Maximum send attempts before a delivery is permanently failed.
     #[serde(default = "default_notification_email_max_attempts")]
     pub notification_email_max_attempts: i32,
+
+    /// HTTP provider request timeout in seconds.
+    #[serde(default = "default_notification_email_request_timeout_seconds")]
+    pub notification_email_request_timeout_seconds: u64,
+
+    /// Digest schedule. Currently supports the previous completed UTC week.
+    #[serde(default = "default_notification_email_digest_schedule")]
+    pub notification_email_digest_schedule: String,
 
     /// Session last-seen update throttle in seconds.
     #[serde(default = "default_session_last_seen_throttle_seconds")]
@@ -236,16 +232,20 @@ fn default_notification_email_sender_name() -> String {
     "Crystal Forge".to_string()
 }
 
-fn default_notification_email_tls_mode() -> String {
-    "starttls".to_string()
-}
-
 fn default_notification_email_worker_interval_seconds() -> u64 {
     60
 }
 
 fn default_notification_email_max_attempts() -> i32 {
     5
+}
+
+fn default_notification_email_request_timeout_seconds() -> u64 {
+    30
+}
+
+fn default_notification_email_digest_schedule() -> String {
+    "weekly_utc".to_string()
 }
 
 fn default_session_last_seen_throttle_seconds() -> u64 {
@@ -321,12 +321,12 @@ impl Default for ServerConfig {
             notification_email_endpoint: None,
             notification_email_sender_address: None,
             notification_email_sender_name: default_notification_email_sender_name(),
-            notification_email_tls_mode: default_notification_email_tls_mode(),
-            notification_email_username: None,
-            notification_email_password_file: None,
             notification_email_worker_interval_seconds:
                 default_notification_email_worker_interval_seconds(),
             notification_email_max_attempts: default_notification_email_max_attempts(),
+            notification_email_request_timeout_seconds:
+                default_notification_email_request_timeout_seconds(),
+            notification_email_digest_schedule: default_notification_email_digest_schedule(),
             session_last_seen_throttle_seconds: default_session_last_seen_throttle_seconds(),
             session_retention_days: default_session_retention_days(),
         }
@@ -396,15 +396,20 @@ impl ServerConfig {
         }
 
         if self.notification_email_enabled {
-            if self
+            let endpoint = self
                 .notification_email_endpoint
                 .as_deref()
                 .unwrap_or("")
-                .trim()
-                .is_empty()
-            {
+                .trim();
+            if endpoint.is_empty() {
                 return Err(
                     "notification_email_endpoint is required when notification email is enabled"
+                        .to_string(),
+                );
+            }
+            if !endpoint.starts_with("https://") && !endpoint.starts_with("http://") {
+                return Err(
+                    "notification_email_endpoint must be an HTTP provider URL starting with http:// or https://"
                         .to_string(),
                 );
             }
@@ -428,6 +433,14 @@ impl ServerConfig {
 
         if self.notification_email_max_attempts <= 0 {
             return Err("notification email max attempts must be greater than 0".to_string());
+        }
+
+        if self.notification_email_request_timeout_seconds == 0 {
+            return Err("notification email request timeout must be greater than 0".to_string());
+        }
+
+        if self.notification_email_digest_schedule != "weekly_utc" {
+            return Err("notification email digest schedule must be weekly_utc".to_string());
         }
 
         if self.session_last_seen_throttle_seconds == 0 {

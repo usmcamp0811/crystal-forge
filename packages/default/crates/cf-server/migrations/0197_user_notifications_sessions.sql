@@ -39,9 +39,12 @@ CREATE TABLE user_notifications (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     read_at TIMESTAMPTZ,
     dismissed_at TIMESTAMPTZ,
-    UNIQUE (user_id, category, source_type, source_id),
     UNIQUE (user_id, category, source_occurrence_id)
 );
+
+CREATE UNIQUE INDEX idx_user_notifications_unique_deployment_source
+    ON user_notifications (user_id, category, source_type, source_id)
+    WHERE source_type = 'system_event';
 
 CREATE INDEX idx_user_notifications_unread
     ON user_notifications (user_id, created_at DESC)

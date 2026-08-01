@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 
+use crate::alerts::set_current_user_id;
 use crate::api::models::{AuthContext, ClassificationBannerConfig, ConfigHealthResponse};
 
 /// State of authentication fetch operation.
@@ -37,6 +38,8 @@ pub struct AppState {
     pub auth: Option<AuthContext>,
     /// State of auth fetch operation.
     pub auth_fetch_state: AuthFetchState,
+    /// Monotonic generation bumped whenever the authenticated session boundary changes.
+    pub auth_generation: u64,
     /// Shared admin config-health response.
     pub config_health: Option<ConfigHealthResponse>,
     /// State of the shared config-health fetch.
@@ -55,12 +58,31 @@ impl Default for AppState {
             poll_interval_secs: 30,
             auth: None,
             auth_fetch_state: AuthFetchState::Loading,
+            auth_generation: 0,
             config_health: None,
             config_health_fetch_state: ConfigHealthFetchState::Idle,
             classification_config: None,
             classification_fetch_state: None,
         }
     }
+}
+
+/// Store a fresh authenticated context and bump the auth generation.
+pub fn set_authenticated_context(state: &mut AppState, auth_context: AuthContext) {
+    if let Some(user) = &auth_context.user {
+        set_current_user_id(&user.id);
+    }
+    state.auth = Some(auth_context);
+    state.auth_fetch_state = AuthFetchState::Loaded;
+    state.auth_generation = state.auth_generation.saturating_add(1);
+}
+
+/// Clear account-scoped authentication state and bump the auth generation.
+pub fn clear_authenticated_context(state: &mut AppState) {
+    set_current_user_id("");
+    state.auth = None;
+    state.auth_fetch_state = AuthFetchState::Loaded;
+    state.auth_generation = state.auth_generation.saturating_add(1);
 }
 
 /// Provide the global [`AppState`] as a Dioxus context.
