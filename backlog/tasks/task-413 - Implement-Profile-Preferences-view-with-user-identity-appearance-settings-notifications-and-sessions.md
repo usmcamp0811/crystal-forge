@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-31 13:46'
-updated_date: '2026-08-01 01:44'
+updated_date: '2026-08-01 02:22'
 labels:
   - web-ui
   - design-parity
@@ -162,4 +162,6 @@ Uncommitted deployed-login hotfix attempt:
 - Retry invalidates stale in-flight bootstrap attempts, clears the message, and starts a new fetch/initialize attempt.
 - Verification run: `nix develop -c bash -c 'rustfmt --edition 2024 packages/web-ui/src/components/layout/app_shell.rs && cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` passed with existing warnings.
 - This does not yet prove the deployed root cause; collect browser Network details for `/api/v1/user/preferences` and `/api/v1/user/preferences/initialize` plus server logs if the deployed issue still appears after this hotfix.
+
+Fixed the deployed-login root cause in `AppShell`: the preference bootstrap effect now reads `app_state` inside the `use_effect`, so it subscribes to `/whoami` auth-state completion and starts `GET /api/v1/user/preferences` after authentication becomes loaded. Preferences no longer block authenticated app rendering; the shell renders with cached/local defaults while server preferences load, and preference timeout/API errors appear via the existing warning banner. Verified with `nix develop -c bash -c 'rustfmt --edition 2024 packages/web-ui/src/components/layout/app_shell.rs && cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` (passed with existing warnings). Committed `25c3e954 Fix preference bootstrap auth reactivity` and pushed to MR !312 source branch `TASK-412-profile-preferences`.
 <!-- SECTION:NOTES:END -->
