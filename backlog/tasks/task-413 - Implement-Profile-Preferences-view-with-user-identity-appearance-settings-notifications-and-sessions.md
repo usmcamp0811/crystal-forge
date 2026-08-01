@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-31 13:46'
-updated_date: '2026-08-01 00:14'
+updated_date: '2026-08-01 01:44'
 labels:
   - web-ui
   - design-parity
@@ -155,4 +155,11 @@ Addressed final P2 re-review item:
 - `save_update()` now clears `save_error` after every successful response that includes preferences, and reports an explicit error if the server returns no preferences.
 - Strengthened the browser ordering test by proxying delayed PATCHes through `route.fetch()`/`route.fulfill()` and waiting on a named first-request-completed promise before reading final preferences, so an unserialized implementation cannot pass by asserting before the delayed first request reaches the server.
 - Verification run: `nix develop -c bash -c 'rustfmt --edition 2024 packages/web-ui/src/state/preferences.rs && node --check checks/web-ui/tests/integration-test.js && cd packages/web-ui && cargo check --target wasm32-unknown-unknown && cargo test --bin crystal-forge-ui preferences::tests'` passed with existing warnings.
+
+Uncommitted deployed-login hotfix attempt:
+- Added a 15s AppShell account-preference bootstrap timeout so a hung `GET /api/v1/user/preferences` or initialization request no longer leaves authenticated users indefinitely on `Loading account preferences...`.
+- Timeout now transitions to the existing preference-bootstrap error screen with a visible message and Retry button.
+- Retry invalidates stale in-flight bootstrap attempts, clears the message, and starts a new fetch/initialize attempt.
+- Verification run: `nix develop -c bash -c 'rustfmt --edition 2024 packages/web-ui/src/components/layout/app_shell.rs && cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` passed with existing warnings.
+- This does not yet prove the deployed root cause; collect browser Network details for `/api/v1/user/preferences` and `/api/v1/user/preferences/initialize` plus server logs if the deployed issue still appears after this hotfix.
 <!-- SECTION:NOTES:END -->
