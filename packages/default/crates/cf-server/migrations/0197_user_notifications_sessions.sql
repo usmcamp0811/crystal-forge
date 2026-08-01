@@ -18,6 +18,12 @@ CREATE TABLE user_notification_preferences (
     weekly_digest BOOLEAN NOT NULL DEFAULT FALSE,
     delivery_channel TEXT NOT NULL DEFAULT 'in_app'
         CHECK (delivery_channel IN ('in_app', 'email', 'both')),
+    deploy_failures_email_enabled_at TIMESTAMPTZ,
+    build_failures_email_enabled_at TIMESTAMPTZ,
+    critical_cves_email_enabled_at TIMESTAMPTZ,
+    policy_violations_email_enabled_at TIMESTAMPTZ,
+    heartbeat_lost_email_enabled_at TIMESTAMPTZ,
+    weekly_digest_enabled_at TIMESTAMPTZ,
     initialized_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

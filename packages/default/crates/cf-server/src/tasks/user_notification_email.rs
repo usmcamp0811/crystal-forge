@@ -166,8 +166,10 @@ async fn process_claimed_delivery(
     }
 
     let rendered = match delivery.delivery_type.as_str() {
-        "immediate" => render_immediate_delivery(pool, &delivery, &recipient.email).await?,
-        "weekly_digest" => render_digest_delivery(pool, &delivery, &recipient.email).await?,
+        "immediate" => render_immediate_delivery(pool, config, &delivery, &recipient.email).await?,
+        "weekly_digest" => {
+            render_digest_delivery(pool, config, &delivery, &recipient.email).await?
+        }
         _ => None,
     };
 
@@ -258,6 +260,7 @@ impl EmailTransport for HttpEmailTransport {
             let response = client
                 .post(endpoint)
                 .header("Idempotency-Key", &message.idempotency_key)
+                .bearer_auth(load_provider_token(&self.config).await?)
                 .json(&message)
                 .send()
                 .await
@@ -291,6 +294,7 @@ async fn load_email_recipient(
 
 async fn render_immediate_delivery(
     pool: &PgPool,
+    config: &ServerConfig,
     delivery: &ClaimedEmailDelivery,
     recipient_email: &str,
 ) -> Result<Option<(String, String, String)>, sqlx::Error> {
@@ -329,7 +333,7 @@ async fn render_immediate_delivery(
             &notification.title,
             &notification.summary,
             &notification.category,
-            &notification.route,
+            &absolute_email_link(config, &notification.route),
             notification.created_at,
         );
         (notification.title, text, html)
@@ -338,6 +342,7 @@ async fn render_immediate_delivery(
 
 async fn render_digest_delivery(
     pool: &PgPool,
+    config: &ServerConfig,
     delivery: &ClaimedEmailDelivery,
     recipient_email: &str,
 ) -> Result<Option<(String, String, String)>, sqlx::Error> {
@@ -355,7 +360,35 @@ async fn render_digest_delivery(
         return Ok(None);
     };
 
-    let items = sqlx::query_as::<_, NotificationEmailRow>(
+    let counts = sqlx::query_as::<_, (String, i64)>(
+        r#"
+        SELECT user_notifications.category::text AS category, COUNT(*) AS count
+        FROM user_notifications
+        JOIN user_notification_preferences p
+          ON p.user_id = user_notifications.user_id
+        WHERE user_notifications.user_id = $1
+          AND user_notifications.dismissed_at IS NULL
+          AND user_notifications.created_at >= $2
+          AND user_notifications.created_at < $3
+          AND notification_visible_to_user($1, user_notifications.source_type, user_notifications.source_id)
+          AND (
+                (user_notifications.category = 'deploy_failures' AND p.deploy_failures)
+             OR (user_notifications.category = 'build_failures' AND p.build_failures)
+             OR (user_notifications.category = 'critical_cves' AND p.critical_cves)
+             OR (user_notifications.category = 'policy_violations' AND p.policy_violations)
+             OR (user_notifications.category = 'heartbeat_lost' AND p.heartbeat_lost)
+          )
+        GROUP BY user_notifications.category
+        ORDER BY user_notifications.category
+        "#,
+    )
+    .bind(delivery.user_id)
+    .bind(period_start)
+    .bind(period_end)
+    .fetch_all(pool)
+    .await?;
+
+    let mut items = sqlx::query_as::<_, NotificationEmailRow>(
         r#"
         SELECT user_notifications.title, user_notifications.summary,
                user_notifications.category::text AS category,
@@ -385,11 +418,15 @@ async fn render_digest_delivery(
     .fetch_all(pool)
     .await?;
 
-    if items.is_empty() {
+    if counts.is_empty() || items.is_empty() {
         return Ok(None);
     }
+    for item in &mut items {
+        item.route = absolute_email_link(config, &item.route);
+    }
 
-    let (text, html) = render_digest_email(recipient_email, period_start, period_end, &items);
+    let (text, html) =
+        render_digest_email(recipient_email, period_start, period_end, &counts, &items);
     Ok(Some((
         "Crystal Forge weekly digest".to_string(),
         text,
@@ -505,15 +542,82 @@ fn email_transport_available(config: &ServerConfig) -> bool {
             .notification_email_endpoint
             .as_deref()
             .map(|value| {
-                let value = value.trim();
-                value.starts_with("http://") || value.starts_with("https://")
+                provider_endpoint_allowed(value, config.notification_email_allow_insecure_loopback)
             })
+            .unwrap_or(false)
+        && config
+            .public_base_url
+            .as_deref()
+            .map(is_safe_public_base_url)
+            .unwrap_or(false)
+        && config
+            .notification_email_provider_token_file
+            .as_ref()
+            .map(|path| !path.as_os_str().is_empty() && !path.starts_with("/nix/store"))
             .unwrap_or(false)
         && config
             .notification_email_sender_address
             .as_deref()
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false)
+}
+
+async fn load_provider_token(config: &ServerConfig) -> Result<String, String> {
+    let path = config
+        .notification_email_provider_token_file
+        .as_ref()
+        .ok_or_else(|| "email provider token file is not configured".to_string())?;
+    let token = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|err| format!("email provider token file could not be read: {err}"))?;
+    let token = token.trim();
+    if token.is_empty() {
+        Err("email provider token file is empty".to_string())
+    } else {
+        Ok(token.to_string())
+    }
+}
+
+fn absolute_email_link(config: &ServerConfig, route: &str) -> String {
+    let base = config
+        .public_base_url
+        .as_deref()
+        .unwrap_or("")
+        .trim_end_matches('/');
+    let route = if route.starts_with('/') {
+        route.to_string()
+    } else {
+        format!("/{route}")
+    };
+    format!("{base}{route}")
+}
+
+fn provider_endpoint_allowed(value: &str, allow_insecure_loopback: bool) -> bool {
+    let value = value.trim();
+    value.starts_with("https://") || (allow_insecure_loopback && is_loopback_http_url(value))
+}
+
+fn is_loopback_http_url(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("http://") else {
+        return false;
+    };
+    let host_port = rest.split('/').next().unwrap_or_default();
+    let host = host_port
+        .strip_prefix('[')
+        .and_then(|value| value.split(']').next())
+        .unwrap_or_else(|| host_port.split(':').next().unwrap_or_default());
+    matches!(host, "localhost" | "127.0.0.1" | "::1") || host.starts_with("127.")
+}
+
+fn is_safe_public_base_url(value: &str) -> bool {
+    let Some(rest) = value.trim().strip_prefix("https://") else {
+        return false;
+    };
+    !rest.is_empty()
+        && !rest.contains('/')
+        && !rest.contains('?')
+        && !rest.contains('#')
+        && !rest.contains('@')
 }
 
 fn render_immediate_email(
@@ -545,9 +649,9 @@ fn render_digest_email(
     recipient_email: &str,
     period_start: DateTime<Utc>,
     period_end: DateTime<Utc>,
+    counts: &[(String, i64)],
     items: &[NotificationEmailRow],
 ) -> (String, String) {
-    let counts = category_counts(items);
     let mut text = format!(
         "Crystal Forge weekly digest for {recipient_email}\n\nPeriod: {} to {}\nCounts by category:\n{}\n",
         period_start.to_rfc3339(),
@@ -591,14 +695,6 @@ fn notification_severity(category: &str) -> &'static str {
         "policy_violations" | "heartbeat_lost" => "warning",
         _ => "info",
     }
-}
-
-fn category_counts(items: &[NotificationEmailRow]) -> Vec<(String, usize)> {
-    let mut counts = std::collections::BTreeMap::<String, usize>::new();
-    for item in items {
-        *counts.entry(item.category.clone()).or_default() += 1;
-    }
-    counts.into_iter().collect()
 }
 
 fn escape_html(input: &str) -> String {
@@ -696,6 +792,9 @@ mod tests {
             notification_email_enabled: true,
             notification_email_external_delivery_allowed: true,
             notification_email_endpoint: Some("http://127.0.0.1:9/fake".to_string()),
+            notification_email_allow_insecure_loopback: true,
+            public_base_url: Some("https://crystal-forge.example.test".to_string()),
+            notification_email_provider_token_file: Some("/run/secrets/fake-email-token".into()),
             notification_email_sender_address: Some("noreply@example.test".to_string()),
             notification_email_max_attempts: max_attempts,
             ..Default::default()

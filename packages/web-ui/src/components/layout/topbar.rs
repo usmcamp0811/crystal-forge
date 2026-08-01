@@ -340,18 +340,27 @@ pub fn TopBar(title: String) -> Element {
                                         move |_| {
                                             let route = route.clone();
                                             spawn(async move {
-                                                let _ = mark_user_notification_read(item_id).await;
                                                 if current_topbar_auth_generation(app_state) == requested_generation
                                                 {
-                                                    if let Some(clicked) = notification_items
-                                                        .write()
-                                                        .iter_mut()
-                                                        .find(|candidate| candidate.id == item_id)
-                                                    {
-                                                        if clicked.read_at.is_none() {
-                                                            unread_count.set((unread_count() - 1).max(0));
+                                                    match mark_user_notification_read(item_id).await {
+                                                        Ok(()) => {
+                                                            if let Some(clicked) = notification_items
+                                                                .write()
+                                                                .iter_mut()
+                                                                .find(|candidate| candidate.id == item_id)
+                                                            {
+                                                                if clicked.read_at.is_none() {
+                                                                    unread_count.set((unread_count() - 1).max(0));
+                                                                }
+                                                                clicked.read_at = Some(Utc::now());
+                                                            }
+                                                            notifications_error.set(None);
                                                         }
-                                                        clicked.read_at = Some(Utc::now());
+                                                        Err(err) => {
+                                                            notifications_error.set(Some(format!(
+                                                                "Could not mark notification read: {err}"
+                                                            )));
+                                                        }
                                                     }
                                                     notifications_open.set(false);
                                                     if let Some(route) = route.clone() {

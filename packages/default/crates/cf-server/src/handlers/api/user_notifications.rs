@@ -249,10 +249,22 @@ async fn notification_email_capability(
         .notification_email_endpoint
         .as_deref()
         .map(|endpoint| {
-            let endpoint = endpoint.trim();
-            endpoint.starts_with("http://") || endpoint.starts_with("https://")
+            provider_endpoint_allowed(
+                endpoint,
+                server_config.notification_email_allow_insecure_loopback,
+            )
         })
         .unwrap_or(false)
+        || !server_config
+            .public_base_url
+            .as_deref()
+            .map(is_safe_public_base_url)
+            .unwrap_or(false)
+        || !server_config
+            .notification_email_provider_token_file
+            .as_ref()
+            .map(|path| !path.as_os_str().is_empty() && !path.starts_with("/nix/store"))
+            .unwrap_or(false)
         || !server_config
             .notification_email_sender_address
             .as_deref()
@@ -271,4 +283,32 @@ async fn notification_email_capability(
         delivery_email,
         unavailable_reason,
     }
+}
+
+fn provider_endpoint_allowed(value: &str, allow_insecure_loopback: bool) -> bool {
+    let value = value.trim();
+    value.starts_with("https://") || (allow_insecure_loopback && is_loopback_http_url(value))
+}
+
+fn is_loopback_http_url(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("http://") else {
+        return false;
+    };
+    let host_port = rest.split('/').next().unwrap_or_default();
+    let host = host_port
+        .strip_prefix('[')
+        .and_then(|value| value.split(']').next())
+        .unwrap_or_else(|| host_port.split(':').next().unwrap_or_default());
+    matches!(host, "localhost" | "127.0.0.1" | "::1") || host.starts_with("127.")
+}
+
+fn is_safe_public_base_url(value: &str) -> bool {
+    let Some(rest) = value.trim().strip_prefix("https://") else {
+        return false;
+    };
+    !rest.is_empty()
+        && !rest.contains('/')
+        && !rest.contains('?')
+        && !rest.contains('#')
+        && !rest.contains('@')
 }

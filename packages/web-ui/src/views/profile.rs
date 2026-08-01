@@ -611,6 +611,7 @@ fn save_notification_pref(
 ) {
     let requested_user_id = current_profile_user_id(app_state);
     let requested_generation = current_profile_auth_generation(app_state);
+    let confirmed_before_update = prefs_signal();
     if let Some(mut prefs) = prefs_signal() {
         if let Some(value) = update.deploy_failures {
             prefs.deploy_failures = value;
@@ -669,6 +670,14 @@ fn save_notification_pref(
                     if current_profile_user_id(app_state) == requested_user_id
                         && current_profile_auth_generation(app_state) == requested_generation
                     {
+                        let had_newer_pending = pending_signal.with(|pending| pending.is_some());
+                        if had_newer_pending {
+                            pending_signal.with_mut(|pending| {
+                                merge_notification_update(pending, next_update.clone())
+                            });
+                        } else {
+                            prefs_signal.set(confirmed_before_update.clone());
+                        }
                         error_signal.set(Some(format!(
                             "Could not save notification preferences: {err}"
                         )));
@@ -678,6 +687,19 @@ fn save_notification_pref(
             }
         }
         saving_signal.set(false);
+        if current_profile_user_id(app_state) == requested_user_id
+            && current_profile_auth_generation(app_state) == requested_generation
+            && pending_signal.with(|pending| pending.is_some())
+        {
+            save_notification_pref(
+                prefs_signal,
+                error_signal,
+                saving_signal,
+                pending_signal,
+                app_state,
+                UpdateNotificationPreferences::default(),
+            );
+        }
     });
 }
 

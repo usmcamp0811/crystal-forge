@@ -33,6 +33,12 @@ pub struct UserNotificationPreferences {
     pub heartbeat_lost: bool,
     pub weekly_digest: bool,
     pub delivery_channel: NotificationDeliveryChannel,
+    pub deploy_failures_email_enabled_at: Option<DateTime<Utc>>,
+    pub build_failures_email_enabled_at: Option<DateTime<Utc>>,
+    pub critical_cves_email_enabled_at: Option<DateTime<Utc>>,
+    pub policy_violations_email_enabled_at: Option<DateTime<Utc>>,
+    pub heartbeat_lost_email_enabled_at: Option<DateTime<Utc>>,
+    pub weekly_digest_enabled_at: Option<DateTime<Utc>>,
     pub initialized_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

@@ -48,6 +48,11 @@
           notification_email_external_delivery_allowed =
             cfg.server.notificationEmail.externalDeliveryAllowed;
           notification_email_endpoint = cfg.server.notificationEmail.endpoint;
+          public_base_url = cfg.server.notificationEmail.publicBaseUrl;
+          notification_email_allow_insecure_loopback =
+            cfg.server.notificationEmail.allowInsecureLoopback;
+          notification_email_provider_token_file =
+            cfg.server.notificationEmail.providerTokenFile;
           notification_email_sender_address = cfg.server.notificationEmail.senderAddress;
           notification_email_sender_name = cfg.server.notificationEmail.senderName;
           notification_email_worker_interval_seconds =
@@ -1795,6 +1800,38 @@ in {
             HTTP provider endpoint for notification email. Crystal Forge sends
             an authenticated-session-independent JSON POST containing the
             rendered text and HTML bodies and an `Idempotency-Key` header.
+          '';
+        };
+
+        publicBaseUrl = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "https://crystal-forge.example.com";
+          description = lib.mdDoc ''
+            Canonical public Crystal Forge origin used to expand application
+            routes in notification email. Must be an HTTPS origin without path,
+            query, or fragment when notification email is enabled.
+          '';
+        };
+
+        allowInsecureLoopback = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = lib.mdDoc ''
+            Development-only escape hatch allowing an `http://` email provider
+            endpoint when the endpoint host is loopback. Non-loopback provider
+            endpoints must use HTTPS.
+          '';
+        };
+
+        providerTokenFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "/run/secrets/crystal-forge-email-provider-token";
+          description = lib.mdDoc ''
+            Runtime file containing the email provider bearer token. Do not use
+            a Nix store path; provision this through a secret manager such as
+            age/sops and point the option at the runtime secret file.
           '';
         };
 

@@ -179,6 +179,18 @@ pub struct ServerConfig {
     #[serde(default)]
     pub notification_email_endpoint: Option<String>,
 
+    /// Public Crystal Forge origin used to expand application routes in email.
+    #[serde(default)]
+    pub public_base_url: Option<String>,
+
+    /// Allow http:// provider endpoints only for loopback development.
+    #[serde(default)]
+    pub notification_email_allow_insecure_loopback: bool,
+
+    /// File containing the provider bearer token. The token is never accepted inline.
+    #[serde(default)]
+    pub notification_email_provider_token_file: Option<PathBuf>,
+
     /// Sender email address used for notification email.
     #[serde(default)]
     pub notification_email_sender_address: Option<String>,
@@ -319,6 +331,9 @@ impl Default for ServerConfig {
             notification_email_enabled: false,
             notification_email_external_delivery_allowed: false,
             notification_email_endpoint: None,
+            public_base_url: None,
+            notification_email_allow_insecure_loopback: false,
+            notification_email_provider_token_file: None,
             notification_email_sender_address: None,
             notification_email_sender_name: default_notification_email_sender_name(),
             notification_email_worker_interval_seconds:
@@ -413,6 +428,43 @@ impl ServerConfig {
                         .to_string(),
                 );
             }
+            if endpoint.starts_with("http://")
+                && !(self.notification_email_allow_insecure_loopback
+                    && is_loopback_http_url(endpoint))
+            {
+                return Err(
+                    "notification_email_endpoint must use https:// unless notification_email_allow_insecure_loopback is true and the endpoint host is loopback"
+                        .to_string(),
+                );
+            }
+            let public_base_url = self.public_base_url.as_deref().unwrap_or("").trim();
+            if !is_safe_public_base_url(public_base_url) {
+                return Err(
+                    "public_base_url is required for email and must be an https:// origin without path, query, or fragment"
+                        .to_string(),
+                );
+            }
+            match self.notification_email_provider_token_file.as_ref() {
+                Some(path) if path.starts_with("/nix/store") => {
+                    return Err(
+                        "notification_email_provider_token_file must not point into /nix/store"
+                            .to_string(),
+                    );
+                }
+                Some(path) if path.as_os_str().is_empty() => {
+                    return Err(
+                        "notification_email_provider_token_file must not be empty when email is enabled"
+                            .to_string(),
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    return Err(
+                        "notification_email_provider_token_file is required when notification email is enabled"
+                            .to_string(),
+                    );
+                }
+            }
             if self
                 .notification_email_sender_address
                 .as_deref()
@@ -473,6 +525,29 @@ impl ServerConfig {
 
         Ok(())
     }
+}
+
+fn is_loopback_http_url(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("http://") else {
+        return false;
+    };
+    let host_port = rest.split('/').next().unwrap_or_default();
+    let host = host_port
+        .strip_prefix('[')
+        .and_then(|value| value.split(']').next())
+        .unwrap_or_else(|| host_port.split(':').next().unwrap_or_default());
+    matches!(host, "localhost" | "127.0.0.1" | "::1") || host.starts_with("127.")
+}
+
+fn is_safe_public_base_url(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("https://") else {
+        return false;
+    };
+    !rest.is_empty()
+        && !rest.contains('/')
+        && !rest.contains('?')
+        && !rest.contains('#')
+        && !rest.contains('@')
 }
 
 #[cfg(test)]

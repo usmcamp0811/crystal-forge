@@ -2485,6 +2485,12 @@ mod user_notifications_api_tests {
             heartbeat_lost: false,
             weekly_digest,
             delivery_channel,
+            deploy_failures_email_enabled_at: None,
+            build_failures_email_enabled_at: None,
+            critical_cves_email_enabled_at: None,
+            policy_violations_email_enabled_at: None,
+            heartbeat_lost_email_enabled_at: None,
+            weekly_digest_enabled_at: None,
             initialized_at: Utc::now(),
             updated_at: Utc::now(),
         }

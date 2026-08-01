@@ -61,8 +61,7 @@ pub async fn materialize_attention_notifications_for_user(
             LEFT JOIN systems scoped_system
               ON ao.category = 'systems'
              AND scoped_system.id::text = ao.subject_id
-            WHERE ao.resolved_at IS NULL
-              AND ao.opened_at >= p.initialized_at
+            WHERE ao.opened_at >= p.initialized_at
               AND ao.category IN ('builds', 'evals', 'cves', 'systems')
               AND p.delivery_channel IN ('in_app', 'email', 'both')
               AND (
@@ -155,15 +154,21 @@ pub async fn materialize_attention_notifications_for_user(
                 ao.category AS source_type,
                 ao.subject_id AS source_id,
                 'attention_occurrence' AS identity_type,
-                ao.id::text AS identity_id
+                ao.id::text AS identity_id,
+                ao.opened_at,
+                CASE ao.category
+                    WHEN 'builds' THEN p.build_failures_email_enabled_at
+                    WHEN 'evals' THEN p.policy_violations_email_enabled_at
+                    WHEN 'cves' THEN p.critical_cves_email_enabled_at
+                    WHEN 'systems' THEN p.heartbeat_lost_email_enabled_at
+                END AS email_enabled_at
             FROM attention_occurrences ao
             CROSS JOIN prefs p
             CROSS JOIN authz a
             LEFT JOIN systems scoped_system
               ON ao.category = 'systems'
              AND scoped_system.id::text = ao.subject_id
-            WHERE ao.resolved_at IS NULL
-              AND ao.opened_at >= p.initialized_at
+            WHERE ao.opened_at >= p.initialized_at
               AND ao.category IN ('builds', 'evals', 'cves', 'systems')
               AND p.delivery_channel IN ('email', 'both')
               AND (
@@ -189,7 +194,9 @@ pub async fn materialize_attention_notifications_for_user(
                 'system_event' AS subject_type,
                 se.id::text AS subject_id,
                 'system_event' AS identity_type,
-                se.id::text AS identity_id
+                se.id::text AS identity_id,
+                se.occurred_at AS opened_at,
+                p.deploy_failures_email_enabled_at AS email_enabled_at
             FROM system_events se
             JOIN systems scoped_system ON scoped_system.id = se.system_id
             CROSS JOIN prefs p
@@ -233,6 +240,8 @@ pub async fn materialize_attention_notifications_for_user(
              OR (e.source_occurrence_id IS NULL AND n.source_type = e.source_type AND n.source_id = e.source_id)
          )
         WHERE e.category IS NOT NULL
+          AND e.email_enabled_at IS NOT NULL
+          AND e.opened_at >= e.email_enabled_at
         ON CONFLICT (idempotency_key) DO NOTHING
         "#,
     )
@@ -273,8 +282,11 @@ pub async fn enqueue_due_weekly_digest_deliveries(
         "SELECT user_id
          FROM user_notification_preferences
          WHERE weekly_digest = TRUE
-           AND delivery_channel IN ('email', 'both')",
+           AND delivery_channel IN ('email', 'both')
+           AND weekly_digest_enabled_at IS NOT NULL
+           AND weekly_digest_enabled_at <= $1",
     )
+    .bind(period_start)
     .fetch_all(pool)
     .await?;
 
@@ -296,7 +308,7 @@ pub async fn enqueue_weekly_digest_delivery(
     let result = sqlx::query(
         r#"
         WITH prefs AS (
-            SELECT weekly_digest, delivery_channel
+            SELECT weekly_digest, delivery_channel, weekly_digest_enabled_at
             FROM user_notification_preferences
             WHERE user_id = $1
         ), digest_items AS (
@@ -306,6 +318,7 @@ pub async fn enqueue_weekly_digest_delivery(
               AND dismissed_at IS NULL
               AND created_at >= $2
               AND created_at < $3
+              AND created_at >= (SELECT weekly_digest_enabled_at FROM prefs)
               AND notification_visible_to_user($1, source_type, source_id)
             LIMIT 1
         ), delivery AS (
@@ -319,6 +332,8 @@ pub async fn enqueue_weekly_digest_delivery(
             FROM prefs
             WHERE weekly_digest = TRUE
               AND delivery_channel IN ('email', 'both')
+              AND weekly_digest_enabled_at IS NOT NULL
+              AND weekly_digest_enabled_at <= $2
               AND EXISTS (SELECT 1 FROM digest_items)
             ON CONFLICT (idempotency_key) DO NOTHING
             RETURNING id
@@ -349,7 +364,11 @@ pub async fn get_or_create_notification_preferences(
          VALUES ($1)
          ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id
          RETURNING user_id, deploy_failures, build_failures, critical_cves, policy_violations,
-                   heartbeat_lost, weekly_digest, delivery_channel, initialized_at, updated_at",
+                   heartbeat_lost, weekly_digest, delivery_channel,
+                   deploy_failures_email_enabled_at, build_failures_email_enabled_at,
+                   critical_cves_email_enabled_at, policy_violations_email_enabled_at,
+                   heartbeat_lost_email_enabled_at, weekly_digest_enabled_at,
+                   initialized_at, updated_at",
     )
     .bind(user_id)
     .fetch_one(pool)
@@ -374,10 +393,44 @@ pub async fn update_notification_preferences(
              heartbeat_lost = COALESCE($6, heartbeat_lost),
              weekly_digest = COALESCE($7, weekly_digest),
              delivery_channel = COALESCE($8, delivery_channel),
+             deploy_failures_email_enabled_at = CASE
+                 WHEN NOT COALESCE($2, deploy_failures) OR COALESCE($8, delivery_channel) NOT IN ('email', 'both') THEN NULL
+                 WHEN deploy_failures_email_enabled_at IS NULL OR NOT deploy_failures OR delivery_channel NOT IN ('email', 'both') THEN NOW()
+                 ELSE deploy_failures_email_enabled_at
+             END,
+             build_failures_email_enabled_at = CASE
+                 WHEN NOT COALESCE($3, build_failures) OR COALESCE($8, delivery_channel) NOT IN ('email', 'both') THEN NULL
+                 WHEN build_failures_email_enabled_at IS NULL OR NOT build_failures OR delivery_channel NOT IN ('email', 'both') THEN NOW()
+                 ELSE build_failures_email_enabled_at
+             END,
+             critical_cves_email_enabled_at = CASE
+                 WHEN NOT COALESCE($4, critical_cves) OR COALESCE($8, delivery_channel) NOT IN ('email', 'both') THEN NULL
+                 WHEN critical_cves_email_enabled_at IS NULL OR NOT critical_cves OR delivery_channel NOT IN ('email', 'both') THEN NOW()
+                 ELSE critical_cves_email_enabled_at
+             END,
+             policy_violations_email_enabled_at = CASE
+                 WHEN NOT COALESCE($5, policy_violations) OR COALESCE($8, delivery_channel) NOT IN ('email', 'both') THEN NULL
+                 WHEN policy_violations_email_enabled_at IS NULL OR NOT policy_violations OR delivery_channel NOT IN ('email', 'both') THEN NOW()
+                 ELSE policy_violations_email_enabled_at
+             END,
+             heartbeat_lost_email_enabled_at = CASE
+                 WHEN NOT COALESCE($6, heartbeat_lost) OR COALESCE($8, delivery_channel) NOT IN ('email', 'both') THEN NULL
+                 WHEN heartbeat_lost_email_enabled_at IS NULL OR NOT heartbeat_lost OR delivery_channel NOT IN ('email', 'both') THEN NOW()
+                 ELSE heartbeat_lost_email_enabled_at
+             END,
+             weekly_digest_enabled_at = CASE
+                 WHEN NOT COALESCE($7, weekly_digest) OR COALESCE($8, delivery_channel) NOT IN ('email', 'both') THEN NULL
+                 WHEN weekly_digest_enabled_at IS NULL OR NOT weekly_digest OR delivery_channel NOT IN ('email', 'both') THEN NOW()
+                 ELSE weekly_digest_enabled_at
+             END,
              updated_at = NOW()
          WHERE user_id = $1
          RETURNING user_id, deploy_failures, build_failures, critical_cves, policy_violations,
-                   heartbeat_lost, weekly_digest, delivery_channel, initialized_at, updated_at",
+                   heartbeat_lost, weekly_digest, delivery_channel,
+                   deploy_failures_email_enabled_at, build_failures_email_enabled_at,
+                   critical_cves_email_enabled_at, policy_violations_email_enabled_at,
+                   heartbeat_lost_email_enabled_at, weekly_digest_enabled_at,
+                   initialized_at, updated_at",
     )
     .bind(user_id)
     .bind(update.deploy_failures)
