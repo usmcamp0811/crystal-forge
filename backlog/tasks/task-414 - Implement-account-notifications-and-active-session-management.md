@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-01 13:03'
+updated_date: '2026-08-01 13:37'
 labels:
   - frontend
   - web-ui
@@ -1172,6 +1172,16 @@ Verification in this slice:
 - `node --check checks/web-ui/tests/integration-test.js` passed.
 - `nix develop -c bash -c 'SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml'` passed with existing warnings.
 - `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_notifications --lib'` passed: 4 tests.
+
+Diagnosed the prior `nix build .#checks.x86_64-linux.web-ui --no-link` failure: Nix could not see the newly added TASK-414 Rust modules because they were still untracked in the Git worktree. Staged the intended new files so the flake source includes them. Verification run after staging:
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml'` — passed with existing warnings.
+- `nix build .#checks.x86_64-linux.web-ui --no-link` — passed.
+- `node --check checks/web-ui/tests/integration-test.js` — passed.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` — passed with existing warnings.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo test --bin crystal-forge-ui'` — passed: 131 passed, 0 failed, 1 ignored.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_notifications --lib'` — passed: 4 passed, 0 failed.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_sessions --lib'` — passed: 3 passed, 0 failed.
+Remaining limitations: DB-backed ignored tests were not run because `CRYSTAL_FORGE_TEST_DATABASE_URL` is not set; SQLx metadata has not been refreshed in this session. Implementation remains uncommitted/unpushed pending authorization.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
