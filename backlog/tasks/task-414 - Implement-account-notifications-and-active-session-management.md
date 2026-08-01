@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-01 15:37'
+updated_date: '2026-08-01 16:09'
 labels:
   - frontend
   - web-ui
@@ -1210,6 +1210,25 @@ Verification run after this slice:
 Remaining limitations: DB-backed ignored tests have still not been executed because no `CRYSTAL_FORGE_TEST_DATABASE_URL` is available in this session; SQLx offline metadata has still not been refreshed. Review-fix changes remain uncommitted/unpushed.
 
 Committed and pushed review-fix commit `57c7b1b7` (`Address notification review blockers`) to branch `TASK-414-account-notifications-sessions` for MR !314. Worktree status after push is clean. Remaining unverified items are unchanged: DB-backed ignored tests require `CRYSTAL_FORGE_TEST_DATABASE_URL`; SQLx metadata has not been refreshed; latest `nix build .#checks.x86_64-linux.web-ui --no-link` did not complete within the tool timeout and is unverified.
+
+Continued MR !314 re-review fixes:
+- Reworked notification email config to match the implemented HTTP provider transport: removed unsupported SMTP/TLS/credential-file options, added bounded request timeout and fixed weekly UTC digest schedule config in server config and NixOS module.
+- Tightened notification idempotency and recurrence: attention notifications now identify immediate email deliveries by canonical `attention_occurrence` id, deployment/system-event deliveries by `system_event` id, and the migration now allows reopened attention occurrences while keeping deployment source uniqueness.
+- Made weekly digest enqueue deterministic per UTC week (`date_trunc('week', NOW()) - 7 days` to `date_trunc('week', NOW())`) and pass the configured digest schedule into the worker.
+- Added email transport idempotency key propagation through the HTTP `Idempotency-Key` header, bounded reqwest timeout, current preference rechecks for immediate/digest rendering, persisted digest-period rendering, severity in immediate content, and digest period/category-count content.
+- Added frontend auth-generation/account guards for notification loads and topbar notification mutations, shared auth context set/clear helpers, profile logout/revoke-all state clearing, and synchronous preference save state to avoid stale optimistic response overwrites.
+
+Verification for this slice:
+- `nix develop -c rustfmt --edition 2024 packages/default/crates/cf-config/src/config/server.rs packages/default/crates/cf-server/src/handlers/api/user_notifications.rs packages/default/crates/cf-server/src/queries/user_notifications.rs packages/default/crates/cf-server/src/tasks/user_notification_email.rs packages/web-ui/src/state/app_state.rs packages/web-ui/src/bootstrap/auth.rs packages/web-ui/src/components/layout/app_shell.rs packages/web-ui/src/components/layout/topbar.rs packages/web-ui/src/views/login.rs packages/web-ui/src/views/profile.rs && git diff --check && node --check checks/web-ui/tests/integration-test.js` passed.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml'` passed with existing warnings.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` passed with existing warnings.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_notifications --lib'` passed: 4 passed, 4 ignored.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_sessions --lib'` passed: 3 passed.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo test --bin crystal-forge-ui notification_preference_merge'` passed: 2 passed.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo test --bin crystal-forge-ui'` passed: 133 passed, 1 ignored.
+- `nix build .#checks.x86_64-linux.web-ui --no-link` was attempted again with a 900s tool timeout; it did not complete before the tool killed it and reported `error: interrupted by the user`, so final pass/fail remains unverified.
+
+Remaining limitations: DB-backed ignored tests still require a migrated `CRYSTAL_FORGE_TEST_DATABASE_URL` and were not run in this session; SQLx offline metadata has not been refreshed.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
