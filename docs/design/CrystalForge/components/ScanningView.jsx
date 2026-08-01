@@ -1,7 +1,7 @@
 // Scanning view — CVE scan pipeline status + schedule config
 
 function ScanningView({ onNavigate }) {
-  const [tab, setTab] = React.useState("queue");
+  const [tab, setTab] = React.useState("deployed");
   const [configOpen, setConfigOpen] = React.useState(false);
   const [showActivity, setShowActivity] = React.useState(() => {
     try { return localStorage.getItem("cf-scan-activity") !== "0"; } catch { return true; }
@@ -66,8 +66,9 @@ function ScanningView({ onNavigate }) {
         <div className="card" style={{ overflow:"hidden" }}>
           <div className="sd-tabs" style={{ padding:"0 16px", borderBottom:"1px solid var(--cf-card-border)", display:"flex", alignItems:"center" }}>
             {[
-              { k:"queue", l:"Active & Recent" },
-              { k:"all",   l:"All configs" },
+              { k:"deployed", l:"Deployed" },
+              { k:"queue",    l:"Active & Recent" },
+              { k:"all",      l:"All configs" },
             ].map(t => (
               <button key={t.k} className={`sd-tab focus-ring${tab===t.k?" active":""}`} onClick={()=>setTab(t.k)}>{t.l}</button>
             ))}
@@ -78,7 +79,9 @@ function ScanningView({ onNavigate }) {
               </button>
             )}
           </div>
-          {tab === "queue"
+          {tab === "deployed"
+            ? <ScanTable rows={SCAN_CONFIGS.filter(s=>s.freshness==="deployed")} onNavigate={onNavigate} sel={scanSel}/>
+          : tab === "queue"
             ? <ScanTable rows={SCAN_CONFIGS.filter(s=>s.status!=="unscanned" || s.freshness!=="archived")} onNavigate={onNavigate} sel={scanSel}/>
             : <ScanAllConfigs onNavigate={onNavigate}/>}
         </div>
@@ -127,6 +130,7 @@ function ScanningView({ onNavigate }) {
 }
 
 function ScanTable({ rows, onNavigate, sel }) {
+  const latestIds = React.useMemo(() => (typeof latestPerFlake === "function" ? latestPerFlake(rows) : new Set()), [rows]);
   const freshChip = (f) => {
     const map = { deployed:["chip-healthy","deployed"], recent:["chip-info","recent"], archived:["chip-unknown","archived"] };
     const [cls,label] = map[f] || ["chip-unknown",f];
@@ -158,7 +162,7 @@ function ScanTable({ rows, onNavigate, sel }) {
               onClick={sel ? (e)=>{ sel.handleClick(e, s.id, cancellableIds); } : undefined}>
               <td>
                 <div style={{ fontWeight:600, fontSize:13 }}>{s.name}</div>
-                <div className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{s.flake} · {s.commit}</div>
+                <div className={`mono${latestIds.has(s.id)?" commit-latest":""}`} style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{s.flake} · {latestIds.has(s.id) && <Icon name="star" size={9} className="latest-star" style={{ marginRight:2, verticalAlign:"-1px" }}/>}{s.commit}</div>
               </td>
               <td>{freshChip(s.freshness)}</td>
               <td>

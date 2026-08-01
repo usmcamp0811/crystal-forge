@@ -10,6 +10,7 @@ function ComplianceView({ onOpenSystem, selectedBundleId, onClearBundle }) {
   const [exportOpen, setExportOpen] = React.useState(false);
   const [newBundleOpen, setNewBundleOpen] = React.useState(false);
   const [importOpen, setImportOpen] = React.useState(false);
+  const [importBundleOpen, setImportBundleOpen] = React.useState(false);
   const [editBundleOpen, setEditBundleOpen] = React.useState(false);
   const [filter, setFilter] = React.useState("all");
 
@@ -61,12 +62,13 @@ function ComplianceView({ onOpenSystem, selectedBundleId, onClearBundle }) {
           </p>
         </div>
         <div style={{ display:"flex", gap:8 }}>
-          <button className="btn btn-ghost focus-ring" onClick={() => setExportOpen(true)}>
-            <Icon name="download" size={14}/> Export evidence
-          </button>
-          <button className="btn btn-ghost focus-ring" onClick={() => setImportOpen(true)}>
-            <Icon name="download" size={14} style={{ transform:"rotate(180deg)" }}/> Import STIG
-          </button>
+          <IOMenu items={[
+            { label:"Import STIG (.xml)", icon:"shield", onClick:() => setImportOpen(true) },
+            { label:"Import bundle (.xml)", icon:"upload", onClick:() => setImportBundleOpen(true) },
+            "divider",
+            { label:"Export this bundle (XCCDF .xml)", icon:"download", onClick:() => bundle && exportBundle(bundle) },
+            { label:"Export evidence report…", icon:"download", onClick:() => setExportOpen(true) },
+          ]}/>
           <button className="btn btn-primary focus-ring" onClick={() => setNewBundleOpen(true)}>
             <Icon name="plus" size={14}/> New bundle
           </button>
@@ -133,6 +135,12 @@ function ComplianceView({ onOpenSystem, selectedBundleId, onClearBundle }) {
         <ImportStigModal
           onClose={() => setImportOpen(false)}
           onComplete={(id) => { setImportOpen(false); setBundleId(id); setSelectedSysId(null); }}
+        />
+      )}
+      {importBundleOpen && (
+        <ImportBundleModal
+          onClose={() => setImportBundleOpen(false)}
+          onComplete={(id) => { setImportBundleOpen(false); setBundleId(id); setSelectedSysId(null); }}
         />
       )}
       {editBundleOpen && bundle && (
@@ -917,4 +925,232 @@ function DeleteBundleConfirm({ bundle, onCancel, onConfirm }) {
   );
 }
 
-Object.assign(window, { ComplianceView, ControlsEvidenceDrawer, ControlEvidenceCard });
+Object.assign(window, { ComplianceView, ControlsEvidenceDrawer, ControlEvidenceCard, exportBundle });
+
+// ── Community bundle interchange — XCCDF 1.2 + a small Crystal Forge extension,
+// per the CF-XCCDF Interchange Profile draft. A bundle exports as one <Benchmark>:
+// cf:bundle metadata, a baseline <Profile> selecting every included policy, and one
+// <Rule> per policy. Rules backed by a custom_eval assertion get a full cf:custom-check
+// (exact round trip); other policy kinds export as human-readable rules only.
+function xmlEscape(s) { return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+
+function policyToXccdfRule(policy) {
+  const id = xmlEscape(policy.id);
+  const cat = policyCategoryMeta(policy.category || "deployment");
+  const severity = policy.severity === "high" ? "high" : policy.severity === "low" ? "low" : policy.severity === "medium" ? "medium" : "unknown";
+  const custom = (policy.rules || []).find(r => r.kind === "custom_eval");
+  const otherRules = (policy.rules || []).filter(r => r.kind !== "custom_eval");
+  const check = custom ? `
+    <xccdf:check system="urn:crystal-forge:check-system:policy:1">
+      <xccdf:check-content>
+        <cf:policy schema-version="1">
+          <cf:execution phase="nix-evaluation" strict="${!!custom.strict}"/>
+          <cf:implementation>
+            <cf:custom-check mode="all" context="nixos-configuration-v1" binding="cfg">
+              <cf:rule field-name="${xmlEscape(policy.name)}" strict="${!!custom.strict}">
+                <cf:description>${xmlEscape(custom.message || policy.description)}</cf:description>
+                <cf:expression language="nix"><![CDATA[${(custom.expr || "").replace(/]]>/g, "]]]]><![CDATA[>")}]]></cf:expression>
+              </cf:rule>
+            </cf:custom-check>
+          </cf:implementation>
+        </cf:policy>
+      </xccdf:check-content>
+    </xccdf:check>` : "";
+  return `
+  <xccdf:Rule id="xccdf_org.crystalforge_rule_${id}" selected="${policy.enabled !== false}" severity="${severity}">
+    <xccdf:status>accepted</xccdf:status>
+    <xccdf:title>${xmlEscape(policy.name)}</xccdf:title>
+    <xccdf:description>${xmlEscape(policy.description)}</xccdf:description>
+    ${policy.rationale ? `<xccdf:rationale>${xmlEscape(policy.rationale)}</xccdf:rationale>` : ""}
+    <xccdf:metadata>
+      <cf:policy-identity policy-id="urn:cf:policy:${id}" publication-state="accepted">
+        <cf:category>${xmlEscape(cat.id)}</cf:category>
+        ${otherRules.length ? `<cf:gates>${otherRules.map(r => `<cf:gate>${xmlEscape(ruleDescription(r))}</cf:gate>`).join("")}</cf:gates>` : ""}
+      </cf:policy-identity>
+    </xccdf:metadata>${check}
+  </xccdf:Rule>`;
+}
+
+function bundleToXccdf(bundle) {
+  const policies = bundle.policyIds.map(pid => POLICIES.find(p => p.id === pid)).filter(Boolean);
+  const bid = slugify(bundle.name) || "bundle";
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<xccdf:Benchmark xmlns:xccdf="http://checklists.nist.gov/xccdf/1.2" xmlns:cf="urn:crystal-forge:xccdf:1" id="xccdf_org.crystalforge_benchmark_${bid}">
+  <xccdf:status>accepted</xccdf:status>
+  <xccdf:title>${xmlEscape(bundle.name)}</xccdf:title>
+  <xccdf:description>${xmlEscape(bundle.description || "")}</xccdf:description>
+  <xccdf:version>${xmlEscape(bundle.version || "1.0")}</xccdf:version>
+  <xccdf:metadata>
+    <cf:bundle schema-version="1" bundle-id="urn:cf:bundle:${bid}" publication-state="accepted">
+      <cf:framework name="${xmlEscape(bundle.framework || "Community")}" version="${xmlEscape(bundle.version || "1.0")}"/>
+      <cf:layer>${xmlEscape(bundle.layer || "system")}</cf:layer>
+      <cf:owner>${xmlEscape(bundle.owner || "")}</cf:owner>
+      <cf:required-envs>${(bundle.requiredEnvs||[]).map(e=>xmlEscape(e)).join(",")}</cf:required-envs>
+    </cf:bundle>
+  </xccdf:metadata>
+  <xccdf:Profile id="xccdf_org.crystalforge_profile_${bid}-baseline">
+    <xccdf:title>Baseline</xccdf:title>
+    <xccdf:metadata><cf:profile-role>baseline</cf:profile-role></xccdf:metadata>
+    ${policies.map(p => `<xccdf:select idref="xccdf_org.crystalforge_rule_${xmlEscape(p.id)}" selected="true"/>`).join("\n    ")}
+  </xccdf:Profile>
+  ${policies.map(policyToXccdfRule).join("\n")}
+</xccdf:Benchmark>
+`;
+}
+
+function exportBundle(bundle) {
+  downloadFile(`${slugify(bundle.name)||"bundle"}.xml`, bundleToXccdf(bundle), "application/xml");
+}
+
+// ── Parse a CF-XCCDF (or foreign XCCDF) benchmark back into a bundle + policies.
+function cfByLocal(root, name) { const out=[]; const walk=(el)=>{ for (const c of el.children) { if (c.localName === name) out.push(c); walk(c); } }; walk(root); return out; }
+function cfFirst(el, name) { return cfByLocal(el, name)[0] || null; }
+function cfText(el) { return el ? (el.textContent || "").trim() : ""; }
+
+function parseCfXccdf(text) {
+  const doc = new DOMParser().parseFromString(text, "application/xml");
+  if (doc.querySelector("parsererror")) throw new Error("Not valid XML");
+  const bench = doc.documentElement.localName === "Benchmark" ? doc.documentElement : cfFirst(doc.documentElement, "Benchmark");
+  if (!bench) throw new Error("No <Benchmark> element — is this an XCCDF document?");
+  const cfBundle = cfFirst(bench, "bundle");
+  const meta = {
+    name: cfText(cfFirst(bench, "title")) || "Imported bundle",
+    description: cfText(cfFirst(bench, "description")),
+    version: cfText(cfFirst(bench, "version")) || "1.0",
+    framework: cfBundle ? (cfFirst(cfBundle, "framework")?.getAttribute("name") || "Community") : "Community",
+    layer: cfBundle ? cfText(cfFirst(cfBundle, "layer")) || "system" : "system",
+    owner: cfBundle ? cfText(cfFirst(cfBundle, "owner")) : "",
+    requiredEnvs: cfBundle ? cfText(cfFirst(cfBundle, "required-envs")).split(",").map(s=>s.trim()).filter(Boolean) : [],
+  };
+  const ruleEls = cfByLocal(bench, "Rule");
+  const policies = ruleEls.map((r, i) => {
+    const title = cfText(cfFirst(r, "title")) || `Imported rule ${i+1}`;
+    const description = cfText(cfFirst(r, "description")) || title;
+    const rationale = cfText(cfFirst(r, "rationale"));
+    const severity = r.getAttribute("severity") || "unknown";
+    const policyId = cfFirst(r, "policy-identity")?.getAttribute("policy-id") || "";
+    const slug = policyId.replace(/^urn:cf:policy:/,"") || slugify(title) || `imported-${i}`;
+    const customCheck = cfFirst(r, "custom-check");
+    const rules = [];
+    if (customCheck) {
+      const execEl = cfFirst(r, "execution");
+      const strict = execEl ? execEl.getAttribute("strict") === "true" : false;
+      cfByLocal(customCheck, "rule").forEach(cr => {
+        const expr = cfText(cfFirst(cr, "expression"));
+        const msg = cfText(cfFirst(cr, "description")) || description;
+        rules.push({ kind:"custom_eval", expr, message: msg, strict: cr.getAttribute("strict") === "true" || strict });
+      });
+    }
+    return {
+      id: `custom-import-${slug}`, name: slug, category: "security", description,
+      type: "custom", enabled: r.getAttribute("selected") !== "false", severity: ["high","medium","low"].includes(severity) ? severity : "medium",
+      rationale, rules, evidence: [],
+    };
+  });
+  return { meta, policies };
+}
+
+function ImportBundleModal({ onClose, onComplete }) {
+  const [parsed, setParsed] = React.useState(null); // { meta, policies: mapped[] }
+  const [error, setError] = React.useState("");
+  const [dragOver, setDragOver] = React.useState(false);
+  const [name, setName] = React.useState("");
+  const fileRef = React.useRef(null);
+
+  const handleFile = async (file) => {
+    if (!file) return;
+    setError("");
+    try {
+      const text = await file.text();
+      const isXml = /\.xml$/i.test(file.name) || text.trim().startsWith("<");
+      let data;
+      if (isXml) {
+        data = parseCfXccdf(text);
+      } else {
+        const json = JSON.parse(text);
+        data = { meta: json.bundle || {}, policies: (json.policies || []).map((ext, i) => externalToPolicy(ext, `bundle-${i}`)) };
+      }
+      if (!data.policies.length) throw new Error("No policies found in this bundle file.");
+      setParsed(data);
+      setName(data.meta.name || file.name.replace(/\.(json|xml)$/i,""));
+    } catch (e) {
+      setError(e.message || "Could not parse this file.");
+    }
+  };
+
+  const doImport = () => {
+    const existing = new Set(POLICIES.map(p => p.id));
+    const policyIds = [];
+    parsed.policies.forEach(pol => {
+      policyIds.push(pol.id);
+      if (!existing.has(pol.id)) { POLICIES.push(pol); existing.add(pol.id); }
+    });
+    const bundleId = slugify(name) || ("bundle-" + Date.now());
+    const bundle = {
+      id: bundleId, name: name || "Imported bundle",
+      framework: parsed.meta.framework || "Community", version: parsed.meta.version || "1.0",
+      description: parsed.meta.description || `Imported bundle — ${policyIds.length} controls.`,
+      layer: parsed.meta.layer || "system", owner: "imported", lastReview: "just now",
+      policyIds, requiredEnvs: parsed.meta.requiredEnvs?.length ? parsed.meta.requiredEnvs : ["production"], imported: true,
+    };
+    const dup = COMPLIANCE_BUNDLES.findIndex(b => b.id === bundleId);
+    if (dup >= 0) COMPLIANCE_BUNDLES.splice(dup, 1, bundle); else COMPLIANCE_BUNDLES.push(bundle);
+    onComplete?.(bundleId);
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(600px,96vw)", maxHeight:"92vh" }}>
+        <div className="modal-head">
+          <h2><Icon name="upload" size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/>Import a shared bundle</h2>
+          <p>Upload a bundle exported from another Crystal Forge instance — an XCCDF 1.2 benchmark with the Crystal Forge extension (CF-XCCDF). Plain STIG XCCDF and legacy JSON bundle exports are also accepted.</p>
+        </div>
+        <div className="modal-body" style={{ overflowY:"auto" }}>
+          {!parsed ? (
+            <div
+              onDragOver={e=>{e.preventDefault();setDragOver(true);}}
+              onDragLeave={()=>setDragOver(false)}
+              onDrop={e=>{e.preventDefault();setDragOver(false);handleFile(e.dataTransfer.files[0]);}}
+              onClick={()=>fileRef.current?.click()}
+              className="focus-ring"
+              style={{
+                border:`2px dashed ${dragOver ? "var(--cf-brand-purple)" : "var(--cf-divider)"}`,
+                background: dragOver ? "color-mix(in oklab, var(--cf-brand-purple) 7%, var(--cf-card-bg))" : "var(--cf-card-bg)",
+                borderRadius:12, padding:"38px 20px", textAlign:"center", cursor:"pointer",
+              }}>
+              <input ref={fileRef} type="file" accept=".xml,.json,application/xml" style={{ display:"none" }}
+                onChange={e=>handleFile(e.target.files[0])}/>
+              <Icon name="upload" size={22} style={{ color:"var(--cf-text-muted)" }}/>
+              <div style={{ fontSize:14, fontWeight:600, marginTop:8 }}>Drop a bundle .xml here, or click to browse</div>
+            </div>
+          ) : (
+            <>
+              <div className="field">
+                <label>Bundle name</label>
+                <input className="input focus-ring" value={name} onChange={e=>setName(e.target.value)}/>
+              </div>
+              <div style={{ fontSize:11, textTransform:"uppercase", letterSpacing:"0.06em", color:"var(--cf-text-muted)", fontWeight:600, margin:"10px 0 6px" }}>
+                {parsed.policies.length} polic{parsed.policies.length===1?"y":"ies"} to import
+              </div>
+              <div style={{ display:"flex", flexDirection:"column", gap:6, maxHeight:280, overflowY:"auto" }}>
+                {parsed.policies.map((p, i) => (
+                  <div key={i} className="card" style={{ padding:"9px 11px" }}>
+                    <div className="mono" style={{ fontSize:12.5, fontWeight:600 }}>{p.name}</div>
+                    <div style={{ fontSize:11, color:"var(--cf-text-secondary)" }}>{p.description}</div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+          {error && <div className="sd-callout sd-callout-danger" style={{ marginTop:12 }}><Icon name="warn" size={13}/><div style={{ fontSize:12 }}>{error}</div></div>}
+        </div>
+        <div className="modal-foot">
+          <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
+          {parsed && <button className="btn btn-primary focus-ring" disabled={!name.trim()} onClick={doImport}><Icon name="check" size={13}/> Create bundle</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, { ImportBundleModal });

@@ -7,6 +7,10 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
   const [editPolicy, setEditPolicy] = React.useState(null);
   const [addOpen, setAddOpen] = React.useState(false);
   const [drawerPolicy, setDrawerPolicy] = React.useState(null);
+  const [importOpen, setImportOpen] = React.useState(false);
+  const [selectMode, setSelectMode] = React.useState(false);
+  const [selectedIds, setSelectedIds] = React.useState(() => new Set());
+  const toggleSelected = (id) => setSelectedIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   React.useEffect(() => {
     if (!focus) return;
     const p = POLICIES.find(x => x.id === focus || x.name === focus);
@@ -40,9 +44,29 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
             Criteria a system must satisfy to deploy · {POLICY_BUILTIN.length} built-in · {POLICY_CUSTOM.length} custom · governing {SYSTEMS.length} systems
           </p>
         </div>
-        <button className="btn btn-primary focus-ring" onClick={() => setAddOpen(true)}>
-          <Icon name="plus" size={14}/> New custom policy
-        </button>
+        <div style={{ display:"flex", gap:8 }}>
+          {selectMode ? (
+            <>
+              <span style={{ fontSize:12, color:"var(--cf-text-muted)", alignSelf:"center" }}>{selectedIds.size} selected</span>
+              <button className="btn btn-primary focus-ring" disabled={selectedIds.size===0}
+                onClick={() => { exportPolicies(POLICIES.filter(p => selectedIds.has(p.id))); setSelectMode(false); setSelectedIds(new Set()); }}>
+                <Icon name="download" size={14}/> Export selected
+              </button>
+              <button className="btn btn-ghost focus-ring" onClick={() => { setSelectMode(false); setSelectedIds(new Set()); }}>Cancel</button>
+            </>
+          ) : (
+            <>
+              <IOMenu items={[
+                { label:"Import policies…", icon:"upload", onClick:() => setImportOpen(true) },
+                { label:"Select policies to export…", icon:"download", onClick:() => { setSelectMode(true); setSelectedIds(new Set()); } },
+                { label:"Export all custom policies", icon:"download", onClick:() => exportPolicies(POLICY_CUSTOM) },
+              ]}/>
+              <button className="btn btn-primary focus-ring" onClick={() => setAddOpen(true)}>
+                <Icon name="plus" size={14}/> New custom policy
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Category stat strip — doubles as a filter. Click to scope, click again to clear. */}
@@ -117,8 +141,10 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
           <div className="cards-grid">
             {items.map(p => (
               <PolicyCard key={p.id} policy={p}
-                onOpen={() => setDrawerPolicy(p)}
-                onEdit={p.type === "custom" ? () => setEditPolicy(p) : null}
+                onOpen={() => selectMode ? toggleSelected(p.id) : setDrawerPolicy(p)}
+                onEdit={!selectMode && p.type === "custom" ? () => setEditPolicy(p) : null}
+                selectMode={selectMode}
+                selected={selectedIds.has(p.id)}
               />
             ))}
           </div>
@@ -140,19 +166,245 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
           onClose={() => { setEditPolicy(null); setAddOpen(false); }}
         />
       )}
+      {importOpen && <ImportPoliciesModal onClose={() => setImportOpen(false)}/>}
     </div>
   );
 }
 
-function PolicyCard({ policy, onOpen, onEdit }) {
+// ── Community policy interchange — matches the CVE-style single-check schema
+// shared as JSON/TOML: { config: { description, expression, strict }, enabled, policy_type }.
+function policyToExternal(p) {
+  const rule = p.rules.find(r => r.kind === "custom_eval");
+  return {
+    config: {
+      description: p.description,
+      expression: rule ? rule.expr : (p.rules.map(ruleDescription).join(" && ") || ""),
+      strict: rule ? !!rule.strict : false,
+    },
+    enabled: p.enabled !== false,
+    policy_type: "custom_check",
+  };
+}
+
+function slugify(s) {
+  return (s || "").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/(^-|-$)/g,"");
+}
+
+function externalToPolicy(ext, idx) {
+  const cfg = ext.config || ext || {};
+  const description = cfg.description || "Imported policy";
+  const slug = slugify(description) || `imported-${idx}`;
+  return {
+    id: `custom-import-${slug}-${idx}`,
+    name: slug,
+    category: "security",
+    description,
+    type: "custom",
+    enabled: ext.enabled !== false,
+    severity: "medium",
+    rationale: "Imported from an external policy file.",
+    rules: [{ kind:"custom_eval", expr: cfg.expression || "", message: description, strict: !!cfg.strict }],
+    evidence: [],
+  };
+}
+
+function downloadFile(filename, content, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function exportPolicies(list) {
+  if (list.length === 1) {
+    downloadFile(`${slugify(list[0].name)||"policy"}.json`, JSON.stringify(policyToExternal(list[0]), null, 2), "application/json");
+  } else {
+    downloadFile("crystal-forge-policies.json", JSON.stringify(list.map(policyToExternal), null, 2), "application/json");
+  }
+}
+
+// Minimal TOML reader for this one schema shape — repeated [[policy]] tables with a
+// nested [policy.config] (or flat config.* keys). Not a general TOML parser.
+function parseSimpleToml(text) {
+  const lines = text.split(/\r?\n/);
+  const items = [];
+  let current = null, inConfig = false;
+  const coerce = (raw) => {
+    let v = raw.trim();
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) return v.slice(1,-1);
+    if (v === "true") return true;
+    if (v === "false") return false;
+    if (!isNaN(Number(v)) && v !== "") return Number(v);
+    return v;
+  };
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (/^\[\[(policy|policies)\]\]$/i.test(line)) { current = { config:{}, enabled:true, policy_type:"custom_check" }; items.push(current); inConfig = false; continue; }
+    if (/^\[(policy|policies)?\.?config\]$/i.test(line)) { if (!current) { current = { config:{}, enabled:true, policy_type:"custom_check" }; items.push(current); } inConfig = true; continue; }
+    if (/^\[(policy|policies)\]$/i.test(line)) { if (!current) { current = { config:{}, enabled:true, policy_type:"custom_check" }; items.push(current); } inConfig = false; continue; }
+    const m = line.match(/^([\w.]+)\s*=\s*(.+)$/);
+    if (m && current) {
+      const key = m[1], val = coerce(m[2]);
+      if (inConfig || key.startsWith("config.")) current.config[key.replace(/^config\./,"")] = val;
+      else current[key] = val;
+    }
+  }
+  return items;
+}
+
+function parsePolicyFile(text, filename) {
+  const isToml = /\.toml$/i.test(filename) || (!/\.json$/i.test(filename) && !text.trim().startsWith("{") && !text.trim().startsWith("["));
+  if (isToml) {
+    const items = parseSimpleToml(text);
+    if (items.length === 0) throw new Error("No [[policy]] entries found");
+    return items;
+  }
+  const parsed = JSON.parse(text);
+  if (Array.isArray(parsed)) return parsed;
+  if (Array.isArray(parsed.policies)) return parsed.policies;
+  return [parsed];
+}
+
+function ImportPoliciesModal({ onClose }) {
+  const [entries, setEntries] = React.useState([]); // { key, source, external, policy, error, checked }
+  const [dragOver, setDragOver] = React.useState(false);
+  const [imported, setImported] = React.useState(false);
+  const fileRef = React.useRef(null);
+
+  const handleFiles = async (fileList) => {
+    const files = Array.from(fileList);
+    const next = [];
+    for (const f of files) {
+      try {
+        const text = await f.text();
+        const externals = parsePolicyFile(text, f.name);
+        externals.forEach((ext, i) => {
+          try {
+            const policy = externalToPolicy(ext, `${f.name}-${i}`);
+            next.push({ key:`${f.name}-${i}`, source:f.name, external:ext, policy, error:null, checked:true });
+          } catch (e) {
+            next.push({ key:`${f.name}-${i}`, source:f.name, external:ext, policy:null, error:e.message, checked:false });
+          }
+        });
+      } catch (e) {
+        next.push({ key:f.name, source:f.name, external:null, policy:null, error:`Could not parse ${f.name}: ${e.message}`, checked:false });
+      }
+    }
+    setEntries(prev => [...prev, ...next]);
+  };
+
+  const toggle = (key) => setEntries(prev => prev.map(e => e.key===key ? { ...e, checked: !e.checked } : e));
+  const remove = (key) => setEntries(prev => prev.filter(e => e.key !== key));
+
+  const existingSlugs = new Set(POLICIES.map(p => slugify(p.name)));
+  const importable = entries.filter(e => e.policy && e.checked);
+
+  if (imported) {
+    return (
+      <div className="modal-backdrop" onClick={onClose}>
+        <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(480px,94vw)" }}>
+          <div className="modal-body" style={{ textAlign:"center", padding:"32px 20px" }}>
+            <Icon name="check" size={28} style={{ color:"#34d399" }}/>
+            <h2 style={{ marginTop:12 }}>{importable.length} polic{importable.length===1?"y":"ies"} imported</h2>
+            <p style={{ color:"var(--cf-text-muted)", fontSize:12 }}>They're now available to assign from a system's edit dialog.</p>
+          </div>
+          <div className="modal-foot"><button className="btn btn-primary focus-ring" onClick={onClose}>Done</button></div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(680px,96vw)", maxHeight:"92vh" }}>
+        <div className="modal-head">
+          <h2><Icon name="upload" size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/> Import policies</h2>
+          <p>Drop one or more JSON/TOML files shared by the community — each holds a single check (<span className="mono">config.description</span> / <span className="mono">config.expression</span>), same shape you'd export from another Crystal Forge instance.</p>
+        </div>
+        <div className="modal-body" style={{ overflowY:"auto" }}>
+          <div
+            onDragOver={e=>{ e.preventDefault(); setDragOver(true); }}
+            onDragLeave={()=>setDragOver(false)}
+            onDrop={e=>{ e.preventDefault(); setDragOver(false); handleFiles(e.dataTransfer.files); }}
+            onClick={()=>fileRef.current?.click()}
+            style={{
+              border:`2px dashed ${dragOver ? "var(--cf-brand-purple)" : "var(--cf-divider)"}`,
+              borderRadius:10, padding:"28px 16px", textAlign:"center", cursor:"pointer",
+              background: dragOver ? "color-mix(in oklab, var(--cf-brand-purple) 8%, transparent)" : "var(--cf-subtle-bg)",
+            }}>
+            <Icon name="upload" size={20} style={{ color:"var(--cf-text-muted)" }}/>
+            <div style={{ marginTop:8, fontSize:13, fontWeight:500 }}>Drop policy files here, or click to browse</div>
+            <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>.json or .toml · multiple files OK</div>
+            <input ref={fileRef} type="file" accept=".json,.toml,application/json" multiple hidden
+              onChange={e=>{ handleFiles(e.target.files); e.target.value=""; }}/>
+          </div>
+
+          {entries.length > 0 && (
+            <div style={{ marginTop:16, display:"flex", flexDirection:"column", gap:8 }}>
+              <div style={{ fontSize:11, textTransform:"uppercase", letterSpacing:"0.06em", color:"var(--cf-text-muted)", fontWeight:600 }}>
+                Preview — {importable.length} of {entries.length} selected
+              </div>
+              {entries.map(e => {
+                const dupe = e.policy && existingSlugs.has(slugify(e.policy.name));
+                return (
+                  <div key={e.key} className="card" style={{ padding:"10px 12px", display:"flex", gap:10, alignItems:"flex-start", opacity: e.error ? 0.7 : 1 }}>
+                    {e.error ? (
+                      <Icon name="warn" size={15} style={{ color:"#f87171", flexShrink:0, marginTop:1 }}/>
+                    ) : (
+                      <input type="checkbox" checked={e.checked} onChange={()=>toggle(e.key)} style={{ marginTop:3, flexShrink:0 }}/>
+                    )}
+                    <div style={{ minWidth:0, flex:1 }}>
+                      {e.error ? (
+                        <div style={{ fontSize:12, color:"#f87171" }}>{e.error}</div>
+                      ) : (
+                        <>
+                          <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+                            <span className="mono" style={{ fontWeight:600, fontSize:13 }}>{e.policy.name}</span>
+                            {dupe && <span className="chip chip-unknown" style={{ fontSize:9 }}>name collision — will suffix</span>}
+                            {!e.policy.enabled && <span className="chip" style={{ fontSize:9 }}>disabled</span>}
+                          </div>
+                          <div style={{ fontSize:11, color:"var(--cf-text-secondary)", marginTop:2 }}>{e.policy.description}</div>
+                          <div className="mono" style={{ fontSize:10.5, color:"var(--cf-text-muted)", marginTop:3, wordBreak:"break-all" }}>{e.policy.rules[0].expr}</div>
+                        </>
+                      )}
+                      <div style={{ fontSize:10, color:"var(--cf-text-muted)", marginTop:4 }}>{e.source}</div>
+                    </div>
+                    <button className="btn-icon focus-ring" onClick={()=>remove(e.key)} title="Remove"><Icon name="x" size={13}/></button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <div className="modal-foot">
+          <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary focus-ring" disabled={importable.length===0}
+            onClick={()=>setImported(true)}>
+            <Icon name="upload" size={13}/> Import {importable.length || ""} polic{importable.length===1?"y":"ies"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PolicyCard({ policy, onOpen, onEdit, selectMode, selected }) {
   const usage = policyUsage(policy.id);
   const cat = policyCategoryMeta(policy.category || "deployment");
   const disabled = policy.type === "custom" && policy.enabled === false;
   const railColor = disabled ? "#6b7280" : cat.color;
 
   return (
-    <div className="sys-card" onClick={onOpen} style={{ cursor:"pointer", opacity: disabled ? 0.72 : 1 }}>
+    <div className="sys-card" onClick={onOpen} style={{ cursor:"pointer", opacity: disabled ? 0.72 : 1, outline: selectMode && selected ? "2px solid var(--cf-brand-purple)" : "none", outlineOffset: -1 }}>
       <div className="status-rail" style={{ "--status-color": railColor }}/>
+      {selectMode && (
+        <span className={`pol-select-box${selected?" checked":""}`}>
+          {selected && <Icon name="check" size={11} style={{ color:"#fff" }}/>}
+        </span>
+      )}
       <div className="sys-card-head">
         <div className="sys-title">
           <div className="sys-hostname"><Icon name="file" size={13}/>&nbsp;{policy.name}</div>
@@ -265,6 +517,7 @@ function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem }) {
             </div>
           </div>
           <div style={{ display:"flex", gap:6 }}>
+            {policy.type === "custom" && <button className="btn btn-ghost focus-ring xs" onClick={()=>exportPolicies([policy])}><Icon name="download" size={11}/> Export</button>}
             {onEdit && <button className="btn btn-ghost focus-ring xs" onClick={onEdit}><Icon name="gear" size={11}/> Edit</button>}
             <button className="btn-icon focus-ring" onClick={onClose}><Icon name="x" size={16}/></button>
           </div>
@@ -815,4 +1068,4 @@ function DeletePolicyConfirm({ policy, onCancel, onConfirm }) {
   );
 }
 
-Object.assign(window, { PoliciesView, RuleEditor });
+Object.assign(window, { PoliciesView, RuleEditor, policyToExternal, externalToPolicy, slugify, downloadFile, exportPolicies, parsePolicyFile, ruleDescription, ImportPoliciesModal });

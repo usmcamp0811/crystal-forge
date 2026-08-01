@@ -67,6 +67,40 @@ function latestPerFlake(list) {
 }
 window.latestPerFlake = latestPerFlake;
 
+// Shared "Import / Export" dropdown — consolidates sharing actions behind one button
+// instead of a row of standalone buttons. items: [{label, icon, onClick, danger}] or "divider".
+function IOMenu({ label = "Import / Export", icon = "upload", items }) {
+  const [open, setOpen] = React.useState(false);
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const onKey = (e) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onDoc);
+    window.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDoc); window.removeEventListener("keydown", onKey); };
+  }, [open]);
+  return (
+    <div ref={ref} style={{ position:"relative" }}>
+      <button className="btn btn-ghost focus-ring" onClick={() => setOpen(v => !v)}>
+        <Icon name={icon} size={14}/> {label} <Icon name="chevron-down" size={12}/>
+      </button>
+      {open && (
+        <div className="io-menu">
+          {items.map((it, i) => it === "divider"
+            ? <div key={i} className="io-menu-divider"/>
+            : (
+              <button key={i} className="io-menu-item" onClick={() => { setOpen(false); it.onClick(); }} style={it.danger ? { color:"#f87171" } : undefined}>
+                <Icon name={it.icon} size={13}/> {it.label}
+              </button>
+            ))}
+        </div>
+      )}
+    </div>
+  );
+}
+window.IOMenu = IOMenu;
+
 // Tracks a Set of selected ids with modifier-click (⌘/Ctrl toggle, Shift range) support.
 function useMultiSelect(resetKey) {
   const [ids, setIds] = React.useState(() => new Set());

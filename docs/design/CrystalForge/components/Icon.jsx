@@ -44,6 +44,7 @@ const Icon = ({ name, size = 16, ...rest }) => {
     case "plus":      return <svg {...common}><path d="M12 5v14M5 12h14"/></svg>;
     case "more":      return <svg {...common}><circle cx="5" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="19" cy="12" r="1.4" fill="currentColor"/></svg>;
     case "download":  return <svg {...common}><path d="M12 3v12M6 9l6 6 6-6"/><path d="M4 21h16"/></svg>;
+    case "upload":    return <svg {...common}><path d="M12 21V9M6 15l6-6 6 6"/><path d="M4 3h16"/></svg>;
     case "tweaks":    return <svg {...common}><path d="M4 6h10M4 12h6M4 18h12"/><circle cx="18" cy="6" r="2"/><circle cx="14" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>;
     case "check":     return <svg {...common}><path d="m5 12 5 5L20 6"/></svg>;
     case "cpu":       return <svg {...common}><rect x="6" y="6" width="12" height="12" rx="1.5"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg>;
