@@ -515,9 +515,8 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
         SELECT dpv.id, dpv.policy_id, dpv.name, dpv.description, dpv.policy_type,
                dpv.implementation_state, dpv.execution_phase, dpv.config,
                dpv.compliance_metadata, dpv.dependencies, dpv.opaque_xml,
-               dp.enabled
+               dpv.enabled_by_default AS enabled
         FROM deployment_policy_versions dpv
-        JOIN deployment_policies dp ON dp.id = dpv.policy_id
         WHERE dpv.semantic_digest = 'pending'
           AND dpv.publication_state IN ('incomplete', 'draft', 'interim')
         "#,

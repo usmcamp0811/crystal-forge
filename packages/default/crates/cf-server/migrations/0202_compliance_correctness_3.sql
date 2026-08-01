@@ -732,3 +732,131 @@ CREATE TRIGGER trigger_guard_bundle_version_insert_state
     BEFORE INSERT ON compliance_bundle_versions
     FOR EACH ROW
     EXECUTE FUNCTION guard_version_insert_state();
+
+-- ── 14. Fix sync_bundle_version_membership DELETE CTE (P1 #1) ─────────────────
+-- The table has no surrogate id column, use the composite key.
+CREATE OR REPLACE FUNCTION sync_bundle_version_membership()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    v_bundle_id       uuid;
+    v_version_id      uuid;
+    v_policy_version_id uuid;
+    v_max_order       integer;
+BEGIN
+    v_bundle_id := COALESCE(NEW.bundle_id, OLD.bundle_id);
+
+    SELECT current_draft_version_id INTO v_version_id
+    FROM compliance_bundles WHERE id = v_bundle_id;
+
+    IF v_version_id IS NULL THEN
+        IF TG_OP = 'INSERT' THEN
+            RAISE EXCEPTION
+                'Cannot add policy to bundle %: bundle has no current draft version.',
+                v_bundle_id;
+        END IF;
+        RETURN OLD;
+    END IF;
+
+    IF TG_OP = 'INSERT' THEN
+        SELECT COALESCE(dp.current_draft_version_id, dp.current_published_version_id)
+        INTO v_policy_version_id
+        FROM deployment_policies dp
+        WHERE dp.id = NEW.policy_id;
+
+        IF v_policy_version_id IS NULL THEN
+            RAISE EXCEPTION
+                'Cannot add policy % to bundle %: policy has no versioned draft or '
+                'published version.',
+                NEW.policy_id, v_bundle_id;
+        END IF;
+
+        IF NOT EXISTS (
+            SELECT 1 FROM deployment_policy_versions
+            WHERE id = v_policy_version_id AND policy_id = NEW.policy_id
+        ) THEN
+            RAISE EXCEPTION
+                'Pointer integrity violation: policy version % does not belong to policy %.',
+                v_policy_version_id, NEW.policy_id;
+        END IF;
+
+        SELECT COALESCE(MAX(policy_order), -1) + 1 INTO v_max_order
+        FROM compliance_bundle_version_policies
+        WHERE bundle_version_id = v_version_id;
+
+        INSERT INTO compliance_bundle_version_policies
+            (bundle_version_id, policy_version_id, policy_order)
+        VALUES (v_version_id, v_policy_version_id, v_max_order)
+        ON CONFLICT DO NOTHING;
+
+    ELSIF TG_OP = 'DELETE' THEN
+        DELETE FROM compliance_bundle_version_policies
+        WHERE bundle_version_id = v_version_id
+          AND policy_version_id IN (
+              SELECT id FROM deployment_policy_versions
+              WHERE policy_id = OLD.policy_id
+          );
+
+        -- Recompact order using the composite key (table has no id column).
+        WITH ordered AS (
+            SELECT
+                bundle_version_id,
+                policy_version_id,
+                (row_number() OVER (ORDER BY policy_order))::integer - 1 AS new_order
+            FROM compliance_bundle_version_policies
+            WHERE bundle_version_id = v_version_id
+        )
+        UPDATE compliance_bundle_version_policies bvp
+        SET policy_order = ordered.new_order
+        FROM ordered
+        WHERE bvp.bundle_version_id = ordered.bundle_version_id
+          AND bvp.policy_version_id = ordered.policy_version_id;
+    END IF;
+
+    UPDATE compliance_bundle_versions
+    SET semantic_digest = 'pending'
+    WHERE id = v_version_id
+      AND publication_state IN ('incomplete', 'draft', 'interim');
+
+    RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+-- ── 15. Add enabled to trigger column list (P1 #2) ────────────────────────────
+DROP TRIGGER IF EXISTS trigger_sync_policy_draft_version ON deployment_policies;
+CREATE TRIGGER trigger_sync_policy_draft_version
+    AFTER INSERT OR UPDATE OF name, description, policy_type, config, enabled
+    ON deployment_policies
+    FOR EACH ROW
+    WHEN (pg_trigger_depth() = 0)
+    EXECUTE FUNCTION sync_policy_draft_version();
+
+-- ── 16. Remove selected=TRUE from bundle publication guard (P1 #4) ────────────
+-- Every membership row in an accepted bundle must reference an immutable policy
+-- version, regardless of the selected flag. Unselected rows are still part of
+-- the bundle's portable identity and must not be mutable after publication.
+CREATE OR REPLACE FUNCTION validate_bundle_policy_versions_on_accept()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    v_count bigint;
+BEGIN
+    IF NEW.publication_state = 'accepted' THEN
+        SELECT COUNT(*) INTO v_count
+        FROM compliance_bundle_version_policies membership
+        JOIN deployment_policy_versions policy_version
+          ON policy_version.id = membership.policy_version_id
+        WHERE membership.bundle_version_id = NEW.id
+          AND policy_version.publication_state
+              NOT IN ('accepted', 'deprecated');
+
+        IF v_count > 0 THEN
+            RAISE EXCEPTION
+                'Bundle version % cannot be accepted: % member policy version(s) '
+                'are not in an immutable (accepted or deprecated) state. '
+                'Publish the included policy versions before publishing the bundle, '
+                'or remove the draft policies from the baseline.',
+                NEW.id, v_count;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
