@@ -215,6 +215,12 @@ pub fn save_update(update: UpdateUserPreferences, mut save_error: Signal<Option<
                 Ok(response) => {
                     if let Some(preferences) = response.preferences {
                         mirror_to_storage(&preferences);
+                        save_error.set(None);
+                    } else {
+                        save_error.set(Some(
+                            "Could not save preferences: server returned no preferences"
+                                .to_string(),
+                        ));
                     }
                 }
                 Err(err) => save_error.set(Some(format!("Could not save preferences: {err}"))),

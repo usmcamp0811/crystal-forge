@@ -3520,7 +3520,11 @@ const steps = [
       await page.waitForTimeout(1000);
 
       let patchCount = 0;
+      let resolveFirstPatchCompleted;
       let resolveSecondPatch;
+      const firstPatchCompleted = new Promise((resolve) => {
+        resolveFirstPatchCompleted = resolve;
+      });
       const secondPatchSeen = new Promise((resolve) => {
         resolveSecondPatch = resolve;
       });
@@ -3533,11 +3537,16 @@ const steps = [
         patchCount += 1;
         if (patchCount === 1) {
           await new Promise((resolve) => setTimeout(resolve, 1000));
+          const response = await route.fetch();
+          await route.fulfill({ response });
+          resolveFirstPatchCompleted();
+          return;
         }
         if (patchCount === 2) {
           resolveSecondPatch();
         }
-        await route.continue();
+        const response = await route.fetch();
+        await route.fulfill({ response });
       });
 
       const appearanceCard = page.locator(".card", { hasText: "Appearance" });
@@ -3546,6 +3555,10 @@ const steps = [
       await Promise.race([
         secondPatchSeen,
         new Promise((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for serialized second preference PATCH")), 5000)),
+      ]);
+      await Promise.race([
+        firstPatchCompleted,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for delayed first preference PATCH completion")), 5000)),
       ]);
       await page.waitForFunction(
         async ({ baseUrl }) => {
