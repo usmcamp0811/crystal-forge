@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-01 14:26'
+updated_date: '2026-08-01 15:27'
 labels:
   - frontend
   - web-ui
@@ -1188,6 +1188,26 @@ Remaining limitations: DB-backed ignored tests were not run because `CRYSTAL_FOR
 Committed and pushed TASK-414 implementation commit `7efeaedb` (`Implement account notifications and sessions`) to branch `TASK-414-account-notifications-sessions`. Opened MR !314 for review: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/314. Task remains In Progress rather than Review because required DB-backed ignored tests have not been run locally (`CRYSTAL_FORGE_TEST_DATABASE_URL` unavailable) and SQLx metadata was not refreshed in this session; MR is open for early human/dev-server review and iteration.
 
 Review result received for MR !314: request changes with seven P1 blockers and one P2. Blocking areas: invalid immediate-email materialization SQL/idempotency key, worker marking email sent without transport acceptance, missing notification authorization boundaries, missing CSRF validation on notification mutations, email/digest production depending on notification-center GET, preference write/client response races, former-account responses populating new-account UI. P2: session last-seen config not wired from ServerConfig and retention cleanup missing. Proceeding to address these in the TASK-414 branch/MR.
+
+Continued MR !314 review-fix work:
+- Added fake email transport regression coverage for durable email delivery acceptance, retry, terminal failure, and weekly digest period-boundary behavior (DB-backed tests are `#[ignore]` and require a migrated `CRYSTAL_FORGE_TEST_DATABASE_URL`).
+- Changed weekly digest rendering to use the persisted `user_notification_weekly_digest_runs` period instead of all current notifications.
+- Updated delivery state transitions to keep weekly digest run status in sync when sent, skipped/cancelled, retried, or terminally failed.
+- Added web UI unit coverage for notification preference merge/coalescing last-action-wins behavior.
+
+Verification run after this slice:
+- `nix develop -c rustfmt --edition 2024 packages/default/crates/cf-server/src/tasks/user_notification_email.rs packages/web-ui/src/views/profile.rs` passed.
+- `git diff --check` passed.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_notifications --lib'` passed: 4 passed, 4 ignored.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo test --bin crystal-forge-ui notification_preference_merge'` passed: 2 passed.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml'` passed with existing warnings.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` passed with existing warnings.
+- `node --check checks/web-ui/tests/integration-test.js` passed.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_sessions --lib'` passed: 3 passed.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo test --bin crystal-forge-ui'` passed: 133 passed, 1 ignored.
+- `nix build .#checks.x86_64-linux.web-ui --no-link` was attempted twice; it did not complete within 120s, then within 900s. The tool killed it and reported `error: interrupted by the user`, so final pass/fail is unverified.
+
+Remaining limitations: DB-backed ignored tests have still not been executed because no `CRYSTAL_FORGE_TEST_DATABASE_URL` is available in this session; SQLx offline metadata has still not been refreshed. Review-fix changes remain uncommitted/unpushed.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
