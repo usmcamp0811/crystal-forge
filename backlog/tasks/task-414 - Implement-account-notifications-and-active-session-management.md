@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-01 15:27'
+updated_date: '2026-08-01 15:37'
 labels:
   - frontend
   - web-ui
@@ -1208,6 +1208,8 @@ Verification run after this slice:
 - `nix build .#checks.x86_64-linux.web-ui --no-link` was attempted twice; it did not complete within 120s, then within 900s. The tool killed it and reported `error: interrupted by the user`, so final pass/fail is unverified.
 
 Remaining limitations: DB-backed ignored tests have still not been executed because no `CRYSTAL_FORGE_TEST_DATABASE_URL` is available in this session; SQLx offline metadata has still not been refreshed. Review-fix changes remain uncommitted/unpushed.
+
+Committed and pushed review-fix commit `57c7b1b7` (`Address notification review blockers`) to branch `TASK-414-account-notifications-sessions` for MR !314. Worktree status after push is clean. Remaining unverified items are unchanged: DB-backed ignored tests require `CRYSTAL_FORGE_TEST_DATABASE_URL`; SQLx metadata has not been refreshed; latest `nix build .#checks.x86_64-linux.web-ui --no-link` did not complete within the tool timeout and is unverified.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
