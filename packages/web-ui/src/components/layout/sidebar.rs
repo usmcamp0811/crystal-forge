@@ -204,12 +204,12 @@ pub fn SidebarNav() -> Element {
             style: "border-right: 1px solid var(--cf-card-border); width: {nav_width};",
             div {
                 class: "sidebar-brand",
-                style: if is_collapsed { "justify-content: center;" } else { "" },
+
                 div {
                     class: "brand-mark",
                     img {
                         src: asset!("assets/cf.png"),
-                        alt: "Crystal Forge logo",
+                        alt: "Crystal Forge",
                         class: "brand-mark-img",
                     }
                 }

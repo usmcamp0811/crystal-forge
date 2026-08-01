@@ -2044,45 +2044,61 @@ html[data-theme="light"] .sd-nix {
   min-height: 60px;
 }
 
-/* Collapse / expand button inside sidebar-brand (design example Shell.jsx). */
-.sidebar-collapse {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  border: none;
-  background: transparent;
-  color: var(--cf-text-muted);
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: background-color 0.15s ease, color 0.15s ease;
-}
-.sidebar-collapse:hover {
-  background: var(--cf-subtle-bg);
-  color: var(--cf-text-primary);
-}
-.sidebar-collapse svg {
-  width: 15px;
-  height: 15px;
-}
-.sidebar.rail .sidebar-collapse {
-  margin: 0 auto;
-}
-
 .brand-mark {
   width: 28px;
   height: 28px;
-  overflow: hidden;
+  display: grid;
+  place-items: center;
   flex-shrink: 0;
 }
 
 .brand-mark-img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   display: block;
+}
+
+.sidebar-collapse {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border: 1px solid var(--cf-divider);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--cf-text-muted);
+  cursor: pointer;
+  transition:
+    background 120ms,
+    color 120ms,
+    border-color 120ms;
+}
+
+.sidebar-collapse:hover {
+  background: var(--cf-hover-bg);
+  color: var(--cf-text-primary);
+  border-color: var(--cf-brand-purple);
+}
+
+.sidebar-collapse svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* Collapsed rail layout: logo above expand button. */
+.sidebar.rail .sidebar-brand {
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+  padding: 16px 12px 14px;
+}
+
+.sidebar.rail .sidebar-collapse {
+  margin-left: 0;
 }
 
 .brand-name {
@@ -2194,11 +2210,6 @@ html[data-theme="light"] .sd-nix {
 
 .sidebar.rail .nav-section-label {
   display: none;
-}
-
-.sidebar.rail .sidebar-brand {
-  justify-content: center;
-  padding: 18px 12px 14px;
 }
 
 .sidebar.rail .brand-name,
