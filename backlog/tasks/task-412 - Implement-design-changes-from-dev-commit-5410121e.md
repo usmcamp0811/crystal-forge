@@ -1,11 +1,11 @@
 ---
 id: TASK-412
 title: Implement CF-XCCDF bundle and policy interchange and design updates
-status: In Progress
+status: Review
 assignee:
   - gpt-5.6-terra
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-01 03:22'
+updated_date: '2026-08-01 03:23'
 labels:
   - design
   - frontend
@@ -37,6 +37,7 @@ references:
   - packages/web-ui/src/views/policies.rs
   - packages/web-ui/src/views/scanning.rs
   - packages/web-ui/src/export/mod.rs
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/313'
 modified_files:
   - migrations/
   - packages/default/crates/cf-server/src/api/
@@ -1330,4 +1331,6 @@ Verification before MR:
 - `cargo fmt` applied to all new/modified files; pre-existing diffs in dev base are out of scope
 - Pre-existing `cargo fmt --all --check` failures are in `dev` branch base files not touched by this task; AC #41 requires a clean pass — noted in MR
 - `nix flake check --keep-going` not yet run locally; CI will be authoritative (AC #43)
+
+MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/313. Moved to Review.
 <!-- SECTION:NOTES:END -->
