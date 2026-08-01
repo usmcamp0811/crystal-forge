@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-01 22:11'
+updated_date: '2026-08-01 22:36'
 labels:
   - frontend
   - web-ui
@@ -1277,6 +1277,27 @@ Verification run in this slice:
 Remaining limitations unchanged: DB-backed ignored tests still require `CRYSTAL_FORGE_TEST_DATABASE_URL`; SQLx metadata has not been refreshed in this session; MR pipeline/Nix web-ui check still need final verification.
 
 Committed and pushed MR !314 review-fix commit `46c3177a` (`Fix notification delivery races`) to branch `TASK-414-account-notifications-sessions`. Active task worktree status is clean after push. Remaining limitations unchanged: DB-backed ignored tests require `CRYSTAL_FORGE_TEST_DATABASE_URL`; SQLx metadata has not been refreshed; MR pipeline/Nix web-ui check still need final verification before moving TASK-414 to Review.
+
+Continued MR !314 P1 review-fix work:
+- Added migration/user-creation preference initialization so notification defaults exist before the user first opens notification preferences.
+- Added default preference insertion to password/dev user creation and external identity user creation transactions.
+- Switched notification pagination from timestamp-only cursors to opaque composite `(created_at, id)` cursors, kept legacy `before` compatibility, and return `invalid_notification_cursor` for malformed cursors.
+- Updated the web client notification feed model/API call to use string cursors.
+- Tightened profile notification preference save rollback to keep a mutable `last_confirmed` snapshot, restore the last successful server state on failed older saves, layer newer optimistic updates, and requeue failed+newer updates so last-action-wins survives out-of-order failures.
+- Added focused unit coverage for URL-safe cursor round-tripping and preference save failure/generation behavior.
+- Added ignored DB regression tests for pre-API-touch preference initialization and tied-created-at pagination.
+
+Verification for this slice:
+- `nix develop -c rustfmt --edition 2024 packages/default/crates/cf-server/src/api/models.rs packages/default/crates/cf-server/src/handlers/api/user_notifications.rs packages/default/crates/cf-server/src/queries/user_notifications.rs packages/default/crates/cf-server/src/queries/users.rs packages/default/crates/cf-server/src/queries/auth_identity.rs packages/web-ui/src/api/client.rs packages/web-ui/src/api/models.rs packages/web-ui/src/views/profile.rs && git diff --check` passed.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml'` passed with existing warnings.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_notifications --lib'` passed: 5 passed, 6 ignored.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_sessions --lib'` passed: 3 passed.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` passed with existing warnings.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo test --bin crystal-forge-ui notification_save'` passed: 3 passed.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo test --bin crystal-forge-ui notification_preference_merge'` passed: 2 passed.
+- `node --check checks/web-ui/tests/integration-test.js` passed.
+
+Remaining limitations: DB-backed ignored tests still require a migrated isolated `CRYSTAL_FORGE_TEST_DATABASE_URL`; SQLx metadata was not refreshed; `nix build .#checks.x86_64-linux.web-ui --no-link` was not rerun in this slice. P2 review items remain deferred unless explicitly scoped.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
