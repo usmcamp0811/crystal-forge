@@ -1229,6 +1229,8 @@ Verification for this slice:
 - `nix build .#checks.x86_64-linux.web-ui --no-link` was attempted again with a 900s tool timeout; it did not complete before the tool killed it and reported `error: interrupted by the user`, so final pass/fail remains unverified.
 
 Remaining limitations: DB-backed ignored tests still require a migrated `CRYSTAL_FORGE_TEST_DATABASE_URL` and were not run in this session; SQLx offline metadata has not been refreshed.
+
+Committed and pushed latest re-review-fix commit `08639ffb` (`Tighten notification delivery review fixes`) to branch `TASK-414-account-notifications-sessions` for MR !314. Worktree status after push is clean. Remaining limitations: DB-backed ignored tests require `CRYSTAL_FORGE_TEST_DATABASE_URL`; SQLx metadata has not been refreshed; `nix build .#checks.x86_64-linux.web-ui --no-link` was attempted but timed out after 900s and remains unverified.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
