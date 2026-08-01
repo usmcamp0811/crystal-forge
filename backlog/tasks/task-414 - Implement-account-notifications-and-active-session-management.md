@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-01 04:59'
+updated_date: '2026-08-01 13:03'
 labels:
   - frontend
   - web-ui
@@ -1160,6 +1160,18 @@ Verification in this slice:
 - `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_sessions --lib'` passed: 3 tests.
 
 Note: an earlier parallel test run timed out while waiting on Cargo/Nix locks; the same targeted test commands were rerun serially and passed.
+
+Continued TASK-414 implementation:
+- Added `tasks::user_notification_email`, a configured background loop for durable email queue processing.
+- Implemented atomic delivery claims with `FOR UPDATE SKIP LOCKED`, stale-claim recovery, preference/email rechecks before send, cancellation for unavailable recipients or disabled preferences, sent-state updates, retry/backoff helper, and bounded digest rendering.
+- Added text/HTML rendering helpers with escaping and tests for controlled-value escaping.
+- Wired the notification email loop into server background task startup; it exits disabled unless email transport config and external-delivery policy are both enabled.
+- Updated web integration test script to stop expecting the old notification/session placeholders and to assert server-shaped notification/session UI states with mocked API responses for screenshot coverage.
+
+Verification in this slice:
+- `node --check checks/web-ui/tests/integration-test.js` passed.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml'` passed with existing warnings.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_notifications --lib'` passed: 4 tests.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
