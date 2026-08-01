@@ -28,13 +28,21 @@ const POLICY_JSON_TEMPLATE: &str = r#"{
 pub fn PoliciesView() -> Element {
     let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let mut policy_library: Signal<Vec<PolicyDefinition>> = use_signal(Vec::new);
+    let mut policies_load_error: Signal<Option<String>> = use_signal(|| None);
     let mut show_editor = use_signal(|| false);
     let mut drawer_policy = use_signal(|| None::<PolicyDefinition>);
 
     use_effect(move || {
         spawn(async move {
-            let policies = policies_api::load_policies_with_fallback().await;
-            policy_library.set(policies);
+            match policies_api::load_policies().await {
+                policies_api::PolicyLoadResult::Ok(p) => {
+                    policies_load_error.set(None);
+                    policy_library.set(p);
+                }
+                policies_api::PolicyLoadResult::Err(e) => {
+                    policies_load_error.set(Some(e));
+                }
+            }
         });
     });
 
@@ -194,21 +202,23 @@ pub fn PoliciesView() -> Element {
                         trigger_label: "Import / Export".to_string(),
                         trigger_class: "focus-ring".to_string(),
                         items: vec![
-                            IOMenuItem::action("Import policies…"),
+                            // Import and export coming in a later phase.
+                            IOMenuItem::disabled(
+                                "Import policies…",
+                                "Policy import coming in a later phase",
+                            ),
                             IOMenuItem::Separator,
-                            IOMenuItem::action("Export all custom policies"),
+                            IOMenuItem::disabled(
+                                "Export all custom policies",
+                                "Policy export coming in a later phase",
+                            ),
                             IOMenuItem::disabled(
                                 "Export selected policies…",
-                                "Select policies using the checkboxes first",
+                                "Policy export coming in a later phase",
                             ),
                         ],
-                        on_action: move |idx: usize| {
-                            match idx {
-                                0 => { /* Import: not yet implemented */ }
-                                1 => { /* Export all custom: not yet implemented */ }
-                                2 => { /* Export selected: disabled */ }
-                                _ => {}
-                            }
+                        on_action: move |_idx: usize| {
+                            // All items disabled; no-op until interchange is implemented.
                         },
                     }
                     button {
@@ -226,6 +236,13 @@ pub fn PoliciesView() -> Element {
                         }
                         " New custom policy"
                     }
+                }
+            }
+
+            // Show an explicit error when the policy API fails (AC #34).
+            if let Some(ref err) = *policies_load_error.read() {
+                div { class: "sd-callout sd-callout-danger",
+                    "Failed to load policies: {err}"
                 }
             }
 
@@ -416,8 +433,15 @@ pub fn PoliciesView() -> Element {
                         spawn(async move {
                             match delete_deployment_policy(&id).await {
                                 Ok(()) => {
-                                    let latest = policies_api::load_policies_with_fallback().await;
-                                    policy_library.set(latest);
+                                    match policies_api::load_policies().await {
+                                        policies_api::PolicyLoadResult::Ok(p) => {
+                                            policies_load_error.set(None);
+                                            policy_library.set(p);
+                                        }
+                                        policies_api::PolicyLoadResult::Err(e) => {
+                                            policies_load_error.set(Some(e));
+                                        }
+                                    }
                                 }
                                 Err(error) => {
                                     web_sys::console::error_1(&format!("Failed to delete policy: {error}").into());

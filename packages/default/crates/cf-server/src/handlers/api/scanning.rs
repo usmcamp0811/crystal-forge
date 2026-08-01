@@ -85,7 +85,7 @@ fn scan_queue_row_to_response(
     r: crate::queries::scanning::ScanQueueRow,
 ) -> ScanningQueueItemResponse {
     ScanningQueueItemResponse {
-        scan_id: r.scan_id,
+        scan_id: r.scan_id, // Option<Uuid>: None for never-scanned deployed configs
         hostname: r.hostname,
         flake_name: r.flake_name,
         commit_hash: r.commit_hash,

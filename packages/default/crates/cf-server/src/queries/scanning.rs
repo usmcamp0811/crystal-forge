@@ -27,10 +27,12 @@ pub struct ScanStatsRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanQueueRow {
-    pub scan_id: Uuid,
+    /// `None` when the system has been deployed but never scanned.
+    pub scan_id: Option<Uuid>,
     pub hostname: String,
     pub flake_name: Option<String>,
     pub commit_hash: Option<String>,
+    /// Normalized scan status; `"never_scanned"` when no scan row exists.
     pub status: String,
     pub completed_at: Option<DateTime<Utc>>,
     pub scheduled_at: Option<DateTime<Utc>>,
@@ -267,39 +269,53 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
 
 /// Returns all derivations currently deployed on at least one active system,
 /// with complete flake history used to derive `is_latest_per_flake`.
+///
+/// Uses the same normalized configuration-name expression as the evaluation
+/// path (`COALESCE(NULLIF(BTRIM(system_configuration_name), ''), hostname)`)
+/// so systems whose NixOS config name differs from their hostname are included.
+///
+/// Nullable scan columns are COALESCE'd to safe defaults so systems that have
+/// never been scanned are included without NULL-decode panics.
 pub async fn get_scan_deployed(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRow>> {
     let rows = sqlx::query(
         r#"
         WITH latest_commit_per_flake AS (
+            -- Order by commit_timestamp DESC first (newest git commit wins),
+            -- then by id DESC as a tiebreaker for identical timestamps.
             SELECT DISTINCT ON (flake_id) id AS commit_id, flake_id
             FROM commits
-            ORDER BY flake_id, id DESC
+            ORDER BY flake_id, commit_timestamp DESC NULLS LAST, id DESC
         ),
         deployed_derivations AS (
             SELECT DISTINCT ON (d.id)
-                cs.id AS scan_id,
-                s.hostname,
-                f.name AS flake_name,
-                c.git_commit_hash AS commit_hash,
+                cs.id                      AS scan_id,
+                -- Use the same normalized config-name expression as the evaluator.
+                COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) AS hostname,
+                f.name                     AS flake_name,
+                c.git_commit_hash          AS commit_hash,
                 c.flake_id,
-                c.id AS commit_db_id,
-                cs.status,
+                c.id                       AS commit_db_id,
+                COALESCE(cs.status, 'never_scanned')  AS status,
                 cs.completed_at,
                 cs.scheduled_at,
-                cs.critical_count,
-                cs.high_count,
-                cs.medium_count,
+                COALESCE(cs.critical_count, 0)::int   AS critical_count,
+                COALESCE(cs.high_count, 0)::int        AS high_count,
+                COALESCE(cs.medium_count, 0)::int      AS medium_count,
                 COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) AS lifecycle_at
             FROM systems s
-            JOIN derivations d ON d.derivation_name = s.hostname
-                AND d.store_path IS NOT NULL
-                AND d.store_path = s.current_store_path
+            -- Match on the normalized config name.
+            JOIN derivations d
+              ON d.derivation_name =
+                     COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
+              AND d.store_path IS NOT NULL
+              AND d.store_path = s.current_store_path
             LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
             LEFT JOIN commits c ON c.id = d.commit_id
             LEFT JOIN flakes f ON f.id = c.flake_id
             WHERE s.is_active = TRUE
               AND d.derivation_type = 'nixos'
-            ORDER BY d.id, COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
+            ORDER BY d.id,
+                     COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
         )
         SELECT
             scan_id,
@@ -313,13 +329,14 @@ pub async fn get_scan_deployed(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueu
             high_count,
             medium_count,
             CASE
-                WHEN completed_at IS NULL THEN 'archived'
+                WHEN completed_at IS NULL THEN 'never_scanned'
                 WHEN completed_at >= NOW() - INTERVAL '24 hours' THEN 'deployed'
                 WHEN completed_at >= NOW() - INTERVAL '30 days' THEN 'recent'
                 ELSE 'archived'
             END AS freshness,
             TRUE AS is_current,
-            (lc.commit_id IS NOT NULL AND dd.commit_db_id = lc.commit_id) AS is_latest_per_flake
+            (lc.commit_id IS NOT NULL
+             AND dd.commit_db_id = lc.commit_id) AS is_latest_per_flake
         FROM deployed_derivations dd
         LEFT JOIN latest_commit_per_flake lc ON lc.flake_id = dd.flake_id
         ORDER BY hostname ASC

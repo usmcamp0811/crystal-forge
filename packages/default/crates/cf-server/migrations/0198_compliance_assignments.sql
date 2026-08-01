@@ -1,4 +1,4 @@
--- Migration 0197: Versioned bundle assignment overlays and import provenance.
+-- Migration 0198: Versioned bundle assignment overlays and import provenance.
 
 CREATE TABLE compliance_source_object_mappings (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

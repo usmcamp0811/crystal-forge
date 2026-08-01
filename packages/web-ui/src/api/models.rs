@@ -559,7 +559,8 @@ pub struct ScanningStatsResponse {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScanningQueueItemResponse {
-    pub scan_id: Uuid,
+    /// `None` when the system is deployed but has never been scanned.
+    pub scan_id: Option<Uuid>,
     pub hostname: String,
     pub flake_name: Option<String>,
     pub commit_hash: Option<String>,

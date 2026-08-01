@@ -197,6 +197,12 @@ pub fn ScanningView() -> Element {
                     }
 
                     if tab() == "deployed" {
+                        // Error banner above the table when the API fails (P2 #7).
+                        if let Some(Err(ref e)) = deployed.read().as_ref().cloned() {
+                            div { class: "sd-callout sd-callout-danger", style: "margin:8px;",
+                                "Failed to load deployed configurations: {e}"
+                            }
+                        }
                         table { class: "sys-table",
                             thead { tr {
                                 th { "System" }
@@ -242,7 +248,7 @@ pub fn ScanningView() -> Element {
                                             }
                                         }
                                     }
-                                } else {
+                                } else if deployed.read().is_none() {
                                     tr { td { colspan: 5, style: "padding:14px; color:var(--cf-text-muted);", "Loading deployed configurations…" } }
                                 }
                             }

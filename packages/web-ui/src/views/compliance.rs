@@ -196,27 +196,23 @@ pub fn ComplianceView() -> Element {
                         items: {
                             let mut items = vec![];
                             if is_admin {
+                                // Import STIG: wired to the existing sample modal.
                                 items.push(IOMenuItem::action_with_icon(
                                     "Import STIG or XCCDF (.xml/.zip)",
                                     IconName::Download,
                                 ));
-                                items.push(IOMenuItem::action_with_icon(
+                                // Import CF bundle: coming in a later phase.
+                                items.push(IOMenuItem::disabled(
                                     "Import Crystal Forge bundle (.xml)",
-                                    IconName::Download,
+                                    "CF bundle import coming in a later phase",
                                 ));
                                 items.push(IOMenuItem::Separator);
                             }
-                            items.push(if selected_bundle_id.read().is_some() {
-                                IOMenuItem::action_with_icon(
-                                    "Export this bundle (XCCDF .xml)",
-                                    IconName::Download,
-                                )
-                            } else {
-                                IOMenuItem::disabled(
-                                    "Export this bundle (XCCDF .xml)",
-                                    "Select a bundle first",
-                                )
-                            });
+                            // Export XCCDF: coming in a later phase.
+                            items.push(IOMenuItem::disabled(
+                                "Export this bundle (XCCDF .xml)",
+                                "XCCDF export coming in a later phase",
+                            ));
                             items.push(IOMenuItem::action_with_icon(
                                 "Export evidence report…",
                                 IconName::Download,
@@ -225,19 +221,16 @@ pub fn ComplianceView() -> Element {
                         },
                         on_action: move |idx: usize| {
                             // Index mapping depends on is_admin:
-                            // admin:    0=Import STIG, 1=Import CF bundle, (sep), 2=Export XCCDF, 3=Export evidence
-                            // non-admin: 0=Export XCCDF (disabled if no bundle), 1=Export evidence
+                            // admin:    0=Import STIG, 1=Import CF bundle (disabled), sep, 2=Export XCCDF (disabled), 3=Export evidence
+                            // non-admin: 0=Export XCCDF (disabled), 1=Export evidence
                             if is_admin {
                                 match idx {
                                     0 => show_import_stig.set(true),
-                                    1 => { /* Import CF bundle: not yet implemented */ }
-                                    2 => { /* Export XCCDF: not yet implemented */ }
                                     3 => show_export.set(true),
                                     _ => {}
                                 }
                             } else {
                                 match idx {
-                                    0 => { /* Export XCCDF */ }
                                     1 => show_export.set(true),
                                     _ => {}
                                 }
