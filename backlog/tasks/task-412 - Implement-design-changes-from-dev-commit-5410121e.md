@@ -1,10 +1,11 @@
 ---
 id: TASK-412
 title: Implement CF-XCCDF bundle and policy interchange and design updates
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - gpt-5.6-terra
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-01 01:06'
+updated_date: '2026-08-01 01:31'
 labels:
   - design
   - frontend
@@ -21,13 +22,14 @@ labels:
   - testing
 dependencies: []
 references:
-  - commit:5410121ebf4e5eebd64b06d3a78e82d052329e50
+  - 'commit:5410121ebf4e5eebd64b06d3a78e82d052329e50'
   - docs/design/CrystalForge/components/ComplianceView.jsx
   - docs/design/CrystalForge/components/PoliciesView.jsx
   - docs/design/CrystalForge/components/ScanningView.jsx
   - docs/design/CrystalForge/components/Shell.jsx
   - docs/design/CrystalForge/styles.css
-  - docs/design/CrystalForge/docs/crystal-forge-xccdf-interchange-profile-v0.1.md
+  - >-
+    docs/design/CrystalForge/docs/crystal-forge-xccdf-interchange-profile-v0.1.md
   - packages/default/crates/cf-server/src/models/deployment_policies.rs
   - packages/default/crates/cf-server/src/queries/compliance.rs
   - packages/default/crates/cf-server/src/api/models.rs
@@ -47,7 +49,8 @@ modified_files:
   - packages/web-ui/src/views/
   - packages/web-ui/src/export/
   - packages/web-ui/assets/
-  - docs/design/CrystalForge/docs/crystal-forge-xccdf-interchange-profile-v0.1.md
+  - >-
+    docs/design/CrystalForge/docs/crystal-forge-xccdf-interchange-profile-v0.1.md
 priority: high
 type: feature
 ordinal: 400000
@@ -1202,7 +1205,6 @@ State clearly that v0.1 targets:
 - Level C: Crystal Forge executable round trip.
 
 Do not claim Level D generic SCAP execution unless standard executable checks and valid SCAP packaging are added and tested.
-
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -1253,3 +1255,9 @@ Do not claim Level D generic SCAP execution unless standard executable checks an
 - [ ] #43 `nix flake check --keep-going` passes, or any local timeout is reported accurately and CI provides the authoritative result.
 - [ ] #44 The CF-XCCDF specification and operator documentation match the implemented behavior and make no unsupported SCAP-execution claim.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Dedicated worktree created at `/home/mcamp/code/crystal-forge/TASK-412-cf-xccdf-interchange` on branch `TASK-412-cf-xccdf-interchange`, based on `dev` at `2fdbfa839544628aad4bc802b71d7988cdedc60a`. Initial task research and scope planning are underway.
+<!-- SECTION:NOTES:END -->
