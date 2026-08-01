@@ -1331,3 +1331,48 @@ ALTER TABLE compliance_source_object_mappings
         FOREIGN KEY (bundle_version_id)
         REFERENCES compliance_bundle_versions(id)
         ON DELETE RESTRICT;
+
+-- ── 26. Fix mapping guard to compare full row (P1) ────────────────────────────
+
+CREATE OR REPLACE FUNCTION guard_source_object_mapping_immutability()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION
+            'Source-object mapping % is immutable and cannot be deleted.',
+            OLD.id;
+    END IF;
+
+    IF to_jsonb(NEW) IS DISTINCT FROM to_jsonb(OLD) THEN
+        RAISE EXCEPTION
+            'Source-object mapping % is immutable and cannot be updated.',
+            OLD.id;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+-- ── 27. Fix source-artifact guard to use full-row comparison (P1) ────────────
+
+CREATE OR REPLACE FUNCTION guard_source_artifact_integrity()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.sha256 <> encode(digest(NEW.content, 'sha256'), 'hex') THEN
+            RAISE EXCEPTION
+                'Source artifact %: supplied sha256 does not match content hash.',
+                NEW.id;
+        END IF;
+    ELSIF TG_OP = 'UPDATE' THEN
+        IF (to_jsonb(NEW) - 'signature_details')
+           IS DISTINCT FROM (to_jsonb(OLD) - 'signature_details')
+        THEN
+            RAISE EXCEPTION
+                'Source artifact % is immutable. Only signature_details may change.',
+                OLD.id;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
