@@ -210,7 +210,6 @@ pub fn AppShell() -> Element {
         auth_context = Some(mock);
     }
 
-    let auth_loaded = matches!(auth_fetch_state, AuthFetchState::Loaded);
     let is_authenticated = auth::is_authenticated(&auth_context);
     let mock_auth_enabled = ui_check_mock_auth_enabled();
 
@@ -222,8 +221,21 @@ pub fn AppShell() -> Element {
             return;
         }
 
-        if !auth_loaded || !is_authenticated {
+        // Read authentication state inside the effect so Dioxus subscribes this
+        // preference bootstrap to /whoami completion. Reading only the derived
+        // values outside this closure can leave the bootstrap idle forever when
+        // AppShell first mounts while auth is still loading.
+        let (bootstrap_auth_loaded, bootstrap_is_authenticated) = {
+            let state = app_state.read();
+            (
+                matches!(state.auth_fetch_state.clone(), AuthFetchState::Loaded),
+                auth::is_authenticated(&state.auth),
+            )
+        };
+
+        if !bootstrap_auth_loaded || !bootstrap_is_authenticated {
             if preference_bootstrap() != PreferenceBootstrapState::Idle {
+                preference_bootstrap_attempt.set(preference_bootstrap_attempt() + 1);
                 preference_bootstrap.set(PreferenceBootstrapState::Idle);
             }
             return;
@@ -360,42 +372,10 @@ pub fn AppShell() -> Element {
             }
 
             match preference_bootstrap() {
-                PreferenceBootstrapState::Loaded => {}
-                PreferenceBootstrapState::Error => {
-                    return rsx! {
-                        div {
-                            class: "min-h-screen flex items-center justify-center {theme::surface::PAGE_BG}",
-                            div {
-                                class: "card max-w-lg p-6 space-y-3",
-                                h2 { class: "text-lg font-semibold", "Could not load account preferences" }
-                                if let Some(error) = save_error() {
-                                    p { class: "text-sm text-red-300", "{error}" }
-                                }
-                                button {
-                                    class: "btn btn-primary focus-ring",
-                                    onclick: move |_| {
-                                        preference_bootstrap_attempt.set(preference_bootstrap_attempt() + 1);
-                                        save_error.set(None);
-                                        preference_bootstrap.set(PreferenceBootstrapState::Idle);
-                                    },
-                                    "Retry"
-                                }
-                            }
-                        }
-                    };
-                }
-                PreferenceBootstrapState::Idle | PreferenceBootstrapState::Loading => {
-                    return rsx! {
-                        div {
-                            class: "min-h-screen flex items-center justify-center {theme::surface::PAGE_BG}",
-                            div {
-                                class: "text-center",
-                                div { class: "animate-spin rounded-full h-12 w-12 border-b-2 border-violet-500 mx-auto mb-4" }
-                                p { class: "{theme::text::SECONDARY}", "Loading account preferences..." }
-                            }
-                        }
-                    };
-                }
+                PreferenceBootstrapState::Idle
+                | PreferenceBootstrapState::Loading
+                | PreferenceBootstrapState::Loaded
+                | PreferenceBootstrapState::Error => {}
             }
         }
     }
