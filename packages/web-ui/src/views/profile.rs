@@ -113,17 +113,23 @@ pub fn ProfileView() -> Element {
             }
             match fetch_notification_preferences().await {
                 Ok(preferences) => {
-                    if current_profile_user_id(app_state) == requested_user_id
-                        && current_profile_auth_generation(app_state) == requested_generation
-                    {
+                    if notification_save_request_still_current(
+                        current_profile_user_id(app_state),
+                        current_profile_auth_generation(app_state),
+                        requested_user_id.clone(),
+                        requested_generation,
+                    ) {
                         notification_prefs.set(Some(preferences));
                         notification_error.set(None);
                     }
                 }
                 Err(err) => {
-                    if current_profile_user_id(app_state) == requested_user_id
-                        && current_profile_auth_generation(app_state) == requested_generation
-                    {
+                    if notification_save_request_still_current(
+                        current_profile_user_id(app_state),
+                        current_profile_auth_generation(app_state),
+                        requested_user_id.clone(),
+                        requested_generation,
+                    ) {
                         notification_error.set(Some(format!(
                             "Could not load notification preferences: {err}"
                         )));
@@ -644,6 +650,7 @@ fn save_notification_pref(
     saving_signal.set(true);
 
     spawn(async move {
+        let mut last_confirmed = confirmed_before_update;
         loop {
             let next = pending_signal.with_mut(|pending| pending.take());
             let Some(next_update) = next else {
@@ -655,6 +662,7 @@ fn save_notification_pref(
                     if current_profile_user_id(app_state) == requested_user_id
                         && current_profile_auth_generation(app_state) == requested_generation
                     {
+                        last_confirmed = Some(saved.clone());
                         pending_signal.with(|pending| {
                             if let Some(pending) = pending {
                                 apply_notification_update(&mut saved, pending);
@@ -671,14 +679,13 @@ fn save_notification_pref(
                         && current_profile_auth_generation(app_state) == requested_generation
                     {
                         let newer_pending = pending_signal.with_mut(|pending| pending.take());
-                        if let Some(newer_pending) = newer_pending {
-                            pending_signal.with_mut(|pending| {
-                                merge_notification_update(pending, next_update.clone());
-                                merge_notification_update(pending, newer_pending);
-                            });
-                        } else {
-                            prefs_signal.set(confirmed_before_update.clone());
-                        }
+                        let (restored, requeued) = notification_save_failure_state(
+                            &last_confirmed,
+                            &next_update,
+                            newer_pending,
+                        );
+                        pending_signal.set(requeued);
+                        prefs_signal.set(restored);
                         error_signal.set(Some(format!(
                             "Could not save notification preferences: {err}"
                         )));
@@ -688,9 +695,12 @@ fn save_notification_pref(
             }
         }
         saving_signal.set(false);
-        if current_profile_user_id(app_state) == requested_user_id
-            && current_profile_auth_generation(app_state) == requested_generation
-            && pending_signal.with(|pending| pending.is_some())
+        if notification_save_request_still_current(
+            current_profile_user_id(app_state),
+            current_profile_auth_generation(app_state),
+            requested_user_id,
+            requested_generation,
+        ) && pending_signal.with(|pending| pending.is_some())
         {
             save_notification_pref(
                 prefs_signal,
@@ -702,6 +712,35 @@ fn save_notification_pref(
             );
         }
     });
+}
+
+fn notification_save_failure_state(
+    last_confirmed: &Option<NotificationPreferencesDto>,
+    failed_update: &UpdateNotificationPreferences,
+    newer_pending: Option<UpdateNotificationPreferences>,
+) -> (
+    Option<NotificationPreferencesDto>,
+    Option<UpdateNotificationPreferences>,
+) {
+    let mut restored = last_confirmed.clone();
+    let mut requeued = None;
+    if let Some(newer_pending) = newer_pending {
+        if let Some(restored) = restored.as_mut() {
+            apply_notification_update(restored, &newer_pending);
+        }
+        merge_notification_update(&mut requeued, failed_update.clone());
+        merge_notification_update(&mut requeued, newer_pending);
+    }
+    (restored, requeued)
+}
+
+fn notification_save_request_still_current(
+    current_user_id: Option<String>,
+    current_generation: u64,
+    requested_user_id: Option<String>,
+    requested_generation: u64,
+) -> bool {
+    current_user_id == requested_user_id && current_generation == requested_generation
 }
 
 fn apply_notification_update(
@@ -794,8 +833,30 @@ fn reset_profile_account_state(
 
 #[cfg(test)]
 mod tests {
-    use super::merge_notification_update;
-    use crate::api::models::{NotificationDeliveryChannel, UpdateNotificationPreferences};
+    use super::{
+        merge_notification_update, notification_save_failure_state,
+        notification_save_request_still_current,
+    };
+    use crate::api::models::{
+        NotificationDeliveryChannel, NotificationPreferencesDto, UpdateNotificationPreferences,
+    };
+    use chrono::Utc;
+
+    fn prefs(delivery_channel: NotificationDeliveryChannel) -> NotificationPreferencesDto {
+        NotificationPreferencesDto {
+            deploy_failures: true,
+            build_failures: true,
+            critical_cves: true,
+            policy_violations: true,
+            heartbeat_lost: false,
+            weekly_digest: false,
+            delivery_channel,
+            email_available: true,
+            delivery_email: Some("tester@example.test".to_string()),
+            email_unavailable_reason: None,
+            updated_at: Utc::now(),
+        }
+    }
 
     #[test]
     fn notification_preference_merge_preserves_last_action_per_field() {
@@ -850,6 +911,79 @@ mod tests {
             Some(NotificationDeliveryChannel::Email)
         );
         assert_eq!(pending.heartbeat_lost, Some(true));
+    }
+
+    #[test]
+    fn notification_save_failure_restores_last_successful_snapshot() {
+        let last_confirmed = Some(prefs(NotificationDeliveryChannel::Email));
+        let failed_update = UpdateNotificationPreferences {
+            delivery_channel: Some(NotificationDeliveryChannel::Both),
+            ..UpdateNotificationPreferences::default()
+        };
+
+        let (restored, requeued) =
+            notification_save_failure_state(&last_confirmed, &failed_update, None);
+
+        assert_eq!(requeued, None);
+        assert_eq!(
+            restored.expect("restored prefs").delivery_channel,
+            NotificationDeliveryChannel::Email
+        );
+    }
+
+    #[test]
+    fn notification_save_failure_layers_newer_pending_over_last_success() {
+        let last_confirmed = Some(prefs(NotificationDeliveryChannel::Email));
+        let failed_update = UpdateNotificationPreferences {
+            build_failures: Some(false),
+            delivery_channel: Some(NotificationDeliveryChannel::Both),
+            ..UpdateNotificationPreferences::default()
+        };
+        let newer_pending = UpdateNotificationPreferences {
+            delivery_channel: Some(NotificationDeliveryChannel::InApp),
+            critical_cves: Some(false),
+            ..UpdateNotificationPreferences::default()
+        };
+
+        let (restored, requeued) =
+            notification_save_failure_state(&last_confirmed, &failed_update, Some(newer_pending));
+
+        let restored = restored.expect("restored prefs");
+        assert_eq!(
+            restored.delivery_channel,
+            NotificationDeliveryChannel::InApp
+        );
+        assert!(!restored.critical_cves);
+
+        let requeued = requeued.expect("requeued update");
+        assert_eq!(requeued.build_failures, Some(false));
+        assert_eq!(requeued.critical_cves, Some(false));
+        assert_eq!(
+            requeued.delivery_channel,
+            Some(NotificationDeliveryChannel::InApp)
+        );
+    }
+
+    #[test]
+    fn notification_save_generation_change_discards_queued_response() {
+        assert!(notification_save_request_still_current(
+            Some("user-a".to_string()),
+            7,
+            Some("user-a".to_string()),
+            7,
+        ));
+        assert!(!notification_save_request_still_current(
+            Some("user-a".to_string()),
+            8,
+            Some("user-a".to_string()),
+            7,
+        ));
+        assert!(!notification_save_request_still_current(
+            Some("user-b".to_string()),
+            7,
+            Some("user-a".to_string()),
+            7,
+        ));
     }
 }
 

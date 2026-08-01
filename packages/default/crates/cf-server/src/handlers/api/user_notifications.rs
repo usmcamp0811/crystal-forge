@@ -11,7 +11,8 @@ use uuid::Uuid;
 
 use crate::api::models::{
     NotificationEmailCapability, NotificationPreferencesDto, UpdateNotificationPreferences,
-    UserNotificationDto, UserNotificationsResponse,
+    UserNotificationDto, UserNotificationsResponse, decode_notification_cursor,
+    encode_notification_cursor,
 };
 use crate::auth::extractors::AuthenticatedUser;
 use crate::config::ServerConfig;
@@ -31,6 +32,7 @@ use cf_config::config::{
 #[derive(Debug, Deserialize)]
 pub struct ListNotificationsParams {
     pub limit: Option<i64>,
+    pub cursor: Option<String>,
     pub before: Option<DateTime<Utc>>,
     pub unread_only: Option<bool>,
 }
@@ -135,13 +137,29 @@ pub async fn get_notifications(
 ) -> impl IntoResponse {
     let limit = params.limit.unwrap_or(20).clamp(1, 50);
     let unread_only = params.unread_only.unwrap_or(false);
+    let cursor = match params.cursor.as_deref() {
+        Some(value) => match decode_notification_cursor(value) {
+            Some(cursor) => Some(cursor),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_notification_cursor",
+                        "message": "Notification cursor is invalid"
+                    })),
+                )
+                    .into_response();
+            }
+        },
+        None => params.before.map(|before| (before, Uuid::max())),
+    };
 
     if let Err(err) = materialize_attention_notifications_for_user(&pool, user.user_id).await {
         tracing::warn!(%err, user_id = %user.user_id, "failed to materialize attention notifications");
     }
 
     let notifications =
-        match list_notifications(&pool, user.user_id, limit, params.before, unread_only).await {
+        match list_notifications(&pool, user.user_id, limit, cursor, unread_only).await {
             Ok(notifications) => notifications,
             Err(err) => return server_error(err, "notifications_fetch_failed"),
         };
@@ -151,9 +169,9 @@ pub async fn get_notifications(
     };
 
     let next_cursor = if notifications.len() as i64 == limit {
-        notifications
-            .last()
-            .map(|notification| notification.created_at)
+        notifications.last().map(|notification| {
+            encode_notification_cursor(notification.created_at, notification.id)
+        })
     } else {
         None
     };

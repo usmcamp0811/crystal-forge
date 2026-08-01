@@ -1587,15 +1587,15 @@ pub async fn update_notification_preferences(
 
 pub async fn fetch_user_notifications(
     limit: Option<i64>,
-    before: Option<DateTime<Utc>>,
+    cursor: Option<String>,
     unread_only: bool,
 ) -> Result<UserNotificationsResponse, ApiClientError> {
     let mut params = Vec::new();
     if let Some(limit) = limit {
         params.push(format!("limit={limit}"));
     }
-    if let Some(before) = before {
-        params.push(format!("before={}", before.to_rfc3339()));
+    if let Some(cursor) = cursor {
+        params.push(format!("cursor={cursor}"));
     }
     if unread_only {
         params.push("unread_only=true".to_string());

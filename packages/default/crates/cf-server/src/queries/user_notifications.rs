@@ -507,9 +507,10 @@ pub async fn list_notifications(
     pool: &PgPool,
     user_id: Uuid,
     limit: i64,
-    cursor_created_before: Option<chrono::DateTime<chrono::Utc>>,
+    cursor: Option<(chrono::DateTime<chrono::Utc>, Uuid)>,
     unread_only: bool,
 ) -> Result<Vec<UserNotification>, sqlx::Error> {
+    let (cursor_created_at, cursor_id) = cursor.unzip();
     sqlx::query_as::<_, UserNotification>(
         "SELECT id, user_id, category, source_occurrence_id, source_type, source_id,
                 title, summary, route, created_at, read_at, dismissed_at
@@ -517,14 +518,15 @@ pub async fn list_notifications(
          WHERE user_id = $1
            AND in_app_visible
            AND dismissed_at IS NULL
-           AND ($2::timestamptz IS NULL OR created_at < $2)
-           AND ($3 = FALSE OR read_at IS NULL)
+           AND ($2::timestamptz IS NULL OR (created_at, id) < ($2, $3))
+           AND ($4 = FALSE OR read_at IS NULL)
            AND notification_visible_to_user($1, source_type, source_id)
          ORDER BY created_at DESC, id DESC
-         LIMIT $4",
+         LIMIT $5",
     )
     .bind(user_id)
-    .bind(cursor_created_before)
+    .bind(cursor_created_at)
+    .bind(cursor_id)
     .bind(unread_only)
     .bind(limit.clamp(1, 50))
     .fetch_all(pool)
@@ -606,4 +608,121 @@ pub async fn dismiss_notification(
     .await?;
 
     Ok(result.rows_affected() > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::users::{User, UserType};
+    use sqlx::postgres::PgPoolOptions;
+
+    fn test_database_url() -> String {
+        std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .expect(
+                "CRYSTAL_FORGE_TEST_DATABASE_URL or DATABASE_URL must be set for database tests",
+            )
+    }
+
+    async fn test_pool() -> PgPool {
+        PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&test_database_url())
+            .await
+            .expect("failed to connect to test database")
+    }
+
+    async fn create_test_user(pool: &PgPool, label: &str) -> Uuid {
+        let user_id = Uuid::new_v4();
+        crate::queries::users::create_user(
+            pool,
+            User {
+                id: user_id,
+                username: format!("notifications-{label}-{user_id}"),
+                first_name: Some("Notification".to_string()),
+                last_name: Some("Tester".to_string()),
+                email: format!("notifications-{label}-{user_id}@example.test"),
+                user_type: UserType::Human,
+                is_active: true,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .expect("create test user")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn user_notifications_materialize_event_after_user_creation_before_api_touch() {
+        let pool = test_pool().await;
+        let user_id = create_test_user(&pool, "preference-init").await;
+        let occurrence_id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4().to_string();
+
+        sqlx::query(
+            "INSERT INTO attention_occurrences
+                (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at)
+             VALUES ($1, 'builds', 'builds', $2, $3, NOW(), NOW())",
+        )
+        .bind(occurrence_id)
+        .bind(&subject_id)
+        .bind(format!("test-notification-{occurrence_id}"))
+        .execute(&pool)
+        .await
+        .expect("insert attention occurrence");
+
+        let materialized = materialize_attention_notifications_for_user(&pool, user_id)
+            .await
+            .expect("materialize notifications");
+
+        assert_eq!(materialized, 1);
+        let rows = list_notifications(&pool, user_id, 20, None, false)
+            .await
+            .expect("list notifications");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source_occurrence_id, Some(occurrence_id));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn user_notifications_pagination_uses_created_at_and_id_tie_breaker() {
+        let pool = test_pool().await;
+        let user_id = create_test_user(&pool, "pagination").await;
+        let created_at = chrono::Utc::now();
+        let mut ids = Vec::new();
+
+        for index in 0..21 {
+            let id = Uuid::new_v4();
+            ids.push(id);
+            sqlx::query(
+                "INSERT INTO user_notifications
+                    (id, user_id, category, source_type, source_id, title, summary, route, created_at)
+                 VALUES ($1, $2, 'build_failures', 'builds', $3, $4, 'Same timestamp', '/builds', $5)",
+            )
+            .bind(id)
+            .bind(user_id)
+            .bind(format!("pagination-{id}"))
+            .bind(format!("Build failed {index}"))
+            .bind(created_at)
+            .execute(&pool)
+            .await
+            .expect("insert notification");
+        }
+
+        let first_page = list_notifications(&pool, user_id, 20, None, false)
+            .await
+            .expect("first page");
+        assert_eq!(first_page.len(), 20);
+
+        let last = first_page.last().expect("first page last row");
+        let second_page =
+            list_notifications(&pool, user_id, 20, Some((last.created_at, last.id)), false)
+                .await
+                .expect("second page");
+
+        assert_eq!(second_page.len(), 1);
+        assert!(!first_page.iter().any(|row| row.id == second_page[0].id));
+        assert!(ids.contains(&second_page[0].id));
+    }
 }

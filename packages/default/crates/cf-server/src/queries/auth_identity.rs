@@ -489,6 +489,15 @@ pub async fn create_user_and_bind_external_identity(
     .execute(&mut *tx)
     .await?;
 
+    sqlx::query(
+        "INSERT INTO user_notification_preferences (user_id)
+         VALUES ($1)
+         ON CONFLICT (user_id) DO NOTHING",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
     let tenant_key = normalize_tenant_discriminator(tenant_discriminator);
     sqlx::query(
         "INSERT INTO external_identities (user_id, provider_key, subject, tenant_discriminator, claims)

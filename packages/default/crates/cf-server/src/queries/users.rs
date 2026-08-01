@@ -4,6 +4,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 pub async fn create_user(pool: &PgPool, user: User) -> Result<Uuid> {
+    let mut tx = pool.begin().await?;
     let result = sqlx::query!(
         r#"
         INSERT INTO users (
@@ -21,8 +22,19 @@ pub async fn create_user(pool: &PgPool, user: User) -> Result<Uuid> {
         user.user_type as UserType,
         user.is_active,
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+
+    sqlx::query(
+        "INSERT INTO user_notification_preferences (user_id)
+         VALUES ($1)
+         ON CONFLICT (user_id) DO NOTHING",
+    )
+    .bind(result.id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
 
     Ok(result.id)
 }

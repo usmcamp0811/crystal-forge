@@ -33,6 +33,11 @@ CREATE TABLE user_notification_preferences (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+INSERT INTO user_notification_preferences (user_id)
+SELECT id
+FROM users
+ON CONFLICT (user_id) DO NOTHING;
+
 CREATE TABLE user_notifications (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL

@@ -2467,6 +2467,7 @@ impl NotificationPreferencesDto {
 mod user_notifications_api_tests {
     use super::{
         NotificationDeliveryChannel, NotificationEmailCapability, NotificationPreferencesDto,
+        decode_notification_cursor, encode_notification_cursor,
     };
     use crate::models::user_notifications;
     use chrono::Utc;
@@ -2538,6 +2539,25 @@ mod user_notifications_api_tests {
         assert_eq!(dto.delivery_channel, NotificationDeliveryChannel::Both);
         assert!(dto.weekly_digest);
         assert!(dto.email_unavailable_reason.is_none());
+    }
+
+    #[test]
+    fn user_notifications_cursor_round_trips_without_url_reserved_time_chars() {
+        let id = Uuid::new_v4();
+        let created_at = Utc::now();
+        let cursor = encode_notification_cursor(created_at, id);
+
+        assert!(!cursor.contains('+'));
+        assert!(!cursor.contains(':'));
+
+        let (decoded_created_at, decoded_id) =
+            decode_notification_cursor(&cursor).expect("cursor decodes");
+        assert_eq!(decoded_id, id);
+        assert_eq!(
+            decoded_created_at.timestamp_micros(),
+            created_at.timestamp_micros()
+        );
+        assert!(decode_notification_cursor("not-a-cursor").is_none());
     }
 }
 
@@ -2613,7 +2633,19 @@ impl From<crate::models::user_notifications::UserNotification> for UserNotificat
 pub struct UserNotificationsResponse {
     pub notifications: Vec<UserNotificationDto>,
     pub unread_count: i64,
-    pub next_cursor: Option<DateTime<Utc>>,
+    pub next_cursor: Option<String>,
+}
+
+pub fn encode_notification_cursor(created_at: DateTime<Utc>, id: Uuid) -> String {
+    format!("{}|{}", created_at.timestamp_micros(), id)
+}
+
+pub fn decode_notification_cursor(value: &str) -> Option<(DateTime<Utc>, Uuid)> {
+    let (created_at, id) = value.split_once('|')?;
+    Some((
+        DateTime::from_timestamp_micros(created_at.parse().ok()?)?,
+        Uuid::parse_str(id).ok()?,
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

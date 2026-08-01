@@ -3181,7 +3181,7 @@ pub struct UserNotificationDto {
 pub struct UserNotificationsResponse {
     pub notifications: Vec<UserNotificationDto>,
     pub unread_count: i64,
-    pub next_cursor: Option<DateTime<Utc>>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
