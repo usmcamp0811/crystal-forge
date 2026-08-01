@@ -1,63 +1,61 @@
-
 ---
-
 id: TASK-414
 title: Implement account notifications and active session management
-status: Backlog
-assignee: []
+status: In Progress
+assignee:
+  - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-01 04:04'
+updated_date: '2026-08-01 04:21'
 labels:
-
-- frontend
-- web-ui
-- backend
-- api
-- database
-- auth
-- security
-- notifications
-- email
-- design
-- testing
-  dependencies: []
-  references:
-- merge-request:312
-- docs/design/CrystalForge/components/ProfileView.jsx
-- docs/design/CrystalForge/components/Shell.jsx
-- docs/design/CrystalForge/styles.css
-- packages/web-ui/src/views/profile.rs
-- packages/web-ui/src/components/layout/topbar.rs
-- packages/web-ui/src/components/layout/app_shell.rs
-- packages/web-ui/src/alerts/
-- packages/default/crates/cf-server/src/auth/
-- packages/default/crates/cf-server/src/handlers/api/
-- packages/default/crates/cf-server/migrations/0196_user_preferences.sql
-  modified_files:
-- packages/default/crates/cf-server/migrations/
-- packages/default/crates/cf-server/src/api/
-- packages/default/crates/cf-server/src/auth/
-- packages/default/crates/cf-server/src/handlers/api/
-- packages/default/crates/cf-server/src/models/
-- packages/default/crates/cf-server/src/queries/
-- packages/default/crates/cf-server/src/background_jobs/
-- packages/default/crates/cf-server/src/server/
-- packages/web-ui/src/api/
-- packages/web-ui/src/components/
-- packages/web-ui/src/components/layout/
-- packages/web-ui/src/state/
-- packages/web-ui/src/views/profile.rs
-- packages/web-ui/assets/
-- checks/web-ui/
-- modules/
-  priority: high
-  type: feature
-  ordinal: 410000
-
+  - frontend
+  - web-ui
+  - backend
+  - api
+  - database
+  - auth
+  - security
+  - notifications
+  - email
+  - design
+  - testing
+dependencies: []
+references:
+  - 'merge-request:312'
+  - docs/design/CrystalForge/components/ProfileView.jsx
+  - docs/design/CrystalForge/components/Shell.jsx
+  - docs/design/CrystalForge/styles.css
+  - packages/web-ui/src/views/profile.rs
+  - packages/web-ui/src/components/layout/topbar.rs
+  - packages/web-ui/src/components/layout/app_shell.rs
+  - packages/web-ui/src/alerts/
+  - packages/default/crates/cf-server/src/auth/
+  - packages/default/crates/cf-server/src/handlers/api/
+  - packages/default/crates/cf-server/migrations/0196_user_preferences.sql
+modified_files:
+  - packages/default/crates/cf-server/migrations/
+  - packages/default/crates/cf-server/src/api/
+  - packages/default/crates/cf-server/src/auth/
+  - packages/default/crates/cf-server/src/handlers/api/
+  - packages/default/crates/cf-server/src/models/
+  - packages/default/crates/cf-server/src/queries/
+  - packages/default/crates/cf-server/src/background_jobs/
+  - packages/default/crates/cf-server/src/server/
+  - packages/web-ui/src/api/
+  - packages/web-ui/src/components/
+  - packages/web-ui/src/components/layout/
+  - packages/web-ui/src/state/
+  - packages/web-ui/src/views/profile.rs
+  - packages/web-ui/assets/
+  - checks/web-ui/
+  - modules/
+priority: high
+type: feature
+ordinal: 410000
 ---
 
 ## Description
 
+<!-- SECTION:DESCRIPTION:BEGIN -->
 Complete the two intentionally unavailable areas added to the Profile & Preferences page by MR !312:
 
 1. Notifications
@@ -1027,6 +1025,7 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 ```
 
 Run database-backed ignored tests explicitly against the migrated isolated test database.
+<!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance criteria
 
@@ -1081,6 +1080,12 @@ Run database-backed ignored tests explicitly against the migrated isolated test 
 - [ ] Web UI integration tests pass.
 - [ ] The Nix web-ui check passes.
 - [ ] The task record documents the final schema, API routes, configuration, defaults, and verification commands.
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Repaired malformed TASK-414 front matter so Backlog.md can hydrate the task correctly; issue was indentation under labels/references/modified_files plus a leading blank line before front matter. User explicitly requested starting TASK-414, so task is being taken into progress for implementation preflight.
+<!-- SECTION:NOTES:END -->
 
 ## Implementation order
 
