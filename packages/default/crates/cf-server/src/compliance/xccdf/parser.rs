@@ -219,6 +219,19 @@ impl ParserState {
         self.current_element = name.to_string();
         self.current_text.clear();
 
+        // Enforce attribute count limit.
+        let attr_count = e.attributes().count();
+        if attr_count > self.limits.max_attributes_per_element {
+            self.errors.push(Diagnostic::error(
+                "ATTRIBUTE_LIMIT_EXCEEDED",
+                &format!(
+                    "Element '{}' has {} attributes, exceeding maximum {}",
+                    name, attr_count, self.limits.max_attributes_per_element
+                ),
+            ));
+            return;
+        }
+
         // Detect namespace prefix on this element.
         let is_cf = e.name().prefix()
             .and_then(|p| std::str::from_utf8(p.as_ref()).ok().map(String::from))
@@ -401,7 +414,6 @@ impl ParserState {
             }
             "Rule" => {
                 if let Some(rule) = self.current_rule.take() {
-                    self.check_rule_limit();
                     self.rules.push(rule);
                 }
             }
@@ -518,22 +530,32 @@ impl ParserState {
         }
     }
 
-    fn check_rule_limit(&mut self) {
+    fn begin_rule(&mut self) -> bool {
         if self.rules.len() >= self.limits.max_rule_count {
             self.errors.push(Diagnostic::error(
                 "RULE_LIMIT_EXCEEDED",
-                &format!("Rule count {} exceeds maximum {}", self.rules.len(), self.limits.max_rule_count),
+                &format!(
+                    "Rule count exceeds maximum {}",
+                    self.limits.max_rule_count
+                ),
             ));
+            return false;
         }
+        true
     }
 
-    fn check_profile_limit(&mut self) {
+    fn begin_profile(&mut self) -> bool {
         if self.profiles.len() >= self.limits.max_profile_count {
             self.errors.push(Diagnostic::error(
                 "PROFILE_LIMIT_EXCEEDED",
-                &format!("Profile count {} exceeds maximum {}", self.profiles.len(), self.limits.max_profile_count),
+                &format!(
+                    "Profile count exceeds maximum {}",
+                    self.limits.max_profile_count
+                ),
             ));
+            return false;
         }
+        true
     }
 
     // ── Start-element parsing ──────────────────────────────────────────────────
@@ -559,6 +581,9 @@ impl ParserState {
     }
 
     fn parse_profile_start(&mut self, e: &quick_xml::events::BytesStart) {
+        if !self.begin_profile() {
+            return;
+        }
         let id = e
             .try_get_attribute("id")
             .ok()
@@ -588,6 +613,9 @@ impl ParserState {
     }
 
     fn parse_rule_start(&mut self, e: &quick_xml::events::BytesStart) {
+        if !self.begin_rule() {
+            return;
+        }
         let id = e
             .try_get_attribute("id")
             .ok()
