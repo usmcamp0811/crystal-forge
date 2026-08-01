@@ -9,6 +9,13 @@
 --    never creates an implicit derived draft.
 -- 6. Bundle membership and draft sync triggers: error-on-missing semantics.
 -- 7. Rebuilt assignment updated_at trigger.
+-- 8. Corrected accepted→deprecated comparison (P1 #3): use full-row minus
+--    publication_state to reject every non-lifecycle change.
+-- 9. Bundle publication guard (P1 #2): deferred validation that every selected
+--    membership references an immutable (accepted/deprecated) policy version.
+-- 10. Restricted sync triggers (P1 #1): the lineage sync triggers fire only
+--    for semantic-column updates so pointer-only updates (publication) do not
+--    provoke a "no draft version" error.
 
 -- ── 1. Policy pointer-integrity triggers ─────────────────────────────────────
 
@@ -493,16 +500,12 @@ BEGIN
             RAISE EXCEPTION 'Cannot delete accepted bundle version %.', OLD.id;
         END IF;
         IF NEW.publication_state = 'deprecated' THEN
-            IF NEW.name IS DISTINCT FROM OLD.name
-            OR NEW.framework IS DISTINCT FROM OLD.framework
-            OR NEW.framework_version IS DISTINCT FROM OLD.framework_version
-            OR NEW.description IS DISTINCT FROM OLD.description
-            OR NEW.layer IS DISTINCT FROM OLD.layer
-            OR NEW.owner IS DISTINCT FROM OLD.owner
-            OR NEW.semantic_digest IS DISTINCT FROM OLD.semantic_digest
+            -- P1 #3: Compare every non-lifecycle column. Only publication_state may change.
+            IF (to_jsonb(NEW) - 'publication_state')
+               IS DISTINCT FROM (to_jsonb(OLD) - 'publication_state')
             THEN
                 RAISE EXCEPTION
-                    'Deprecating accepted bundle version % but semantic fields changed.', OLD.id;
+                    'Deprecating accepted bundle version % but non-lifecycle fields changed.', OLD.id;
             END IF;
             RETURN NEW;
         END IF;
@@ -524,14 +527,11 @@ BEGIN
             RAISE EXCEPTION 'Cannot delete accepted policy version %.', OLD.id;
         END IF;
         IF NEW.publication_state = 'deprecated' THEN
-            IF NEW.name IS DISTINCT FROM OLD.name
-            OR NEW.description IS DISTINCT FROM OLD.description
-            OR NEW.policy_type IS DISTINCT FROM OLD.policy_type
-            OR NEW.config::text IS DISTINCT FROM OLD.config::text
-            OR NEW.semantic_digest IS DISTINCT FROM OLD.semantic_digest
+            IF (to_jsonb(NEW) - 'publication_state')
+               IS DISTINCT FROM (to_jsonb(OLD) - 'publication_state')
             THEN
                 RAISE EXCEPTION
-                    'Deprecating accepted policy version % but semantic fields changed.', OLD.id;
+                    'Deprecating accepted policy version % but non-lifecycle fields changed.', OLD.id;
             END IF;
             RETURN NEW;
         END IF;
@@ -585,3 +585,66 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+
+-- ── 10. Restrict sync triggers to semantic columns only (P1 #1) ───────────────
+-- The original trigger definitions fired on ANY update to the lineage, including
+-- pointer-only updates during publication.  Drop and recreate with explicit
+-- column filters so clearing current_draft_version_id does not trigger the
+-- "no draft version" error during publication.
+
+DROP TRIGGER IF EXISTS trigger_sync_policy_draft_version ON deployment_policies;
+CREATE TRIGGER trigger_sync_policy_draft_version
+    AFTER INSERT OR UPDATE OF name, description, policy_type, config
+    ON deployment_policies
+    FOR EACH ROW
+    WHEN (pg_trigger_depth() = 0)
+    EXECUTE FUNCTION sync_policy_draft_version();
+
+DROP TRIGGER IF EXISTS trigger_sync_bundle_draft_version ON compliance_bundles;
+CREATE TRIGGER trigger_sync_bundle_draft_version
+    AFTER INSERT OR UPDATE OF name, framework, version, description
+    ON compliance_bundles
+    FOR EACH ROW
+    WHEN (pg_trigger_depth() = 0)
+    EXECUTE FUNCTION sync_bundle_draft_version();
+
+-- ── 11. Deferred bundle publication guard (P1 #2) ─────────────────────────────
+-- Before a bundle version can become accepted, every selected membership row
+-- must reference an immutable (accepted/deprecated) policy version.
+-- This fires at COMMIT time so the publication service can atomically publish
+-- included policy drafts in the same transaction.
+
+CREATE OR REPLACE FUNCTION validate_bundle_policy_versions_on_accept()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    v_count bigint;
+BEGIN
+    IF NEW.publication_state = 'accepted' THEN
+        SELECT COUNT(*) INTO v_count
+        FROM compliance_bundle_version_policies membership
+        JOIN deployment_policy_versions policy_version
+          ON policy_version.id = membership.policy_version_id
+        WHERE membership.bundle_version_id = NEW.id
+          AND membership.selected = TRUE
+          AND policy_version.publication_state
+              NOT IN ('accepted', 'deprecated');
+
+        IF v_count > 0 THEN
+            RAISE EXCEPTION
+                'Bundle version % cannot be accepted: % selected member policy version(s) '
+                'are not in an immutable (accepted or deprecated) state. '
+                'Publish the included policy versions before publishing the bundle, '
+                'or remove the draft policies from the baseline.',
+                NEW.id, v_count;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER trigger_validate_bundle_policy_versions_on_accept
+    AFTER UPDATE OF publication_state ON compliance_bundle_versions
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    WHEN (OLD.publication_state IS DISTINCT FROM NEW.publication_state)
+    EXECUTE FUNCTION validate_bundle_policy_versions_on_accept();
