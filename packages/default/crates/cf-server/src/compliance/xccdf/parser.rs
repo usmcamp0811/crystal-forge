@@ -65,8 +65,15 @@ pub fn parse_xccdf(
                 state.handle_end(name);
             }
             Ok(Event::Text(ref e)) => {
-                if let Ok(text) = e.unescape() {
-                    state.handle_text(&text);
+                match e.unescape() {
+                    Ok(text) => state.handle_text(&text),
+                    Err(error) => {
+                        state.errors.push(Diagnostic::error(
+                            "XML_ENTITY_ERROR",
+                            &format!("Invalid XML entity reference: {error}"),
+                        ));
+                        break;
+                    }
                 }
             }
             Ok(Event::CData(ref e)) => {
@@ -492,11 +499,12 @@ impl ParserState {
     }
 
     fn handle_text(&mut self, text: &str) {
-        if text.len() > self.limits.max_text_node_bytes {
+        if self.current_text.len() + text.len() > self.limits.max_text_node_bytes {
             self.errors.push(Diagnostic::error(
                 "TEXT_TOO_LARGE",
                 &format!(
-                    "Text node exceeds maximum of {} bytes",
+                    "Cumulative text {} exceeds maximum of {} bytes",
+                    self.current_text.len() + text.len(),
                     self.limits.max_text_node_bytes
                 ),
             ));
@@ -510,9 +518,21 @@ impl ParserState {
         }
     }
 
-    fn check_rule_limit(&self) {
+    fn check_rule_limit(&mut self) {
         if self.rules.len() >= self.limits.max_rule_count {
-            // Will be caught next iteration; just log a warning for now.
+            self.errors.push(Diagnostic::error(
+                "RULE_LIMIT_EXCEEDED",
+                &format!("Rule count {} exceeds maximum {}", self.rules.len(), self.limits.max_rule_count),
+            ));
+        }
+    }
+
+    fn check_profile_limit(&mut self) {
+        if self.profiles.len() >= self.limits.max_profile_count {
+            self.errors.push(Diagnostic::error(
+                "PROFILE_LIMIT_EXCEEDED",
+                &format!("Profile count {} exceeds maximum {}", self.profiles.len(), self.limits.max_profile_count),
+            ));
         }
     }
 

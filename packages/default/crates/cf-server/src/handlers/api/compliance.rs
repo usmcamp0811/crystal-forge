@@ -354,7 +354,7 @@ pub async fn export_bundle_xccdf(
 
     // Load the bundle version to build the canonical representation.
     let version_row: Option<(String, String, Option<String>, Option<String>, String, String)> =
-        sqlx::query_as(
+        match sqlx::query_as(
             r#"
             SELECT name, framework, framework_version, description, layer, owner
             FROM compliance_bundle_versions WHERE id = $1
@@ -363,8 +363,13 @@ pub async fn export_bundle_xccdf(
         .bind(version_id)
         .fetch_optional(&pool)
         .await
-        .ok()
-        .flatten();
+        {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::error!(%error, %version_id, "failed to load bundle version for export");
+                return internal_error("Failed to load bundle version");
+            }
+        };
 
     let Some((name, framework, fw_ver, desc, layer, owner)) = version_row else {
         return not_found();
