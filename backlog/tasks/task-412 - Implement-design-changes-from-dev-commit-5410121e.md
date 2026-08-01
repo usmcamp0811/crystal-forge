@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.6-terra
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-01 01:35'
+updated_date: '2026-08-01 01:43'
 labels:
   - design
   - frontend
@@ -1317,4 +1317,6 @@ Before implementation, approve the phased delivery/subtask breakdown and the dep
 Dedicated worktree created at `/home/mcamp/code/crystal-forge/TASK-412-cf-xccdf-interchange` on branch `TASK-412-cf-xccdf-interchange`, based on `dev` at `2fdbfa839544628aad4bc802b71d7988cdedc60a`. Initial task research and scope planning are underway.
 
 User approved the recorded seven-phase delivery plan on 2026-07-31. Proceeding with phase 1: freeze the interchange contract and establish vendored-schema/parser test foundations.
+
+Phase 1 foundation added: `cf-server::compliance::interchange` freezes the XCCDF and Crystal Forge namespace/check-system identifiers, canonicalization/digest versions, and bounded XML/ZIP/parser resource limits with unit tests. Added the initial typed `cf-xccdf-1.xsd` extension schema and provenance record. Verification: `SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml --lib compliance::interchange` passed (2 tests); `xmllint --noout schemas/cf-xccdf-1/cf-xccdf-1.xsd` passed; `git diff --check` passed. A broad `cargo test` without `SQLX_OFFLINE=true` cannot compile because it attempts database connections; broad `rustfmt --check` also reports pre-existing formatting differences in unrelated server files, which were not retained. Remaining phase-1 work: vendor the complete NIST XCCDF 1.2 schema dependency set and add the no-network Nix validation check.
 <!-- SECTION:NOTES:END -->
