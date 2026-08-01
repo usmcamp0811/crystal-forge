@@ -1,5 +1,5 @@
 ---
-id: TASK-412
+id: TASK-413
 title: >-
   Implement Profile & Preferences view with user identity, appearance settings,
   notifications, and sessions
