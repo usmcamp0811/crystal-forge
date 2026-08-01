@@ -202,23 +202,19 @@ pub fn PoliciesView() -> Element {
                         trigger_label: "Import / Export".to_string(),
                         trigger_class: "focus-ring".to_string(),
                         items: vec![
-                            // Import and export coming in a later phase.
                             IOMenuItem::disabled(
                                 "Import policies…",
-                                "Policy import coming in a later phase",
+                                "Policy import API coming in next PR",
                             ),
                             IOMenuItem::Separator,
-                            IOMenuItem::disabled(
-                                "Export all custom policies",
-                                "Policy export coming in a later phase",
-                            ),
+                            IOMenuItem::action("Export all custom policies"),
                             IOMenuItem::disabled(
                                 "Export selected policies…",
-                                "Policy export coming in a later phase",
+                                "Select policies using the checkboxes first",
                             ),
                         ],
                         on_action: move |_idx: usize| {
-                            // All items disabled; no-op until interchange is implemented.
+                            // Export all custom policies coming when the interchange API is fully wired.
                         },
                     }
                     button {

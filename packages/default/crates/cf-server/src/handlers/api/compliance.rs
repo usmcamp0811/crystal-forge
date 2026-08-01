@@ -342,8 +342,7 @@ pub async fn xccdf_import(State(pool): State<PgPool>, headers: HeaderMap) -> imp
 
 /// `GET /api/v1/compliance/bundle-versions/:version_id/xccdf`
 ///
-/// Exports the bundle version as an XCCDF 1.2 XML document. Full
-/// implementation arrives in phase 4.
+/// Exports the bundle version as an XCCDF 1.2 XML document.
 pub async fn export_bundle_xccdf(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -352,16 +351,98 @@ pub async fn export_bundle_xccdf(
     let Some((_user_id, _roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
-    let _ = version_id;
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(ApiError {
-            error: "Not Implemented".to_string(),
-            message: "XCCDF export not yet implemented".to_string(),
-            details: None,
-        }),
+
+    // Load the bundle version to build the canonical representation.
+    let version_row: Option<(String, String, Option<String>, Option<String>, String, String)> =
+        sqlx::query_as(
+            r#"
+            SELECT name, framework, framework_version, description, layer, owner
+            FROM compliance_bundle_versions WHERE id = $1
+            "#,
+        )
+        .bind(version_id)
+        .fetch_optional(&pool)
+        .await
+        .ok()
+        .flatten();
+
+    let Some((name, framework, fw_ver, desc, layer, owner)) = version_row else {
+        return not_found();
+    };
+
+    // Load membership.
+    let members = match load_bundle_membership_txless(&pool, version_id).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!("Failed to load bundle membership for export: {e:#}");
+            return internal_error("Failed to load bundle membership");
+        }
+    };
+
+    let canonical = BundleVersionCanonical {
+        name,
+        framework,
+        framework_version: fw_ver,
+        description: desc,
+        layer,
+        owner,
+        members,
+    };
+
+    match write_bundle_xccdf(&canonical) {
+        Ok(xml) => {
+            let safe_filename = safe_bundle_xml_filename(&canonical.name);
+            (
+                StatusCode::OK,
+                [
+                    ("content-type", "application/xml"),
+                    ("content-disposition", &format!("attachment; filename=\"{}\"", safe_filename)),
+                ],
+                xml,
+            ).into_response()
+        }
+        Err(e) => {
+            tracing::error!("XCCDF export write error: {e:#}");
+            internal_error("Failed to generate XCCDF export")
+        }
+    }
+}
+
+/// Load bundle membership without a transaction (for read-only export).
+async fn load_bundle_membership_txless(
+    pool: &PgPool,
+    version_id: Uuid,
+) -> Result<Vec<BundleMembershipEntry>, anyhow::Error> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        policy_version_id: Uuid,
+        selected: bool,
+    }
+    let rows: Vec<Row> = sqlx::query_as(
+        r#"
+        SELECT policy_version_id, selected
+        FROM compliance_bundle_version_policies
+        WHERE bundle_version_id = $1
+        ORDER BY policy_order ASC
+        "#,
     )
-        .into_response()
+    .bind(version_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| BundleMembershipEntry {
+            policy_version_id: r.policy_version_id,
+            selected: r.selected,
+        })
+        .collect())
+}
+
+fn safe_bundle_xml_filename(name: &str) -> String {
+    let safe = name.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect::<String>();
+    format!("{}.xml", if safe.is_empty() { "bundle" } else { &safe })
 }
 
 /// `POST /api/v1/policies/interchange/export`

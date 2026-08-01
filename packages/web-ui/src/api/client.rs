@@ -29,7 +29,7 @@ fn backend_origin_for_dev(window: &web_sys::Window, origin: &str) -> Option<Stri
 
 /// Base URL for the API. In production this is the same origin;
 /// during development it may point to a different port.
-fn base_url() -> String {
+pub fn base_url() -> String {
     let window = web_sys::window().expect("no global window");
     let location = window.location();
     let origin = location

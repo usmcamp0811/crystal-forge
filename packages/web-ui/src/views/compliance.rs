@@ -196,23 +196,30 @@ pub fn ComplianceView() -> Element {
                         items: {
                             let mut items = vec![];
                             if is_admin {
-                                // Import STIG: wired to the existing sample modal.
                                 items.push(IOMenuItem::action_with_icon(
                                     "Import STIG or XCCDF (.xml/.zip)",
                                     IconName::Download,
                                 ));
-                                // Import CF bundle: coming in a later phase.
+                                // Import CF bundle: requires the full import UI.
                                 items.push(IOMenuItem::disabled(
                                     "Import Crystal Forge bundle (.xml)",
                                     "CF bundle import coming in a later phase",
                                 ));
                                 items.push(IOMenuItem::Separator);
                             }
-                            // Export XCCDF: coming in a later phase.
-                            items.push(IOMenuItem::disabled(
-                                "Export this bundle (XCCDF .xml)",
-                                "XCCDF export coming in a later phase",
-                            ));
+                            // Export XCCDF: enabled when a bundle version is selected.
+                            let bundle_selected = selected_bundle_id.read().is_some();
+                            items.push(if bundle_selected {
+                                IOMenuItem::action_with_icon(
+                                    "Export this bundle (XCCDF .xml)",
+                                    IconName::Download,
+                                )
+                            } else {
+                                IOMenuItem::disabled(
+                                    "Export this bundle (XCCDF .xml)",
+                                    "Select a bundle first",
+                                )
+                            });
                             items.push(IOMenuItem::action_with_icon(
                                 "Export evidence report…",
                                 IconName::Download,
@@ -220,17 +227,39 @@ pub fn ComplianceView() -> Element {
                             items
                         },
                         on_action: move |idx: usize| {
-                            // Index mapping depends on is_admin:
-                            // admin:    0=Import STIG, 1=Import CF bundle (disabled), sep, 2=Export XCCDF (disabled), 3=Export evidence
-                            // non-admin: 0=Export XCCDF (disabled), 1=Export evidence
                             if is_admin {
                                 match idx {
                                     0 => show_import_stig.set(true),
+                                    2 => {
+                                        // Export XCCDF: trigger a download of the selected bundle.
+                                        if let Some(bid) = *selected_bundle_id.read() {
+                                            let url = format!(
+                                                "{}/api/v1/compliance/bundle-versions/{}/xccdf",
+                                                crate::api::client::base_url(),
+                                                bid
+                                            );
+                                            if let Some(win) = web_sys::window() {
+                                                let _ = win.location().set_href(&url);
+                                            }
+                                        }
+                                    }
                                     3 => show_export.set(true),
                                     _ => {}
                                 }
                             } else {
                                 match idx {
+                                    0 => {
+                                        if let Some(bid) = *selected_bundle_id.read() {
+                                            let url = format!(
+                                                "{}/api/v1/compliance/bundle-versions/{}/xccdf",
+                                                crate::api::client::base_url(),
+                                                bid
+                                            );
+                                            if let Some(win) = web_sys::window() {
+                                                let _ = win.location().set_href(&url);
+                                            }
+                                        }
+                                    }
                                     1 => show_export.set(true),
                                     _ => {}
                                 }
