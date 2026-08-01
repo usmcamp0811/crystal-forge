@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-31 13:46'
-updated_date: '2026-07-31 23:50'
+updated_date: '2026-08-01 00:14'
 labels:
   - web-ui
   - design-parity
@@ -150,4 +150,9 @@ Addressed re-review races:
   - `nix develop -c bash -c 'rustfmt --edition 2024 packages/default/crates/cf-server/src/bin/server.rs packages/default/crates/cf-server/src/handlers/api/user_preferences.rs packages/default/crates/cf-server/src/queries/user_preferences.rs packages/web-ui/src/api/client.rs packages/web-ui/src/components/layout/app_shell.rs packages/web-ui/src/state/preferences.rs && node --check checks/web-ui/tests/integration-test.js'` passed.
   - `nix develop -c bash -c 'SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml && SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_preferences --lib && cd packages/web-ui && cargo check --target wasm32-unknown-unknown && cargo test --bin crystal-forge-ui preferences::tests'` passed with existing warnings; server command ran 3 non-ignored user_preferences tests and reported 6 ignored live-DB tests.
   - Attempted required ignored DB command with `CRYSTAL_FORGE_TEST_DATABASE_URL`, but the variable is not set in this shell: `CRYSTAL_FORGE_TEST_DATABASE_URL is not set` (exit 2).
+
+Addressed final P2 re-review item:
+- `save_update()` now clears `save_error` after every successful response that includes preferences, and reports an explicit error if the server returns no preferences.
+- Strengthened the browser ordering test by proxying delayed PATCHes through `route.fetch()`/`route.fulfill()` and waiting on a named first-request-completed promise before reading final preferences, so an unserialized implementation cannot pass by asserting before the delayed first request reaches the server.
+- Verification run: `nix develop -c bash -c 'rustfmt --edition 2024 packages/web-ui/src/state/preferences.rs && node --check checks/web-ui/tests/integration-test.js && cd packages/web-ui && cargo check --target wasm32-unknown-unknown && cargo test --bin crystal-forge-ui preferences::tests'` passed with existing warnings.
 <!-- SECTION:NOTES:END -->
