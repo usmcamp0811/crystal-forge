@@ -1,5 +1,6 @@
 //! Canonical semantic JSON and SHA-256 digests for portable compliance objects.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -34,6 +35,40 @@ pub const fn digest_contract() -> (&'static str, &'static str) {
     (DIGEST_ALGORITHM, CANONICALIZATION_VERSION)
 }
 
+/// Publication states shared by policy and bundle versions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicationState {
+    Incomplete,
+    Draft,
+    Interim,
+    Accepted,
+    Deprecated,
+}
+
+impl PublicationState {
+    pub const fn is_immutable(self) -> bool {
+        matches!(self, Self::Accepted | Self::Deprecated)
+    }
+}
+
+/// Whether Crystal Forge can activate an imported requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImplementationState {
+    Native,
+    Manual,
+    External,
+    Unbound,
+    Opaque,
+}
+
+impl ImplementationState {
+    pub const fn can_activate(self) -> bool {
+        matches!(self, Self::Native | Self::Manual | Self::External)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -54,5 +89,14 @@ mod tests {
             semantic_digest(&json!({"rules": ["one", "two"]})),
             semantic_digest(&json!({"rules": ["two", "one"]}))
         );
+    }
+
+    #[test]
+    fn publication_and_implementation_state_preserve_activation_rules() {
+        assert!(PublicationState::Accepted.is_immutable());
+        assert!(!PublicationState::Draft.is_immutable());
+        assert!(ImplementationState::Native.can_activate());
+        assert!(!ImplementationState::Unbound.can_activate());
+        assert!(!ImplementationState::Opaque.can_activate());
     }
 }
