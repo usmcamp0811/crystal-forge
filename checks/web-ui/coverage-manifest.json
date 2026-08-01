@@ -786,6 +786,20 @@
       "baseline": "advisory"
     },
     {
+      "name": "11a-profile-preferences",
+      "description": "Profile page uses account-scoped preferences and reports save failures",
+      "route": "/profile",
+      "designRef": "docs/design/CrystalForge/components/ProfileView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
       "name": "11b-builders",
       "description": "Builders list cards/table parity with real-shaped API data",
       "route": "/builders",

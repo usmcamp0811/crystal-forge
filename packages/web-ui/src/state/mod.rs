@@ -7,4 +7,5 @@
 pub mod app_state;
 pub mod auth;
 pub mod navigation_focus;
+pub mod preferences;
 pub mod theme;

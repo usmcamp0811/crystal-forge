@@ -19,6 +19,7 @@ use crate::views::flakes::FlakesView;
 use crate::views::login::LoginView;
 use crate::views::not_found::NotFoundView;
 use crate::views::policies::PoliciesView;
+use crate::views::profile::ProfileView;
 use crate::views::register::RegisterView;
 use crate::views::scanning::ScanningView;
 use crate::views::setup::SetupView;
@@ -78,6 +79,9 @@ pub enum Route {
     #[route("/admin")]
     AdminView {},
 
+    #[route("/profile")]
+    ProfileView {},
+
     #[route("/style-guide")]
     StyleGuideView {},
 
@@ -120,6 +124,7 @@ impl Route {
             Route::PoliciesView { .. } => "Deployment Policies".to_string(),
             Route::ComplianceView { .. } => "Compliance".to_string(),
             Route::AdminView { .. } => "Server Management".to_string(),
+            Route::ProfileView { .. } => "Profile & Preferences".to_string(),
             Route::StyleGuideView { .. } => "Component Showcase".to_string(),
             Route::LoginView { .. } => "Sign In".to_string(),
             Route::RegisterView { .. } => "Register".to_string(),

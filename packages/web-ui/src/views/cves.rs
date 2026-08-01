@@ -227,7 +227,8 @@ pub fn CvesView() -> Element {
     });
 
     use_effect(move || {
-        if let (Some(Ok(_s)), Some(Ok(_items))) = (stats.read().as_ref(), cve_list.read().as_ref()) {
+        if let (Some(Ok(_s)), Some(Ok(_items))) = (stats.read().as_ref(), cve_list.read().as_ref())
+        {
             let Some(cursor) = NAV_BADGES.read_unchecked().observed_at.clone() else {
                 return;
             };

@@ -11,5 +11,7 @@ pub use card::Card;
 pub use dev_banner::{
     BannerPlacement, DEV_MODE_BANNER_HEIGHT_PX, DevModeBanner, use_dev_mode_enabled,
 };
-pub use sidebar::{MobileDrawer, SidebarContext, SidebarEdgeToggle, SidebarNav};
+pub use sidebar::{
+    MobileDrawer, PreferencesContext, SidebarContext, SidebarEdgeToggle, SidebarNav,
+};
 pub use topbar::TopBar;

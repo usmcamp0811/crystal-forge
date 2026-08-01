@@ -2130,6 +2130,54 @@ pub struct AuthContext {
     pub auth_mode: AuthMode,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UiThemePreference {
+    Dark,
+    Light,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UiDensityPreference {
+    Comfortable,
+    Compact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SystemsViewPreference {
+    Cards,
+    Table,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserPreferencesDto {
+    pub user_id: Uuid,
+    pub theme: String,
+    pub density: String,
+    pub sidebar_collapsed: bool,
+    pub default_systems_view: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserPreferencesResponse {
+    pub preferences: Option<UserPreferencesDto>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateUserPreferences {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<UiThemePreference>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub density: Option<UiDensityPreference>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sidebar_collapsed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_systems_view: Option<SystemsViewPreference>,
+}
+
 /// Admin users list item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdminUserSummary {

@@ -1305,6 +1305,25 @@ pub async fn fetch_whoami() -> Result<AuthContext, ApiClientError> {
     fetch_json(&url).await
 }
 
+pub async fn fetch_user_preferences() -> Result<UserPreferencesResponse, ApiClientError> {
+    let url = format!("{}/user/preferences", base_url());
+    fetch_json(&url).await
+}
+
+pub async fn update_user_preferences(
+    request: &UpdateUserPreferences,
+) -> Result<UserPreferencesResponse, ApiClientError> {
+    let url = format!("{}/user/preferences", base_url());
+    send_json_with_csrf("PATCH", &url, Some(request)).await
+}
+
+pub async fn initialize_user_preferences(
+    request: &UpdateUserPreferences,
+) -> Result<UserPreferencesResponse, ApiClientError> {
+    let url = format!("{}/user/preferences/initialize", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
 /// Development mode login.
 pub async fn dev_login(email: &str) -> Result<DevLoginResponse, ApiClientError> {
     let url = format!("{}/dev/login", auth_base_url());

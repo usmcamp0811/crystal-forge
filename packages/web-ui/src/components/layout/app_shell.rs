@@ -2,10 +2,18 @@
 
 use dioxus::prelude::*;
 
-use crate::api::client::{fetch_classification_config, fetch_config_health};
-use crate::api::models::{AuthContext, AuthMode, AuthUser, ClassificationBannerConfig, Role};
+use crate::api::client::{
+    fetch_classification_config, fetch_config_health, fetch_user_preferences,
+    initialize_user_preferences, update_user_preferences,
+};
+use crate::api::models::{
+    AuthContext, AuthMode, AuthUser, ClassificationBannerConfig, Role, UpdateUserPreferences,
+    UserPreferencesDto,
+};
 use crate::components::layout::TopBar;
-use crate::components::layout::sidebar::{MobileDrawer, SidebarContext, SidebarNav};
+use crate::components::layout::sidebar::{
+    MobileDrawer, PreferencesContext, SidebarContext, SidebarNav,
+};
 use crate::components::layout::{
     BannerPlacement, DEV_MODE_BANNER_HEIGHT_PX, DevModeBanner, use_dev_mode_enabled,
 };
@@ -14,6 +22,7 @@ use crate::components::onboarding::OnboardingCoachPanel;
 use crate::routes::Route;
 use crate::state::app_state::{AppState, AuthFetchState, ConfigHealthFetchState};
 use crate::state::auth;
+use crate::state::preferences;
 use crate::theme;
 
 /// Check if UI check mock auth mode is enabled via query param.
@@ -73,6 +82,45 @@ fn should_show_admin_denied(route: &Route, auth_context: &Option<AuthContext>) -
     ) && !auth::is_admin(auth_context)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreferenceBootstrapState {
+    Idle,
+    Loading,
+    Loaded,
+    Error,
+}
+
+const PREFERENCE_BOOTSTRAP_TIMEOUT_MS: u32 = 15_000;
+
+fn set_root_attr(name: &str, value: &str) {
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (name, value);
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(document) = web_sys::window().and_then(|w| w.document()) {
+            if let Some(root) = document.document_element() {
+                let _ = root.set_attribute(name, value);
+            }
+        }
+    }
+}
+
+fn apply_loaded_preferences(
+    preferences: &UserPreferencesDto,
+    mut theme_signal: Signal<crate::state::theme::UiTheme>,
+    mut density: Signal<String>,
+    mut is_collapsed: Signal<bool>,
+    mut default_systems_view: Signal<String>,
+) {
+    theme_signal.set(preferences::theme_from_server(&preferences.theme));
+    density.set(preferences.density.clone());
+    is_collapsed.set(preferences.sidebar_collapsed);
+    default_systems_view.set(preferences.default_systems_view.clone());
+    preferences::mirror_to_storage(preferences);
+    set_root_attr("data-density", &preferences.density);
+}
+
 /// Top-level application layout wrapping all views.
 ///
 /// Provides the sidebar navigation and main content area.
@@ -82,17 +130,13 @@ pub fn AppShell() -> Element {
     let current_route = use_route::<Route>();
     let mut app_state = use_context::<Signal<AppState>>();
     let nav = navigator();
+    let theme_signal = use_context::<Signal<crate::state::theme::UiTheme>>();
 
     // Initialize sidebar state
     let is_mobile_drawer_open = use_signal(|| false);
     let is_collapsed = use_signal(|| {
-        // Try to read from localStorage
-        let stored = web_sys::window()
-            .and_then(|w| w.local_storage().ok())
-            .flatten()
-            .and_then(|storage| storage.get_item("cf-sidebar-collapsed").ok())
-            .flatten()
-            .map(|v| v == "true");
+        let stored =
+            preferences::read_storage(preferences::SIDEBAR_COLLAPSED_KEY).map(|v| v == "true");
 
         if let Some(value) = stored {
             return value;
@@ -106,13 +150,66 @@ pub fn AppShell() -> Element {
             .unwrap_or(false)
     });
 
+    // Initialize shared UI preferences
+    let density = use_signal(|| {
+        preferences::read_storage(preferences::DENSITY_KEY)
+            .unwrap_or_else(|| "comfortable".to_string())
+    });
+    let default_systems_view = use_signal(|| {
+        preferences::read_storage(preferences::SYSTEMS_VIEW_KEY)
+            .unwrap_or_else(|| "cards".to_string())
+    });
+    let mut save_error = use_signal(|| None::<String>);
+    let mut preference_bootstrap = use_signal(|| PreferenceBootstrapState::Idle);
+    let mut preference_bootstrap_attempt = use_signal(|| 0_u64);
+    let mut preference_save_pending = use_signal(|| None::<UpdateUserPreferences>);
+    let mut preference_save_in_flight = use_signal(|| false);
+    let mut preference_save_user_id = use_signal(|| None::<String>);
+    let mut preference_save_generation = use_signal(|| 0_u64);
+    let save_update = Callback::new(move |update: UpdateUserPreferences| {
+        save_error.set(None);
+        preference_save_pending.with_mut(|pending| {
+            if let Some(pending) = pending.as_mut() {
+                preferences::merge_update(pending, update);
+            } else {
+                *pending = Some(update);
+            }
+        });
+    });
+
     // Provide sidebar context
     use_context_provider(|| SidebarContext {
         is_mobile_drawer_open,
         is_collapsed,
     });
+
+    // Provide preferences context
+    use_context_provider(|| PreferencesContext {
+        density,
+        default_systems_view,
+        save_error,
+        save_update,
+    });
+
     let breadcrumb_override = use_signal(|| None::<(String, String)>);
     use_context_provider(|| breadcrumb_override);
+
+    // Apply density immediately on load and whenever it changes
+    use_effect(move || {
+        let density_val = density();
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = density_val;
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(window) = web_sys::window() {
+                if let Some(document) = window.document() {
+                    if let Some(root) = document.document_element() {
+                        let _ = root.set_attribute("data-density", &density_val);
+                    }
+                }
+            }
+        }
+    });
 
     let sidebar_width = if is_collapsed() { "64px" } else { "240px" };
 
@@ -128,6 +225,183 @@ pub fn AppShell() -> Element {
         app_state.write().auth = Some(mock.clone());
         auth_context = Some(mock);
     }
+
+    let is_authenticated = auth::is_authenticated(&auth_context);
+    let mock_auth_enabled = ui_check_mock_auth_enabled();
+
+    use_effect(move || {
+        if mock_auth_enabled {
+            if preference_bootstrap() != PreferenceBootstrapState::Loaded {
+                preference_bootstrap.set(PreferenceBootstrapState::Loaded);
+            }
+            return;
+        }
+
+        // Read authentication state inside the effect so Dioxus subscribes this
+        // preference bootstrap to /whoami completion. Reading only the derived
+        // values outside this closure can leave the bootstrap idle forever when
+        // AppShell first mounts while auth is still loading.
+        let (bootstrap_auth_loaded, bootstrap_is_authenticated) = {
+            let state = app_state.read();
+            (
+                matches!(state.auth_fetch_state.clone(), AuthFetchState::Loaded),
+                auth::is_authenticated(&state.auth),
+            )
+        };
+
+        if !bootstrap_auth_loaded || !bootstrap_is_authenticated {
+            if preference_bootstrap() != PreferenceBootstrapState::Idle {
+                preference_bootstrap_attempt.set(preference_bootstrap_attempt() + 1);
+                preference_bootstrap.set(PreferenceBootstrapState::Idle);
+            }
+            return;
+        }
+
+        if preference_bootstrap() != PreferenceBootstrapState::Idle {
+            return;
+        }
+
+        let attempt = preference_bootstrap_attempt() + 1;
+        preference_bootstrap_attempt.set(attempt);
+        preference_bootstrap.set(PreferenceBootstrapState::Loading);
+
+        spawn(async move {
+            gloo_timers::future::TimeoutFuture::new(PREFERENCE_BOOTSTRAP_TIMEOUT_MS).await;
+            if preference_bootstrap_attempt() == attempt
+                && preference_bootstrap() == PreferenceBootstrapState::Loading
+            {
+                save_error.set(Some(
+                    "Could not initialize account preferences: request timed out".to_string(),
+                ));
+                preference_bootstrap.set(PreferenceBootstrapState::Error);
+            }
+        });
+
+        spawn(async move {
+            match fetch_user_preferences().await {
+                Ok(response) => {
+                    if preference_bootstrap_attempt() != attempt {
+                        return;
+                    }
+
+                    let preferences = if let Some(preferences) = response.preferences {
+                        Ok(preferences)
+                    } else {
+                        let legacy = preferences::legacy_snapshot_with_current_defaults(
+                            theme_signal(),
+                            &density(),
+                            is_collapsed(),
+                            &default_systems_view(),
+                        );
+                        let import = preferences::import_request(&legacy);
+                        initialize_user_preferences(&import)
+                            .await
+                            .and_then(|response| {
+                                response.preferences.ok_or_else(|| {
+                                    crate::api::client::ApiClientError::Deserialize(
+                                        "preference import returned no preferences".to_string(),
+                                    )
+                                })
+                            })
+                    };
+
+                    match preferences {
+                        Ok(preferences) => {
+                            apply_loaded_preferences(
+                                &preferences,
+                                theme_signal,
+                                density,
+                                is_collapsed,
+                                default_systems_view,
+                            );
+                            save_error.set(None);
+                            preference_bootstrap.set(PreferenceBootstrapState::Loaded);
+                        }
+                        Err(err) => {
+                            save_error.set(Some(format!(
+                                "Could not initialize account preferences: {err}"
+                            )));
+                            preference_bootstrap.set(PreferenceBootstrapState::Error);
+                        }
+                    }
+                }
+                Err(err) => {
+                    if preference_bootstrap_attempt() != attempt {
+                        return;
+                    }
+
+                    save_error.set(Some(format!(
+                        "Could not initialize account preferences: {err}"
+                    )));
+                    preference_bootstrap.set(PreferenceBootstrapState::Error);
+                }
+            }
+        });
+    });
+
+    use_effect(move || {
+        let current_user_id = {
+            let state = app_state.read();
+            if matches!(state.auth_fetch_state, AuthFetchState::Loaded)
+                && auth::is_authenticated(&state.auth)
+            {
+                state
+                    .auth
+                    .as_ref()
+                    .and_then(|auth| auth.user.as_ref().map(|user| user.id.clone()))
+            } else {
+                None
+            }
+        };
+
+        if preference_save_user_id() != current_user_id {
+            preference_save_user_id.set(current_user_id.clone());
+            preference_save_generation.set(preference_save_generation() + 1);
+            preference_save_pending.set(None);
+            preference_save_in_flight.set(false);
+        }
+
+        let Some(user_id) = current_user_id else {
+            return;
+        };
+
+        if preference_save_in_flight() {
+            return;
+        }
+
+        let Some(update) = preference_save_pending.write().take() else {
+            return;
+        };
+
+        preference_save_in_flight.set(true);
+        let generation = preference_save_generation();
+        spawn(async move {
+            let result = update_user_preferences(&update).await;
+
+            if preference_save_user_id() != Some(user_id)
+                || preference_save_generation() != generation
+            {
+                return;
+            }
+
+            match result {
+                Ok(response) => {
+                    if let Some(preferences) = response.preferences {
+                        preferences::mirror_to_storage(&preferences);
+                        save_error.set(None);
+                    } else {
+                        save_error.set(Some(
+                            "Could not save preferences: server returned no preferences"
+                                .to_string(),
+                        ));
+                    }
+                }
+                Err(err) => save_error.set(Some(format!("Could not save preferences: {err}"))),
+            }
+
+            preference_save_in_flight.set(false);
+        });
+    });
 
     // Handle auth fetch states
     match auth_fetch_state {
@@ -164,7 +438,7 @@ pub fn AppShell() -> Element {
         }
         AuthFetchState::Loaded => {
             // Auth loaded - check if authenticated
-            if !auth::is_authenticated(&auth_context) {
+            if !is_authenticated {
                 nav.push("/login");
                 return rsx! {
                     div {
@@ -175,6 +449,13 @@ pub fn AppShell() -> Element {
                         }
                     }
                 };
+            }
+
+            match preference_bootstrap() {
+                PreferenceBootstrapState::Idle
+                | PreferenceBootstrapState::Loading
+                | PreferenceBootstrapState::Loaded
+                | PreferenceBootstrapState::Error => {}
             }
         }
     }
@@ -310,7 +591,11 @@ pub fn AppShell() -> Element {
     // backdrops) so they sit between the clearance banners rather than behind them.
     let top_class_height: u8 = if classification_enabled { 24 } else { 0 };
     let bot_class_height = top_class_height;
-    let dev_height: u8 = if dev_mode_enabled { DEV_MODE_BANNER_HEIGHT_PX } else { 0 };
+    let dev_height: u8 = if dev_mode_enabled {
+        DEV_MODE_BANNER_HEIGHT_PX
+    } else {
+        0
+    };
     let top_banner_offset = format!("{}px", dev_height + top_class_height);
     let bottom_banner_offset = format!("{}px", dev_height + bot_class_height);
 
@@ -342,6 +627,18 @@ pub fn AppShell() -> Element {
                 div {
                     class: "main",
                     TopBar { title: current_route.title() }
+                    if let Some(error) = save_error() {
+                        div {
+                            class: "px-6 py-3 border-b border-red-500/30 bg-red-950/30",
+                            AlertBanner {
+                                severity: AlertSeverity::Warning,
+                                message: error,
+                                action_label: None,
+                                action_url: None,
+                                on_dismiss: Some(EventHandler::new(move |_| save_error.set(None))),
+                            }
+                        }
+                    }
                     if show_health_bar {
                         if let Some(ref msg) = health_banner_msg {
                             div {

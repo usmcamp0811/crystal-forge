@@ -23,7 +23,7 @@ use crystal_forge::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
             builders, caches, commits, compliance, config_health, cves, dashboard,
             deployment_policies, deployments, environments, flakes, hardening, navigation,
-            scanning, setup_wizard, systems,
+            scanning, setup_wizard, systems, user_preferences,
         },
         status,
         webhook::webhook_handler,
@@ -238,6 +238,14 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/navigation/acknowledge",
             post(navigation::acknowledge_navigation_category),
+        )
+        .route(
+            "/api/v1/user/preferences",
+            get(user_preferences::get_preferences).patch(user_preferences::patch_preferences),
+        )
+        .route(
+            "/api/v1/user/preferences/initialize",
+            post(user_preferences::initialize_preferences),
         )
         .route("/api/v1/cves", get(cves::list_cves))
         .route("/api/v1/cves/grouped", get(cves::list_cves_grouped))
