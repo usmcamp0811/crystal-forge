@@ -3,3 +3,4 @@
 pub mod canonical;
 pub mod digest;
 pub mod interchange;
+pub mod xccdf;

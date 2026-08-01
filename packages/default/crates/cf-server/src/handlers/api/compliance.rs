@@ -5,7 +5,7 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Multipart, Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
@@ -17,6 +17,12 @@ use crate::api::models::{
     ApiError, CreateComplianceBundleRequest, SystemComplianceBundle,
     SystemComplianceBundlesResponse, UpdateComplianceBundleRequest,
 };
+use crate::compliance::digest::{
+    BundleMembershipEntry, BundleVersionCanonical, load_bundle_membership,
+};
+use crate::compliance::interchange::InterchangeLimits;
+use crate::compliance::xccdf::parser::parse_xccdf;
+use crate::compliance::xccdf::xml_writer::write_bundle_xccdf;
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
     BundleValidationError, create_bundle as create_bundle_row, delete_bundle as delete_bundle_row,
@@ -203,29 +209,112 @@ pub struct PolicyInterchangeExportRequest {
 
 /// `POST /api/v1/compliance/xccdf/preview`
 ///
-/// Accepts a multipart XML or ZIP upload, validates structure and limits, and
-/// returns metadata without persisting anything. The full parser is implemented
-/// in phase 4; this handler enforces upload limits and returns a structured stub.
-pub async fn xccdf_preview(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
+/// Accepts multipart XML upload, parses XCCDF 1.2 and CF-XCCDF content,
+/// classifies the document, and returns typed metadata without durable writes.
+pub async fn xccdf_preview(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
     let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !has_admin_role(&roles) {
         return forbidden();
     }
-    // Phase 4 will add full multipart parsing and XCCDF validation here.
-    // For now, return a structured 501 so the UI can distinguish "not yet
-    // implemented" from a server error.
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(XccdfPreviewResponse {
-            sha256: String::new(),
-            document_type: "unknown".to_string(),
-            errors: vec!["XCCDF parser not yet implemented".to_string()],
-            warnings: vec![],
-        }),
-    )
-        .into_response()
+
+    let limits = InterchangeLimits::default();
+    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut filename: Option<String> = None;
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        filename = field.file_name().map(String::from);
+        match field.bytes().await {
+            Ok(bytes) => {
+                if bytes.len() > limits.max_xml_bytes {
+                    return (
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        Json(ApiError {
+                            error: "File too large".into(),
+                            message: format!(
+                                "XML file exceeds {} byte limit",
+                                limits.max_xml_bytes
+                            ),
+                            details: None,
+                        }),
+                    )
+                        .into_response();
+                }
+                file_bytes = Some(bytes.to_vec());
+            }
+            Err(e) => {
+                return internal_error(&format!("Failed to read upload: {e}"));
+            }
+        }
+    }
+
+    let bytes = match file_bytes {
+        Some(b) => b,
+        None => return bad_request("No file attached"),
+    };
+
+    match parse_xccdf(&bytes, filename.as_deref(), &limits) {
+        Ok(parsed) => {
+            // Format rules for the response.
+            let rule_summaries: Vec<serde_json::Value> = parsed
+                .rules
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "id": r.id,
+                        "title": r.title,
+                        "severity": r.severity,
+                        "is_native": r.cf_policy_meta.is_some(),
+                    })
+                })
+                .collect();
+
+            let response = serde_json::json!({
+                "sha256": parsed.source_sha256,
+                "filename": parsed.source_filename,
+                "xccdf_version": parsed.xccdf_version,
+                "document_class": format!("{:?}", parsed.class).to_lowercase(),
+                "fidelity": format!("{:?}", parsed.fidelity).to_lowercase(),
+                "fidelity_losses": parsed.fidelity_losses,
+                "benchmark": parsed.benchmark.map(|bm| serde_json::json!({
+                    "id": bm.id,
+                    "title": bm.title,
+                    "version": bm.version,
+                    "status": bm.status,
+                    "platforms": bm.platforms,
+                })),
+                "profiles": parsed.profiles.iter().map(|p| serde_json::json!({
+                    "id": p.id,
+                    "title": p.title,
+                    "rule_count": p.select_ids.len(),
+                })).collect::<Vec<_>>(),
+                "rules": rule_summaries,
+                "rule_count": parsed.rules.len(),
+                "profile_count": parsed.profiles.len(),
+                "cf_bundle_meta": parsed.cf_bundle_meta.map(|m| serde_json::json!({
+                    "bundle_id": m.bundle_id,
+                    "bundle_version_id": m.bundle_version_id,
+                    "publication_state": m.publication_state,
+                })),
+                "errors": parsed.errors.iter().map(|e| serde_json::json!({
+                    "code": e.code, "summary": e.summary, "blocking": e.blocking,
+                })).collect::<Vec<_>>(),
+                "warnings": parsed.warnings.iter().map(|w| serde_json::json!({
+                    "code": w.code, "summary": w.summary,
+                })).collect::<Vec<_>>(),
+            });
+            (StatusCode::OK, Json(response)).into_response()
+        }
+        Err(e) => {
+            tracing::error!("XCCDF parse error: {e:#}");
+            internal_error(&format!("Failed to parse XCCDF: {e}"))
+        }
+    }
 }
 
 /// `POST /api/v1/compliance/xccdf/import`
