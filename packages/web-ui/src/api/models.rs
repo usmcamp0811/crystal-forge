@@ -584,6 +584,14 @@ pub struct ScanningQueueItemResponse {
     pub trigger: Option<String>,
 }
 
+/// Paginated deployed configurations response (P2#6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanningDeployedResponse {
+    pub items: Vec<ScanningQueueItemResponse>,
+    pub total: i64,
+    pub has_more: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScanningSystemsItemResponse {
     pub system_id: Uuid,

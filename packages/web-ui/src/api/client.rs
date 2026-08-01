@@ -109,7 +109,7 @@ pub async fn fetch_scanning_systems(
 
 pub async fn fetch_scanning_deployed(
     limit: Option<i64>,
-) -> Result<Vec<ScanningQueueItemResponse>, ApiClientError> {
+) -> Result<ScanningDeployedResponse, ApiClientError> {
     let mut url = format!("{}/scanning/deployed", base_url());
     if let Some(limit) = limit {
         url.push_str(&format!("?limit={}", limit.clamp(1, 1000)));

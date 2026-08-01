@@ -336,6 +336,19 @@ pub struct ScanningQueueItemResponse {
     pub trigger: Option<String>,
 }
 
+/// Paginated deployed configurations response (AC #37).
+///
+/// `has_more` is `true` when the returned list was capped by the server's limit
+/// and more rows exist. Callers must not present a capped result as complete.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanningDeployedResponse {
+    pub items: Vec<ScanningQueueItemResponse>,
+    /// Total deployed configurations known to the server.
+    pub total: i64,
+    /// True when `items.len() < total`.
+    pub has_more: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanningSystemsItemResponse {
     pub system_id: Uuid,

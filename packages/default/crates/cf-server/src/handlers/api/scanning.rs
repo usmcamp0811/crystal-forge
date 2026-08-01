@@ -7,8 +7,9 @@ use sqlx::PgPool;
 use tracing::error;
 
 use crate::api::models::{
-    ScanSchedulePolicyResponse, ScanningActivityItemResponse, ScanningQueueItemResponse,
-    ScanningStatsResponse, ScanningSystemsItemResponse, UpdateScanSchedulePolicyRequest,
+    ScanSchedulePolicyResponse, ScanningActivityItemResponse, ScanningDeployedResponse,
+    ScanningQueueItemResponse, ScanningStatsResponse, ScanningSystemsItemResponse,
+    UpdateScanSchedulePolicyRequest,
 };
 use crate::handlers::api::rbac::require_admin;
 use crate::queries::scanning::{
@@ -112,13 +113,17 @@ pub async fn get_scanning_deployed(
     }
 
     match get_scan_deployed(&pool, params.limit.clamp(1, 1000)).await {
-        Ok(rows) => (
+        Ok(result) => (
             StatusCode::OK,
-            Json(
-                rows.into_iter()
+            Json(ScanningDeployedResponse {
+                items: result
+                    .rows
+                    .into_iter()
                     .map(scan_queue_row_to_response)
-                    .collect::<Vec<_>>(),
-            ),
+                    .collect(),
+                total: result.total,
+                has_more: result.has_more,
+            }),
         )
             .into_response(),
         Err(e) => {

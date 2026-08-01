@@ -267,6 +267,15 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
         .collect())
 }
 
+/// Result type for `get_scan_deployed` including pagination metadata.
+pub struct ScanDeployedResult {
+    pub rows: Vec<ScanQueueRow>,
+    /// Total deployed configurations known to the server, before the limit.
+    pub total: i64,
+    /// True when `rows.len() < total`.
+    pub has_more: bool,
+}
+
 /// Returns all derivations currently deployed on at least one active system,
 /// with complete flake history used to derive `is_latest_per_flake`.
 ///
@@ -276,7 +285,7 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
 ///
 /// Nullable scan columns are COALESCE'd to safe defaults so systems that have
 /// never been scanned are included without NULL-decode panics.
-pub async fn get_scan_deployed(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRow>> {
+pub async fn get_scan_deployed(pool: &PgPool, limit: i64) -> Result<ScanDeployedResult> {
     let rows = sqlx::query(
         r#"
         WITH latest_commit_per_flake AS (
@@ -347,7 +356,7 @@ pub async fn get_scan_deployed(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueu
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
+    let items: Vec<ScanQueueRow> = rows
         .into_iter()
         .map(|row| ScanQueueRow {
             scan_id: row.get("scan_id"),
@@ -364,7 +373,33 @@ pub async fn get_scan_deployed(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueu
             is_current: row.get("is_current"),
             is_latest_per_flake: row.get("is_latest_per_flake"),
         })
-        .collect())
+        .collect();
+
+    // Count total deployed configurations (without limit) so the UI can detect
+    // a truncated result and show a pagination warning.
+    let total: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(DISTINCT d.id)
+        FROM systems s
+        JOIN derivations d
+          ON d.derivation_name =
+                 COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
+          AND d.store_path IS NOT NULL
+          AND d.store_path = s.current_store_path
+        WHERE s.is_active = TRUE
+          AND d.derivation_type = 'nixos'
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(items.len() as i64);
+
+    let returned = items.len() as i64;
+    Ok(ScanDeployedResult {
+        has_more: returned < total,
+        total,
+        rows: items,
+    })
 }
 
 pub async fn get_scan_queue_for_system(

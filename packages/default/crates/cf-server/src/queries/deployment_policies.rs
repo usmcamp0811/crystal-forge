@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::compliance::digest::refresh_policy_version_digest;
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
 };
@@ -267,7 +268,11 @@ pub async fn get_deployment_policy_by_id(
     Ok(policy)
 }
 
-/// Create a new deployment policy
+/// Create a new deployment policy.
+///
+/// After the SQL trigger creates the draft version row (with `semantic_digest =
+/// 'pending'`), this function computes the real Rust-canonical digest and
+/// persists it so the version row is always authoritative.
 pub async fn create_deployment_policy(
     pool: &PgPool,
     request: &CreateDeploymentPolicyRequest,
@@ -288,10 +293,28 @@ pub async fn create_deployment_policy(
     .await
     .context("Failed to create deployment policy")?;
 
+    // Refresh the Rust-canonical digest on the draft version row.
+    if let Err(e) = refresh_policy_version_digest(
+        pool,
+        policy.id,
+        &policy.name,
+        policy.description.as_deref(),
+        &policy.policy_type,
+        &policy.config,
+    )
+    .await
+    {
+        tracing::warn!(policy_id = %policy.id, "Failed to refresh policy version digest: {e:#}");
+    }
+
     Ok(policy)
 }
 
-/// Update an existing deployment policy
+/// Update an existing deployment policy.
+///
+/// After the SQL trigger updates the draft version row (with `semantic_digest =
+/// 'pending'`), this function computes the real Rust-canonical digest and
+/// persists it.
 pub async fn update_deployment_policy(
     pool: &PgPool,
     policy_id: &Uuid,
@@ -319,6 +342,21 @@ pub async fn update_deployment_policy(
     .fetch_optional(pool)
     .await
     .context("Failed to update deployment policy")?;
+
+    if let Some(ref p) = policy {
+        if let Err(e) = refresh_policy_version_digest(
+            pool,
+            p.id,
+            &p.name,
+            p.description.as_deref(),
+            &p.policy_type,
+            &p.config,
+        )
+        .await
+        {
+            tracing::warn!(policy_id = %p.id, "Failed to refresh policy version digest: {e:#}");
+        }
+    }
 
     Ok(policy)
 }

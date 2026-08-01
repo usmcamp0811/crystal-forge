@@ -182,8 +182,14 @@ pub fn IOMenu(props: IOMenuProps) -> Element {
                     let enabled_first = enabled_indices.first().copied();
                     move |evt: Event<KeyboardData>| {
                         match evt.key() {
-                            Key::Escape => close_and_refocus(),
-                            Key::ArrowDown | Key::Enter => {
+                            Key::Escape => {
+                                close_and_refocus();
+                            }
+                            Key::ArrowDown => {
+                                // Let arrow-down open the menu from the trigger.
+                                // Do NOT handle Enter here: the native button click fires after
+                                // keydown, which would immediately toggle the menu closed again.
+                                evt.prevent_default();
                                 if !open() {
                                     open.set(true);
                                     focused_item.set(enabled_first);
@@ -215,6 +221,7 @@ pub fn IOMenu(props: IOMenuProps) -> Element {
                             match evt.key() {
                                 Key::Escape => close_and_refocus(),
                                 Key::ArrowDown => {
+                                    evt.prevent_default(); // stop page scroll
                                     if let Some(cur) = focused_item() {
                                         let next = enabled_indices
                                             .iter()
@@ -227,6 +234,7 @@ pub fn IOMenu(props: IOMenuProps) -> Element {
                                     }
                                 }
                                 Key::ArrowUp => {
+                                    evt.prevent_default(); // stop page scroll
                                     if let Some(cur) = focused_item() {
                                         let prev = enabled_indices
                                             .iter()
@@ -240,12 +248,14 @@ pub fn IOMenu(props: IOMenuProps) -> Element {
                                     }
                                 }
                                 Key::Home => {
+                                    evt.prevent_default();
                                     if let Some(&first) = enabled_indices.first() {
                                         focused_item.set(Some(first));
                                         focus_by_id(&format!("{}-item-{}", menu_id, first));
                                     }
                                 }
                                 Key::End => {
+                                    evt.prevent_default();
                                     if let Some(&last) = enabled_indices.last() {
                                         focused_item.set(Some(last));
                                         focus_by_id(&format!("{}-item-{}", menu_id, last));

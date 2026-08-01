@@ -6,8 +6,8 @@ use crate::api::client::{
     fetch_scanning_schedule, fetch_scanning_stats, fetch_scanning_system_scans,
     fetch_scanning_systems, update_scanning_schedule,
 };
-use crate::api::models::ScanningQueueItemResponse;
 use crate::api::models::{ScanSchedulePolicyResponse, UpdateScanSchedulePolicyRequest};
+use crate::api::models::{ScanningDeployedResponse, ScanningQueueItemResponse};
 use crate::components::chips::EnvBadge;
 use crate::components::icon::{Icon, IconName};
 use crate::routes::Route;
@@ -205,6 +205,14 @@ pub fn ScanningView() -> Element {
                                 "Failed to load deployed configurations: {e}"
                             }
                         }
+                        // Show a warning when the result is paginated (has_more = true).
+                        if let Some(Ok(ref result)) = deployed.read().as_ref().cloned() {
+                            if result.has_more {
+                                div { class: "sd-callout sd-callout-warning", style: "margin:8px;",
+                                    "Showing {result.items.len()} of {result.total} deployed configurations. Not all systems are shown."
+                                }
+                            }
+                        }
                         table { class: "sys-table",
                             thead { tr {
                                 th { "System" }
@@ -214,11 +222,11 @@ pub fn ScanningView() -> Element {
                                 th { "Last scan" }
                             } }
                             tbody {
-                                if let Some(Ok(rows)) = deployed.read().as_ref() {
-                                    if rows.is_empty() {
+                                if let Some(Ok(result)) = deployed.read().as_ref() {
+                                    if result.items.is_empty() {
                                         tr { td { colspan: 5, style: "padding:14px; color:var(--cf-text-muted);", "No deployed configurations found." } }
                                     }
-                                    for row in rows.iter() {
+                                    for row in result.items.iter() {
                                         {
                                             let eff = effective_status(row);
                                             let meta = meta_for(&eff);
@@ -251,7 +259,9 @@ pub fn ScanningView() -> Element {
                                         }
                                     }
                                 } else if deployed.read().is_none() {
-                                    tr { td { colspan: 5, style: "padding:14px; color:var(--cf-text-muted);", "Loading deployed configurations…" } }
+                                    tr { td { colspan: 5, style: "padding:14px; color:var(--cf-text-muted);",
+                                        "Loading deployed configurations…"
+                                    } }
                                 }
                             }
                         }

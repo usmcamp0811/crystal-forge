@@ -1,3 +1,4 @@
+use crate::compliance::digest::refresh_bundle_version_digest;
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -234,6 +235,11 @@ pub async fn create_bundle(
 
     tx.commit().await?;
 
+    // Refresh the Rust-canonical bundle digest after triggers have settled.
+    if let Err(e) = refresh_bundle_version_digest(pool, bundle_id).await {
+        tracing::warn!(bundle_id = %bundle_id, "Failed to refresh bundle version digest: {e:#}");
+    }
+
     find_bundle(pool, bundle_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("Created bundle was not found"))
@@ -385,6 +391,12 @@ pub async fn update_bundle(
     }
 
     tx.commit().await?;
+
+    // Refresh the Rust-canonical bundle digest after triggers have settled.
+    if let Err(e) = refresh_bundle_version_digest(pool, bundle_id).await {
+        tracing::warn!(bundle_id = %bundle_id, "Failed to refresh bundle version digest: {e:#}");
+    }
+
     find_bundle(pool, bundle_id).await
 }
 
