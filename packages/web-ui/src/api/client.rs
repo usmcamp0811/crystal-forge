@@ -109,10 +109,13 @@ pub async fn fetch_scanning_systems(
 
 pub async fn fetch_scanning_deployed(
     limit: Option<i64>,
+    after_cursor: Option<&str>,
 ) -> Result<ScanningDeployedResponse, ApiClientError> {
     let mut url = format!("{}/scanning/deployed", base_url());
-    if let Some(limit) = limit {
-        url.push_str(&format!("?limit={}", limit.clamp(1, 1000)));
+    let limit_val = limit.unwrap_or(500).clamp(1, 1000);
+    url.push_str(&format!("?limit={}", limit_val));
+    if let Some(cursor) = after_cursor {
+        url.push_str(&format!("&after={}", js_sys::encode_uri_component(cursor)));
     }
     fetch_json(&url).await
 }

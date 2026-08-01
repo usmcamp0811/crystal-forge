@@ -340,6 +340,7 @@ pub struct ScanningQueueItemResponse {
 ///
 /// `has_more` is `true` when the returned list was capped by the server's limit
 /// and more rows exist. Callers must not present a capped result as complete.
+/// Use `next_cursor` with a subsequent request to load the next page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanningDeployedResponse {
     pub items: Vec<ScanningQueueItemResponse>,
@@ -347,6 +348,9 @@ pub struct ScanningDeployedResponse {
     pub total: i64,
     /// True when `items.len() < total`.
     pub has_more: bool,
+    /// Opaque cursor for the next page. Pass as `?after=<value>` in the next
+    /// request. `None` when this is the last page.
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

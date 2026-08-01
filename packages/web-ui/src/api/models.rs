@@ -590,6 +590,8 @@ pub struct ScanningDeployedResponse {
     pub items: Vec<ScanningQueueItemResponse>,
     pub total: i64,
     pub has_more: bool,
+    /// Opaque cursor for the next page. `None` when this is the last page.
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

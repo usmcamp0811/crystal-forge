@@ -18,10 +18,14 @@ use crate::queries::scanning::{
     update_scan_schedule_policy,
 };
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct ScanningListParams {
     #[serde(default = "default_limit")]
     pub limit: i64,
+    /// Keyset cursor for the deployed endpoint. Pass the `next_cursor` value
+    /// from the previous response to retrieve the next page.
+    #[serde(default)]
+    pub after: Option<String>,
 }
 
 fn default_limit() -> i64 {
@@ -112,7 +116,7 @@ pub async fn get_scanning_deployed(
         return forbidden_admin();
     }
 
-    match get_scan_deployed(&pool, params.limit.clamp(1, 1000)).await {
+    match get_scan_deployed(&pool, params.limit.clamp(1, 1000), params.after.as_deref()).await {
         Ok(result) => (
             StatusCode::OK,
             Json(ScanningDeployedResponse {
@@ -123,6 +127,7 @@ pub async fn get_scanning_deployed(
                     .collect(),
                 total: result.total,
                 has_more: result.has_more,
+                next_cursor: result.next_cursor,
             }),
         )
             .into_response(),
@@ -399,7 +404,10 @@ mod tests {
         let response = get_scanning_queue(
             State(lazy_pool()),
             HeaderMap::new(),
-            Query(ScanningListParams { limit: 50 }),
+            Query(ScanningListParams {
+                limit: 50,
+                after: None,
+            }),
         )
         .await
         .into_response();
@@ -411,7 +419,10 @@ mod tests {
         let response = get_scanning_systems(
             State(lazy_pool()),
             HeaderMap::new(),
-            Query(ScanningListParams { limit: 50 }),
+            Query(ScanningListParams {
+                limit: 50,
+                after: None,
+            }),
         )
         .await
         .into_response();
@@ -423,7 +434,10 @@ mod tests {
         let response = get_scanning_activity(
             State(lazy_pool()),
             HeaderMap::new(),
-            Query(ScanningListParams { limit: 50 }),
+            Query(ScanningListParams {
+                limit: 50,
+                after: None,
+            }),
         )
         .await
         .into_response();
@@ -436,7 +450,10 @@ mod tests {
             State(lazy_pool()),
             HeaderMap::new(),
             Path(uuid::Uuid::nil()),
-            Query(ScanningListParams { limit: 50 }),
+            Query(ScanningListParams {
+                limit: 50,
+                after: None,
+            }),
         )
         .await
         .into_response();

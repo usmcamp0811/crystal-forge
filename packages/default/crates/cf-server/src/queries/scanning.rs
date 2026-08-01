@@ -270,10 +270,12 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
 /// Result type for `get_scan_deployed` including pagination metadata.
 pub struct ScanDeployedResult {
     pub rows: Vec<ScanQueueRow>,
-    /// Total deployed configurations known to the server, before the limit.
+    /// Total deployed configurations known to the server (without limit/cursor).
     pub total: i64,
     /// True when `rows.len() < total`.
     pub has_more: bool,
+    /// Cursor for the next page: the hostname of the last returned row.
+    pub next_cursor: Option<String>,
 }
 
 /// Returns all derivations currently deployed on at least one active system,
@@ -285,7 +287,14 @@ pub struct ScanDeployedResult {
 ///
 /// Nullable scan columns are COALESCE'd to safe defaults so systems that have
 /// never been scanned are included without NULL-decode panics.
-pub async fn get_scan_deployed(pool: &PgPool, limit: i64) -> Result<ScanDeployedResult> {
+/// Cursor-based pagination for the deployed scan list. The cursor is the
+/// hostname of the last item returned by the previous page (the query uses
+/// `hostname ASC` ordering so `> cursor` is stable and deterministic).
+pub async fn get_scan_deployed(
+    pool: &PgPool,
+    limit: i64,
+    after_cursor: Option<&str>,
+) -> Result<ScanDeployedResult> {
     let rows = sqlx::query(
         r#"
         WITH latest_commit_per_flake AS (
@@ -348,11 +357,15 @@ pub async fn get_scan_deployed(pool: &PgPool, limit: i64) -> Result<ScanDeployed
              AND dd.commit_db_id = lc.commit_id) AS is_latest_per_flake
         FROM deployed_derivations dd
         LEFT JOIN latest_commit_per_flake lc ON lc.flake_id = dd.flake_id
+        -- Keyset cursor: hostname is the stable sort key.
+        -- $2 is '' when no cursor; all hostname values sort after ''.
+        WHERE dd.hostname > $2
         ORDER BY hostname ASC
         LIMIT $1
         "#,
     )
     .bind(limit)
+    .bind(after_cursor.unwrap_or(""))
     .fetch_all(pool)
     .await?;
 
@@ -394,9 +407,16 @@ pub async fn get_scan_deployed(pool: &PgPool, limit: i64) -> Result<ScanDeployed
     .await?;
 
     let returned = items.len() as i64;
+    let has_more = returned < total;
+    let next_cursor = if has_more {
+        items.last().map(|r| r.hostname.clone())
+    } else {
+        None
+    };
     Ok(ScanDeployedResult {
-        has_more: returned < total,
+        has_more,
         total,
+        next_cursor,
         rows: items,
     })
 }
@@ -429,7 +449,9 @@ pub async fn get_scan_queue_for_system(
                 cs.medium_count,
                 COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) AS lifecycle_at
             FROM derivations d
-            JOIN systems s ON s.hostname = d.derivation_name
+            JOIN systems s
+              ON d.derivation_name =
+                     COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
             LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
             LEFT JOIN commits c ON c.id = d.commit_id
             LEFT JOIN flakes f ON f.id = c.flake_id

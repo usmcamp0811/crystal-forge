@@ -8,6 +8,7 @@ use crate::compliance::digest::{PolicyVersionCanonical, write_policy_version_dig
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
 };
+use crate::queries::compliance::ensure_policy_draft;
 
 /// List deployment policies with pagination
 pub async fn list_deployment_policies(
@@ -335,6 +336,14 @@ pub async fn update_deployment_policy(
 
     // Load the current draft version's rich fields before the lineage update,
     // so that updating the lineage cannot erase imported semantics (P1 #4).
+    // Ensure a mutable draft exists (creates a derived draft from the published
+    // version when needed). (P1 #2)
+    let _draft_version_id = ensure_policy_draft(&mut tx, *policy_id)
+        .await
+        .context("Failed to ensure policy draft version exists")?;
+
+    // Load rich semantic fields from the current draft version row.
+    // This is done AFTER ensure_policy_draft so the pointer is guaranteed valid.
     #[derive(sqlx::FromRow)]
     struct DraftVersionFields {
         implementation_state: String,
@@ -350,8 +359,7 @@ pub async fn update_deployment_policy(
         FROM deployment_policies dp
         JOIN deployment_policy_versions dpv ON dpv.id = dp.current_draft_version_id
         WHERE dp.id = $1
-          AND dpv.publication_state = 'draft'
-        FOR UPDATE OF dp
+          AND dpv.publication_state IN ('incomplete', 'draft', 'interim')
         "#,
     )
     .bind(policy_id)

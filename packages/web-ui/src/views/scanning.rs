@@ -106,9 +106,25 @@ pub fn ScanningView() -> Element {
 
     let stats = use_resource(|| async { fetch_scanning_stats().await });
     let queue = use_resource(|| async { fetch_scanning_queue(Some(50)).await });
-    // Request up to 1000 deployed configurations (server's current maximum).
-    // Pagination will be added when fleet sizes exceed this bound.
-    let deployed = use_resource(|| async { fetch_scanning_deployed(Some(1000)).await });
+    // Deployed tab: fetches the first page. Additional pages are loaded via
+    // the "Load more" button which appends subsequent pages using the cursor.
+    let deployed = use_resource(|| async { fetch_scanning_deployed(Some(500), None).await });
+    // Accumulated deployed rows across all pages.
+    let mut deployed_rows = use_signal(Vec::<ScanningQueueItemResponse>::new);
+    let mut deployed_cursor = use_signal(|| Option::<String>::None);
+    let mut deployed_total = use_signal(|| 0i64);
+    let mut deployed_loading_more = use_signal(|| false);
+
+    // Seed accumulated rows from the initial page fetch.
+    use_effect(move || {
+        if let Some(Ok(result)) = deployed.read().clone() {
+            if deployed_rows.read().is_empty() {
+                deployed_rows.set(result.items.clone());
+                deployed_cursor.set(result.next_cursor.clone());
+                deployed_total.set(result.total);
+            }
+        }
+    });
     let systems = use_resource(|| async { fetch_scanning_systems(Some(100)).await });
     let environments = use_resource(|| async { fetch_environments().await });
     let activity = use_resource(|| async { fetch_scanning_activity(Some(20)).await });
@@ -205,14 +221,7 @@ pub fn ScanningView() -> Element {
                                 "Failed to load deployed configurations: {e}"
                             }
                         }
-                        // Show a warning when the result is paginated (has_more = true).
-                        if let Some(Ok(ref result)) = deployed.read().as_ref().cloned() {
-                            if result.has_more {
-                                div { class: "sd-callout sd-callout-warning", style: "margin:8px;",
-                                    "Showing {result.items.len()} of {result.total} deployed configurations. Not all systems are shown."
-                                }
-                            }
-                        }
+
                         table { class: "sys-table",
                             thead { tr {
                                 th { "System" }
@@ -222,46 +231,71 @@ pub fn ScanningView() -> Element {
                                 th { "Last scan" }
                             } }
                             tbody {
-                                if let Some(Ok(result)) = deployed.read().as_ref() {
-                                    if result.items.is_empty() {
-                                        tr { td { colspan: 5, style: "padding:14px; color:var(--cf-text-muted);", "No deployed configurations found." } }
-                                    }
-                                    for row in result.items.iter() {
-                                        {
-                                            let eff = effective_status(row);
-                                            let meta = meta_for(&eff);
-                                            let is_latest = row.is_latest_per_flake;
-                                            rsx! {
-                                                tr {
-                                                    td {
-                                                        div { style: "font-weight:600; font-size:13px;", "{row.hostname}" }
+                                if deployed_rows.read().is_empty() && deployed.read().is_none() {
+                                    tr { td { colspan: 5, style: "padding:14px; color:var(--cf-text-muted);", "Loading deployed configurations…" } }
+                                } else if deployed_rows.read().is_empty() {
+                                    tr { td { colspan: 5, style: "padding:14px; color:var(--cf-text-muted);", "No deployed configurations found." } }
+                                }
+                                for row in deployed_rows.read().iter() {
+                                    {
+                                        let eff = effective_status(row);
+                                        let meta = meta_for(&eff);
+                                        let is_latest = row.is_latest_per_flake;
+                                        rsx! {
+                                            tr {
+                                                td { div { style: "font-weight:600; font-size:13px;", "{row.hostname}" } }
+                                                td {
+                                                    div {
+                                                        class: "mono",
+                                                        style: "font-size:11px; color:var(--cf-text-muted); display:flex; align-items:center; gap:4px;",
+                                                        if is_latest { span { title: "Latest commit for this flake", style: "color:#f59e0b; font-size:12px;", "★" } }
+                                                        "{flake_commit(row)}"
                                                     }
-                                                    td {
-                                                        div {
-                                                            class: "mono",
-                                                            style: "font-size:11px; color:var(--cf-text-muted); display:flex; align-items:center; gap:4px;",
-                                                            if is_latest {
-                                                                span { title: "Latest commit for this flake", style: "color:#f59e0b; font-size:12px;", "★" }
-                                                            }
-                                                            "{flake_commit(row)}"
-                                                        }
-                                                    }
-                                                    td {
-                                                        span { class: "chip {meta.cls}",
-                                                            span { class: "chip-dot", style: "background:{meta.color};" }
-                                                            "{meta.label}"
-                                                        }
-                                                    }
-                                                    td { { findings_cell(row.critical_count, row.high_count, row.medium_count, row.completed_at.is_some()) } }
-                                                    td { style: "font-size:12px; color:var(--cf-text-muted);", "{last_scan(row)}" }
                                                 }
+                                                td {
+                                                    span { class: "chip {meta.cls}",
+                                                        span { class: "chip-dot", style: "background:{meta.color};" }
+                                                        "{meta.label}"
+                                                    }
+                                                }
+                                                td { { findings_cell(row.critical_count, row.high_count, row.medium_count, row.completed_at.is_some()) } }
+                                                td { style: "font-size:12px; color:var(--cf-text-muted);", "{last_scan(row)}" }
                                             }
                                         }
                                     }
-                                } else if deployed.read().is_none() {
-                                    tr { td { colspan: 5, style: "padding:14px; color:var(--cf-text-muted);",
-                                        "Loading deployed configurations…"
-                                    } }
+                                }
+                            }
+                        }
+                        // Load more button for cursor pagination.
+                        if deployed_cursor.read().is_some() {
+                            div { style: "padding:10px 16px; border-top:1px solid var(--cf-card-border); display:flex; align-items:center; gap:12px;",
+                                span { style: "font-size:12px; color:var(--cf-text-muted);",
+                                    "Showing {deployed_rows.read().len()} of {deployed_total()} deployed configurations"
+                                }
+                                button {
+                                    class: "btn btn-ghost focus-ring",
+                                    style: "font-size:12px; padding:4px 10px;",
+                                    disabled: deployed_loading_more(),
+                                    onclick: move |_| {
+                                        if let Some(cursor) = deployed_cursor.read().clone() {
+                                            deployed_loading_more.set(true);
+                                            let cursor_clone = cursor.clone();
+                                            spawn(async move {
+                                                match fetch_scanning_deployed(Some(500), Some(&cursor_clone)).await {
+                                                    Ok(result) => {
+                                                        let mut rows = deployed_rows.read().clone();
+                                                        rows.extend(result.items);
+                                                        deployed_rows.set(rows);
+                                                        deployed_cursor.set(result.next_cursor);
+                                                        deployed_total.set(result.total);
+                                                    }
+                                                    Err(_) => {}
+                                                }
+                                                deployed_loading_more.set(false);
+                                            });
+                                        }
+                                    },
+                                    if deployed_loading_more() { "Loading…" } else { "Load more" }
                                 }
                             }
                         }
