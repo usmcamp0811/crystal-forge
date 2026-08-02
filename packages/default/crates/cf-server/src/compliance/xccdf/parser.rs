@@ -56,6 +56,9 @@ pub fn parse_xccdf(
                     break;
                 }
                 state.handle_start(name, e);
+                if state.should_stop() {
+                    break;
+                }
             }
             Ok(Event::End(ref e)) => {
                 let name = String::from_utf8_lossy(e.name().local_name().into_inner().as_ref())
@@ -93,6 +96,9 @@ pub fn parse_xccdf(
             Ok(Event::Empty(ref e)) => {
                 let name = std::str::from_utf8(e.name().local_name().into_inner()).unwrap_or("");
                 state.handle_start(name, e);
+                if state.should_stop() {
+                    break;
+                }
                 state.handle_end(name);
             }
             Ok(Event::Decl(_)) => {}
@@ -542,6 +548,12 @@ impl ParserState {
             return false;
         }
         true
+    }
+
+    /// Whether any blocking error has been recorded — used by the event loop
+    /// to terminate parsing after a security limit violation.
+    fn should_stop(&self) -> bool {
+        self.errors.iter().any(|e| e.blocking)
     }
 
     fn begin_profile(&mut self) -> bool {
