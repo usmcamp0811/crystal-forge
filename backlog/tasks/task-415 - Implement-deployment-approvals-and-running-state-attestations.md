@@ -1,9 +1,7 @@
-
 ---
-
 id: TASK-415
 title: Implement deployment approvals, signed running-state attestations, and attention UX
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-01 10:07'
 updated_date: '2026-08-01 10:07'
