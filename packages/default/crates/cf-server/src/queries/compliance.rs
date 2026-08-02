@@ -391,6 +391,10 @@ struct BundleRow {
     env_colors: Vec<String>,
     control_count: i64,
     environment_count: i64,
+    current_draft_version_id: Option<Uuid>,
+    current_published_version_id: Option<Uuid>,
+    current_draft_version: Option<String>,
+    current_published_version: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -441,6 +445,10 @@ fn bundle_from_row(row: BundleRow) -> ComplianceBundleSummary {
         required_envs,
         control_count: row.control_count,
         environment_count: row.environment_count,
+        current_draft_version_id: row.current_draft_version_id,
+        current_published_version_id: row.current_published_version_id,
+        current_draft_version: row.current_draft_version,
+        current_published_version: row.current_published_version,
     }
 }
 
@@ -461,7 +469,11 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
             COALESCE(e.env_names, ARRAY[]::text[]) AS env_names,
             COALESCE(e.env_colors, ARRAY[]::text[]) AS env_colors,
             COALESCE(p.control_count, 0)::bigint AS control_count,
-            COALESCE(e.environment_count, 0)::bigint AS environment_count
+            COALESCE(e.environment_count, 0)::bigint AS environment_count,
+            b.current_draft_version_id,
+            b.current_published_version_id,
+            dv.version AS current_draft_version,
+            pv.version AS current_published_version
         FROM compliance_bundles b
         LEFT JOIN LATERAL (
             SELECT
@@ -481,6 +493,8 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
             JOIN environments e ON e.id = cbe.environment_id
             WHERE cbe.bundle_id = b.id
         ) e ON TRUE
+        LEFT JOIN compliance_bundle_versions dv ON dv.id = b.current_draft_version_id
+        LEFT JOIN compliance_bundle_versions pv ON pv.id = b.current_published_version_id
         ORDER BY b.name ASC
         "#,
     )
@@ -636,7 +650,11 @@ pub async fn find_bundle(
             COALESCE(e.env_names, ARRAY[]::text[]) AS env_names,
             COALESCE(e.env_colors, ARRAY[]::text[]) AS env_colors,
             COALESCE(p.control_count, 0)::bigint AS control_count,
-            COALESCE(e.environment_count, 0)::bigint AS environment_count
+            COALESCE(e.environment_count, 0)::bigint AS environment_count,
+            b.current_draft_version_id,
+            b.current_published_version_id,
+            dv.version AS current_draft_version,
+            pv.version AS current_published_version
         FROM compliance_bundles b
         LEFT JOIN LATERAL (
             SELECT array_agg(policy_id ORDER BY policy_id) AS policy_ids, count(*)::bigint AS control_count
@@ -653,6 +671,8 @@ pub async fn find_bundle(
             JOIN environments e ON e.id = cbe.environment_id
             WHERE cbe.bundle_id = b.id
         ) e ON TRUE
+        LEFT JOIN compliance_bundle_versions dv ON dv.id = b.current_draft_version_id
+        LEFT JOIN compliance_bundle_versions pv ON pv.id = b.current_published_version_id
         WHERE b.id = $1
         "#,
     )
@@ -1567,6 +1587,10 @@ mod tests {
             required_envs: vec![],
             control_count: 0,
             environment_count: 0,
+            current_draft_version_id: None,
+            current_published_version_id: None,
+            current_draft_version: None,
+            current_published_version: None,
         }
     }
 

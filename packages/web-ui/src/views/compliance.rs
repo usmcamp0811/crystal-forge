@@ -54,6 +54,7 @@ pub fn ComplianceView() -> Element {
     let mut policies = use_signal(Vec::<DeploymentPolicySummary>::new);
     let mut environments = use_signal(Vec::<EnvironmentSummary>::new);
     let mut sys_filter = use_signal(|| "all".to_string());
+    let mut selected_export_version_id = use_signal(|| None::<uuid::Uuid>);
 
     // Generation counters guard against stale async responses overwriting the
     // state of a subsequently-selected bundle or system.  Each spawn captures
@@ -146,6 +147,18 @@ pub fn ComplianceView() -> Element {
         start_systems_fetch(bundle_id);
     };
 
+    use_effect(move || {
+        let bundle_id = *selected_bundle_id.read();
+        let bundles_snapshot = bundles.read().clone();
+        let version_id = bundle_id
+            .and_then(|bid| bundles_snapshot.iter().find(|b| b.id == bid))
+            .and_then(|b| {
+                b.current_draft_version_id
+                    .or(b.current_published_version_id)
+            });
+        selected_export_version_id.set(version_id);
+    });
+
     let on_evidence = move |system_id: uuid::Uuid| {
         if let Some(bundle_id) = *selected_bundle_id.read() {
             evidence.set(None);
@@ -209,10 +222,16 @@ pub fn ComplianceView() -> Element {
                             }
                             // Export XCCDF: enabled when a bundle version is selected.
                             let bundle_selected = selected_bundle_id.read().is_some();
-                            items.push(if bundle_selected {
+                            let has_version = selected_export_version_id.read().is_some();
+                            items.push(if bundle_selected && has_version {
                                 IOMenuItem::action_with_icon(
                                     "Export this bundle (XCCDF .xml)",
                                     IconName::Download,
+                                )
+                            } else if bundle_selected {
+                                IOMenuItem::disabled(
+                                    "Export this bundle (XCCDF .xml)",
+                                    "No published or draft version available",
                                 )
                             } else {
                                 IOMenuItem::disabled(
@@ -231,12 +250,12 @@ pub fn ComplianceView() -> Element {
                                 match idx {
                                     0 => show_import_stig.set(true),
                                     2 => {
-                                        // Export XCCDF: trigger a download of the selected bundle.
-                                        if let Some(bid) = *selected_bundle_id.read() {
+                                        // Export XCCDF: trigger a download of the selected bundle version.
+                                        if let Some(vid) = *selected_export_version_id.read() {
                                             let url = format!(
                                                 "{}/api/v1/compliance/bundle-versions/{}/xccdf",
                                                 crate::api::client::base_url(),
-                                                bid
+                                                vid
                                             );
                                             if let Some(win) = web_sys::window() {
                                                 let _ = win.location().set_href(&url);
@@ -249,11 +268,11 @@ pub fn ComplianceView() -> Element {
                             } else {
                                 match idx {
                                     0 => {
-                                        if let Some(bid) = *selected_bundle_id.read() {
+                                        if let Some(vid) = *selected_export_version_id.read() {
                                             let url = format!(
                                                 "{}/api/v1/compliance/bundle-versions/{}/xccdf",
                                                 crate::api::client::base_url(),
-                                                bid
+                                                vid
                                             );
                                             if let Some(win) = web_sys::window() {
                                                 let _ = win.location().set_href(&url);

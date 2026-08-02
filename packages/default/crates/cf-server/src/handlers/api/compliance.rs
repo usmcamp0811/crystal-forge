@@ -17,12 +17,10 @@ use crate::api::models::{
     ApiError, CreateComplianceBundleRequest, SystemComplianceBundle,
     SystemComplianceBundlesResponse, UpdateComplianceBundleRequest,
 };
-use crate::compliance::digest::{
-    BundleMembershipEntry, BundleVersionCanonical, load_bundle_membership,
-};
+use crate::compliance::xccdf::export_models::{XccdfBundleExport, XccdfPolicyExport, XccdfSourceMapping};
+use crate::compliance::xccdf::xml_writer::write_bundle_xccdf_export;
 use crate::compliance::interchange::{InterchangeLimits, MAX_XCCDF_UPLOAD_BYTES};
 use crate::compliance::xccdf::parser::parse_xccdf;
-use crate::compliance::xccdf::xml_writer::write_bundle_xccdf;
 use crate::compliance::xccdf::zip_extractor::{
     PackageKind, detect_package_kind, extract_xccdf_from_zip,
 };
@@ -568,7 +566,9 @@ pub async fn xccdf_import(State(pool): State<PgPool>, headers: HeaderMap) -> imp
 
 /// `GET /api/v1/compliance/bundle-versions/:version_id/xccdf`
 ///
-/// Exports the bundle version as an XCCDF 1.2 XML document.
+/// Exports the bundle version as a complete XCCDF 1.2 XML document with CF
+/// extensions. Loads a consistent database snapshot in one read-only
+/// transaction and delegates to the typed XML writer.
 pub async fn export_bundle_xccdf(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -578,57 +578,18 @@ pub async fn export_bundle_xccdf(
         return forbidden();
     };
 
-    // Load the bundle version to build the canonical representation.
-    let version_row: Option<(
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        String,
-        String,
-    )> = match sqlx::query_as(
-        r#"
-            SELECT name, framework, framework_version, description, layer, owner
-            FROM compliance_bundle_versions WHERE id = $1
-            "#,
-    )
-    .bind(version_id)
-    .fetch_optional(&pool)
-    .await
-    {
-        Ok(row) => row,
-        Err(error) => {
-            tracing::error!(%error, %version_id, "failed to load bundle version for export");
-            return internal_error("Failed to load bundle version");
+    let snapshot = match load_export_snapshot(&pool, version_id).await {
+        Ok(s) => s,
+        Err(ExportSnapshotError::NotFound) => return not_found(),
+        Err(ExportSnapshotError::Db(e)) => {
+            tracing::error!(error = %e, %version_id, "failed to load export snapshot");
+            return internal_error("Failed to load bundle version for export");
         }
     };
 
-    let Some((name, framework, fw_ver, desc, layer, owner)) = version_row else {
-        return not_found();
-    };
-
-    // Load membership.
-    let members = match load_bundle_membership_txless(&pool, version_id).await {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::error!("Failed to load bundle membership for export: {e:#}");
-            return internal_error("Failed to load bundle membership");
-        }
-    };
-
-    let canonical = BundleVersionCanonical {
-        name,
-        framework,
-        framework_version: fw_ver,
-        description: desc,
-        layer,
-        owner,
-        members,
-    };
-
-    match write_bundle_xccdf(&canonical) {
+    match write_bundle_xccdf_export(&snapshot) {
         Ok(xml) => {
-            let safe_filename = safe_bundle_xml_filename(&canonical.name);
+            let safe_filename = safe_bundle_xml_filename(&snapshot.name);
             (
                 StatusCode::OK,
                 [
@@ -649,34 +610,288 @@ pub async fn export_bundle_xccdf(
     }
 }
 
-/// Load bundle membership without a transaction (for read-only export).
-async fn load_bundle_membership_txless(
+
+/// Errors from snapshot loading.
+enum ExportSnapshotError {
+    NotFound,
+    Db(anyhow::Error),
+}
+
+impl From<anyhow::Error> for ExportSnapshotError {
+    fn from(e: anyhow::Error) -> Self {
+        Self::Db(e)
+    }
+}
+
+/// Load a complete, consistent export snapshot from the database.
+///
+/// All reads execute inside a single `REPEATABLE READ READ ONLY` transaction so
+/// the snapshot is a consistent point-in-time view. The bundle version,
+/// membership, policy versions, and source-object mappings can never diverge
+/// mid-export.
+async fn load_export_snapshot(
     pool: &PgPool,
     version_id: Uuid,
-) -> Result<Vec<BundleMembershipEntry>, anyhow::Error> {
+) -> Result<XccdfBundleExport, ExportSnapshotError> {
+    // Acquire a dedicated connection and pin the isolation level so every
+    // subsequent query sees the same database state.
+    let mut tx = pool.begin().await.map_err(|e| anyhow::anyhow!("{e:#}"))?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+
+    // 1. Load the exact bundle version row.
     #[derive(sqlx::FromRow)]
-    struct Row {
+    struct BundleVersionRow {
+        id: Uuid,
+        bundle_id: Uuid,
+        version: String,
+        publication_state: String,
+        semantic_digest: String,
+        name: String,
+        description: Option<String>,
+        framework: String,
+        framework_version: Option<String>,
+        layer: String,
+        owner: String,
+    }
+
+    let bv: BundleVersionRow = sqlx::query_as(
+        r#"
+        SELECT id, bundle_id, version, publication_state, semantic_digest,
+               name, description, framework, framework_version, layer, owner
+        FROM compliance_bundle_versions
+        WHERE id = $1
+        "#,
+    )
+    .bind(version_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| anyhow::anyhow!("{e:#}"))?
+    .ok_or(ExportSnapshotError::NotFound)?;
+
+    let publication_state = parse_publication_state(&bv.publication_state)?;
+
+    // 2. Load ordered membership with selection state.
+    #[derive(sqlx::FromRow)]
+    struct MembershipRow {
         policy_version_id: Uuid,
+        policy_order: i32,
         selected: bool,
     }
-    let rows: Vec<Row> = sqlx::query_as(
+
+    let membership: Vec<MembershipRow> = sqlx::query_as(
         r#"
-        SELECT policy_version_id, selected
+        SELECT policy_version_id, policy_order, selected
         FROM compliance_bundle_version_policies
         WHERE bundle_version_id = $1
         ORDER BY policy_order ASC
         "#,
     )
     .bind(version_id)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|r| BundleMembershipEntry {
-            policy_version_id: r.policy_version_id,
-            selected: r.selected,
-        })
-        .collect())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+
+    // 3. Load every policy version referenced by membership in one query.
+    let policy_version_ids: Vec<Uuid> = membership.iter().map(|m| m.policy_version_id).collect();
+
+    if policy_version_ids.is_empty() {
+        // Empty membership: return a benchmark with no rules.
+        return Ok(XccdfBundleExport {
+            bundle_id: bv.bundle_id,
+            bundle_version_id: bv.id,
+            version: bv.version,
+            publication_state,
+            semantic_digest: bv.semantic_digest,
+            name: bv.name,
+            description: bv.description,
+            framework: bv.framework,
+            framework_version: bv.framework_version,
+            layer: bv.layer,
+            owner: bv.owner,
+            policies: vec![],
+        });
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct PolicyVersionRow {
+        id: Uuid,
+        policy_id: Uuid,
+        version: String,
+        publication_state: String,
+        semantic_digest: String,
+        name: String,
+        description: Option<String>,
+        policy_type: String,
+        implementation_state: String,
+        execution_phase: String,
+        config: serde_json::Value,
+        compliance_metadata: serde_json::Value,
+        dependencies: serde_json::Value,
+        opaque_xml: Option<String>,
+        enabled_by_default: bool,
+    }
+
+    let policy_rows: Vec<PolicyVersionRow> = sqlx::query_as(
+        r#"
+        SELECT id, policy_id, version, publication_state, semantic_digest,
+               name, description, policy_type, implementation_state,
+               execution_phase, config, compliance_metadata, dependencies,
+               opaque_xml, enabled_by_default
+        FROM deployment_policy_versions
+        WHERE id = ANY($1)
+        "#,
+    )
+    .bind(&policy_version_ids)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+
+    // Reject missing policy versions: every membership entry must resolve.
+    if policy_rows.len() != policy_version_ids.len() {
+        let found: std::collections::HashSet<Uuid> =
+            policy_rows.iter().map(|r| r.id).collect();
+        let missing: Vec<Uuid> = policy_version_ids
+            .iter()
+            .copied()
+            .filter(|id| !found.contains(id))
+            .collect();
+        return Err(ExportSnapshotError::Db(anyhow::anyhow!(
+            "Bundle version {} has {} membership entries pointing to missing policy version(s): {:?}",
+            version_id,
+            missing.len(),
+            missing
+        )));
+    }
+
+    // Build a map from policy_version_id → row.
+    let mut policy_map: std::collections::HashMap<Uuid, PolicyVersionRow> =
+        policy_rows.into_iter().map(|r| (r.id, r)).collect();
+
+    // 4. Load source-object mappings for all policy versions in one query.
+    #[derive(sqlx::FromRow)]
+    struct SourceMappingRow {
+        policy_version_id: Option<Uuid>,
+        object_kind: String,
+        source_identity: String,
+        fidelity: String,
+    }
+
+    let mapping_rows: Vec<SourceMappingRow> = sqlx::query_as(
+        r#"
+        SELECT
+            com.policy_version_id,
+            com.object_kind,
+            com.source_identity,
+            com.fidelity
+        FROM compliance_source_object_mappings com
+        WHERE com.policy_version_id = ANY($1)
+        ORDER BY com.object_kind, com.source_identity
+        "#,
+    )
+    .bind(&policy_version_ids)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+
+    // Group mappings by policy_version_id.
+    let mut mappings_by_policy: std::collections::HashMap<Uuid, Vec<XccdfSourceMapping>> =
+        std::collections::HashMap::new();
+    for m in mapping_rows {
+        if let Some(pvid) = m.policy_version_id {
+            mappings_by_policy
+                .entry(pvid)
+                .or_default()
+                .push(XccdfSourceMapping {
+                    object_kind: m.object_kind,
+                    source_identity: m.source_identity,
+                    fidelity: m.fidelity,
+                });
+        }
+    }
+
+    // 5. Assemble the export model, preserving membership order.
+    let mut policies = Vec::with_capacity(membership.len());
+    for member in &membership {
+        let pv = policy_map
+            .remove(&member.policy_version_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Internal inconsistency: policy version {} in membership but not in query results",
+                    member.policy_version_id
+                )
+            })?;
+
+        let impl_state = parse_implementation_state(&pv.implementation_state)?;
+        let pub_state = parse_publication_state(&pv.publication_state)?;
+
+        policies.push(XccdfPolicyExport {
+            policy_id: pv.policy_id,
+            policy_version_id: pv.id,
+            version: pv.version,
+            publication_state: pub_state,
+            semantic_digest: pv.semantic_digest,
+            name: pv.name,
+            description: pv.description,
+            policy_type: pv.policy_type,
+            execution_phase: pv.execution_phase,
+            implementation_state: impl_state,
+            enabled_default: pv.enabled_by_default,
+            selected: member.selected,
+            policy_order: member.policy_order,
+            config: pv.config,
+            compliance_metadata: pv.compliance_metadata,
+            dependencies: pv.dependencies,
+            opaque_xml: pv.opaque_xml,
+            source_mappings: mappings_by_policy
+                .remove(&member.policy_version_id)
+                .unwrap_or_default(),
+        });
+    }
+
+    // All reads are complete. Commit the transaction to release the snapshot.
+    tx.commit().await.map_err(|e| anyhow::anyhow!("{e:#}"))?;
+
+    Ok(XccdfBundleExport {
+        bundle_id: bv.bundle_id,
+        bundle_version_id: bv.id,
+        version: bv.version,
+        publication_state,
+        semantic_digest: bv.semantic_digest,
+        name: bv.name,
+        description: bv.description,
+        framework: bv.framework,
+        framework_version: bv.framework_version,
+        layer: bv.layer,
+        owner: bv.owner,
+        policies,
+    })
+}
+
+fn parse_publication_state(s: &str) -> Result<crate::compliance::canonical::PublicationState, anyhow::Error> {
+    use crate::compliance::canonical::PublicationState;
+    match s {
+        "incomplete" => Ok(PublicationState::Incomplete),
+        "draft" => Ok(PublicationState::Draft),
+        "interim" => Ok(PublicationState::Interim),
+        "accepted" => Ok(PublicationState::Accepted),
+        "deprecated" => Ok(PublicationState::Deprecated),
+        other => anyhow::bail!("Unknown publication state: {other}"),
+    }
+}
+
+fn parse_implementation_state(s: &str) -> Result<crate::compliance::canonical::ImplementationState, anyhow::Error> {
+    use crate::compliance::canonical::ImplementationState;
+    match s {
+        "native" => Ok(ImplementationState::Native),
+        "manual" => Ok(ImplementationState::Manual),
+        "external" => Ok(ImplementationState::External),
+        "unbound" => Ok(ImplementationState::Unbound),
+        "opaque" => Ok(ImplementationState::Opaque),
+        other => anyhow::bail!("Unknown implementation state: {other}"),
+    }
 }
 
 fn safe_bundle_xml_filename(name: &str) -> String {
@@ -800,7 +1015,7 @@ mod tests {
     use crate::queries::users::insert_user;
     use axum::Router;
     use axum::extract::DefaultBodyLimit;
-    use axum::routing::post;
+    use axum::routing::{get, post};
     use chrono::Utc;
 
     const BOUNDARY: &str = "XCFTESTBOUNDARY";
@@ -1469,5 +1684,327 @@ mod tests {
 
         // Original ZIP sha256 differs from the inner XML sha256.
         assert_ne!(json["sha256"], source["selected_xml_sha256"]);
+    }
+
+    // ── Export endpoint helpers ───────────────────────────────────────────────
+
+    async fn spawn_export_server(pool: PgPool) -> String {
+        let app = Router::new()
+            .route(
+                "/api/v1/compliance/bundle-versions/:version_id/xccdf",
+                get(export_bundle_xccdf),
+            )
+            .with_state(pool);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve export app");
+        });
+        format!("http://{addr}")
+    }
+
+    /// Insert a minimal but complete chain of test data for export tests.
+    /// Returns `(pool, bundle_id, version_id)`.
+    async fn create_export_test_data(pool: &PgPool) -> (PgPool, Uuid, Uuid) {
+        let bundle_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+        let policy_version_id = Uuid::new_v4();
+
+        // 1. compliance_bundles row
+        sqlx::query(
+            r#"INSERT INTO compliance_bundles (id, name, framework, layer, owner)
+               VALUES ($1, 'Test Bundle for Export', 'NIST', 'nixos', 'test')"#,
+        )
+        .bind(bundle_id)
+        .execute(pool)
+        .await
+        .expect("insert compliance_bundles");
+
+        // 2. compliance_bundle_versions row
+        sqlx::query(
+            r#"INSERT INTO compliance_bundle_versions
+               (id, bundle_id, version, publication_state, semantic_digest,
+                name, framework, layer, owner)
+               VALUES ($1, $2, '1.0.0', 'draft', 'abc123',
+                       'Test Bundle for Export', 'NIST', 'nixos', 'test')"#,
+        )
+        .bind(version_id)
+        .bind(bundle_id)
+        .execute(pool)
+        .await
+        .expect("insert compliance_bundle_versions");
+
+        // 3. Point bundle to draft version
+        sqlx::query(
+            "UPDATE compliance_bundles SET current_draft_version_id = $1 WHERE id = $2",
+        )
+        .bind(version_id)
+        .bind(bundle_id)
+        .execute(pool)
+        .await
+        .expect("update bundle draft version");
+
+        // 4. deployment_policies row (trigger auto-creates deployment_policy_versions)
+        sqlx::query(
+            r#"INSERT INTO deployment_policies (id, name, policy_type, config)
+               VALUES ($1, 'test-export-policy', 'require_cf_agent', '{"strict": true}'::jsonb)"#,
+        )
+        .bind(policy_id)
+        .execute(pool)
+        .await
+        .expect("insert deployment_policies");
+
+        // The trigger creates a draft version; fetch its id.
+        let _created_policy_version_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM deployment_policy_versions WHERE policy_id = $1 LIMIT 1",
+        )
+        .bind(policy_id)
+        .fetch_one(pool)
+        .await
+        .expect("fetch auto-created policy version");
+
+        // 5. Insert a second explicit policy version row for testing
+        sqlx::query(
+            r#"INSERT INTO deployment_policy_versions
+               (id, policy_id, version, publication_state, name, policy_type,
+                implementation_state, config, semantic_digest)
+               VALUES ($1, $2, '2.0.0', 'draft', 'test-export-policy',
+                       'require_cf_agent', 'native', '{"strict": true}'::jsonb, 'policy-digest')"#,
+        )
+        .bind(policy_version_id)
+        .bind(policy_id)
+        .execute(pool)
+        .await
+        .expect("insert deployment_policy_versions");
+
+        // 6. compliance_bundle_version_policies linking version → policy version
+        sqlx::query(
+            r#"INSERT INTO compliance_bundle_version_policies
+               (bundle_version_id, policy_version_id, policy_order, selected)
+               VALUES ($1, $2, 1, true)"#,
+        )
+        .bind(version_id)
+        .bind(policy_version_id)
+        .execute(pool)
+        .await
+        .expect("insert compliance_bundle_version_policies");
+
+        (pool.clone(), bundle_id, version_id)
+    }
+
+    // ── Export endpoint tests ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn export_returns_200_with_xml_content_type() {
+        let pool = test_pool_from_env().await;
+        let token = admin_session_token(&pool).await;
+        let (_pool, _bundle_id, version_id) = create_export_test_data(&pool).await;
+        let base = spawn_export_server(pool).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!(
+                "{base}/api/v1/compliance/bundle-versions/{version_id}/xccdf"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("export request completes");
+
+        assert_eq!(resp.status().as_u16(), 200);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .expect("content-type header")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(ct.contains("application/xml"), "got content-type: {ct}");
+
+        let body = resp.text().await.expect("text body");
+        assert!(
+            body.starts_with("<?xml"),
+            "body should start with XML declaration, got: {}",
+            &body[..body.len().min(80)]
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn export_includes_content_disposition_header() {
+        let pool = test_pool_from_env().await;
+        let token = admin_session_token(&pool).await;
+        let (_pool, _bundle_id, version_id) = create_export_test_data(&pool).await;
+        let base = spawn_export_server(pool).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!(
+                "{base}/api/v1/compliance/bundle-versions/{version_id}/xccdf"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("export request completes");
+
+        let cd = resp
+            .headers()
+            .get("content-disposition")
+            .expect("content-disposition header")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            cd.contains("attachment; filename="),
+            "Content-Disposition missing attachment; filename=: {cd}"
+        );
+        assert!(
+            cd.ends_with(".xml"),
+            "Content-Disposition filename should end with .xml: {cd}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn export_returns_valid_xccdf_body() {
+        let pool = test_pool_from_env().await;
+        let token = admin_session_token(&pool).await;
+        let (_pool, _bundle_id, version_id) = create_export_test_data(&pool).await;
+        let base = spawn_export_server(pool).await;
+
+        let client = reqwest::Client::new();
+        let body = client
+            .get(format!(
+                "{base}/api/v1/compliance/bundle-versions/{version_id}/xccdf"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("export request completes")
+            .text()
+            .await
+            .expect("text body");
+
+        assert!(
+            body.contains("<Benchmark"),
+            "body should contain <Benchmark element"
+        );
+        assert!(
+            body.contains("<status>"),
+            "body should contain <status> element"
+        );
+        assert!(
+            body.contains("<title>Test Bundle for Export</title>"),
+            "body should contain the bundle title"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn export_returns_404_for_nonexistent_version() {
+        let pool = test_pool_from_env().await;
+        let token = admin_session_token(&pool).await;
+        let base = spawn_export_server(pool).await;
+        let fake_id = Uuid::new_v4();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!(
+                "{base}/api/v1/compliance/bundle-versions/{fake_id}/xccdf"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("export request completes");
+
+        assert_eq!(resp.status().as_u16(), 404);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn export_returns_403_without_auth() {
+        let pool = test_pool_from_env().await;
+        let (_pool, _bundle_id, version_id) = create_export_test_data(&pool).await;
+        let base = spawn_export_server(pool).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!(
+                "{base}/api/v1/compliance/bundle-versions/{version_id}/xccdf"
+            ))
+            .send()
+            .await
+            .expect("export request completes");
+
+        assert_eq!(resp.status().as_u16(), 403);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn export_returns_200_with_no_rules_for_empty_bundle() {
+        let pool = test_pool_from_env().await;
+        let token = admin_session_token(&pool).await;
+
+        let bundle_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+
+        sqlx::query(
+            r#"INSERT INTO compliance_bundles (id, name, framework, layer, owner)
+               VALUES ($1, 'Empty Export Bundle', 'NIST', 'nixos', 'test')"#,
+        )
+        .bind(bundle_id)
+        .execute(&pool)
+        .await
+        .expect("insert empty bundle");
+
+        sqlx::query(
+            r#"INSERT INTO compliance_bundle_versions
+               (id, bundle_id, version, publication_state, semantic_digest,
+                name, framework, layer, owner)
+               VALUES ($1, $2, '1.0.0', 'draft', 'empty-digest',
+                       'Empty Export Bundle', 'NIST', 'nixos', 'test')"#,
+        )
+        .bind(version_id)
+        .bind(bundle_id)
+        .execute(&pool)
+        .await
+        .expect("insert empty bundle version");
+
+        sqlx::query(
+            "UPDATE compliance_bundles SET current_draft_version_id = $1 WHERE id = $2",
+        )
+        .bind(version_id)
+        .bind(bundle_id)
+        .execute(&pool)
+        .await
+        .expect("update empty bundle draft version");
+
+        let base = spawn_export_server(pool).await;
+
+        let client = reqwest::Client::new();
+        let body = client
+            .get(format!(
+                "{base}/api/v1/compliance/bundle-versions/{version_id}/xccdf"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("export request completes")
+            .text()
+            .await
+            .expect("text body");
+
+        assert!(
+            body.contains("<Benchmark"),
+            "empty bundle should still contain <Benchmark element"
+        );
+        assert!(
+            !body.contains("<Rule"),
+            "empty bundle should not contain <Rule> elements"
+        );
     }
 }

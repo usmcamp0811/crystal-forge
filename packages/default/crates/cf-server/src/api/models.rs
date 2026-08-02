@@ -1335,6 +1335,18 @@ pub struct ComplianceBundleSummary {
     pub required_envs: Vec<ComplianceEnvironmentRef>,
     pub control_count: i64,
     pub environment_count: i64,
+    /// Exact draft bundle-version ID, or `None` if no mutable draft exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_draft_version_id: Option<uuid::Uuid>,
+    /// Exact published (accepted) bundle-version ID, or `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_published_version_id: Option<uuid::Uuid>,
+    /// Human-readable version string for the current draft.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_draft_version: Option<String>,
+    /// Human-readable version string for the current published version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_published_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1013,6 +1013,14 @@ pub struct ComplianceBundleSummary {
     pub required_envs: Vec<ComplianceEnvironmentRef>,
     pub control_count: i64,
     pub environment_count: i64,
+    #[serde(default)]
+    pub current_draft_version_id: Option<Uuid>,
+    #[serde(default)]
+    pub current_published_version_id: Option<Uuid>,
+    #[serde(default)]
+    pub current_draft_version: Option<String>,
+    #[serde(default)]
+    pub current_published_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
