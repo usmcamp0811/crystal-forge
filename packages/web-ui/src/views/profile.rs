@@ -17,6 +17,19 @@ use crate::state::app_state::{AppState, clear_authenticated_context};
 use crate::state::preferences;
 use crate::state::theme;
 
+fn profile_relative_time(timestamp: chrono::DateTime<chrono::Utc>) -> String {
+    let delta = chrono::Utc::now().signed_duration_since(timestamp);
+    if delta.num_minutes() < 1 {
+        "just now".to_string()
+    } else if delta.num_hours() < 1 {
+        format!("{} minutes ago", delta.num_minutes())
+    } else if delta.num_days() < 1 {
+        format!("{} hours ago", delta.num_hours())
+    } else {
+        format!("{} days ago", delta.num_days())
+    }
+}
+
 #[component]
 pub fn ProfileView() -> Element {
     let mut app_state = use_context::<Signal<AppState>>();
@@ -44,6 +57,7 @@ pub fn ProfileView() -> Element {
     let mut sessions_loading = use_signal(|| true);
     let mut sessions_error = use_signal(|| None::<String>);
     let mut revoke_all_confirm = use_signal(|| false);
+    let mut revoke_all_in_progress = use_signal(|| false);
 
     // Only display identity values supplied by the authenticated context.
     let user_name = auth_context
@@ -558,6 +572,7 @@ pub fn ProfileView() -> Element {
                         button {
                             class: "btn ghost",
                             style: "margin-top: 12px; color: var(--cf-critical); border-color: color-mix(in srgb, var(--cf-critical) 45%, transparent);",
+                            disabled: revoke_all_in_progress(),
                             onclick: move |_| revoke_all_confirm.set(true),
                             "Sign out everywhere"
                         }
@@ -568,10 +583,15 @@ pub fn ProfileView() -> Element {
                                 h3 { style: "font-size: 13px; font-weight: 600; margin: 0 0 8px;", "Sign out everywhere?" }
                                 p { class: "help", "This will sign out all computers and browsers, including this one." }
                                 div { style: "display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px;",
-                                    button { class: "btn ghost", onclick: move |_| revoke_all_confirm.set(false), "Cancel" }
+                                    button { class: "btn ghost", disabled: revoke_all_in_progress(), onclick: move |_| revoke_all_confirm.set(false), "Cancel" }
                                     button {
                                         class: "btn",
+                                        disabled: revoke_all_in_progress(),
                                         onclick: move |_| {
+                                            if revoke_all_in_progress() {
+                                                return;
+                                            }
+                                            revoke_all_in_progress.set(true);
                                             spawn(async move {
                                                 match revoke_all_user_sessions().await {
                                                     Ok(()) => {
@@ -587,11 +607,14 @@ pub fn ProfileView() -> Element {
                                                         );
                                                         nav.replace(Route::LoginView {});
                                                     }
-                                                    Err(err) => sessions_error.set(Some(format!("Could not sign out everywhere: {err}"))),
+                                                    Err(err) => {
+                                                        revoke_all_in_progress.set(false);
+                                                        sessions_error.set(Some(format!("Could not sign out everywhere: {err}")));
+                                                    }
                                                 }
                                             });
                                         },
-                                        "Sign out everywhere"
+                                        if revoke_all_in_progress() { "Signing out…" } else { "Sign out everywhere" }
                                     }
                                 }
                             }
@@ -1020,20 +1043,33 @@ fn SessionRow(
 ) -> Element {
     let session_id = session.id;
     let label = session.device_label.clone();
+    let mut revoking = use_signal(|| false);
+    let session_title = if session.browser.starts_with("Unknown")
+        && session.operating_system.starts_with("Unknown")
+    {
+        session.device_label.clone()
+    } else {
+        format!("{} on {}", session.browser, session.operating_system)
+    };
+    let ip_address = session
+        .ip_address
+        .clone()
+        .unwrap_or_else(|| "unknown IP".to_string());
+    let active_label = profile_relative_time(session.last_seen_at);
     rsx! {
         div {
-            style: "display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 8px; background: var(--cf-surface-muted);",
-            div { style: "display: flex; gap: 10px; min-width: 0;",
+            style: "display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 8px; background: var(--cf-surface-muted); flex-wrap: wrap;",
+            div { style: "display: flex; gap: 10px; min-width: 180px; flex: 1 1 260px;",
                 Icon { name: IconName::Server, size: 16 }
                 div { style: "min-width: 0;",
-                    div { style: "display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600;",
-                        "{session.device_label}"
+                    div { style: "display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; flex-wrap: wrap;",
+                        span { style: "overflow-wrap: anywhere;", "{session_title}" }
                         if session.current {
                             span { class: "chip chip-healthy", style: "font-size: 10px;", "this device" }
                         }
                     }
                     div { style: "font-size: 10px; color: var(--cf-text-muted); font-family: var(--cf-font-mono); margin-top: 2px;",
-                        "{session.ip_address.clone().unwrap_or_else(|| \"unknown IP\".to_string())} · last active {session.last_seen_at}"
+                        "{ip_address} · Active {active_label}"
                     }
                 }
             }
@@ -1041,18 +1077,26 @@ fn SessionRow(
                 button {
                     class: "btn ghost",
                     aria_label: "Revoke session {label}",
+                    disabled: revoking(),
                     onclick: move |_| {
+                        if revoking() {
+                            return;
+                        }
+                        revoking.set(true);
                         spawn(async move {
                             match revoke_user_session(session_id).await {
                                 Ok(()) => {
                                     sessions.write().retain(|item| item.id != session_id);
                                     sessions_error.set(None);
                                 }
-                                Err(err) => sessions_error.set(Some(format!("Could not revoke session: {err}"))),
+                                Err(err) => {
+                                    revoking.set(false);
+                                    sessions_error.set(Some(format!("Could not revoke session: {err}")));
+                                }
                             }
                         });
                     },
-                    "Revoke"
+                    if revoking() { "Revoking…" } else { "Revoke" }
                 }
             }
         }

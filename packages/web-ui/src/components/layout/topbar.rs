@@ -13,6 +13,18 @@ use crate::state::theme::UiTheme;
 use crate::theme;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
+
+#[derive(Clone, Copy)]
+pub struct AccountNotificationsContext {
+    pub items: Signal<Vec<UserNotificationDto>>,
+    pub unread_count: Signal<i64>,
+    pub next_cursor: Signal<Option<String>>,
+    pub loading: Signal<bool>,
+    pub loading_more: Signal<bool>,
+    pub error: Signal<Option<String>>,
+}
 
 #[derive(Clone, Copy)]
 enum NotificationKind {
@@ -29,6 +41,28 @@ fn set_root_attr(name: &str, value: &str) {
             let _ = root.set_attribute(name, value);
         }
     }
+}
+
+fn focus_topbar_bell() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(document) = web_sys::window().and_then(|w| w.document()) {
+            if let Some(element) = document
+                .query_selector("[data-testid='topbar-notifications-button']")
+                .ok()
+                .flatten()
+            {
+                if let Some(html_element) = element.dyn_ref::<web_sys::HtmlElement>() {
+                    let _ = html_element.focus();
+                }
+            }
+        }
+    }
+}
+
+fn close_notifications(mut notifications_open: Signal<bool>) {
+    notifications_open.set(false);
+    focus_topbar_bell();
 }
 
 fn notification_kind(category: NotificationCategory) -> NotificationKind {
@@ -92,6 +126,62 @@ fn current_topbar_auth_generation(app_state: Signal<AppState>) -> u64 {
     app_state.read().auth_generation
 }
 
+fn load_account_notifications(
+    mut ctx: AccountNotificationsContext,
+    app_state: Signal<AppState>,
+    auth_user_id: Option<String>,
+    auth_generation: u64,
+    cursor: Option<String>,
+    append: bool,
+) {
+    spawn(async move {
+        if auth_user_id.is_none() {
+            ctx.items.set(Vec::new());
+            ctx.unread_count.set(0);
+            ctx.next_cursor.set(None);
+            return;
+        }
+        if append {
+            ctx.loading_more.set(true);
+        } else {
+            ctx.loading.set(true);
+        }
+        match fetch_user_notifications(Some(10), cursor, false).await {
+            Ok(response) => {
+                if current_topbar_user_id(app_state) == auth_user_id
+                    && current_topbar_auth_generation(app_state) == auth_generation
+                {
+                    if append {
+                        ctx.items.write().extend(response.notifications);
+                    } else {
+                        ctx.items.set(response.notifications);
+                    }
+                    ctx.unread_count.set(response.unread_count);
+                    ctx.next_cursor.set(response.next_cursor);
+                    ctx.error.set(None);
+                }
+            }
+            Err(err) => {
+                if current_topbar_user_id(app_state) == auth_user_id
+                    && current_topbar_auth_generation(app_state) == auth_generation
+                {
+                    ctx.error
+                        .set(Some(format!("Could not load notifications: {err}")))
+                }
+            }
+        }
+        if current_topbar_user_id(app_state) == auth_user_id
+            && current_topbar_auth_generation(app_state) == auth_generation
+        {
+            if append {
+                ctx.loading_more.set(false);
+            } else {
+                ctx.loading.set(false);
+            }
+        }
+    });
+}
+
 /// Header bar displaying the current page title and optional actions.
 #[component]
 pub fn TopBar(title: String) -> Element {
@@ -118,10 +208,13 @@ pub fn TopBar(title: String) -> Element {
 
     let mut tweaks_open = use_signal(|| false);
     let mut notifications_open = use_signal(|| false);
-    let mut notification_items = use_signal(Vec::<UserNotificationDto>::new);
-    let mut notifications_loading = use_signal(|| false);
-    let mut notifications_error = use_signal(|| None::<String>);
-    let mut unread_count = use_signal(|| 0_i64);
+    let notification_ctx = use_context::<AccountNotificationsContext>();
+    let mut notification_items = notification_ctx.items;
+    let mut notifications_loading = notification_ctx.loading;
+    let mut notifications_loading_more = notification_ctx.loading_more;
+    let mut notifications_error = notification_ctx.error;
+    let mut unread_count = notification_ctx.unread_count;
+    let mut notification_next_cursor = notification_ctx.next_cursor;
     let (crumb_parent, crumb_current) =
         if let Some((parent, current)) = breadcrumb_override.read().clone() {
             (Some(parent), current)
@@ -152,42 +245,20 @@ pub fn TopBar(title: String) -> Element {
         );
     });
 
+    let effect_auth_user_id = auth_user_id.clone();
     use_effect(move || {
-        let auth_user_id = auth_user_id.clone();
-        let requested_generation = auth_generation;
-        spawn(async move {
-            if auth_user_id.is_none() {
-                notification_items.set(Vec::new());
-                unread_count.set(0);
-                return;
-            }
-            notifications_loading.set(true);
-            match fetch_user_notifications(Some(10), None, false).await {
-                Ok(response) => {
-                    if current_topbar_user_id(app_state) == auth_user_id
-                        && current_topbar_auth_generation(app_state) == requested_generation
-                    {
-                        notification_items.set(response.notifications);
-                        unread_count.set(response.unread_count);
-                        notifications_error.set(None);
-                    }
-                }
-                Err(err) => {
-                    if current_topbar_user_id(app_state) == auth_user_id
-                        && current_topbar_auth_generation(app_state) == requested_generation
-                    {
-                        notifications_error
-                            .set(Some(format!("Could not load notifications: {err}")))
-                    }
-                }
-            }
-            if current_topbar_user_id(app_state) == auth_user_id
-                && current_topbar_auth_generation(app_state) == requested_generation
-            {
-                notifications_loading.set(false);
-            }
-        });
+        load_account_notifications(
+            notification_ctx,
+            app_state,
+            effect_auth_user_id.clone(),
+            auth_generation,
+            None,
+            false,
+        );
     });
+
+    let open_auth_user_id = auth_user_id.clone();
+    let more_auth_user_id = auth_user_id.clone();
 
     rsx! {
         header {
@@ -250,9 +321,22 @@ pub fn TopBar(title: String) -> Element {
                     "data-testid": "topbar-notifications-button",
                     class: "btn-icon focus-ring topbar-bell",
                     "aria-label": "Notifications ({unread_count()} unread)",
+                    "aria-expanded": "{notifications_open()}",
+                    "aria-haspopup": "menu",
                     title: "Notifications",
                     onclick: move |_| {
-                        notifications_open.set(!notifications_open());
+                        let next_open = !notifications_open();
+                        notifications_open.set(next_open);
+                        if next_open {
+                            load_account_notifications(
+                                notification_ctx,
+                                app_state,
+                                open_auth_user_id.clone(),
+                                auth_generation,
+                                None,
+                                false,
+                            );
+                        }
                     },
                     svg {
                         class: "w-4 h-4",
@@ -276,11 +360,17 @@ pub fn TopBar(title: String) -> Element {
                 if notifications_open() {
                     div {
                         class: "cf-overlay-backdrop",
-                        onclick: move |_| notifications_open.set(false),
+                        onclick: move |_| close_notifications(notifications_open),
                     }
                     div {
                         "data-testid": "topbar-notifications-panel",
                         class: "notif-panel",
+                        tabindex: "-1",
+                        onkeydown: move |evt| {
+                            if evt.key() == Key::Escape {
+                                close_notifications(notifications_open);
+                            }
+                        },
                         div {
                             class: "notif-head",
                             strong { "Notifications" }
@@ -319,10 +409,11 @@ pub fn TopBar(title: String) -> Element {
                         }
                         div {
                             class: "notif-list",
-                            if notifications_loading() {
+                            if let Some(error) = notifications_error() {
+                                div { class: "help", style: "padding: 10px 12px; color: var(--cf-critical); border-bottom: 1px solid var(--cf-divider);", "{error}" }
+                            }
+                            if notifications_loading() && notification_items.read().is_empty() {
                                 div { class: "help", style: "padding: 12px;", "Loading notifications..." }
-                            } else if let Some(error) = notifications_error() {
-                                div { class: "help", style: "padding: 12px; color: var(--cf-critical);", "{error}" }
                             } else if notification_items.read().is_empty() {
                                 div { class: "help", style: "padding: 12px;", "No notifications yet." }
                             } else {
@@ -332,13 +423,52 @@ pub fn TopBar(title: String) -> Element {
                                         class: if item.read_at.is_none() { "notif-item unread focus-ring" } else { "notif-item focus-ring" },
                                         role: "button",
                                         tabindex: "0",
+                                        onkeydown: {
+                                            let nav = nav.clone();
+                                            let route = notification_route(&item.route);
+                                            let item_id = item.id;
+                                            let requested_generation = auth_generation;
+                                            move |evt| {
+                                                if evt.key() == Key::Enter || evt.key() == Key::Character(" ".to_string()) {
+                                                    close_notifications(notifications_open);
+                                                    if let Some(route) = route.clone() {
+                                                        nav.push(route);
+                                                    }
+                                                    spawn(async move {
+                                                        if current_topbar_auth_generation(app_state) == requested_generation {
+                                                            match mark_user_notification_read(item_id).await {
+                                                                Ok(()) => {
+                                                                    if let Some(clicked) = notification_items
+                                                                        .write()
+                                                                        .iter_mut()
+                                                                        .find(|candidate| candidate.id == item_id)
+                                                                    {
+                                                                        if clicked.read_at.is_none() {
+                                                                            unread_count.set((unread_count() - 1).max(0));
+                                                                        }
+                                                                        clicked.read_at = Some(Utc::now());
+                                                                    }
+                                                                    notifications_error.set(None);
+                                                                }
+                                                                Err(err) => notifications_error.set(Some(format!(
+                                                                    "Could not mark notification read: {err}"
+                                                                ))),
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                        },
                                     onclick: {
                                         let nav = nav.clone();
                                         let route = notification_route(&item.route);
                                         let item_id = item.id;
                                         let requested_generation = auth_generation;
                                         move |_| {
-                                            let route = route.clone();
+                                            close_notifications(notifications_open);
+                                            if let Some(route) = route.clone() {
+                                                nav.push(route);
+                                            }
                                             spawn(async move {
                                                 if current_topbar_auth_generation(app_state) == requested_generation
                                                 {
@@ -361,10 +491,6 @@ pub fn TopBar(title: String) -> Element {
                                                                 "Could not mark notification read: {err}"
                                                             )));
                                                         }
-                                                    }
-                                                    notifications_open.set(false);
-                                                    if let Some(route) = route.clone() {
-                                                        nav.push(route);
                                                     }
                                                 }
                                             });
@@ -483,6 +609,25 @@ pub fn TopBar(title: String) -> Element {
                         }
                         div {
                             class: "notif-foot",
+                            if let Some(cursor) = notification_next_cursor() {
+                                button {
+                                    "data-testid": "topbar-notifications-load-more",
+                                    class: "btn btn-ghost focus-ring xs",
+                                    r#type: "button",
+                                    disabled: notifications_loading_more(),
+                                    onclick: move |_| {
+                                        load_account_notifications(
+                                            notification_ctx,
+                                            app_state,
+                                            more_auth_user_id.clone(),
+                                            auth_generation,
+                                            Some(cursor.clone()),
+                                            true,
+                                        )
+                                    },
+                                    if notifications_loading_more() { "Loading..." } else { "Load more" }
+                                }
+                            }
                             button {
                                 "data-testid": "topbar-notifications-settings-button",
                                 class: "btn btn-ghost focus-ring xs",

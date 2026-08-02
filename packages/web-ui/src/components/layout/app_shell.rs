@@ -8,12 +8,12 @@ use crate::api::client::{
 };
 use crate::api::models::{
     AuthContext, AuthMode, AuthUser, ClassificationBannerConfig, Role, UpdateUserPreferences,
-    UserPreferencesDto,
+    UserNotificationDto, UserPreferencesDto,
 };
-use crate::components::layout::TopBar;
 use crate::components::layout::sidebar::{
     MobileDrawer, PreferencesContext, SidebarContext, SidebarNav,
 };
+use crate::components::layout::{AccountNotificationsContext, TopBar};
 use crate::components::layout::{
     BannerPlacement, DEV_MODE_BANNER_HEIGHT_PX, DevModeBanner, use_dev_mode_enabled,
 };
@@ -168,6 +168,12 @@ pub fn AppShell() -> Element {
     let mut preference_save_in_flight = use_signal(|| false);
     let mut preference_save_user_id = use_signal(|| None::<String>);
     let mut preference_save_generation = use_signal(|| 0_u64);
+    let notification_items = use_signal(Vec::<UserNotificationDto>::new);
+    let unread_count = use_signal(|| 0_i64);
+    let notification_next_cursor = use_signal(|| None::<String>);
+    let notifications_loading = use_signal(|| false);
+    let notifications_loading_more = use_signal(|| false);
+    let notifications_error = use_signal(|| None::<String>);
     let save_update = Callback::new(move |update: UpdateUserPreferences| {
         save_error.set(None);
         preference_save_pending.with_mut(|pending| {
@@ -191,6 +197,15 @@ pub fn AppShell() -> Element {
         default_systems_view,
         save_error,
         save_update,
+    });
+
+    use_context_provider(|| AccountNotificationsContext {
+        items: notification_items,
+        unread_count,
+        next_cursor: notification_next_cursor,
+        loading: notifications_loading,
+        loading_more: notifications_loading_more,
+        error: notifications_error,
     });
 
     let breadcrumb_override = use_signal(|| None::<(String, String)>);

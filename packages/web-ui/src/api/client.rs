@@ -1595,7 +1595,7 @@ pub async fn fetch_user_notifications(
         params.push(format!("limit={limit}"));
     }
     if let Some(cursor) = cursor {
-        params.push(format!("cursor={cursor}"));
+        params.push(format!("cursor={}", cursor.replace('|', "%7C")));
     }
     if unread_only {
         params.push("unread_only=true".to_string());
