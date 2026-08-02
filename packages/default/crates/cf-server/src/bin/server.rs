@@ -6,6 +6,7 @@ use axum::http::{
 };
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     routing::{delete, get, patch, post, put},
 };
 use base64::{Engine as _, engine::general_purpose};
@@ -436,7 +437,9 @@ async fn main() -> anyhow::Result<()> {
         // CF-XCCDF import/export and bundle version endpoints
         .route(
             "/api/v1/compliance/xccdf/preview",
-            post(compliance::xccdf_preview),
+            post(compliance::xccdf_preview).layer(DefaultBodyLimit::max(
+                crystal_forge::compliance::interchange::MAX_XCCDF_MULTIPART_BYTES,
+            )),
         )
         .route(
             "/api/v1/compliance/xccdf/import",

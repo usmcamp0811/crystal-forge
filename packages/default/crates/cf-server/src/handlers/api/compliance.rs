@@ -229,27 +229,36 @@ pub async fn xccdf_preview(
     let mut total_bytes: usize = 0;
 
     // Read multipart incrementally, enforcing the byte limit at each chunk.
+    // Only file fields are accumulated; non-file fields are drained without
+    // counting toward the file limit (they still count toward the route-level
+    // request body limit).
     while let Ok(Some(mut field)) = multipart.next_field().await {
-        filename = field.file_name().map(String::from);
-        // Check media type from filename for 415.
-        if let Some(ref fname) = filename {
-            let lower = fname.to_lowercase();
-            if !lower.ends_with(".xml") && !lower.ends_with(".zip") {
-                return (
-                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    Json(ApiError {
-                        error: "Unsupported file type".into(),
-                        message: "Only .xml and .zip files are accepted".into(),
-                        details: None,
-                    }),
-                )
-                    .into_response();
+        let is_file = field.file_name().is_some();
+        if is_file && filename.is_none() {
+            filename = field.file_name().map(String::from);
+            // Check media type from filename for 415.
+            if let Some(ref fname) = filename {
+                let lower = fname.to_lowercase();
+                if !lower.ends_with(".xml") && !lower.ends_with(".zip") {
+                    return (
+                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                        Json(ApiError {
+                            error: "Unsupported file type".into(),
+                            message: "Only .xml and .zip files are accepted".into(),
+                            details: None,
+                        }),
+                    )
+                        .into_response();
+                }
             }
         }
         // Read incrementally.
         loop {
             match field.chunk().await {
                 Ok(Some(chunk)) => {
+                    if !is_file {
+                        continue;
+                    }
                     total_bytes += chunk.len();
                     if total_bytes > limits.max_xml_bytes {
                         return (
@@ -269,6 +278,17 @@ pub async fn xccdf_preview(
                 }
                 Ok(None) => break,
                 Err(e) => {
+                    if is_body_limit_error(&e) {
+                        return (
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            Json(ApiError {
+                                error: "Request too large".into(),
+                                message: "Multipart request exceeds the route body limit".into(),
+                                details: None,
+                            }),
+                        )
+                            .into_response();
+                    }
                     return internal_error(&format!("Failed to read upload: {e}"));
                 }
             }
@@ -583,4 +603,260 @@ fn internal_error(message: &str) -> axum::response::Response {
         }),
     )
         .into_response()
+}
+
+/// Detect whether a multipart chunk-read failure is the route-level
+/// `DefaultBodyLimit` rejecting an over-limit request body.
+///
+/// Axum wraps the request body in `http_body::Limited`; when the limit is
+/// exceeded mid-stream the error surfaces here instead of at extraction time
+/// (the handler authenticates before reading fields). Walk the error source
+/// chain for the limit message rather than exposing it as a 500.
+fn is_body_limit_error(err: &axum::extract::multipart::MultipartError) -> bool {
+    let mut current: Option<&(dyn std::error::Error + 'static)> =
+        Some(err as &(dyn std::error::Error + 'static));
+    while let Some(e) = current {
+        if e.to_string().contains("length limit exceeded") {
+            return true;
+        }
+        current = e.source();
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
+    use crate::compliance::interchange::{MAX_XCCDF_MULTIPART_BYTES, MAX_XCCDF_XML_BYTES};
+    use crate::models::auth_identity::AuthRole;
+    use crate::queries::auth_identity::{create_user_session, sync_user_role};
+    use crate::queries::users::insert_user;
+    use axum::Router;
+    use axum::extract::DefaultBodyLimit;
+    use axum::routing::post;
+    use chrono::Utc;
+
+    const BOUNDARY: &str = "XCFTESTBOUNDARY";
+
+    fn minimal_xccdf() -> &'static str {
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2"
+    id="xccdf_org.crystalforge_benchmark_test">
+  <status>draft</status>
+  <title>Test Benchmark</title>
+  <version>0.1.0</version>
+  <Rule id="xccdf_org.crystalforge_rule_test">
+    <title>Test Rule</title>
+  </Rule>
+</Benchmark>"#
+    }
+
+    async fn test_pool_from_env() -> PgPool {
+        let db_url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL must be set for XCCDF preview endpoint tests");
+        PgPool::connect(&db_url)
+            .await
+            .expect("failed to connect to DATABASE_URL")
+    }
+
+    /// Create an admin user with a live session and return the session token.
+    async fn admin_session_token(pool: &PgPool) -> String {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let user = insert_user(
+            pool,
+            &format!("{suffix}@example.com"),
+            Some("XCCDF Preview Tester"),
+        )
+        .await
+        .expect("insert_user should succeed");
+        sync_user_role(pool, user.id, AuthRole::Admin)
+            .await
+            .expect("sync_user_role should succeed");
+        let token = format!("session-{suffix}");
+        create_user_session(
+            pool,
+            user.id,
+            hash_token(&token),
+            Utc::now() + chrono::Duration::hours(1),
+            Some("test-agent".to_string()),
+            Some("127.0.0.1".to_string()),
+        )
+        .await
+        .expect("create_user_session should succeed");
+        token
+    }
+
+    /// Serve the preview route exactly as production wires it, including the
+    /// route-level body limit layer, and return the base URL.
+    async fn spawn_preview_server(pool: PgPool) -> String {
+        let app = Router::new()
+            .route(
+                "/api/v1/compliance/xccdf/preview",
+                post(xccdf_preview).layer(DefaultBodyLimit::max(MAX_XCCDF_MULTIPART_BYTES)),
+            )
+            .with_state(pool);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve preview app");
+        });
+        format!("http://{addr}")
+    }
+
+    fn push_file_field(body: &mut Vec<u8>, name: &str, filename: &str, content: &[u8]) {
+        body.extend_from_slice(
+            format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(content);
+        body.extend_from_slice(b"\r\n");
+    }
+
+    fn push_text_field(body: &mut Vec<u8>, name: &str, content: &[u8]) {
+        body.extend_from_slice(
+            format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n")
+                .as_bytes(),
+        );
+        body.extend_from_slice(content);
+        body.extend_from_slice(b"\r\n");
+    }
+
+    fn finish_multipart(body: &mut Vec<u8>) {
+        body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+    }
+
+    async fn post_multipart(base: &str, token: &str, body: Vec<u8>) -> reqwest::Response {
+        reqwest::Client::new()
+            .post(format!("{base}/api/v1/compliance/xccdf/preview"))
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .body(body)
+            .send()
+            .await
+            .expect("preview request completes")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_rejects_body_above_route_limit() {
+        let pool = test_pool_from_env().await;
+        let token = admin_session_token(&pool).await;
+        let base = spawn_preview_server(pool).await;
+
+        // File field stays under the file limit; a junk field pushes the total
+        // request body past the route-level limit.
+        let mut body = Vec::new();
+        push_file_field(&mut body, "file", "test.xml", minimal_xccdf().as_bytes());
+        push_text_field(&mut body, "junk", &vec![b'x'; MAX_XCCDF_MULTIPART_BYTES]);
+        finish_multipart(&mut body);
+
+        let response = post_multipart(&base, &token, body).await;
+        assert_eq!(response.status().as_u16(), 413);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_rejects_file_above_file_limit() {
+        let pool = test_pool_from_env().await;
+        let token = admin_session_token(&pool).await;
+        let base = spawn_preview_server(pool).await;
+
+        let mut body = Vec::new();
+        push_file_field(
+            &mut body,
+            "file",
+            "big.xml",
+            &vec![b'x'; MAX_XCCDF_XML_BYTES + 1],
+        );
+        finish_multipart(&mut body);
+
+        let response = post_multipart(&base, &token, body).await;
+        assert_eq!(response.status().as_u16(), 413);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_accepts_valid_file_below_limits() {
+        let pool = test_pool_from_env().await;
+        let token = admin_session_token(&pool).await;
+        let base = spawn_preview_server(pool).await;
+
+        let mut body = Vec::new();
+        push_file_field(&mut body, "file", "test.xml", minimal_xccdf().as_bytes());
+        finish_multipart(&mut body);
+
+        let response = post_multipart(&base, &token, body).await;
+        assert_eq!(response.status().as_u16(), 200);
+        let json: serde_json::Value = response.json().await.expect("json body");
+        assert_eq!(json["document_class"], "foreignxccdf");
+        assert_eq!(json["rule_count"], 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_rejects_unsupported_file_type() {
+        let pool = test_pool_from_env().await;
+        let token = admin_session_token(&pool).await;
+        let base = spawn_preview_server(pool).await;
+
+        let mut body = Vec::new();
+        push_file_field(&mut body, "file", "test.txt", minimal_xccdf().as_bytes());
+        finish_multipart(&mut body);
+
+        let response = post_multipart(&base, &token, body).await;
+        assert_eq!(response.status().as_u16(), 415);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_rejects_blocking_validation_errors_with_422() {
+        let pool = test_pool_from_env().await;
+        let token = admin_session_token(&pool).await;
+        let base = spawn_preview_server(pool).await;
+
+        let dtd = r#"<?xml version="1.0"?>
+<!DOCTYPE Benchmark [<!ENTITY x "y">]>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="xccdf_test_benchmark">
+  <status>draft</status>
+  <title>Test</title>
+  <version>0.1</version>
+</Benchmark>"#;
+        let mut body = Vec::new();
+        push_file_field(&mut body, "file", "test.xml", dtd.as_bytes());
+        finish_multipart(&mut body);
+
+        let response = post_multipart(&base, &token, body).await;
+        assert_eq!(response.status().as_u16(), 422);
+        let json: serde_json::Value = response.json().await.expect("json body");
+        let codes: Vec<&str> = json["errors"]
+            .as_array()
+            .expect("errors array")
+            .iter()
+            .filter_map(|e| e["code"].as_str())
+            .collect();
+        assert!(codes.contains(&"DTD_FORBIDDEN"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_rejects_missing_file_with_400() {
+        let pool = test_pool_from_env().await;
+        let token = admin_session_token(&pool).await;
+        let base = spawn_preview_server(pool).await;
+
+        let mut body = Vec::new();
+        push_text_field(&mut body, "note", b"no file attached");
+        finish_multipart(&mut body);
+
+        let response = post_multipart(&base, &token, body).await;
+        assert_eq!(response.status().as_u16(), 400);
+    }
 }

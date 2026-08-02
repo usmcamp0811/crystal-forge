@@ -15,6 +15,13 @@ pub const CANONICALIZATION_VERSION: &str = "cf-model-json-1";
 /// Digest algorithm used with [`CANONICALIZATION_VERSION`].
 pub const DIGEST_ALGORITHM: &str = "sha-256";
 
+/// Maximum accepted XCCDF XML document size (file-field bytes).
+pub const MAX_XCCDF_XML_BYTES: usize = 10 * 1024 * 1024;
+/// Allowance for multipart framing (boundaries, headers) around the file field.
+pub const MAX_MULTIPART_OVERHEAD_BYTES: usize = 64 * 1024;
+/// Maximum accepted multipart request size for XCCDF upload routes.
+pub const MAX_XCCDF_MULTIPART_BYTES: usize = MAX_XCCDF_XML_BYTES + MAX_MULTIPART_OVERHEAD_BYTES;
+
 /// Limits applied before XML or archive contents are parsed.
 ///
 /// The limits deliberately bound both the compressed transport and the parsed
@@ -31,6 +38,8 @@ pub struct InterchangeLimits {
     pub max_text_node_bytes: usize,
     pub max_rule_count: usize,
     pub max_profile_count: usize,
+    pub max_group_count: usize,
+    pub max_value_count: usize,
     pub max_policy_expression_bytes: usize,
     pub max_preserved_opaque_xml_bytes: usize,
 }
@@ -38,7 +47,7 @@ pub struct InterchangeLimits {
 impl Default for InterchangeLimits {
     fn default() -> Self {
         Self {
-            max_xml_bytes: 10 * 1024 * 1024,
+            max_xml_bytes: MAX_XCCDF_XML_BYTES,
             max_zip_bytes: 50 * 1024 * 1024,
             max_expanded_archive_bytes: 100 * 1024 * 1024,
             max_archive_files: 1_000,
@@ -47,6 +56,8 @@ impl Default for InterchangeLimits {
             max_text_node_bytes: 1024 * 1024,
             max_rule_count: 5_000,
             max_profile_count: 100,
+            max_group_count: 1_000,
+            max_value_count: 5_000,
             max_policy_expression_bytes: 128 * 1024,
             max_preserved_opaque_xml_bytes: 512 * 1024,
         }
