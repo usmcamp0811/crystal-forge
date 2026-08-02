@@ -17,13 +17,14 @@ use crystal_forge::{
     fixtures::seed_from_fixture,
     flake::commits::initialize_flake_commits,
     handlers::{
-        agent::{deployment_failed, deployment_started, heartbeat, state},
+        agent::{attestation, deployment_failed, deployment_started, heartbeat, state},
         agent_request::CFState,
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
             builders, caches, commits, compliance, config_health, cves, dashboard,
-            deployment_policies, deployments, environments, flakes, hardening, navigation,
-            scanning, setup_wizard, systems, user_preferences,
+            deployment_approvals, deployment_policies, deployments, environments, flakes,
+            hardening, navigation, running_state_attestations, scanning, setup_wizard,
+            systems, user_preferences,
         },
         status,
         webhook::webhook_handler,
@@ -208,6 +209,10 @@ async fn main() -> anyhow::Result<()> {
             post(deployment_started::report),
         )
         .route("/agent/deployment-failed", post(deployment_failed::report))
+        .route(
+            "/api/v1/agent/running-state-attestations",
+            post(attestation::submit_attestation),
+        )
         .route("/webhook", post(webhook_handler))
         // REST API v1
         .route(
@@ -446,6 +451,48 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/deployments/commit/:commit_id/rollout/:policy_id",
             get(deployments::get_commit_rollout_status),
+        )
+        // Deployment approval request endpoints
+        .route(
+            "/api/v1/deployment-approvals",
+            get(deployment_approvals::list_approval_requests),
+        )
+        .route(
+            "/api/v1/deployment-approvals/summary",
+            get(deployment_approvals::get_approval_summary),
+        )
+        .route(
+            "/api/v1/deployment-approvals/:request_id",
+            get(deployment_approvals::get_approval_request),
+        )
+        .route(
+            "/api/v1/deployment-approvals/:request_id/approve",
+            post(deployment_approvals::approve_request),
+        )
+        .route(
+            "/api/v1/deployment-approvals/:request_id/reject",
+            post(deployment_approvals::reject_request),
+        )
+        .route(
+            "/api/v1/deployment-approvals/:request_id/cancel",
+            post(deployment_approvals::cancel_request),
+        )
+        // Running-state attestation and trust endpoints
+        .route(
+            "/api/v1/running-state-attestations/summary",
+            get(running_state_attestations::get_trust_summary),
+        )
+        .route(
+            "/api/v1/running-state-attestations/:attestation_id/actions",
+            post(running_state_attestations::submit_resolution_action),
+        )
+        .route(
+            "/api/v1/systems/:system_id/running-state-trust",
+            get(running_state_attestations::get_system_trust_state),
+        )
+        .route(
+            "/api/v1/systems/:system_id/running-state-attestations",
+            get(running_state_attestations::list_attestation_history),
         )
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))

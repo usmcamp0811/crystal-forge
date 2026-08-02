@@ -13,5 +13,6 @@
 //!   or `cf-agent`.
 
 pub mod agent;
+pub mod attestation;
 pub mod builder;
 pub mod cache;

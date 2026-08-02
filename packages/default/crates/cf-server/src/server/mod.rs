@@ -917,6 +917,18 @@ pub fn spawn_background_tasks(
         deployment_pool,
     ));
 
+    // Deployment approval expiration reconciliation
+    let approval_expiration_pool = pool.clone();
+    tokio::spawn(crate::tasks::approval_expiration::run_approval_expiration_loop(
+        approval_expiration_pool,
+    ));
+
+    // Attestation freshness reconciliation
+    let attestation_freshness_pool = pool.clone();
+    tokio::spawn(crate::tasks::attestation_freshness::run_attestation_freshness_loop(
+        attestation_freshness_pool,
+    ));
+
     // --- CVE scan background job ---
     // The job handle is registered in the registry so the Admin Background Jobs
     // tab (TASK-336.5) can list it, toggle enabled/disabled, and trigger run-now.

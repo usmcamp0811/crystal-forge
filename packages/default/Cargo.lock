@@ -415,16 +415,19 @@ dependencies = [
  "cf-protocol",
  "chrono",
  "ed25519-dalek",
+ "hex",
  "hostname",
  "nix",
  "rand 0.8.5",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "sysinfo",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
