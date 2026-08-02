@@ -227,14 +227,31 @@ pub async fn xccdf_preview(
     let mut accumulated = Vec::new();
     let mut filename: Option<String> = None;
     let mut total_bytes: usize = 0;
+    let mut received_file = false;
 
-    // Read multipart incrementally, enforcing the byte limit at each chunk.
-    // Only file fields are accumulated; non-file fields are drained without
-    // counting toward the file limit (they still count toward the route-level
-    // request body limit).
+    // Read multipart incrementally.
+    //
+    // * Only the field named exactly "file" is accepted as the upload field.
+    //   Any field with a filename but a different name is rejected (400).
+    // * Exactly one upload file is accepted; a second file field is rejected (400).
+    // * Non-file fields are drained to satisfy the route-level body limit
+    //   without contributing to the accumulated bytes.
     while let Ok(Some(mut field)) = multipart.next_field().await {
-        let is_file = field.file_name().is_some();
-        if is_file && filename.is_none() {
+        let field_name = field.name().map(String::from);
+        let has_filename = field.file_name().is_some();
+
+        if has_filename {
+            // Enforce field name == "file".
+            if field_name.as_deref() != Some("file") {
+                return bad_request(
+                    "Upload field must be named 'file'; unexpected field name in multipart",
+                );
+            }
+            // Reject a second file field.
+            if received_file {
+                return bad_request("Exactly one file field named 'file' is required");
+            }
+            received_file = true;
             filename = field.file_name().map(String::from);
             // Check media type from filename for 415.
             if let Some(ref fname) = filename {
@@ -252,11 +269,13 @@ pub async fn xccdf_preview(
                 }
             }
         }
+
         // Read incrementally.
         loop {
             match field.chunk().await {
                 Ok(Some(chunk)) => {
-                    if !is_file {
+                    if !has_filename {
+                        // Drain non-file fields without accumulating.
                         continue;
                     }
                     total_bytes += chunk.len();
@@ -297,7 +316,7 @@ pub async fn xccdf_preview(
 
     let bytes = accumulated;
     if bytes.is_empty() {
-        return bad_request("No file attached");
+        return bad_request("No file field named 'file' was attached");
     };
 
     match parse_xccdf(&bytes, filename.as_deref(), &limits) {
@@ -854,6 +873,58 @@ mod tests {
 
         let mut body = Vec::new();
         push_text_field(&mut body, "note", b"no file attached");
+        finish_multipart(&mut body);
+
+        let response = post_multipart(&base, &token, body).await;
+        assert_eq!(response.status().as_u16(), 400);
+    }
+
+    // ── Multipart field-count tests ───────────────────────────────────────────
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_rejects_two_file_fields_with_400() {
+        let pool = test_pool_from_env().await;
+        let token = admin_session_token(&pool).await;
+        let base = spawn_preview_server(pool).await;
+
+        let mut body = Vec::new();
+        push_file_field(&mut body, "file", "a.xml", minimal_xccdf().as_bytes());
+        push_file_field(&mut body, "file", "b.xml", minimal_xccdf().as_bytes());
+        finish_multipart(&mut body);
+
+        let response = post_multipart(&base, &token, body).await;
+        assert_eq!(response.status().as_u16(), 400);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_accepts_non_file_field_plus_one_file_field() {
+        let pool = test_pool_from_env().await;
+        let token = admin_session_token(&pool).await;
+        let base = spawn_preview_server(pool).await;
+
+        // A leading non-file (text) field must be silently drained; only the
+        // "file" upload field is processed.
+        let mut body = Vec::new();
+        push_text_field(&mut body, "note", b"metadata only");
+        push_file_field(&mut body, "file", "test.xml", minimal_xccdf().as_bytes());
+        finish_multipart(&mut body);
+
+        let response = post_multipart(&base, &token, body).await;
+        assert_eq!(response.status().as_u16(), 200);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_rejects_file_field_with_wrong_name() {
+        let pool = test_pool_from_env().await;
+        let token = admin_session_token(&pool).await;
+        let base = spawn_preview_server(pool).await;
+
+        // File field named "upload" instead of "file" must be rejected.
+        let mut body = Vec::new();
+        push_file_field(&mut body, "upload", "test.xml", minimal_xccdf().as_bytes());
         finish_multipart(&mut body);
 
         let response = post_multipart(&base, &token, body).await;

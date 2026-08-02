@@ -6,11 +6,11 @@
 //! documents, and returns typed structures for preview and import.
 
 use anyhow::Result;
-use quick_xml::events::Event;
+use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::reader::NsReader;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use uuid::Uuid;
 
@@ -63,6 +63,66 @@ fn classify_element_namespace(
 enum ParseControl {
     Continue,
     Abort,
+}
+
+// ── Attribute parsing ─────────────────────────────────────────────────────────
+
+/// Parse all attributes of an element in a single pass, enforcing the per-element
+/// attribute limit and detecting both malformed attributes and duplicates.
+///
+/// Attribute values are unescaped (entity references resolved). The returned
+/// map is keyed by the raw qualified attribute name bytes (e.g. `b"id"`,
+/// `b"xccdf:version"`).
+fn parse_attributes(
+    element: &BytesStart<'_>,
+    limit: usize,
+) -> Result<HashMap<Vec<u8>, String>, Diagnostic> {
+    let mut parsed: HashMap<Vec<u8>, String> = HashMap::new();
+
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|error| {
+            Diagnostic::error(
+                "XML_ATTRIBUTE_ERROR",
+                &format!("Invalid XML attribute: {error}"),
+            )
+        })?;
+
+        if parsed.len() >= limit {
+            return Err(Diagnostic::error(
+                "ATTRIBUTE_LIMIT_EXCEEDED",
+                &format!("Element exceeds the maximum of {limit} attributes"),
+            ));
+        }
+
+        let key = attribute.key.as_ref().to_vec();
+
+        if parsed.contains_key(&key) {
+            return Err(Diagnostic::error(
+                "DUPLICATE_ATTRIBUTE",
+                &format!("Duplicate attribute '{}'", String::from_utf8_lossy(&key)),
+            ));
+        }
+
+        let value = attribute
+            .unescape_value()
+            .map_err(|error| {
+                Diagnostic::error(
+                    "XML_ATTRIBUTE_ERROR",
+                    &format!("Invalid XML attribute value: {error}"),
+                )
+            })?
+            .into_owned();
+
+        parsed.insert(key, value);
+    }
+
+    Ok(parsed)
+}
+
+/// Look up an attribute value by its raw qualified name, returning a `&str`
+/// when present.
+fn attr<'a>(attrs: &'a HashMap<Vec<u8>, String>, key: &[u8]) -> Option<&'a str> {
+    attrs.get(key).map(String::as_str)
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -254,6 +314,13 @@ struct ParserState {
     group_ids: HashSet<String>,
     value_ids: HashSet<String>,
 
+    // CF classification tracking.
+    /// True when at least one recognised CF extension element was parsed.
+    saw_supported_cf_content: bool,
+    /// True when a CF-namespace element with an unrecognised local name was
+    /// encountered.  Triggers `CfNativeUnsupportedExtension`.
+    saw_unknown_cf_content: bool,
+
     // Parsing state.
     current_text: String,
     current_rule: Option<ParsedRule>,
@@ -291,6 +358,8 @@ impl ParserState {
             rule_ids: HashSet::new(),
             group_ids: HashSet::new(),
             value_ids: HashSet::new(),
+            saw_supported_cf_content: false,
+            saw_unknown_cf_content: false,
             current_text: String::new(),
             current_rule: None,
             current_profile: None,
@@ -310,20 +379,15 @@ impl ParserState {
     ) -> ParseControl {
         self.current_text.clear();
 
-        // Enforce attribute count limit on every element, regardless of namespace.
-        let attr_count = e.attributes().count();
-        if attr_count > self.limits.max_attributes_per_element {
-            self.errors.push(Diagnostic::error(
-                "ATTRIBUTE_LIMIT_EXCEEDED",
-                &format!(
-                    "Element '{}' has {} attributes, exceeding maximum {}",
-                    String::from_utf8_lossy(local_name),
-                    attr_count,
-                    self.limits.max_attributes_per_element
-                ),
-            ));
-            return ParseControl::Abort;
-        }
+        // Parse attributes in one pass: enforces the per-element limit,
+        // detects malformed and duplicate attributes, and unescapes values.
+        let attrs = match parse_attributes(e, self.limits.max_attributes_per_element) {
+            Ok(a) => a,
+            Err(diag) => {
+                self.errors.push(diag);
+                return ParseControl::Abort;
+            }
+        };
 
         // Warn when the root element looks like XCCDF but is not bound to the
         // XCCDF namespace.
@@ -339,65 +403,50 @@ impl ParserState {
 
         match (namespace, local_name) {
             // ── XCCDF structure ────────────────────────────────────────────
-            (ElementNamespace::Xccdf, b"Benchmark") => self.parse_benchmark_start(e),
-            (ElementNamespace::Xccdf, b"Profile") => self.parse_profile_start(e),
-            (ElementNamespace::Xccdf, b"Rule") => self.parse_rule_start(e),
-            (ElementNamespace::Xccdf, b"Group") => self.parse_group_start(e),
-            (ElementNamespace::Xccdf, b"Value") => self.parse_value_start(e),
+            (ElementNamespace::Xccdf, b"Benchmark") => self.parse_benchmark_start(&attrs),
+            (ElementNamespace::Xccdf, b"Profile") => self.parse_profile_start(&attrs),
+            (ElementNamespace::Xccdf, b"Rule") => self.parse_rule_start(&attrs),
+            (ElementNamespace::Xccdf, b"Group") => self.parse_group_start(&attrs),
+            (ElementNamespace::Xccdf, b"Value") => self.parse_value_start(&attrs),
             (ElementNamespace::Xccdf, b"status") => {
-                if let Some(date) = e.try_get_attribute("date").ok().flatten() {
-                    if let Ok(d) = std::str::from_utf8(&date.value) {
-                        if let Some(ref mut bm) = self.benchmark {
-                            bm.status_date = Some(d.to_string());
-                        }
+                if let Some(d) = attr(&attrs, b"date") {
+                    if let Some(ref mut bm) = self.benchmark {
+                        bm.status_date = Some(d.to_string());
                     }
                 }
                 ParseControl::Continue
             }
             (ElementNamespace::Xccdf, b"platform") => {
-                if let Some(idref) = e.try_get_attribute("idref").ok().flatten() {
-                    if let Ok(v) = std::str::from_utf8(&idref.value) {
-                        if let Some(ref mut bm) = self.benchmark {
-                            bm.platforms.push(v.to_string());
-                        }
+                if let Some(v) = attr(&attrs, b"idref") {
+                    if let Some(ref mut bm) = self.benchmark {
+                        bm.platforms.push(v.to_string());
                     }
                 }
                 ParseControl::Continue
             }
             (ElementNamespace::Xccdf, b"reference") => {
-                let href = e
-                    .try_get_attribute("href")
-                    .ok()
-                    .flatten()
-                    .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from));
+                let href = attr(&attrs, b"href").map(String::from);
                 self.current_ref = Some(Reference { href, title: None });
                 ParseControl::Continue
             }
             (ElementNamespace::Xccdf, b"select") => {
-                if let Some(idref) = e.try_get_attribute("idref").ok().flatten() {
-                    if let Ok(v) = std::str::from_utf8(&idref.value) {
-                        if let Some(ref mut pr) = self.current_profile {
-                            pr.select_ids.push(v.to_string());
-                        }
+                if let Some(v) = attr(&attrs, b"idref") {
+                    if let Some(ref mut pr) = self.current_profile {
+                        pr.select_ids.push(v.to_string());
                     }
                 }
                 ParseControl::Continue
             }
             (ElementNamespace::Xccdf, b"check") => {
-                self.parse_check_start(e);
+                self.parse_check_start(&attrs);
                 ParseControl::Continue
             }
             (ElementNamespace::Xccdf, b"fix") => {
-                self.parse_fix_start(e);
+                self.parse_fix_start(&attrs);
                 ParseControl::Continue
             }
             (ElementNamespace::Xccdf, b"ident") => {
-                let system = e
-                    .try_get_attribute("system")
-                    .ok()
-                    .flatten()
-                    .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from))
-                    .unwrap_or_default();
+                let system = attr(&attrs, b"system").unwrap_or("").to_string();
                 self.current_ident = Some(StandardIdentifier {
                     system,
                     value: String::new(),
@@ -406,33 +455,45 @@ impl ParserState {
             }
             // ── Crystal Forge extension elements ───────────────────────────
             (ElementNamespace::CrystalForge, b"bundle") => {
-                self.parse_cf_bundle_start(e);
+                self.saw_supported_cf_content = true;
+                self.parse_cf_bundle_start(&attrs);
                 ParseControl::Continue
             }
             (ElementNamespace::CrystalForge, b"policy-identity") => {
-                self.parse_cf_policy_identity_start(e);
+                self.saw_supported_cf_content = true;
+                self.parse_cf_policy_identity_start(&attrs);
                 ParseControl::Continue
             }
             (ElementNamespace::CrystalForge, b"execution") => {
+                self.saw_supported_cf_content = true;
                 if let Some(ref mut meta) = self
                     .current_rule
                     .as_mut()
                     .and_then(|r| r.cf_policy_meta.as_mut())
                 {
-                    if let Some(phase) = e.try_get_attribute("phase").ok().flatten() {
-                        meta.execution_phase =
-                            std::str::from_utf8(&phase.value).ok().map(String::from);
-                    }
-                    if let Some(strict) = e.try_get_attribute("strict").ok().flatten() {
-                        meta.strict = std::str::from_utf8(&strict.value).ok().map(|s| s == "true");
-                    }
+                    meta.execution_phase = attr(&attrs, b"phase").map(String::from);
+                    meta.strict = attr(&attrs, b"strict").map(|s| s == "true");
                 }
                 ParseControl::Continue
             }
-            // Text-bearing elements (both namespaces) and everything else are
-            // consumed by the end handler or ignored. Unknown content never
-            // reclassifies the element by position: only its resolved
-            // namespace decides.
+            // Recognised CF text-only elements (content captured in handle_end).
+            (
+                ElementNamespace::CrystalForge,
+                b"policy" | b"framework" | b"layer" | b"owner" | b"content-digest"
+                | b"policy-version",
+            ) => {
+                self.saw_supported_cf_content = true;
+                ParseControl::Continue
+            }
+            // Unknown CF-namespace element: marks the document as using an
+            // unsupported CF extension so classification is downgraded.
+            (ElementNamespace::CrystalForge, _) => {
+                self.saw_unknown_cf_content = true;
+                ParseControl::Continue
+            }
+            // Text-bearing XCCDF elements and everything else are consumed by
+            // the end handler or ignored. Unknown content never reclassifies
+            // an element: only its resolved namespace decides.
             _ => ParseControl::Continue,
         }
     }
@@ -679,13 +740,8 @@ impl ParserState {
 
     // ── Start-element parsing ──────────────────────────────────────────────────
 
-    fn parse_benchmark_start(&mut self, e: &quick_xml::events::BytesStart) -> ParseControl {
-        let id = e
-            .try_get_attribute("id")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from))
-            .unwrap_or_default();
+    fn parse_benchmark_start(&mut self, attrs: &HashMap<Vec<u8>, String>) -> ParseControl {
+        let id = attr(attrs, b"id").unwrap_or("").to_string();
         if Self::check_duplicate_id(
             &mut self.benchmark_ids,
             &id,
@@ -696,12 +752,8 @@ impl ParserState {
         {
             return ParseControl::Abort;
         }
-        // Informational version hint; matched by raw qualified name only.
-        self.xccdf_version = e
-            .try_get_attribute("xccdf:version")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from));
+        // Informational version hint from qualified attribute name.
+        self.xccdf_version = attr(attrs, b"xccdf:version").map(String::from);
         self.benchmark = Some(BenchmarkMeta {
             id,
             title: None,
@@ -716,16 +768,11 @@ impl ParserState {
         ParseControl::Continue
     }
 
-    fn parse_profile_start(&mut self, e: &quick_xml::events::BytesStart) -> ParseControl {
+    fn parse_profile_start(&mut self, attrs: &HashMap<Vec<u8>, String>) -> ParseControl {
         if self.begin_profile() == ParseControl::Abort {
             return ParseControl::Abort;
         }
-        let id = e
-            .try_get_attribute("id")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from))
-            .unwrap_or_default();
+        let id = attr(attrs, b"id").unwrap_or("").to_string();
         if Self::check_duplicate_id(
             &mut self.profile_ids,
             &id,
@@ -736,16 +783,9 @@ impl ParserState {
         {
             return ParseControl::Abort;
         }
-        let extends = e
-            .try_get_attribute("extends")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from));
-        let abstract_attr = e
-            .try_get_attribute("abstract")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(|s| s == "true"))
+        let extends = attr(attrs, b"extends").map(String::from);
+        let abstract_attr = attr(attrs, b"abstract")
+            .map(|v| v == "true")
             .unwrap_or(false);
         self.current_profile = Some(ParsedProfile {
             id,
@@ -759,16 +799,11 @@ impl ParserState {
         ParseControl::Continue
     }
 
-    fn parse_rule_start(&mut self, e: &quick_xml::events::BytesStart) -> ParseControl {
+    fn parse_rule_start(&mut self, attrs: &HashMap<Vec<u8>, String>) -> ParseControl {
         if self.begin_rule() == ParseControl::Abort {
             return ParseControl::Abort;
         }
-        let id = e
-            .try_get_attribute("id")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from))
-            .unwrap_or_default();
+        let id = attr(attrs, b"id").unwrap_or("").to_string();
         if Self::check_duplicate_id(
             &mut self.rule_ids,
             &id,
@@ -779,16 +814,8 @@ impl ParserState {
         {
             return ParseControl::Abort;
         }
-        let severity = e
-            .try_get_attribute("severity")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from));
-        let weight = e.try_get_attribute("weight").ok().flatten().and_then(|v| {
-            std::str::from_utf8(&v.value)
-                .ok()
-                .and_then(|s| s.parse::<f64>().ok())
-        });
+        let severity = attr(attrs, b"severity").map(String::from);
+        let weight = attr(attrs, b"weight").and_then(|v| v.parse::<f64>().ok());
         self.current_rule = Some(ParsedRule {
             id,
             title: None,
@@ -810,16 +837,11 @@ impl ParserState {
         ParseControl::Continue
     }
 
-    fn parse_group_start(&mut self, e: &quick_xml::events::BytesStart) -> ParseControl {
+    fn parse_group_start(&mut self, attrs: &HashMap<Vec<u8>, String>) -> ParseControl {
         if self.begin_group() == ParseControl::Abort {
             return ParseControl::Abort;
         }
-        let id = e
-            .try_get_attribute("id")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from))
-            .unwrap_or_default();
+        let id = attr(attrs, b"id").unwrap_or("").to_string();
         if Self::check_duplicate_id(
             &mut self.group_ids,
             &id,
@@ -839,16 +861,11 @@ impl ParserState {
         ParseControl::Continue
     }
 
-    fn parse_value_start(&mut self, e: &quick_xml::events::BytesStart) -> ParseControl {
+    fn parse_value_start(&mut self, attrs: &HashMap<Vec<u8>, String>) -> ParseControl {
         if self.begin_value() == ParseControl::Abort {
             return ParseControl::Abort;
         }
-        let id = e
-            .try_get_attribute("id")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from))
-            .unwrap_or_default();
+        let id = attr(attrs, b"id").unwrap_or("").to_string();
         if Self::check_duplicate_id(
             &mut self.value_ids,
             &id,
@@ -859,58 +876,32 @@ impl ParserState {
         {
             return ParseControl::Abort;
         }
-        let vtype = e
-            .try_get_attribute("type")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from))
-            .unwrap_or("string".to_string());
+        let vtype = attr(attrs, b"type").unwrap_or("string").to_string();
         self.values.push(ParsedValue {
             id,
             title: None,
             description: None,
-            value_type: vtype.to_string(),
+            value_type: vtype,
             default_value: None,
             allowed_values: vec![],
         });
         ParseControl::Continue
     }
 
-    fn parse_check_start(&mut self, e: &quick_xml::events::BytesStart) {
-        let system = e
-            .try_get_attribute("system")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from))
-            .unwrap_or_default();
-        let selector = e
-            .try_get_attribute("selector")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from));
+    fn parse_check_start(&mut self, attrs: &HashMap<Vec<u8>, String>) {
+        let system = attr(attrs, b"system").unwrap_or("").to_string();
+        let selector = attr(attrs, b"selector").map(String::from);
         self.current_check = Some(CheckContent {
-            system: system.to_string(),
+            system,
             content: String::new(),
             selector,
         });
     }
 
-    fn parse_fix_start(&mut self, e: &quick_xml::events::BytesStart) {
-        let system = e
-            .try_get_attribute("system")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from));
-        let complexity = e
-            .try_get_attribute("complexity")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from));
-        let disruption = e
-            .try_get_attribute("disruption")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from));
+    fn parse_fix_start(&mut self, attrs: &HashMap<Vec<u8>, String>) {
+        let system = attr(attrs, b"system").map(String::from);
+        let complexity = attr(attrs, b"complexity").map(String::from);
+        let disruption = attr(attrs, b"disruption").map(String::from);
         self.current_fix = Some(FixContent {
             system,
             content: String::new(),
@@ -919,25 +910,16 @@ impl ParserState {
         });
     }
 
-    fn parse_cf_bundle_start(&mut self, e: &quick_xml::events::BytesStart) {
-        let bundle_id = e
-            .try_get_attribute("bundle-id")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(parse_uuid_urn))
-            .flatten();
-        let bvid = e
-            .try_get_attribute("bundle-version-id")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(parse_uuid_urn))
-            .flatten();
-        let state = e
-            .try_get_attribute("publication-state")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from))
-            .unwrap_or_default();
+    fn parse_cf_bundle_start(&mut self, attrs: &HashMap<Vec<u8>, String>) {
+        let bundle_id = attr(attrs, b"bundle-id").and_then(parse_uuid_urn);
+        let bvid = attr(attrs, b"bundle-version-id").and_then(parse_uuid_urn);
+        if bundle_id.is_none() {
+            self.warnings.push(Diagnostic::warning(
+                "INVALID_CF_IDENTITY",
+                "CF bundle element is missing a valid 'bundle-id' UUID",
+            ));
+        }
+        let state = attr(attrs, b"publication-state").unwrap_or("").to_string();
         self.cf_bundle_meta = Some(CfBundleMeta {
             bundle_id: bundle_id.unwrap_or_else(Uuid::nil),
             bundle_version_id: bvid.unwrap_or_else(Uuid::nil),
@@ -950,25 +932,16 @@ impl ParserState {
         });
     }
 
-    fn parse_cf_policy_identity_start(&mut self, e: &quick_xml::events::BytesStart) {
-        let policy_id = e
-            .try_get_attribute("policy-id")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(parse_uuid_urn))
-            .flatten();
-        let pvid = e
-            .try_get_attribute("policy-version-id")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(parse_uuid_urn))
-            .flatten();
-        let state = e
-            .try_get_attribute("publication-state")
-            .ok()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(&v.value).ok().map(String::from))
-            .unwrap_or_default();
+    fn parse_cf_policy_identity_start(&mut self, attrs: &HashMap<Vec<u8>, String>) {
+        let policy_id = attr(attrs, b"policy-id").and_then(parse_uuid_urn);
+        let pvid = attr(attrs, b"policy-version-id").and_then(parse_uuid_urn);
+        if policy_id.is_none() {
+            self.warnings.push(Diagnostic::warning(
+                "INVALID_CF_IDENTITY",
+                "CF policy-identity element is missing a valid 'policy-id' UUID",
+            ));
+        }
+        let state = attr(attrs, b"publication-state").unwrap_or("").to_string();
         if let Some(ref mut rule) = self.current_rule {
             rule.cf_policy_meta = Some(CfPolicyMeta {
                 policy_id: policy_id.unwrap_or_else(Uuid::nil),
@@ -993,8 +966,9 @@ fn parse_uuid_urn(s: &str) -> Option<Uuid> {
 }
 
 fn classify(state: &mut ParserState) {
-    let has_cf_elements =
-        state.cf_bundle_meta.is_some() || state.rules.iter().any(|r| r.cf_policy_meta.is_some());
+    let has_cf_elements = state.saw_supported_cf_content
+        || state.cf_bundle_meta.is_some()
+        || state.rules.iter().any(|r| r.cf_policy_meta.is_some());
 
     if state.errors.iter().any(|e| e.blocking) {
         state.class = DocumentClass::InvalidXccdf;
@@ -1012,8 +986,19 @@ fn classify(state: &mut ParserState) {
     }
 
     if has_cf_elements {
-        state.class = DocumentClass::CfNativeExact;
-        state.fidelity = Fidelity::NativeExact;
+        if state.saw_unknown_cf_content {
+            // Document uses CF extensions but includes unknown CF elements
+            // (e.g. from a newer CF namespace version). It cannot be imported
+            // exactly; partial extraction may be possible in a later tool.
+            state.class = DocumentClass::CfNativeUnsupportedExtension;
+            state.fidelity = Fidelity::Degraded;
+            state
+                .fidelity_losses
+                .push("Document contains unrecognised Crystal Forge extension elements".into());
+        } else {
+            state.class = DocumentClass::CfNativeExact;
+            state.fidelity = Fidelity::NativeExact;
+        }
     } else {
         state.class = DocumentClass::ForeignXccdf;
         // Foreign XCCDF: all rules are preserved opaque unless the user maps them.
@@ -1408,5 +1393,208 @@ mod tests {
                 .any(|e| e.code == "VALUE_LIMIT_EXCEEDED" && e.blocking)
         );
         assert!(parsed.values.len() <= 1);
+    }
+
+    // ── Attribute validation tests ────────────────────────────────────────────
+
+    #[test]
+    fn rejects_malformed_attribute() {
+        let limits = InterchangeLimits::default();
+        // Inject a raw broken attribute (unclosed quote). quick-xml surfaces
+        // this as an attribute parse error.
+        let xml = b"<?xml version=\"1.0\"?>\
+<Benchmark xmlns=\"http://checklists.nist.gov/xccdf/1.2\" id=bad>\
+</Benchmark>";
+        let parsed = parse_xccdf(xml, None, &limits).unwrap();
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|e| e.code == "XML_ATTRIBUTE_ERROR" && e.blocking),
+            "expected XML_ATTRIBUTE_ERROR, got: {:?}",
+            parsed.errors
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_attribute() {
+        let limits = InterchangeLimits::default();
+        // XML spec disallows duplicate attribute names; quick-xml reports them
+        // as attribute errors in strict mode.
+        let xml = format!(
+            r#"<?xml version="1.0"?>
+<Benchmark xmlns="{XCCDF_NAMESPACE}" id="b1" id="b2"></Benchmark>"#
+        );
+        let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
+        assert!(
+            parsed.errors.iter().any(|e| {
+                (e.code == "XML_ATTRIBUTE_ERROR" || e.code == "DUPLICATE_ATTRIBUTE") && e.blocking
+            }),
+            "expected attribute error for duplicate 'id', got: {:?}",
+            parsed.errors
+        );
+    }
+
+    #[test]
+    fn attribute_count_exactly_at_limit_is_accepted() {
+        let limits = InterchangeLimits {
+            max_attributes_per_element: 3,
+            ..InterchangeLimits::default()
+        };
+        // 3 attributes: xmlns, id, style — exactly at limit.
+        let xml = format!(
+            r#"<?xml version="1.0"?>
+<Benchmark xmlns="{XCCDF_NAMESPACE}" id="b1" style="base">
+  <status>draft</status>
+  <title>Test</title>
+  <version>0.1</version>
+</Benchmark>"#
+        );
+        let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
+        assert!(
+            !parsed
+                .errors
+                .iter()
+                .any(|e| e.code == "ATTRIBUTE_LIMIT_EXCEEDED"),
+            "3 attrs at limit-3 should be accepted"
+        );
+    }
+
+    #[test]
+    fn attribute_count_one_above_limit_is_rejected() {
+        let limits = InterchangeLimits {
+            max_attributes_per_element: 3,
+            ..InterchangeLimits::default()
+        };
+        // 4 attributes: xmlns, id, style, resolved — one over limit.
+        let xml = format!(
+            r#"<?xml version="1.0"?>
+<Benchmark xmlns="{XCCDF_NAMESPACE}" id="b1" style="base" resolved="1">
+  <status>draft</status>
+  <title>Test</title>
+  <version>0.1</version>
+</Benchmark>"#
+        );
+        let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|e| e.code == "ATTRIBUTE_LIMIT_EXCEEDED" && e.blocking),
+            "4 attrs above limit-3 should be rejected"
+        );
+    }
+
+    // ── CF classification tests ───────────────────────────────────────────────
+
+    #[test]
+    fn recognised_cf_only_classifies_as_exact() {
+        let limits = InterchangeLimits::default();
+        let xml = format!(
+            r#"<?xml version="1.0"?>
+<Benchmark xmlns="{XCCDF_NAMESPACE}" xmlns:cf="{CF_XCCDF_NAMESPACE}"
+    id="xccdf_cf_benchmark_test">
+  <status>draft</status>
+  <title>Test</title>
+  <version>0.1</version>
+  <cf:bundle bundle-id="urn:uuid:11111111-1111-1111-1111-111111111111"
+      bundle-version-id="urn:uuid:22222222-2222-2222-2222-222222222222"
+      publication-state="published"/>
+</Benchmark>"#
+        );
+        let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
+        assert_eq!(parsed.class, DocumentClass::CfNativeExact);
+        assert_eq!(parsed.fidelity, Fidelity::NativeExact);
+    }
+
+    #[test]
+    fn unknown_cf_element_downgrades_to_unsupported_extension() {
+        let limits = InterchangeLimits::default();
+        // A recognised bundle plus an unknown CF element should downgrade.
+        let xml = format!(
+            r#"<?xml version="1.0"?>
+<Benchmark xmlns="{XCCDF_NAMESPACE}" xmlns:cf="{CF_XCCDF_NAMESPACE}"
+    id="xccdf_cf_benchmark_test">
+  <status>draft</status>
+  <title>Test</title>
+  <version>0.1</version>
+  <cf:bundle bundle-id="urn:uuid:11111111-1111-1111-1111-111111111111"
+      bundle-version-id="urn:uuid:22222222-2222-2222-2222-222222222222"
+      publication-state="published"/>
+  <cf:future-element/>
+</Benchmark>"#
+        );
+        let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
+        assert_eq!(parsed.class, DocumentClass::CfNativeUnsupportedExtension);
+        assert_eq!(parsed.fidelity, Fidelity::Degraded);
+    }
+
+    #[test]
+    fn newer_cf_namespace_version_classifies_as_foreign() {
+        let limits = InterchangeLimits::default();
+        // A different CF namespace URI is treated as an Other namespace, not CF.
+        let xml = format!(
+            r#"<?xml version="1.0"?>
+<Benchmark xmlns="{XCCDF_NAMESPACE}" xmlns:cf="urn:crystal-forge:xccdf:2"
+    id="xccdf_cf_benchmark_test">
+  <status>draft</status>
+  <title>Test</title>
+  <version>0.1</version>
+  <cf:bundle id="bundle-1"/>
+</Benchmark>"#
+        );
+        let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
+        // "cf" prefix bound to a future CF namespace URI → Other → no CF metadata.
+        assert_ne!(parsed.class, DocumentClass::CfNativeExact);
+        assert_ne!(parsed.class, DocumentClass::CfNativeUnsupportedExtension);
+        assert!(parsed.cf_bundle_meta.is_none());
+    }
+
+    #[test]
+    fn invalid_cf_bundle_uuid_produces_warning() {
+        let limits = InterchangeLimits::default();
+        let xml = format!(
+            r#"<?xml version="1.0"?>
+<Benchmark xmlns="{XCCDF_NAMESPACE}" xmlns:cf="{CF_XCCDF_NAMESPACE}"
+    id="xccdf_cf_benchmark_test">
+  <status>draft</status>
+  <title>Test</title>
+  <version>0.1</version>
+  <cf:bundle bundle-id="not-a-uuid"
+      bundle-version-id="urn:uuid:22222222-2222-2222-2222-222222222222"
+      publication-state="published"/>
+</Benchmark>"#
+        );
+        let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| w.code == "INVALID_CF_IDENTITY"),
+            "expected INVALID_CF_IDENTITY warning for bad UUID"
+        );
+        // Despite the bad UUID the classification still reflects CF content.
+        assert_eq!(parsed.class, DocumentClass::CfNativeExact);
+    }
+
+    #[test]
+    fn foreign_extension_namespace_classifies_as_foreign_xccdf() {
+        let limits = InterchangeLimits::default();
+        let xml = format!(
+            r#"<?xml version="1.0"?>
+<Benchmark xmlns="{XCCDF_NAMESPACE}" xmlns:ext="urn:some-other-vendor:ext:1"
+    id="xccdf_cf_benchmark_test">
+  <status>draft</status>
+  <title>Test</title>
+  <version>0.1</version>
+  <Rule id="r1">
+    <title>Rule 1</title>
+    <ext:vendor-data/>
+  </Rule>
+</Benchmark>"#
+        );
+        let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
+        assert_eq!(parsed.class, DocumentClass::ForeignXccdf);
+        assert!(parsed.cf_bundle_meta.is_none());
     }
 }
