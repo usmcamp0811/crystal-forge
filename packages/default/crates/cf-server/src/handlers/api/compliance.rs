@@ -19,7 +19,8 @@ use crate::api::models::{
 };
 use crate::compliance::interchange::{InterchangeLimits, MAX_XCCDF_UPLOAD_BYTES};
 use crate::compliance::xccdf::export_models::{
-    XccdfBundleExport, XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
+    GroupProjectionError, XccdfBundleExport, XccdfGroupExport, XccdfPolicyExport,
+    XccdfSourceMapping,
 };
 use crate::compliance::xccdf::parser::parse_xccdf;
 use crate::compliance::xccdf::xml_writer::write_bundle_xccdf_export;
@@ -865,7 +866,7 @@ async fn load_export_snapshot(
     // All reads are complete. Commit the transaction to release the snapshot.
     tx.commit().await.map_err(|e| anyhow::anyhow!("{e:#}"))?;
 
-    let groups = build_export_groups(&policies);
+    let groups = build_export_groups(&policies).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     Ok(XccdfBundleExport {
         bundle_id: bv.bundle_id,
@@ -890,18 +891,18 @@ async fn load_export_snapshot(
 /// Foreign source IDs are retained in `source_id`; generated IDs are always
 /// NCName-safe XCCDF 1.2 IDs and therefore cannot inherit identifiers such as
 /// `V-268078` from XCCDF 1.1/STIG content.
-/// Build a safe, deterministic recursive group tree from imported group metadata.
 ///
-/// ## Safety guarantees
+/// ## Validation rules
 ///
 /// - Authored policies with no `group_id` are always roots with no children.
-///   This prevents the `None == None` parent-matching cycle that would cause
-///   stack overflow when multiple authored policy types share the same bundle.
-/// - Orphaned children (whose declared `parent_group_id` does not exist as a
-///   node) are promoted to roots rather than silently dropped.
-/// - Cycle detection prevents infinite recursion for malformed import metadata.
+/// - Empty orphan groups (declared parent missing, no policies assigned) are
+///   rejected with `GroupProjectionError::EmptyOrphan`.
+/// - Full-DAG cycle detection traverses every node; cycles not originating
+///   from any root are rejected with `GroupProjectionError::CycleNotFromRoot`.
 /// - Every generated ID is NCName-safe: only ASCII alphanumeric and underscore.
-fn build_export_groups(policies: &[XccdfPolicyExport]) -> Vec<XccdfGroupExport> {
+fn build_export_groups(
+    policies: &[XccdfPolicyExport],
+) -> Result<Vec<XccdfGroupExport>, GroupProjectionError> {
     use std::collections::{BTreeMap, BTreeSet};
 
     struct GroupNode {
@@ -945,6 +946,74 @@ fn build_export_groups(policies: &[XccdfPolicyExport]) -> Vec<XccdfGroupExport> 
             policy_ids: Vec::new(),
         });
         node.policy_ids.push(policy.policy_version_id);
+    }
+
+    // ── Root key set ──────────────────────────────────────────────────────
+    let root_keys: BTreeSet<String> = nodes
+        .iter()
+        .filter(|(_, n)| {
+            n.parent_source_id
+                .as_deref()
+                .map(|pid| !nodes.contains_key(pid))
+                .unwrap_or(true)
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+
+    // ── Empty orphan detection ────────────────────────────────────────────
+    // Non-root imported nodes whose parent does not exist AND have no directly
+    // assigned policies are rejected because they carry no useful information.
+    for (key, node) in &nodes {
+        if root_keys.contains(key) {
+            continue;
+        }
+        if let Some(ref parent) = node.parent_source_id {
+            if !nodes.contains_key(parent) && node.policy_ids.is_empty() {
+                if let Some(ref sid) = node.source_id {
+                    return Err(GroupProjectionError::EmptyOrphan {
+                        group_source_id: sid.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    // ── Parent→children index for cycle detection ─────────────────────────
+    let mut children_of: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (key, node) in &nodes {
+        if let Some(ref parent) = node.parent_source_id {
+            if let Some(parent_key) = nodes
+                .iter()
+                .find(|(_, n)| n.source_id.as_deref() == Some(parent.as_str()))
+                .map(|(k, _)| k.clone())
+            {
+                children_of
+                    .entry(parent_key)
+                    .or_default()
+                    .push(key.clone());
+            }
+        }
+    }
+
+    // ── Full-DAG cycle detection (downward DFS from every root) ───────────
+    let mut global_visited = BTreeSet::new();
+    for root_key in &root_keys {
+        let mut stack = vec![(root_key.clone(), BTreeSet::new())];
+        while let Some((current, mut ancestors)) = stack.pop() {
+            if ancestors.contains(&current) {
+                return Err(GroupProjectionError::CycleNotFromRoot(current));
+            }
+            if global_visited.contains(&current) {
+                continue;
+            }
+            global_visited.insert(current.clone());
+            ancestors.insert(current.clone());
+            if let Some(children) = children_of.get(&current) {
+                for child in children {
+                    stack.push((child.clone(), ancestors.clone()));
+                }
+            }
+        }
     }
 
     fn generated_id(source_id: Option<&str>, policy_ids: &[Uuid]) -> String {
@@ -1013,9 +1082,6 @@ fn build_export_groups(policies: &[XccdfPolicyExport]) -> Vec<XccdfGroupExport> 
         }
     }
 
-    // A node is a root if:
-    // - it has no parent_source_id, OR
-    // - its declared parent does not exist in nodes (orphan promotion).
     let mut visiting = BTreeSet::new();
     let mut roots: Vec<XccdfGroupExport> = nodes
         .iter()
@@ -1028,7 +1094,7 @@ fn build_export_groups(policies: &[XccdfPolicyExport]) -> Vec<XccdfGroupExport> 
         .map(|(key, _)| build_node(key, &nodes, &mut visiting))
         .collect();
     roots.sort_by_key(|g| g.order);
-    roots
+    Ok(roots)
 }
 
 fn parse_publication_state(

@@ -73,7 +73,7 @@ pub struct XccdfPolicyExport {
     pub source_mappings: Vec<XccdfSourceMapping>,
 }
 
-/// Errors that can arise while parsing imported check/fix metadata.
+/// Errors that can arise while parsing imported check metadata.
 #[derive(Debug)]
 pub enum ImportedCheckError {
     /// The `check` object exists but `system` is missing or not a string.
@@ -84,6 +84,9 @@ pub enum ImportedCheckError {
     RefNameWithoutHref,
     /// Neither inline content nor a reference is present.
     EmptyBody,
+    /// The check body is a reference-only form and no opaque_xml fallback is
+    /// available. Standalone export requires self-contained check content.
+    ReferenceOnlyWithoutFallback,
 }
 
 impl std::fmt::Display for ImportedCheckError {
@@ -107,6 +110,36 @@ impl std::fmt::Display for ImportedCheckError {
                 f,
                 "compliance_metadata.check has neither inline content nor a content-ref"
             ),
+            Self::ReferenceOnlyWithoutFallback => write!(
+                f,
+                "compliance_metadata.check is a reference-only form \
+                 (href without inline content) and no opaque_xml fallback is available; \
+                 standalone XCCDF export requires self-contained check content"
+            ),
+        }
+    }
+}
+
+/// Errors that can arise while parsing imported fix metadata.
+#[derive(Debug)]
+pub enum ImportedFixError {
+    /// The `fix` object exists but `content` is missing or not a string.
+    MissingContent,
+    /// The `fix` object exists but `id` is present and not a valid NCName.
+    InvalidId,
+}
+
+impl std::fmt::Display for ImportedFixError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingContent => write!(
+                f,
+                "compliance_metadata.fix.content is missing or not a string"
+            ),
+            Self::InvalidId => write!(
+                f,
+                "compliance_metadata.fix.id is present but empty"
+            ),
         }
     }
 }
@@ -116,16 +149,17 @@ impl XccdfPolicyExport {
     ///
     /// Returns `None` when no `check` key is present.
     /// Returns `Err(ImportedCheckError)` when a `check` object exists but is
-    /// structurally invalid (ambiguous body, missing system, etc.).
-    /// Callers must propagate errors rather than silently replacing with a
-    /// synthesized check.
+    /// structurally invalid. Callers must propagate errors rather than silently
+    /// replacing with a synthesized check.
+    ///
+    /// A reference-only check body is rejected unless `opaque_xml` is present
+    /// to provide a self-contained fallback for standalone artifact consumers.
     pub fn parse_standard_check(&self) -> Result<Option<XccdfStandardCheck>, ImportedCheckError> {
         let value = match self.compliance_metadata.get("check") {
             Some(v) => v,
             None => return Ok(None),
         };
 
-        // system is required
         let system = value
             .get("system")
             .and_then(|v| v.as_str())
@@ -159,6 +193,11 @@ impl XccdfPolicyExport {
                 .to_owned();
             XccdfCheckBody::Inline { content }
         } else if has_href {
+            // A reference-only check is not self-contained. It is valid only
+            // when opaque_xml provides a fallback that readers can use.
+            if self.opaque_xml.is_none() {
+                return Err(ImportedCheckError::ReferenceOnlyWithoutFallback);
+            }
             let href = value
                 .get("content_ref_href")
                 .and_then(|v| v.as_str())
@@ -178,22 +217,44 @@ impl XccdfPolicyExport {
             .and_then(|v| v.as_str())
             .map(str::to_owned);
 
-        Ok(Some(XccdfStandardCheck {
-            system,
-            body,
-            selector,
-        }))
+        Ok(Some(XccdfStandardCheck { system, body, selector }))
     }
 
-    pub fn parse_standard_fix(&self) -> Option<XccdfStandardFix> {
-        let value = self.compliance_metadata.get("fix")?;
-        Some(XccdfStandardFix {
-            id: value.get("id").and_then(|v| v.as_str()).map(str::to_owned),
+    /// Parse the imported standard XCCDF fix from compliance metadata.
+    ///
+    /// Returns `None` when no `fix` key is present.
+    /// Returns `Err(ImportedFixError)` when a `fix` object exists but is
+    /// structurally invalid (missing content, empty id). Callers must propagate
+    /// errors rather than silently replacing with a synthesized fix.
+    pub fn parse_standard_fix(
+        &self,
+    ) -> Result<Option<XccdfStandardFix>, ImportedFixError> {
+        let value = match self.compliance_metadata.get("fix") {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let content = value
+            .get("content")
+            .and_then(|v| v.as_str())
+            .ok_or(ImportedFixError::MissingContent)?
+            .to_owned();
+
+        let id = value.get("id").and_then(|v| v.as_str()).map(str::to_owned);
+        // Reject an empty id string — it produces invalid XCCDF.
+        if let Some(ref id_str) = id {
+            if id_str.is_empty() {
+                return Err(ImportedFixError::InvalidId);
+            }
+        }
+
+        Ok(Some(XccdfStandardFix {
+            id,
             system: value
                 .get("system")
                 .and_then(|v| v.as_str())
                 .map(str::to_owned),
-            content: value.get("content")?.as_str()?.to_owned(),
+            content,
             complexity: value
                 .get("complexity")
                 .and_then(|v| v.as_str())
@@ -202,7 +263,7 @@ impl XccdfPolicyExport {
                 .get("disruption")
                 .and_then(|v| v.as_str())
                 .map(str::to_owned),
-        })
+        }))
     }
 }
 
@@ -268,5 +329,34 @@ impl XccdfPolicyExport {
             "xccdf_crystalforge_rule_{}",
             self.policy_version_id.simple()
         )
+    }
+}
+
+/// Errors produced when building the XCCDF group tree from policy metadata.
+#[derive(Debug)]
+pub enum GroupProjectionError {
+    /// A cycle was detected that does not originate from any root node.
+    CycleNotFromRoot(String),
+    /// A non-root group node has a `parent_source_id` that does not exist and
+    /// has no directly-assigned policies, making it an empty orphan.
+    EmptyOrphan { group_source_id: String },
+}
+
+impl std::fmt::Display for GroupProjectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CycleNotFromRoot(key) => {
+                write!(
+                    f,
+                    "cycle detected in group parent graph not reachable from a root: {key}"
+                )
+            }
+            Self::EmptyOrphan { group_source_id } => {
+                write!(
+                    f,
+                    "group {group_source_id} has no matching parent and no assigned policies"
+                )
+            }
+        }
     }
 }

@@ -42,6 +42,7 @@ use super::super::interchange::{
 };
 use super::export_models::{
     XccdfBundleExport, XccdfCheckBody, XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
+    XccdfStandardCheck,
 };
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -66,6 +67,11 @@ pub enum XccdfWriterError {
     },
     /// An imported standard check object is structurally invalid.
     MalformedImportedCheck {
+        policy_version_id: uuid::Uuid,
+        reason: String,
+    },
+    /// An imported standard fix object is structurally invalid.
+    MalformedImportedFix {
         policy_version_id: uuid::Uuid,
         reason: String,
     },
@@ -111,6 +117,13 @@ impl std::fmt::Display for XccdfWriterError {
             } => write!(
                 f,
                 "policy version {policy_version_id} has malformed compliance_metadata.check: {reason}"
+            ),
+            Self::MalformedImportedFix {
+                policy_version_id,
+                reason,
+            } => write!(
+                f,
+                "policy version {policy_version_id} has malformed compliance_metadata.fix: {reason}"
             ),
         }
     }
@@ -970,9 +983,17 @@ fn write_check_and_fix(
                 reason: e.to_string(),
             })?;
 
+    // Parse the imported standard fix. A malformed fix object is an error.
+    let imported_fix =
+        pv.parse_standard_fix()
+            .map_err(|e| XccdfWriterError::MalformedImportedFix {
+                policy_version_id: pv.policy_version_id,
+                reason: e.to_string(),
+            })?;
+
     // fix MUST precede check in the XCCDF Rule sequence. Preserve all imported
     // fix attributes (system, id, complexity, disruption, content).
-    if let Some(fix_data) = pv.parse_standard_fix() {
+    if let Some(fix_data) = imported_fix {
         let generated_fix_id = format!("xccdf_crystalforge_fix_{}", pv.policy_version_id.simple());
         let fix_id = fix_data.id.as_deref().unwrap_or(generated_fix_id.as_str());
         let mut fix = BytesStart::new("fix");
@@ -1007,80 +1028,100 @@ fn write_check_and_fix(
         writer.write_event(Event::End(BytesEnd::new("fix")))?;
     }
 
-    // Determine whether to emit the CF executable check or the standard check.
-    // For native policies, the CF check is always emitted and contains the
-    // executable cf:policy body. For non-native policies with an imported
-    // standard check, the standard check system and body are preserved exactly.
-    let emit_cf_check =
-        pv.implementation_state == ImplementationState::Native || standard_check.is_none();
+    // XCCDF allows multiple <check> elements in a Rule when each uses a
+    // different system URI. When a native policy also has an imported standard
+    // check, emit the standard check first (for standards consumers), then the
+    // CF executable check (for Crystal Forge consumers). When the imported
+    // check body is reference-only, the opaque_xml presence was already
+    // validated by parse_standard_check, so both a ref and cf:policy appear.
+    let is_native = pv.implementation_state == ImplementationState::Native;
 
-    let check_system = if emit_cf_check {
-        CF_POLICY_CHECK_SYSTEM
+    if is_native {
+        // For native policies: always emit the CF executable check.
+        // If an imported standard check is also present, emit it first so that
+        // standards consumers (OVAL/XCCDF scanners) can evaluate the original
+        // check without understanding Crystal Forge.
+        if let Some(ref std_check) = standard_check {
+            write_single_standard_check(writer, std_check)?;
+        }
+        write_cf_executable_check(writer, pv, standard_check.as_ref())?;
+    } else if let Some(standard_check) = standard_check {
+        // Non-native policy with imported standard check: preserve it exactly.
+        write_single_standard_check(writer, &standard_check)?;
     } else {
-        standard_check
-            .as_ref()
-            .map(|c| c.system.as_str())
-            .unwrap_or(CF_POLICY_CHECK_SYSTEM)
-    };
+        // Non-native policy with no imported check: emit CF explanatory check.
+        write_cf_executable_check(writer, pv, None)?;
+    }
+
+    Ok(())
+}
+
+/// Emit a single imported standard XCCDF `<check>` element.
+fn write_single_standard_check(
+    writer: &mut Writer<Cursor<&mut Vec<u8>>>,
+    std_check: &XccdfStandardCheck,
+) -> Result<(), XccdfWriterError> {
     let mut check = BytesStart::new("check");
-    check.push_attribute(("system", check_system));
-    if let Some(selector) = standard_check.as_ref().and_then(|c| c.selector.as_deref()) {
+    check.push_attribute(("system", std_check.system.as_str()));
+    if let Some(selector) = std_check.selector.as_deref() {
         check.push_attribute(("selector", selector));
     }
     writer.write_event(Event::Start(check))?;
-
-    if emit_cf_check {
-        // Native CF check: embed the typed cf:policy body inside check-content.
-        writer.write_event(Event::Start(BytesStart::new("check-content")))?;
-        if let Some(ref standard_check) = standard_check {
-            // Emit any imported check body text before the CF policy.
-            if let XccdfCheckBody::Inline { content } = &standard_check.body {
-                writer.write_event(Event::Text(BytesText::new(content)))?;
-            }
-        } else {
-            let text = match pv.implementation_state {
-                ImplementationState::Native => {
-                    format!("Crystal Forge {} policy check", pv.policy_type)
-                }
-                ImplementationState::Manual => format!(
-                    "Manual ({}) – user must provide evidence of compliance",
-                    pv.policy_type
-                ),
-                ImplementationState::Unbound => format!(
-                    "Unbound ({}) – requirement exists but has no implementation",
-                    pv.policy_type
-                ),
-                ImplementationState::External => {
-                    format!("External ({}) – checked by external system", pv.policy_type)
-                }
-                ImplementationState::Opaque => format!(
-                    "Opaque ({}) – CF preserves rule but cannot model check",
-                    pv.policy_type
-                ),
-            };
-            writer.write_event(Event::Text(BytesText::new(&text)))?;
+    match &std_check.body {
+        XccdfCheckBody::Inline { content } => {
+            writer.write_event(Event::Start(BytesStart::new("check-content")))?;
+            writer.write_event(Event::Text(BytesText::new(content)))?;
+            writer.write_event(Event::End(BytesEnd::new("check-content")))?;
         }
-        write_cf_policy(writer, pv)?;
-        writer.write_event(Event::End(BytesEnd::new("check-content")))?;
-    } else if let Some(standard_check) = standard_check {
-        // Imported non-native check: preserve the exact body form.
-        match standard_check.body {
-            XccdfCheckBody::Inline { content } => {
-                writer.write_event(Event::Start(BytesStart::new("check-content")))?;
-                writer.write_event(Event::Text(BytesText::new(&content)))?;
-                writer.write_event(Event::End(BytesEnd::new("check-content")))?;
+        XccdfCheckBody::Reference { href, name } => {
+            let mut content_ref = BytesStart::new("check-content-ref");
+            content_ref.push_attribute(("href", href.as_str()));
+            if let Some(name) = name.as_deref() {
+                content_ref.push_attribute(("name", name));
             }
-            XccdfCheckBody::Reference { href, name } => {
-                let mut content_ref = BytesStart::new("check-content-ref");
-                content_ref.push_attribute(("href", href.as_str()));
-                if let Some(name) = name.as_deref() {
-                    content_ref.push_attribute(("name", name));
-                }
-                writer.write_event(Event::Empty(content_ref))?;
-            }
+            writer.write_event(Event::Empty(content_ref))?;
         }
     }
+    writer.write_event(Event::End(BytesEnd::new("check")))?;
+    Ok(())
+}
 
+/// Emit the Crystal Forge executable `<check>` element containing `<cf:policy>`.
+fn write_cf_executable_check(
+    writer: &mut Writer<Cursor<&mut Vec<u8>>>,
+    pv: &XccdfPolicyExport,
+    standard_check: Option<&XccdfStandardCheck>,
+) -> Result<(), XccdfWriterError> {
+    let mut check = BytesStart::new("check");
+    check.push_attribute(("system", CF_POLICY_CHECK_SYSTEM));
+    writer.write_event(Event::Start(check))?;
+    writer.write_event(Event::Start(BytesStart::new("check-content")))?;
+    // Emit a human-readable description before the typed cf:policy.
+    if standard_check.is_none() {
+        let text = match pv.implementation_state {
+            ImplementationState::Native => {
+                format!("Crystal Forge {} policy check", pv.policy_type)
+            }
+            ImplementationState::Manual => format!(
+                "Manual ({}) – user must provide evidence of compliance",
+                pv.policy_type
+            ),
+            ImplementationState::Unbound => format!(
+                "Unbound ({}) – requirement exists but has no implementation",
+                pv.policy_type
+            ),
+            ImplementationState::External => {
+                format!("External ({}) – checked by external system", pv.policy_type)
+            }
+            ImplementationState::Opaque => format!(
+                "Opaque ({}) – CF preserves rule but cannot model check",
+                pv.policy_type
+            ),
+        };
+        writer.write_event(Event::Text(BytesText::new(&text)))?;
+    }
+    write_cf_policy(writer, pv)?;
+    writer.write_event(Event::End(BytesEnd::new("check-content")))?;
     writer.write_event(Event::End(BytesEnd::new("check")))?;
     Ok(())
 }
@@ -3184,6 +3225,7 @@ mod tests {
                 "content_ref_name": "oval:com.example:def:1"
             }
         });
+        policy.opaque_xml = Some("<custom-xml/>".to_owned());
         let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![policy])).unwrap();
         assert!(xml.contains("check-content-ref"));
         assert!(xml.contains("href=\"oval-definitions.xml\""));
@@ -3191,6 +3233,57 @@ mod tests {
         assert!(
             !xml.contains("<check-content>"),
             "Reference check must not emit inline content"
+        );
+    }
+
+    #[test]
+    fn reference_only_check_without_opaque_xml_is_rejected() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
+                "content_ref_href": "oval-definitions.xml",
+                "content_ref_name": "oval:com.example:def:1"
+            }
+            // No opaque_xml fallback
+        });
+        let snap = make_single_policy_snapshot(vec![policy]);
+        assert!(
+            matches!(
+                write_bundle_xccdf_export(&snap),
+                Err(XccdfWriterError::MalformedImportedCheck { .. })
+            ),
+            "Reference-only check without opaque_xml must be rejected"
+        );
+    }
+
+    #[test]
+    fn native_policy_with_imported_check_emits_both_standard_and_cf_checks() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::Native, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
+                "content": "Verify firewall is enabled."
+            }
+        });
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![policy])).unwrap();
+        // Must contain the imported standard check system
+        assert!(
+            xml.contains("http://oval.mitre.org/XMLSchema/oval-definitions-5"),
+            "Standard check system must be preserved"
+        );
+        assert!(
+            xml.contains("Verify firewall is enabled."),
+            "Standard check content must be preserved"
+        );
+        // Must also contain the CF executable check
+        assert!(
+            xml.contains("urn:crystal-forge:check-system:policy:1"),
+            "CF check system must also be present"
+        );
+        assert!(
+            xml.contains("cf:policy"),
+            "CF policy element must be present"
         );
     }
 
