@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-02 01:47'
+updated_date: '2026-08-02 01:48'
 labels:
   - frontend
   - web-ui
@@ -1320,6 +1320,29 @@ Verification for this slice:
 - `nix develop -c bash -c 'SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml'` passed with existing warnings.
 
 A mistaken non-Nix server `cargo check` was run first and failed because `pkg-config`/OpenSSL were unavailable outside the dev shell; it was rerun with `nix develop` successfully. A combined web-ui test filter command also failed because Cargo accepts only one test filter; the two filters were rerun separately and passed.
+
+Continued MR !314 UI review-fix work and pushed commit `58961c1a` (`Finish notification and session UI fixes`) to branch `TASK-414-account-notifications-sessions`.
+
+Implemented in this slice:
+- Moved top-bar notification feed state into AppShell-owned `AccountNotificationsContext` so it is account-scoped with the authenticated shell lifecycle.
+- Added notification dropdown pagination with a `Load more` control using the server `next_cursor`.
+- Added `aria-expanded`/`aria-haspopup`, Escape close, backdrop close with bell focus restoration, and Enter/Space activation for notification rows.
+- Preserved notification feed rows when refresh fails by showing errors as a banner.
+- Changed notification click/keyboard activation to close and navigate immediately, then mark read asynchronously.
+- Escaped the composite cursor delimiter in the web API client query string.
+- Improved active-session rows with browser/OS title, relative active time, wrapping-friendly layout, and per-action pending/disabled states for individual revoke and sign-out-everywhere.
+
+Verification run before commit:
+- `nix develop -c rustfmt --edition 2024 packages/web-ui/src/components/layout/topbar.rs packages/web-ui/src/components/layout/app_shell.rs packages/web-ui/src/components/layout/mod.rs packages/web-ui/src/api/client.rs packages/web-ui/src/views/profile.rs && git diff --check` passed.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` passed with existing warnings.
+- `node --check checks/web-ui/tests/integration-test.js` passed.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo test --bin crystal-forge-ui notification_save'` passed: 3 tests.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo test --bin crystal-forge-ui notification_preference_merge'` passed: 2 tests.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml'` passed with existing warnings.
+
+Post-push status: worktree is clean at `58961c1a`.
+
+Still not verified in this session: DB-backed ignored tests because `CRYSTAL_FORGE_TEST_DATABASE_URL` is unavailable, SQLx offline metadata refresh, MR pipeline, visual baselines/screenshots, and latest `nix build .#checks.x86_64-linux.web-ui --no-link`. Remaining UI integration coverage gaps include mark-all-read, per-item read/navigation, dismiss, incremental loading, keyboard/Escape/focus restoration, preference failures, session revoke/sign-out, and mobile layout.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
