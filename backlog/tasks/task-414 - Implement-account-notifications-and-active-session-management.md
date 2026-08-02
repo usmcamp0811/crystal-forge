@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-02 02:11'
+updated_date: '2026-08-02 02:12'
 labels:
   - frontend
   - web-ui
@@ -1348,6 +1348,8 @@ Latest required Nix web-ui verification after commit `58961c1a`:
 - `nix build .#checks.x86_64-linux.web-ui --no-link` passed.
 
 Remaining unverified items: DB-backed ignored tests still require a migrated isolated database via `CRYSTAL_FORGE_TEST_DATABASE_URL`; SQLx metadata has not been refreshed; MR pipeline and visual baselines/screenshots still need confirmation.
+
+MR !314 pipeline status checked with `nix run nixpkgs#glab -- mr view 314 --output json`: pipeline `2724530884` for commit `58961c1a66a62f4402f99c67d967e7c65125c21e` is currently `running` at https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2724530884.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
