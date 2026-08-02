@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-02 01:48'
+updated_date: '2026-08-02 02:11'
 labels:
   - frontend
   - web-ui
@@ -1343,6 +1343,11 @@ Verification run before commit:
 Post-push status: worktree is clean at `58961c1a`.
 
 Still not verified in this session: DB-backed ignored tests because `CRYSTAL_FORGE_TEST_DATABASE_URL` is unavailable, SQLx offline metadata refresh, MR pipeline, visual baselines/screenshots, and latest `nix build .#checks.x86_64-linux.web-ui --no-link`. Remaining UI integration coverage gaps include mark-all-read, per-item read/navigation, dismiss, incremental loading, keyboard/Escape/focus restoration, preference failures, session revoke/sign-out, and mobile layout.
+
+Latest required Nix web-ui verification after commit `58961c1a`:
+- `nix build .#checks.x86_64-linux.web-ui --no-link` passed.
+
+Remaining unverified items: DB-backed ignored tests still require a migrated isolated database via `CRYSTAL_FORGE_TEST_DATABASE_URL`; SQLx metadata has not been refreshed; MR pipeline and visual baselines/screenshots still need confirmation.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
