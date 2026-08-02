@@ -1333,4 +1333,20 @@ Verification before MR:
 - `nix flake check --keep-going` not yet run locally; CI will be authoritative (AC #43)
 
 MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/313. Moved to Review.
+
+## Slice 3 - Phase 1+2+3 Progress
+
+### Phase 3 (DB snapshot loader + XML writer): COMPLETE
+
+- Replaced handler export_bundle_xccdf to use load_export_snapshot + write_bundle_xccdf_export
+
+- Implemented load_export_snapshot() with full bundle_version + membership + policy_versions + source_mappings in single read-only connection
+
+- Added ExportSnapshotError enum, parse_publication_state(), parse_implementation_state()
+
+- Removed old load_bundle_membership_txless
+
+- Rewrote xml_writer.rs completely: XCCDF 1.2 Benchmark with Groups by policy_type, Rules with severity/weight, CF extensions, source mappings, check/fix elements for all 8 policy types
+
+- 7 new xml_writer tests, all 124 compliance tests pass
 <!-- SECTION:NOTES:END -->
