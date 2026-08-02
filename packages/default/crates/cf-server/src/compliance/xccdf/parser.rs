@@ -14,7 +14,9 @@ use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use uuid::Uuid;
 
-use super::super::interchange::{CF_XCCDF_NAMESPACE, InterchangeLimits, XCCDF_NAMESPACE};
+use super::super::interchange::{
+    CF_XCCDF_NAMESPACE, InterchangeLimits, XCCDF_1_1_NAMESPACE, XCCDF_NAMESPACE,
+};
 use super::models::*;
 
 // ── Namespace classification ──────────────────────────────────────────────────
@@ -40,7 +42,12 @@ fn classify_element_namespace(
     resolved: &ResolveResult<'_>,
 ) -> Result<ElementNamespace, Diagnostic> {
     match resolved {
-        ResolveResult::Bound(namespace) if namespace.as_ref() == XCCDF_NAMESPACE.as_bytes() => {
+        // XCCDF 1.1.4 and XCCDF 1.2 are both treated as the XCCDF namespace
+        // for parsing purposes. CF always exports 1.2.
+        ResolveResult::Bound(namespace)
+            if namespace.as_ref() == XCCDF_NAMESPACE.as_bytes()
+                || namespace.as_ref() == XCCDF_1_1_NAMESPACE.as_bytes() =>
+        {
             Ok(ElementNamespace::Xccdf)
         }
         ResolveResult::Bound(namespace) if namespace.as_ref() == CF_XCCDF_NAMESPACE.as_bytes() => {
@@ -56,6 +63,20 @@ fn classify_element_namespace(
             ),
         )),
     }
+}
+
+/// Extract the source XCCDF namespace version string from a resolved namespace,
+/// returning `"1.1"` or `"1.2"` (or `None` for non-XCCDF namespaces).
+fn xccdf_namespace_version(resolved: &ResolveResult<'_>) -> Option<&'static str> {
+    if let ResolveResult::Bound(ns) = resolved {
+        if ns.as_ref() == XCCDF_NAMESPACE.as_bytes() {
+            return Some("1.2");
+        }
+        if ns.as_ref() == XCCDF_1_1_NAMESPACE.as_bytes() {
+            return Some("1.1");
+        }
+    }
+    None
 }
 
 /// Flow control for parser handlers: `Abort` stops the outer event loop.
@@ -186,6 +207,14 @@ pub fn parse_xccdf(
                     break;
                 }
                 let local_name = element.local_name();
+                // Record the source XCCDF namespace version from the first
+                // Benchmark element so the preview can report it.
+                if state.detected_xccdf_version.is_none()
+                    && namespace == ElementNamespace::Xccdf
+                    && local_name.as_ref() == b"Benchmark"
+                {
+                    state.detected_xccdf_version = xccdf_namespace_version(&resolved);
+                }
                 if state.handle_start(namespace, local_name.as_ref(), &element)
                     == ParseControl::Abort
                 {
@@ -270,6 +299,7 @@ pub fn parse_xccdf(
         source_filename: state.filename,
         source_bytes: state.source_bytes,
         source_sha256: state.source_sha256,
+        xccdf_namespace_version: state.detected_xccdf_version,
         xccdf_version: state.xccdf_version.clone(),
         benchmark: state.benchmark.take(),
         profiles: state.profiles,
@@ -321,6 +351,10 @@ struct ParserState {
     /// encountered.  Triggers `CfNativeUnsupportedExtension`.
     saw_unknown_cf_content: bool,
 
+    /// Source XCCDF namespace version detected from the first Benchmark element:
+    /// `Some("1.1")` or `Some("1.2")`.
+    detected_xccdf_version: Option<&'static str>,
+
     // Parsing state.
     current_text: String,
     current_rule: Option<ParsedRule>,
@@ -360,6 +394,7 @@ impl ParserState {
             value_ids: HashSet::new(),
             saw_supported_cf_content: false,
             saw_unknown_cf_content: false,
+            detected_xccdf_version: None,
             current_text: String::new(),
             current_rule: None,
             current_profile: None,
@@ -1575,6 +1610,90 @@ mod tests {
         );
         // Despite the bad UUID the classification still reflects CF content.
         assert_eq!(parsed.class, DocumentClass::CfNativeExact);
+    }
+
+    // ── XCCDF 1.1 namespace support ───────────────────────────────────────────
+
+    /// Minimal XCCDF 1.1.4 document that structurally mirrors the real
+    /// Anduril NixOS V1R2 STIG (downloaded from public.cyber.mil).
+    fn nixos_stig_fixture() -> String {
+        // The real STIG uses xmlns="http://checklists.nist.gov/xccdf/1.1"
+        // as the default namespace with no prefix, plus several auxiliary
+        // namespaces (Dublin Core, CPE, XHTML, XML DSig).  This minimal
+        // fixture reproduces that structure.
+        format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<Benchmark xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xmlns:cpe="http://cpe.mitre.org/language/2.0"
+    xmlns:xhtml="http://www.w3.org/1999/xhtml"
+    xsi:schemaLocation="{XCCDF_1_1_NAMESPACE} http://nvd.nist.gov/schema/xccdf-1.1.4.xsd"
+    id="Anduril_NixOS_STIG_fixture"
+    xml:lang="en"
+    xmlns="{XCCDF_1_1_NAMESPACE}">
+  <status date="2025-08-19">accepted</status>
+  <title>Anduril NixOS Security Technical Implementation Guide (Fixture)</title>
+  <description>Minimal fixture derived from U_Anduril_NixOS_V1R2_STIG.</description>
+  <reference href="https://cyber.mil">
+    <dc:publisher>DISA</dc:publisher>
+    <dc:source>STIG.DOD.MIL</dc:source>
+  </reference>
+  <version>1</version>
+  <Profile id="MAC-1_Classified">
+    <title>I - Mission Critical Classified</title>
+    <select idref="V-268078" selected="true"/>
+  </Profile>
+  <Group id="V-268078">
+    <title>GEN000000</title>
+    <Rule id="SV-268078r1_rule" severity="medium">
+      <title>NixOS must be configured to use an approved cryptographic module.</title>
+      <description>Without approved cryptographic algorithms, information cannot be protected.</description>
+      <check system="C-268078r1_chk">
+        <check-content>Verify the NixOS cryptographic configuration.</check-content>
+      </check>
+      <fix id="F-268078r1_fix">Apply the approved cryptographic configuration.</fix>
+    </Rule>
+  </Group>
+</Benchmark>"#
+        )
+    }
+
+    #[test]
+    fn parses_xccdf_1_1_document_as_foreign_xccdf() {
+        let limits = InterchangeLimits::default();
+        let xml = nixos_stig_fixture();
+        let parsed = parse_xccdf(xml.as_bytes(), Some("fixture.xml"), &limits).unwrap();
+
+        // No blocking errors; 1.1 is a valid import source.
+        assert!(
+            !parsed.errors.iter().any(|e| e.blocking),
+            "unexpected blocking errors: {:?}",
+            parsed.errors
+        );
+        // Classified as foreign XCCDF, not invalid.
+        assert_eq!(parsed.class, DocumentClass::ForeignXccdf);
+        // Namespace version is detected and reported.
+        assert_eq!(parsed.xccdf_namespace_version, Some("1.1"));
+        // Structural content is preserved.
+        assert!(parsed.benchmark.is_some());
+        assert_eq!(parsed.rules.len(), 1);
+        assert_eq!(parsed.rules[0].id, "SV-268078r1_rule");
+        assert_eq!(parsed.profiles.len(), 1);
+    }
+
+    #[test]
+    fn detects_xccdf_namespace_version_as_1_2_for_standard_document() {
+        let limits = InterchangeLimits::default();
+        let xml = format!(
+            r#"<?xml version="1.0"?>
+<Benchmark xmlns="{XCCDF_NAMESPACE}" id="b1">
+  <status>draft</status>
+  <title>T</title>
+  <version>0.1</version>
+</Benchmark>"#
+        );
+        let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
+        assert_eq!(parsed.xccdf_namespace_version, Some("1.2"));
     }
 
     #[test]

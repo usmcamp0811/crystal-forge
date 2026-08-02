@@ -23,7 +23,7 @@ use quick_xml::reader::NsReader;
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
-use super::super::interchange::{InterchangeLimits, XCCDF_NAMESPACE};
+use super::super::interchange::{InterchangeLimits, XCCDF_1_1_NAMESPACE, XCCDF_NAMESPACE};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -295,10 +295,22 @@ pub fn extract_xccdf_from_zip(
             ));
         }
 
-        // Collect only XML-extension entries as XCCDF candidates (XCCDF
-        // verification happens in the next pass).
+        // Collect XCCDF candidates.  Primary candidates have a .xml extension.
+        // Also admit extensionless or unconventionally-named files whose
+        // declared uncompressed size is within the XML limit and whose content
+        // will be probed for XML leading bytes in the next pass.
         let name_lower = raw_name.to_lowercase();
-        if name_lower.ends_with(".xml") {
+        let has_xml_ext = name_lower.ends_with(".xml");
+        let no_known_ext = !name_lower.contains('.') || {
+            // Treat as extensionless when the only dot is in a directory
+            // component (e.g. the file name itself has no dot).
+            raw_name
+                .rsplit('/')
+                .next()
+                .map(|seg| !seg.contains('.'))
+                .unwrap_or(false)
+        };
+        if has_xml_ext || (no_known_ext && entry_uncompressed <= limits.max_xml_bytes as u64) {
             xml_candidates.push((i, raw_name));
         }
     }
@@ -313,8 +325,17 @@ pub fn extract_xccdf_from_zip(
     // we cannot hold both a by_index handle and index metadata simultaneously,
     // so we do a second pass.
 
-    // Step A: peek every non-XML file entry for ZIP magic.
+    // Build a fast lookup of candidate indices to skip in the ZIP-magic pass.
+    let candidate_indices: std::collections::HashSet<usize> =
+        xml_candidates.iter().map(|(i, _)| *i).collect();
+
+    // Step A: peek every non-candidate file entry for ZIP magic.
     for i in 0..total_entries {
+        // Candidate entries are probed for both ZIP magic and XCCDF root in
+        // step B; skip them here to avoid double-reading.
+        if candidate_indices.contains(&i) {
+            continue;
+        }
         let mut entry = archive.by_index(i).map_err(|e| {
             ZipExtractionError::invalid(
                 "ZIP_ENTRY_ERROR",
@@ -325,11 +346,6 @@ pub fn extract_xccdf_from_zip(
             continue;
         }
         let raw_name = entry.name().to_string();
-        let name_lower = raw_name.to_lowercase();
-        // XML entries are checked below for Benchmark root element, not for ZIP magic.
-        if name_lower.ends_with(".xml") {
-            continue;
-        }
         // Peek first 4 bytes.
         let mut peek = [0u8; 4];
         let n = entry.read(&mut peek).unwrap_or(0);
@@ -487,7 +503,7 @@ fn validate_entry_name(name: &str) -> Result<(), &'static str> {
 }
 
 /// Peek `buf` (up to `PEEK_BYTES`) and return true when the root XML element
-/// is an XCCDF 1.2 `Benchmark`.
+/// is an XCCDF `Benchmark` in namespace 1.1 or 1.2.
 fn is_xccdf_benchmark(buf: &[u8]) -> bool {
     if buf.is_empty() {
         return false;
@@ -500,7 +516,9 @@ fn is_xccdf_benchmark(buf: &[u8]) -> bool {
             Ok((resolved, Event::Start(e) | Event::Empty(e))) => {
                 let is_xccdf_ns = matches!(
                     &resolved,
-                    ResolveResult::Bound(ns) if ns.as_ref() == XCCDF_NAMESPACE.as_bytes()
+                    ResolveResult::Bound(ns)
+                        if ns.as_ref() == XCCDF_NAMESPACE.as_bytes()
+                            || ns.as_ref() == XCCDF_1_1_NAMESPACE.as_bytes()
                 );
                 return is_xccdf_ns && e.local_name().as_ref() == b"Benchmark";
             }
@@ -907,6 +925,53 @@ mod tests {
             err.code
         );
         assert_eq!(err.http_status, 413);
+    }
+
+    // ── XCCDF 1.1 namespace in ZIP ────────────────────────────────────────────
+
+    const XCCDF_11_BENCHMARK: &[u8] = b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+<Benchmark xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
+xmlns=\"http://checklists.nist.gov/xccdf/1.1\" id=\"nixos_stig_fixture\">\
+<status date=\"2025-08-19\">accepted</status>\
+<title>Anduril NixOS STIG Fixture</title>\
+<version>1</version>\
+<Rule id=\"SV-268078r1_rule\" severity=\"medium\">\
+<title>NixOS crypto rule.</title>\
+<check system=\"C-268078r1_chk\">\
+<check-content>Verify.</check-content>\
+</check>\
+</Rule>\
+</Benchmark>";
+
+    #[test]
+    fn extracts_xccdf_1_1_document_from_zip() {
+        // Mirrors the structure of U_Anduril_NixOS_V1R2_STIG.zip:
+        // a subdirectory containing an XCCDF 1.1 XML plus auxiliary files.
+        let zip = make_zip(&[
+            ("NixOS_STIG/README.txt", b"description"),
+            ("NixOS_STIG/STIG_unclass.xsl", b"<stylesheet/>"),
+            (
+                "NixOS_STIG/U_Anduril_NixOS_STIG_V1R2_Manual-xccdf.xml",
+                XCCDF_11_BENCHMARK,
+            ),
+        ]);
+        let result = extract_xccdf_from_zip(&zip, &limits()).unwrap();
+        assert_eq!(
+            result.entry_name,
+            "NixOS_STIG/U_Anduril_NixOS_STIG_V1R2_Manual-xccdf.xml"
+        );
+        assert_eq!(result.xml_bytes, XCCDF_11_BENCHMARK);
+    }
+
+    #[test]
+    fn xccdf_1_1_selected_over_non_xccdf_root_xml() {
+        // Metadata file at root should not win over a nested XCCDF 1.1 document.
+        let zip = make_zip(&[
+            ("metadata.xml", NON_XCCDF_XML),
+            ("content/benchmark.xml", XCCDF_11_BENCHMARK),
+        ]);
+        let result = extract_xccdf_from_zip(&zip, &limits()).unwrap();
+        assert_eq!(result.entry_name, "content/benchmark.xml");
     }
 
     // ── detect_package_kind: mismatch ─────────────────────────────────────────

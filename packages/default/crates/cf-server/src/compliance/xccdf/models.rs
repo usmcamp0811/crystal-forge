@@ -7,7 +7,9 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::super::interchange::{CF_POLICY_CHECK_SYSTEM, CF_XCCDF_NAMESPACE, XCCDF_NAMESPACE};
+use super::super::interchange::{
+    CF_POLICY_CHECK_SYSTEM, CF_XCCDF_NAMESPACE, XCCDF_1_1_NAMESPACE, XCCDF_NAMESPACE,
+};
 
 // ── Document-level types ─────────────────────────────────────────────────────
 
@@ -46,6 +48,8 @@ pub struct ParsedXccdf {
     pub source_filename: Option<String>,
     pub source_bytes: Vec<u8>,
     pub source_sha256: String,
+    /// XCCDF namespace version detected in the source document: `"1.1"` or `"1.2"`.
+    pub xccdf_namespace_version: Option<&'static str>,
     pub xccdf_version: Option<String>,
     pub benchmark: Option<BenchmarkMeta>,
     pub profiles: Vec<ParsedProfile>,

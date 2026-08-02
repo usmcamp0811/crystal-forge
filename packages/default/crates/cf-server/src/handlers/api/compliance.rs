@@ -20,7 +20,7 @@ use crate::api::models::{
 use crate::compliance::digest::{
     BundleMembershipEntry, BundleVersionCanonical, load_bundle_membership,
 };
-use crate::compliance::interchange::InterchangeLimits;
+use crate::compliance::interchange::{InterchangeLimits, MAX_XCCDF_UPLOAD_BYTES};
 use crate::compliance::xccdf::parser::parse_xccdf;
 use crate::compliance::xccdf::xml_writer::write_bundle_xccdf;
 use crate::compliance::xccdf::zip_extractor::{
@@ -239,6 +239,9 @@ pub async fn xccdf_preview(
     // * Exactly one upload file is accepted; a second file field is rejected (400).
     // * Non-file fields are drained to satisfy the route-level body limit
     //   without contributing to the accumulated bytes.
+    // * Accumulation uses MAX_XCCDF_UPLOAD_BYTES (the larger of the XML and ZIP
+    //   limits) so that a 50 MiB ZIP package is not rejected before content
+    //   detection.  After detection the correct per-type limit is enforced.
     while let Ok(Some(mut field)) = multipart.next_field().await {
         let field_name = field.name().map(String::from);
         let has_filename = field.file_name().is_some();
@@ -256,21 +259,6 @@ pub async fn xccdf_preview(
             }
             received_file = true;
             filename = field.file_name().map(String::from);
-            // Check media type from filename for 415.
-            if let Some(ref fname) = filename {
-                let lower = fname.to_lowercase();
-                if !lower.ends_with(".xml") && !lower.ends_with(".zip") {
-                    return (
-                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                        Json(ApiError {
-                            error: "Unsupported file type".into(),
-                            message: "Only .xml and .zip files are accepted".into(),
-                            details: None,
-                        }),
-                    )
-                        .into_response();
-                }
-            }
         }
 
         // Read incrementally.
@@ -282,14 +270,14 @@ pub async fn xccdf_preview(
                         continue;
                     }
                     total_bytes += chunk.len();
-                    if total_bytes > limits.max_xml_bytes {
+                    if total_bytes > MAX_XCCDF_UPLOAD_BYTES {
                         return (
                             StatusCode::PAYLOAD_TOO_LARGE,
                             Json(ApiError {
                                 error: "File too large".into(),
                                 message: format!(
-                                    "Upload exceeds {} byte limit",
-                                    limits.max_xml_bytes
+                                    "Upload exceeds the {} byte limit",
+                                    MAX_XCCDF_UPLOAD_BYTES
                                 ),
                                 details: None,
                             }),
@@ -324,21 +312,32 @@ pub async fn xccdf_preview(
 
     // ── Content-based package detection ───────────────────────────────────────
     //
-    // The filename extension is treated as a hint only.  The byte signature of
-    // the uploaded content is authoritative.
+    // The byte signature of the uploaded content is authoritative. The filename
+    // extension is used only to detect explicit mismatches (ZIP bytes named
+    // .xml, or XML bytes named .zip); files without a recognised extension are
+    // accepted if their bytes identify them as XML or ZIP.
 
     let package_kind = detect_package_kind(&bytes);
-    let hint_is_zip = filename
+
+    // Extract the filename extension (the part after the last dot in the
+    // filename segment, not a directory component).
+    let file_ext = filename
         .as_deref()
-        .map(|f| f.to_lowercase().ends_with(".zip"))
-        .unwrap_or(false);
-    let hint_is_xml = filename
-        .as_deref()
-        .map(|f| {
-            let l = f.to_lowercase();
-            l.ends_with(".xml")
+        .and_then(|f| f.rsplit('/').next()) // last path segment
+        .and_then(|seg| {
+            let dot_pos = seg.rfind('.')?;
+            if dot_pos == 0 {
+                None
+            } else {
+                Some(&seg[dot_pos + 1..])
+            }
         })
-        .unwrap_or(false);
+        .map(|e| e.to_lowercase());
+
+    let has_xml_ext = file_ext.as_deref() == Some("xml");
+    let has_zip_ext = file_ext.as_deref() == Some("zip");
+    // Whether the file has any extension that is NOT .xml or .zip.
+    let has_wrong_ext = file_ext.is_some() && !has_xml_ext && !has_zip_ext;
 
     // Reject unknown content signatures (bytes are neither ZIP nor XML).
     let kind = match package_kind {
@@ -356,12 +355,18 @@ pub async fn xccdf_preview(
         }
     };
 
-    // Reject explicit filename/content mismatches so uploaders cannot rename
-    // a ZIP to .xml or vice versa and confuse the parser.
-    let mismatch = match kind {
-        PackageKind::Zip if hint_is_xml => Some("ZIP bytes uploaded with an .xml extension"),
-        PackageKind::Xml if hint_is_zip => Some("XML bytes uploaded with a .zip extension"),
-        _ => None,
+    // Reject if the file carries a recognised-but-wrong extension (.txt,
+    // .pdf, etc.), or if the extension explicitly contradicts the content
+    // (.xml extension with ZIP bytes, .zip extension with XML bytes).
+    // Files with no extension or with the correct extension are accepted.
+    let mismatch: Option<&str> = if has_wrong_ext {
+        Some("file extension is not .xml or .zip")
+    } else {
+        match kind {
+            PackageKind::Zip if has_xml_ext => Some("ZIP bytes uploaded with an .xml extension"),
+            PackageKind::Xml if has_zip_ext => Some("XML bytes uploaded with a .zip extension"),
+            _ => None,
+        }
     };
     if let Some(reason) = mismatch {
         return (
@@ -369,6 +374,25 @@ pub async fn xccdf_preview(
             Json(ApiError {
                 error: "Content/extension mismatch".into(),
                 message: reason.into(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    // Apply the per-type transport size limit now that we know what the content
+    // is.  The accumulation limit above is the union maximum (ZIP); this step
+    // enforces the tighter per-type limit for plain XML.
+    let size_check = match kind {
+        PackageKind::Xml => limits.check_xml_size(bytes.len()),
+        PackageKind::Zip => limits.check_zip_size(bytes.len()),
+    };
+    if let Err(ref e) = size_check {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ApiError {
+                error: "File too large".into(),
+                message: e.to_string(),
                 details: None,
             }),
         )
@@ -407,6 +431,13 @@ pub async fn xccdf_preview(
                 };
                 let mut error_json = serde_json::json!({
                     "error": "ZIP extraction failed",
+                    "sha256": original_sha256,
+                    "source": serde_json::json!({
+                        "package_kind": "zip_package",
+                        "original_filename": original_filename,
+                        "original_size": original_size,
+                        "original_sha256": original_sha256,
+                    }),
                     "errors": [{
                         "code": e.code,
                         "summary": e.message,
@@ -432,13 +463,15 @@ pub async fn xccdf_preview(
 
     match parse_xccdf(&xml_bytes, xml_filename.as_deref(), &limits) {
         Ok(parsed) => {
-            // 422 for blocking validation errors.
+            // 422 for blocking validation errors — include full source
+            // provenance so the UI can show which package failed.
             if parsed.errors.iter().any(|e| e.blocking) {
                 return (
                     StatusCode::UNPROCESSABLE_ENTITY,
                     Json(serde_json::json!({
                         "error": "XCCDF validation failed",
-                        "sha256": parsed.source_sha256,
+                        "sha256": original_sha256,
+                        "source": package_source_json,
                         "errors": parsed.errors.iter().map(|e| serde_json::json!({
                             "code": e.code, "summary": e.summary, "blocking": e.blocking,
                         })).collect::<Vec<_>>(),
@@ -469,6 +502,7 @@ pub async fn xccdf_preview(
                 "sha256": original_sha256,
                 "source": package_source_json,
                 "filename": xml_filename,
+                "xccdf_namespace_version": parsed.xccdf_namespace_version,
                 "xccdf_version": parsed.xccdf_version,
                 "document_class": format!("{:?}", parsed.class).to_lowercase(),
                 "fidelity": format!("{:?}", parsed.fidelity).to_lowercase(),
@@ -901,13 +935,14 @@ mod tests {
         let token = admin_session_token(&pool).await;
         let base = spawn_preview_server(pool).await;
 
+        // Content must start with '<' so it is identified as XML before the
+        // size check fires (opaque binary bytes would get 415 from content
+        // detection before reaching the size limit).
+        let mut big_xml = b"<".to_vec();
+        big_xml.extend(vec![b'x'; MAX_XCCDF_XML_BYTES]); // total > XML limit
+
         let mut body = Vec::new();
-        push_file_field(
-            &mut body,
-            "file",
-            "big.xml",
-            &vec![b'x'; MAX_XCCDF_XML_BYTES + 1],
-        );
+        push_file_field(&mut body, "file", "big.xml", &big_xml);
         finish_multipart(&mut body);
 
         let response = post_multipart(&base, &token, body).await;
@@ -1215,11 +1250,15 @@ mod tests {
         finish_multipart(&mut body);
 
         let response = post_multipart(&base, &token, body).await;
-        // Should succeed or fail based on XCCDF content, not extension.
-        // The extension-allow-list check runs before content detection and will
-        // reject "package" (no .xml or .zip). Confirm we get 415 (extension
-        // reject) rather than a parse error.
-        assert_eq!(response.status().as_u16(), 415);
+        // Files with no extension are accepted based on content signature.
+        // ZIP bytes containing a valid XCCDF document should preview successfully.
+        assert_eq!(
+            response.status().as_u16(),
+            200,
+            "extensionless ZIP with valid XCCDF should be accepted"
+        );
+        let json: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(json["document_class"], "foreignxccdf");
     }
 
     #[tokio::test]
@@ -1233,9 +1272,15 @@ mod tests {
         push_file_field(&mut body, "file", "package", minimal_xccdf().as_bytes());
         finish_multipart(&mut body);
 
-        // Extension-allow-list rejects "package" before content detection.
+        // Files with no extension are accepted based on content signature.
         let response = post_multipart(&base, &token, body).await;
-        assert_eq!(response.status().as_u16(), 415);
+        assert_eq!(
+            response.status().as_u16(),
+            200,
+            "extensionless XML with valid XCCDF should be accepted"
+        );
+        let json: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(json["document_class"], "foreignxccdf");
     }
 
     #[tokio::test]
@@ -1274,6 +1319,155 @@ mod tests {
         assert_eq!(source["selected_entry"], "benchmark.xml");
         assert!(source["selected_xml_sha256"].is_string());
         // The two digests must differ (ZIP ≠ inner XML).
+        assert_ne!(json["sha256"], source["selected_xml_sha256"]);
+    }
+
+    // ── XCCDF 1.1 / real DISA STIG acceptance test ───────────────────────────
+
+    /// XCCDF 1.1.4 fixture that mirrors the structure of the real
+    /// U_Anduril_NixOS_V1R2_STIG.zip distributed by public.cyber.mil.
+    ///
+    /// The real package contains:
+    ///  - `U_Anduril_NixOS_V1R2_Manual_STIG/U_Anduril_NixOS_STIG_V1R2_Manual-xccdf.xml`
+    ///    (361 KB, xmlns="http://checklists.nist.gov/xccdf/1.1")
+    ///  - several PDF and XSL auxiliary files
+    ///
+    /// This fixture reproduces the namespace, element structure, and
+    /// auxiliary-file layout without the copyrighted content.
+    fn nixos_stig_xccdf_1_1() -> Vec<u8> {
+        let xccdf = r#"<?xml version="1.0" encoding="utf-8"?><?xml-stylesheet type='text/xsl' href='STIG_unclass.xsl'?>
+<Benchmark xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xmlns:cpe="http://cpe.mitre.org/language/2.0"
+    xmlns:xhtml="http://www.w3.org/1999/xhtml"
+    xmlns:dsig="http://www.w3.org/2000/09/xmldsig#"
+    xsi:schemaLocation="http://checklists.nist.gov/xccdf/1.1 http://nvd.nist.gov/schema/xccdf-1.1.4.xsd"
+    id="Anduril_NixOS_STIG_fixture" xml:lang="en"
+    xmlns="http://checklists.nist.gov/xccdf/1.1">
+  <status date="2025-08-19">accepted</status>
+  <title>Anduril NixOS Security Technical Implementation Guide (Reduced Fixture)</title>
+  <description>Reduced fixture derived from U_Anduril_NixOS_V1R2_STIG for CI testing.</description>
+  <notice id="terms-of-use" xml:lang="en"/>
+  <reference href="https://cyber.mil">
+    <dc:publisher>DISA</dc:publisher>
+    <dc:source>STIG.DOD.MIL</dc:source>
+  </reference>
+  <plain-text id="release-info">Release: 2 Benchmark Date: 01 Oct 2025</plain-text>
+  <version>1</version>
+  <Profile id="MAC-1_Classified">
+    <title>I - Mission Critical Classified</title>
+    <select idref="SV-268078r1_rule" selected="true"/>
+  </Profile>
+  <Group id="V-268078">
+    <title>GEN000000-fixture</title>
+    <Rule id="SV-268078r1_rule" severity="medium">
+      <title>The NixOS operating system must be configured correctly.</title>
+      <description>Without proper configuration, information cannot be protected.</description>
+      <check system="C-268078r1_chk">
+        <check-content>Verify the NixOS configuration as required.</check-content>
+      </check>
+      <fix id="F-268078r1_fix">Apply the required configuration.</fix>
+    </Rule>
+  </Group>
+</Benchmark>"#;
+        xccdf.as_bytes().to_vec()
+    }
+
+    fn make_nixos_stig_zip() -> Vec<u8> {
+        use std::io::Write;
+        let xccdf = nixos_stig_xccdf_1_1();
+        let mut buf = Vec::new();
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let opts = zip::write::FileOptions::<()>::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        // Mirror the real package directory layout.
+        w.add_directory(
+            "U_Anduril_NixOS_V1R2_Manual_STIG/",
+            zip::write::FileOptions::<()>::default(),
+        )
+        .unwrap();
+        w.start_file("U_Anduril_NixOS_V1R2_Manual_STIG/STIG_unclass.xsl", opts)
+            .unwrap();
+        w.write_all(b"<xsl:stylesheet xmlns:xsl='http://www.w3.org/1999/XSL/Transform'/>")
+            .unwrap();
+        w.start_file(
+            "U_Anduril_NixOS_V1R2_Manual_STIG/U_Anduril_NixOS_STIG_V1R2_Manual-xccdf.xml",
+            opts,
+        )
+        .unwrap();
+        w.write_all(&xccdf).unwrap();
+        w.finish().unwrap();
+        buf
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_accepts_nixos_stig_structure() {
+        // This test validates that the full workflow works for a ZIP whose
+        // structure matches the real Anduril NixOS V1R2 STIG:
+        //   - XCCDF 1.1.4 namespace
+        //   - XML file inside a subdirectory alongside auxiliary files
+        //   - DC and CPE auxiliary namespaces
+        //
+        // Run the untouched real package instead by pointing NIXOS_STIG_ZIP to
+        // its local path:
+        //   NIXOS_STIG_ZIP=/path/to/U_Anduril_NixOS_V1R2_STIG.zip \
+        //   DATABASE_URL=... cargo test preview_accepts_nixos_stig_structure -- --ignored
+
+        let pool = test_pool_from_env().await;
+        let token = admin_session_token(&pool).await;
+        let base = spawn_preview_server(pool).await;
+
+        let zip_bytes = if let Ok(path) = std::env::var("NIXOS_STIG_ZIP") {
+            std::fs::read(&path).expect("NIXOS_STIG_ZIP path should be readable")
+        } else {
+            make_nixos_stig_zip()
+        };
+
+        let zip_name = if std::env::var("NIXOS_STIG_ZIP").is_ok() {
+            "U_Anduril_NixOS_V1R2_STIG.zip"
+        } else {
+            "nixos_stig_fixture.zip"
+        };
+
+        let mut body = Vec::new();
+        push_file_field(&mut body, "file", zip_name, &zip_bytes);
+        finish_multipart(&mut body);
+
+        let response = post_multipart(&base, &token, body).await;
+        assert_eq!(
+            response.status().as_u16(),
+            200,
+            "NixOS STIG ZIP should preview successfully"
+        );
+
+        let json: serde_json::Value = response.json().await.expect("json body");
+
+        // Document detected as foreign XCCDF (no CF extension elements).
+        assert_eq!(json["document_class"], "foreignxccdf");
+
+        // XCCDF 1.1 namespace is detected and reported.
+        assert_eq!(
+            json["xccdf_namespace_version"], "1.1",
+            "NixOS STIG uses XCCDF 1.1 namespace"
+        );
+
+        // Benchmark content is captured.
+        let bm = json["benchmark"].as_object().expect("benchmark object");
+        assert!(
+            bm["id"].as_str().unwrap().contains("NixOS") || !bm["id"].as_str().unwrap().is_empty()
+        );
+
+        // At least one rule found.
+        assert!(json["rule_count"].as_u64().unwrap_or(0) >= 1);
+
+        // Source provenance reflects the ZIP package.
+        let source = &json["source"];
+        assert_eq!(source["package_kind"], "zip_package");
+        assert!(source["original_sha256"].is_string());
+        assert!(source["selected_entry"].as_str().unwrap().ends_with(".xml"));
+
+        // Original ZIP sha256 differs from the inner XML sha256.
         assert_ne!(json["sha256"], source["selected_xml_sha256"]);
     }
 }
