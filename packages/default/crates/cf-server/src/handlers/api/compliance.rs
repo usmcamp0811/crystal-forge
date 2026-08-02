@@ -224,42 +224,82 @@ pub async fn xccdf_preview(
     }
 
     let limits = InterchangeLimits::default();
-    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut accumulated = Vec::new();
     let mut filename: Option<String> = None;
+    let mut total_bytes: usize = 0;
 
-    while let Ok(Some(field)) = multipart.next_field().await {
+    // Read multipart incrementally, enforcing the byte limit at each chunk.
+    while let Ok(Some(mut field)) = multipart.next_field().await {
         filename = field.file_name().map(String::from);
-        match field.bytes().await {
-            Ok(bytes) => {
-                if bytes.len() > limits.max_xml_bytes {
-                    return (
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        Json(ApiError {
-                            error: "File too large".into(),
-                            message: format!(
-                                "XML file exceeds {} byte limit",
-                                limits.max_xml_bytes
-                            ),
-                            details: None,
-                        }),
-                    )
-                        .into_response();
-                }
-                file_bytes = Some(bytes.to_vec());
+        // Check media type from filename for 415.
+        if let Some(ref fname) = filename {
+            let lower = fname.to_lowercase();
+            if !lower.ends_with(".xml") && !lower.ends_with(".zip") {
+                return (
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    Json(ApiError {
+                        error: "Unsupported file type".into(),
+                        message: "Only .xml and .zip files are accepted".into(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
             }
-            Err(e) => {
-                return internal_error(&format!("Failed to read upload: {e}"));
+        }
+        // Read incrementally.
+        loop {
+            match field.chunk().await {
+                Ok(Some(chunk)) => {
+                    total_bytes += chunk.len();
+                    if total_bytes > limits.max_xml_bytes {
+                        return (
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            Json(ApiError {
+                                error: "File too large".into(),
+                                message: format!(
+                                    "Upload exceeds {} byte limit",
+                                    limits.max_xml_bytes
+                                ),
+                                details: None,
+                            }),
+                        )
+                            .into_response();
+                    }
+                    accumulated.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    return internal_error(&format!("Failed to read upload: {e}"));
+                }
             }
         }
     }
 
-    let bytes = match file_bytes {
-        Some(b) => b,
-        None => return bad_request("No file attached"),
+    let bytes = accumulated;
+    if bytes.is_empty() {
+        return bad_request("No file attached");
     };
 
     match parse_xccdf(&bytes, filename.as_deref(), &limits) {
         Ok(parsed) => {
+            // 422 for blocking validation errors.
+            if parsed.errors.iter().any(|e| e.blocking) {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({
+                        "error": "XCCDF validation failed",
+                        "sha256": parsed.source_sha256,
+                        "errors": parsed.errors.iter().map(|e| serde_json::json!({
+                            "code": e.code, "summary": e.summary, "blocking": e.blocking,
+                        })).collect::<Vec<_>>(),
+                        "warnings": parsed.warnings.iter().map(|w| serde_json::json!({
+                            "code": w.code, "summary": w.summary,
+                        })).collect::<Vec<_>>(),
+                    })),
+                )
+                    .into_response();
+            }
+            // 200 for successful parse with non-blocking warnings only.
             // Format rules for the response.
             let rule_summaries: Vec<serde_json::Value> = parsed
                 .rules
@@ -353,23 +393,29 @@ pub async fn export_bundle_xccdf(
     };
 
     // Load the bundle version to build the canonical representation.
-    let version_row: Option<(String, String, Option<String>, Option<String>, String, String)> =
-        match sqlx::query_as(
-            r#"
+    let version_row: Option<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+    )> = match sqlx::query_as(
+        r#"
             SELECT name, framework, framework_version, description, layer, owner
             FROM compliance_bundle_versions WHERE id = $1
             "#,
-        )
-        .bind(version_id)
-        .fetch_optional(&pool)
-        .await
-        {
-            Ok(row) => row,
-            Err(error) => {
-                tracing::error!(%error, %version_id, "failed to load bundle version for export");
-                return internal_error("Failed to load bundle version");
-            }
-        };
+    )
+    .bind(version_id)
+    .fetch_optional(&pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::error!(%error, %version_id, "failed to load bundle version for export");
+            return internal_error("Failed to load bundle version");
+        }
+    };
 
     let Some((name, framework, fw_ver, desc, layer, owner)) = version_row else {
         return not_found();
@@ -401,10 +447,14 @@ pub async fn export_bundle_xccdf(
                 StatusCode::OK,
                 [
                     ("content-type", "application/xml"),
-                    ("content-disposition", &format!("attachment; filename=\"{}\"", safe_filename)),
+                    (
+                        "content-disposition",
+                        &format!("attachment; filename=\"{}\"", safe_filename),
+                    ),
                 ],
                 xml,
-            ).into_response()
+            )
+                .into_response()
         }
         Err(e) => {
             tracing::error!("XCCDF export write error: {e:#}");
@@ -444,8 +494,15 @@ async fn load_bundle_membership_txless(
 }
 
 fn safe_bundle_xml_filename(name: &str) -> String {
-    let safe = name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+    let safe = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>();
     format!("{}.xml", if safe.is_empty() { "bundle" } else { &safe })
 }

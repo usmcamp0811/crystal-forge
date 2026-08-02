@@ -67,18 +67,16 @@ pub fn parse_xccdf(
                 state.depth = state.depth.saturating_sub(1);
                 state.handle_end(name);
             }
-            Ok(Event::Text(ref e)) => {
-                match e.unescape() {
-                    Ok(text) => state.handle_text(&text),
-                    Err(error) => {
-                        state.errors.push(Diagnostic::error(
-                            "XML_ENTITY_ERROR",
-                            &format!("Invalid XML entity reference: {error}"),
-                        ));
-                        break;
-                    }
+            Ok(Event::Text(ref e)) => match e.unescape() {
+                Ok(text) => state.handle_text(&text),
+                Err(error) => {
+                    state.errors.push(Diagnostic::error(
+                        "XML_ENTITY_ERROR",
+                        &format!("Invalid XML entity reference: {error}"),
+                    ));
+                    break;
                 }
-            }
+            },
             Ok(Event::CData(ref e)) => {
                 let bytes: &[u8] = &**e;
                 if let Ok(text) = std::str::from_utf8(bytes) {
@@ -239,7 +237,9 @@ impl ParserState {
         }
 
         // Detect namespace prefix on this element.
-        let is_cf = e.name().prefix()
+        let is_cf = e
+            .name()
+            .prefix()
             .and_then(|p| std::str::from_utf8(p.as_ref()).ok().map(String::from))
             .as_deref()
             .map(|p| p == "cf")
@@ -540,10 +540,7 @@ impl ParserState {
         if self.rules.len() >= self.limits.max_rule_count {
             self.errors.push(Diagnostic::error(
                 "RULE_LIMIT_EXCEEDED",
-                &format!(
-                    "Rule count exceeds maximum {}",
-                    self.limits.max_rule_count
-                ),
+                &format!("Rule count exceeds maximum {}", self.limits.max_rule_count),
             ));
             return false;
         }
@@ -921,5 +918,96 @@ mod tests {
         let limits = InterchangeLimits::default();
         let parsed = parse_xccdf(b"", None, &limits).unwrap();
         assert_eq!(parsed.class, DocumentClass::UnsupportedPackage);
+    }
+
+    #[test]
+    fn rejects_dtd() {
+        let limits = InterchangeLimits::default();
+        let dtd = r#"<?xml version="1.0"?>
+<!DOCTYPE Benchmark [<!ENTITY x "y">]>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="xccdf_test_benchmark">
+  <status>draft</status>
+  <title>Test</title>
+  <version>0.1</version>
+</Benchmark>"#;
+        let parsed = parse_xccdf(dtd.as_bytes(), None, &limits).unwrap();
+        assert!(parsed.errors.iter().any(|e| e.code == "DTD_FORBIDDEN"));
+    }
+
+    #[test]
+    fn rejects_malformed_entity() {
+        let limits = InterchangeLimits::default();
+        let xml = r#"<?xml version="1.0"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="xccdf_test_benchmark">
+  <status>draft</status>
+  <title>&invalid;</title>
+  <version>0.1</version>
+</Benchmark>"#;
+        let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
+        assert!(parsed.errors.iter().any(|e| e.code == "XML_ENTITY_ERROR"));
+    }
+
+    #[test]
+    fn enforces_rule_limit_and_stops() {
+        let limits = InterchangeLimits {
+            max_rule_count: 2,
+            ..InterchangeLimits::default()
+        };
+        let mut xml = String::from(
+            r#"<?xml version="1.0"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="xccdf_test_benchmark">
+  <status>draft</status>
+  <title>Test</title>
+  <version>0.1</version>"#,
+        );
+        for i in 0..10 {
+            xml.push_str(&format!("<Rule id=\"r{}\"><title>R{}</title></Rule>", i, i));
+        }
+        xml.push_str("</Benchmark>");
+        let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|e| e.code == "RULE_LIMIT_EXCEEDED")
+        );
+        assert!(parsed.rules.len() <= 2);
+    }
+
+    #[test]
+    fn enforces_attribute_limit() {
+        let limits = InterchangeLimits {
+            max_attributes_per_element: 2,
+            ..InterchangeLimits::default()
+        };
+        let xml = r#"<?xml version="1.0"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="a" style="b" resolved="true" extra="c">
+  <status>draft</status>
+  <title>Test</title>
+  <version>0.1</version>
+</Benchmark>"#;
+        let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|e| e.code == "ATTRIBUTE_LIMIT_EXCEEDED")
+        );
+    }
+
+    #[test]
+    fn enforces_cumulative_text_limit() {
+        let limits = InterchangeLimits {
+            max_text_node_bytes: 10,
+            ..InterchangeLimits::default()
+        };
+        let xml = r#"<?xml version="1.0"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="xccdf_test">
+  <status>draft</status>
+  <title>This is a long title that exceeds ten bytes</title>
+  <version>0.1</version>
+</Benchmark>"#;
+        let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
+        assert!(parsed.errors.iter().any(|e| e.code == "TEXT_TOO_LARGE"));
     }
 }
