@@ -41,7 +41,7 @@ use super::super::interchange::{
     DIGEST_ALGORITHM, XCCDF_1_2_NAMESPACE,
 };
 use super::export_models::{
-    XccdfBundleExport, XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
+    XccdfBundleExport, XccdfCheckBody, XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
 };
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -63,6 +63,11 @@ pub enum XccdfWriterError {
         object: &'static str,
         algorithm: String,
         canonicalization_version: String,
+    },
+    /// An imported standard check object is structurally invalid.
+    MalformedImportedCheck {
+        policy_version_id: uuid::Uuid,
+        reason: String,
     },
     /// A policy configuration could not be serialized without loss.
     Json(serde_json::Error),
@@ -99,6 +104,13 @@ impl std::fmt::Display for XccdfWriterError {
             } => write!(
                 f,
                 "{object} digest uses unsupported algorithm {algorithm:?} or canonical model {canonicalization_version:?}"
+            ),
+            Self::MalformedImportedCheck {
+                policy_version_id,
+                reason,
+            } => write!(
+                f,
+                "policy version {policy_version_id} has malformed compliance_metadata.check: {reason}"
             ),
         }
     }
@@ -941,26 +953,49 @@ fn write_json_element(
 ///   … ident*, fixtext*, fix*, (check | complex-check), …
 ///
 /// `fix` must precede `check`.
+/// XCCDF severity enumeration values (from XCCDF 1.2 schema).
+const VALID_FIX_COMPLEXITY: &[&str] = &["unknown", "low", "medium", "high"];
+const VALID_FIX_DISRUPTION: &[&str] = &["unknown", "low", "medium", "high"];
+
 fn write_check_and_fix(
     writer: &mut Writer<Cursor<&mut Vec<u8>>>,
     pv: &XccdfPolicyExport,
 ) -> Result<(), XccdfWriterError> {
-    // fix MUST precede check in the XCCDF Rule sequence. Preserve imported
-    // fix fields when available; only synthesize authored guidance otherwise.
-    if let Some(fix_data) = pv.standard_fix() {
-        {
-            let fix_id = format!("xccdf_crystalforge_fix_{}", pv.policy_version_id.simple());
-            let mut fix = BytesStart::new("fix");
-            if let Some(system) = fix_data.system.as_deref() {
-                fix.push_attribute(("system", system));
-            } else {
-                fix.push_attribute(("system", CF_NIX_FIX_SYSTEM));
-            }
-            fix.push_attribute(("id", fix_id.as_str()));
-            writer.write_event(Event::Start(fix))?;
-            writer.write_event(Event::Text(BytesText::new(&fix_data.content)))?;
-            writer.write_event(Event::End(BytesEnd::new("fix")))?;
+    // Parse the imported standard check. A malformed check object is an error
+    // rather than a silent replacement with a synthesized CF check.
+    let standard_check =
+        pv.parse_standard_check()
+            .map_err(|e| XccdfWriterError::MalformedImportedCheck {
+                policy_version_id: pv.policy_version_id,
+                reason: e.to_string(),
+            })?;
+
+    // fix MUST precede check in the XCCDF Rule sequence. Preserve all imported
+    // fix attributes (system, id, complexity, disruption, content).
+    if let Some(fix_data) = pv.parse_standard_fix() {
+        let generated_fix_id = format!("xccdf_crystalforge_fix_{}", pv.policy_version_id.simple());
+        let fix_id = fix_data.id.as_deref().unwrap_or(generated_fix_id.as_str());
+        let mut fix = BytesStart::new("fix");
+        if let Some(system) = fix_data.system.as_deref() {
+            fix.push_attribute(("system", system));
+        } else {
+            fix.push_attribute(("system", CF_NIX_FIX_SYSTEM));
         }
+        fix.push_attribute(("id", fix_id));
+        // Preserve XCCDF enumeration attributes if they are valid.
+        if let Some(complexity) = fix_data.complexity.as_deref() {
+            if VALID_FIX_COMPLEXITY.contains(&complexity) {
+                fix.push_attribute(("complexity", complexity));
+            }
+        }
+        if let Some(disruption) = fix_data.disruption.as_deref() {
+            if VALID_FIX_DISRUPTION.contains(&disruption) {
+                fix.push_attribute(("disruption", disruption));
+            }
+        }
+        writer.write_event(Event::Start(fix))?;
+        writer.write_event(Event::Text(BytesText::new(&fix_data.content)))?;
+        writer.write_event(Event::End(BytesEnd::new("fix")))?;
     } else if pv.implementation_state == ImplementationState::Native {
         let fix_id = format!("xccdf_crystalforge_fix_{}", pv.policy_version_id.simple());
         let mut fix = BytesStart::new("fix");
@@ -972,42 +1007,36 @@ fn write_check_and_fix(
         writer.write_event(Event::End(BytesEnd::new("fix")))?;
     }
 
-    let standard_check = pv.standard_check();
+    // Determine whether to emit the CF executable check or the standard check.
+    // For native policies, the CF check is always emitted and contains the
+    // executable cf:policy body. For non-native policies with an imported
+    // standard check, the standard check system and body are preserved exactly.
     let emit_cf_check =
         pv.implementation_state == ImplementationState::Native || standard_check.is_none();
-    let mut check = BytesStart::new("check");
+
     let check_system = if emit_cf_check {
         CF_POLICY_CHECK_SYSTEM
     } else {
         standard_check
             .as_ref()
-            .map(|check| check.system.as_str())
+            .map(|c| c.system.as_str())
             .unwrap_or(CF_POLICY_CHECK_SYSTEM)
     };
+    let mut check = BytesStart::new("check");
     check.push_attribute(("system", check_system));
-    if let Some(selector) = standard_check
-        .as_ref()
-        .and_then(|check| check.selector.as_deref())
-    {
+    if let Some(selector) = standard_check.as_ref().and_then(|c| c.selector.as_deref()) {
         check.push_attribute(("selector", selector));
     }
     writer.write_event(Event::Start(check))?;
-    if let Some(standard_check) = standard_check.as_ref() {
-        if standard_check.content_ref_href.is_some() || standard_check.content_ref_name.is_some() {
-            let mut content_ref = BytesStart::new("check-content-ref");
-            if let Some(href) = standard_check.content_ref_href.as_deref() {
-                content_ref.push_attribute(("href", href));
-            }
-            if let Some(name) = standard_check.content_ref_name.as_deref() {
-                content_ref.push_attribute(("name", name));
-            }
-            writer.write_event(Event::Empty(content_ref))?;
-        }
-    }
+
     if emit_cf_check {
+        // Native CF check: embed the typed cf:policy body inside check-content.
         writer.write_event(Event::Start(BytesStart::new("check-content")))?;
-        if let Some(content) = standard_check.and_then(|check| check.content) {
-            writer.write_event(Event::Text(BytesText::new(&content)))?;
+        if let Some(ref standard_check) = standard_check {
+            // Emit any imported check body text before the CF policy.
+            if let XccdfCheckBody::Inline { content } = &standard_check.body {
+                writer.write_event(Event::Text(BytesText::new(content)))?;
+            }
         } else {
             let text = match pv.implementation_state {
                 ImplementationState::Native => {
@@ -1033,11 +1062,25 @@ fn write_check_and_fix(
         }
         write_cf_policy(writer, pv)?;
         writer.write_event(Event::End(BytesEnd::new("check-content")))?;
-    } else if let Some(content) = standard_check.and_then(|check| check.content) {
-        writer.write_event(Event::Start(BytesStart::new("check-content")))?;
-        writer.write_event(Event::Text(BytesText::new(&content)))?;
-        writer.write_event(Event::End(BytesEnd::new("check-content")))?;
+    } else if let Some(standard_check) = standard_check {
+        // Imported non-native check: preserve the exact body form.
+        match standard_check.body {
+            XccdfCheckBody::Inline { content } => {
+                writer.write_event(Event::Start(BytesStart::new("check-content")))?;
+                writer.write_event(Event::Text(BytesText::new(&content)))?;
+                writer.write_event(Event::End(BytesEnd::new("check-content")))?;
+            }
+            XccdfCheckBody::Reference { href, name } => {
+                let mut content_ref = BytesStart::new("check-content-ref");
+                content_ref.push_attribute(("href", href.as_str()));
+                if let Some(name) = name.as_deref() {
+                    content_ref.push_attribute(("name", name));
+                }
+                writer.write_event(Event::Empty(content_ref))?;
+            }
+        }
     }
+
     writer.write_event(Event::End(BytesEnd::new("check")))?;
     Ok(())
 }
@@ -1260,6 +1303,12 @@ pub fn write_bundle_xccdf_export(snapshot: &XccdfBundleExport) -> Result<String,
             });
         }
         validate_execution_phase(pv.policy_version_id, &pv.execution_phase)?;
+        // Validate any imported standard check before writing XML.
+        pv.parse_standard_check()
+            .map_err(|e| XccdfWriterError::MalformedImportedCheck {
+                policy_version_id: pv.policy_version_id,
+                reason: e.to_string(),
+            })?;
     }
 
     let mut buf = Vec::new();
@@ -3059,6 +3108,169 @@ mod tests {
         assert!(
             blocking.is_empty(),
             "No blocking errors expected, got: {blocking:?}"
+        );
+    }
+
+    // ── Group tree tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn two_authored_policy_types_do_not_cause_infinite_recursion() {
+        // Before the fix, two authored policies with no group_id both had
+        // source_id = None, so None == None in the child-matching would cause
+        // each to treat the other as a child, causing stack overflow.
+        let p1 = test_policy("require_cf_agent", ImplementationState::Native, json!({}));
+        let mut p2 = test_policy(
+            "require_packages",
+            ImplementationState::Native,
+            json!({"packages": ["curl"]}),
+        );
+        p2.policy_id = Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
+        p2.policy_version_id = Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
+        // Both policies have no group_id metadata — this is the crash path.
+        let snap = make_single_policy_snapshot(vec![p1, p2]);
+        // Must not panic.
+        let xml = write_bundle_xccdf_export(&snap).unwrap();
+        assert!(xml.contains("<Benchmark"), "Should produce valid output");
+        // Both rules must be present.
+        assert_eq!(xml.matches("<Rule ").count(), 2, "Both rules must appear");
+    }
+
+    #[test]
+    fn orphaned_child_group_is_promoted_to_root() {
+        // A policy with parent_group_id referencing a group that has no policies
+        // should still appear in the output, not be silently dropped.
+        let mut policy = test_policy("require_cf_agent", ImplementationState::Native, json!({}));
+        policy.compliance_metadata = json!({
+            "group_id": "xccdf_crystalforge_group_child",
+            "group_title": "Child Group",
+            "parent_group_id": "nonexistent-parent-that-has-no-policies"
+        });
+        let snap = make_single_policy_snapshot(vec![policy]);
+        let xml = write_bundle_xccdf_export(&snap).unwrap();
+        assert!(
+            xml.contains("<Rule "),
+            "Orphaned child's rule must still appear"
+        );
+    }
+
+    // ── Standard check/fix tests ──────────────────────────────────────────────
+
+    #[test]
+    fn imported_inline_check_content_is_preserved_for_non_native_policy() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
+                "content": "Verify the firewall is enabled."
+            }
+        });
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![policy])).unwrap();
+        assert!(xml.contains("http://oval.mitre.org/XMLSchema/oval-definitions-5"));
+        assert!(xml.contains("Verify the firewall is enabled."));
+        // Must use the imported system, not CF_POLICY_CHECK_SYSTEM.
+        assert!(
+            !xml.contains("urn:crystal-forge:check-system:policy:1"),
+            "Non-native check must use imported system"
+        );
+    }
+
+    #[test]
+    fn imported_reference_check_is_preserved_for_non_native_policy() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
+                "content_ref_href": "oval-definitions.xml",
+                "content_ref_name": "oval:com.example:def:1"
+            }
+        });
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![policy])).unwrap();
+        assert!(xml.contains("check-content-ref"));
+        assert!(xml.contains("href=\"oval-definitions.xml\""));
+        assert!(xml.contains("name=\"oval:com.example:def:1\""));
+        assert!(
+            !xml.contains("<check-content>"),
+            "Reference check must not emit inline content"
+        );
+    }
+
+    #[test]
+    fn check_with_both_inline_and_reference_is_rejected() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://example.com/check",
+                "content": "Inline text",
+                "content_ref_href": "some-ref.xml"
+            }
+        });
+        let snap = make_single_policy_snapshot(vec![policy]);
+        assert!(
+            matches!(
+                write_bundle_xccdf_export(&snap),
+                Err(XccdfWriterError::MalformedImportedCheck { .. })
+            ),
+            "Ambiguous check body must be rejected"
+        );
+    }
+
+    #[test]
+    fn check_with_ref_name_without_href_is_rejected() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://example.com/check",
+                "content_ref_name": "def:1"
+                // no href
+            }
+        });
+        let snap = make_single_policy_snapshot(vec![policy]);
+        assert!(
+            matches!(
+                write_bundle_xccdf_export(&snap),
+                Err(XccdfWriterError::MalformedImportedCheck { .. })
+            ),
+            "Ref name without href must be rejected"
+        );
+    }
+
+    #[test]
+    fn check_with_missing_system_is_rejected() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                // system is absent
+                "content": "Some check"
+            }
+        });
+        let snap = make_single_policy_snapshot(vec![policy]);
+        assert!(
+            matches!(
+                write_bundle_xccdf_export(&snap),
+                Err(XccdfWriterError::MalformedImportedCheck { .. })
+            ),
+            "Missing system must be rejected"
+        );
+    }
+
+    #[test]
+    fn imported_fix_complexity_and_disruption_are_preserved() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::Native, json!({}));
+        policy.compliance_metadata = json!({
+            "fix": {
+                "id": "F-001r1_fix",
+                "system": "urn:example:fix",
+                "content": "Apply the fix.",
+                "complexity": "medium",
+                "disruption": "low"
+            }
+        });
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![policy])).unwrap();
+        assert!(xml.contains("complexity=\"medium\""));
+        assert!(xml.contains("disruption=\"low\""));
+        assert!(
+            xml.contains("id=\"F-001r1_fix\""),
+            "Imported fix ID must be preserved"
         );
     }
 }

@@ -890,8 +890,20 @@ async fn load_export_snapshot(
 /// Foreign source IDs are retained in `source_id`; generated IDs are always
 /// NCName-safe XCCDF 1.2 IDs and therefore cannot inherit identifiers such as
 /// `V-268078` from XCCDF 1.1/STIG content.
+/// Build a safe, deterministic recursive group tree from imported group metadata.
+///
+/// ## Safety guarantees
+///
+/// - Authored policies with no `group_id` are always roots with no children.
+///   This prevents the `None == None` parent-matching cycle that would cause
+///   stack overflow when multiple authored policy types share the same bundle.
+/// - Orphaned children (whose declared `parent_group_id` does not exist as a
+///   node) are promoted to roots rather than silently dropped.
+/// - Cycle detection prevents infinite recursion for malformed import metadata.
+/// - Every generated ID is NCName-safe: only ASCII alphanumeric and underscore.
 fn build_export_groups(policies: &[XccdfPolicyExport]) -> Vec<XccdfGroupExport> {
-    #[derive(Default)]
+    use std::collections::{BTreeMap, BTreeSet};
+
     struct GroupNode {
         source_id: Option<String>,
         parent_source_id: Option<String>,
@@ -901,8 +913,7 @@ fn build_export_groups(policies: &[XccdfPolicyExport]) -> Vec<XccdfGroupExport> 
         policy_ids: Vec<Uuid>,
     }
 
-    let mut nodes: std::collections::BTreeMap<String, GroupNode> =
-        std::collections::BTreeMap::new();
+    let mut nodes: BTreeMap<String, GroupNode> = BTreeMap::new();
     for policy in policies {
         let metadata = &policy.compliance_metadata;
         let source_id = metadata
@@ -911,7 +922,7 @@ fn build_export_groups(policies: &[XccdfPolicyExport]) -> Vec<XccdfGroupExport> 
             .map(str::to_owned);
         let key = source_id
             .clone()
-            .unwrap_or_else(|| format!("policy-type:{}", policy.policy_type));
+            .unwrap_or_else(|| format!("authored-type:{}", policy.policy_type));
         let node = nodes.entry(key.clone()).or_insert_with(|| GroupNode {
             source_id: source_id.clone(),
             parent_source_id: metadata
@@ -940,9 +951,9 @@ fn build_export_groups(policies: &[XccdfPolicyExport]) -> Vec<XccdfGroupExport> 
         let source = source_id.unwrap_or("authored");
         let slug: String = source
             .chars()
-            .map(|character| {
-                if character.is_ascii_alphanumeric() {
-                    character.to_ascii_lowercase()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
                 } else {
                     '_'
                 }
@@ -957,18 +968,40 @@ fn build_export_groups(policies: &[XccdfPolicyExport]) -> Vec<XccdfGroupExport> 
 
     fn build_node(
         key: &str,
-        nodes: &std::collections::BTreeMap<String, GroupNode>,
+        nodes: &BTreeMap<String, GroupNode>,
+        visiting: &mut BTreeSet<String>,
     ) -> XccdfGroupExport {
         let node = &nodes[key];
-        let mut children: Vec<XccdfGroupExport> = nodes
-            .iter()
-            .filter(|(child_key, child)| {
-                child_key.as_str() != key
-                    && child.parent_source_id.as_deref() == node.source_id.as_deref()
-            })
-            .map(|(child_key, _)| build_node(child_key, nodes))
-            .collect();
-        children.sort_by_key(|child| child.order);
+
+        // Authored groups (no source_id) are always leaf roots. They must not
+        // become parents of every other ungrouped node via None == None matching.
+        // Imported groups (with source_id) may have children.
+        let children = if let Some(parent_source_id) = node.source_id.as_deref() {
+            if visiting.contains(key) {
+                // Cycle detected: return without children to break the loop.
+                Vec::new()
+            } else {
+                visiting.insert(key.to_owned());
+                let mut children: Vec<XccdfGroupExport> = nodes
+                    .iter()
+                    .filter(|(child_key, child)| {
+                        // The child must point its parent at THIS node's source_id.
+                        child_key.as_str() != key
+                            && child
+                                .parent_source_id
+                                .as_deref()
+                                .is_some_and(|p| p == parent_source_id)
+                    })
+                    .map(|(child_key, _)| build_node(child_key, nodes, visiting))
+                    .collect();
+                visiting.remove(key);
+                children.sort_by_key(|c| c.order);
+                children
+            }
+        } else {
+            Vec::new()
+        };
+
         XccdfGroupExport {
             generated_id: generated_id(node.source_id.as_deref(), &node.policy_ids),
             source_id: node.source_id.clone(),
@@ -980,12 +1013,21 @@ fn build_export_groups(policies: &[XccdfPolicyExport]) -> Vec<XccdfGroupExport> 
         }
     }
 
+    // A node is a root if:
+    // - it has no parent_source_id, OR
+    // - its declared parent does not exist in nodes (orphan promotion).
+    let mut visiting = BTreeSet::new();
     let mut roots: Vec<XccdfGroupExport> = nodes
         .iter()
-        .filter(|(_, node)| node.parent_source_id.is_none())
-        .map(|(key, _)| build_node(key, &nodes))
+        .filter(|(_, node)| {
+            node.parent_source_id
+                .as_deref()
+                .map(|pid| !nodes.contains_key(pid))
+                .unwrap_or(true)
+        })
+        .map(|(key, _)| build_node(key, &nodes, &mut visiting))
         .collect();
-    roots.sort_by_key(|group| group.order);
+    roots.sort_by_key(|g| g.order);
     roots
 }
 
