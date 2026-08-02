@@ -868,6 +868,28 @@ async fn load_export_snapshot(
 
     let groups = build_export_groups(&policies).map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    // Prevalidate imported standard checks and fixes. Fail-fast before the
+    // writer starts emitting XML so that errors surface cleanly as HTTP 422
+    // rather than mid-write failures.
+    for pv in &policies {
+        if let Some(standard_check) = pv.parse_standard_check().map_err(|e| {
+            anyhow::anyhow!(
+                "policy version {}: {e}",
+                pv.policy_version_id
+            )
+        })? {
+            drop(standard_check);
+        }
+        if let Some(standard_fix) = pv.parse_standard_fix().map_err(|e| {
+            anyhow::anyhow!(
+                "policy version {}: {e}",
+                pv.policy_version_id
+            )
+        })? {
+            drop(standard_fix);
+        }
+    }
+
     Ok(XccdfBundleExport {
         bundle_id: bv.bundle_id,
         bundle_version_id: bv.id,
@@ -1014,6 +1036,17 @@ fn build_export_groups(
                 }
             }
         }
+    }
+
+    // Any node not visited from a root is part of a closed cycle with no root
+    // entry point. These are unrecoverable without persisted group records.
+    if global_visited.len() != nodes.len() {
+        let unvisited = nodes
+            .keys()
+            .find(|key| !global_visited.contains(*key))
+            .expect("lengths differ")
+            .clone();
+        return Err(GroupProjectionError::CycleNotFromRoot(unvisited));
     }
 
     fn generated_id(source_id: Option<&str>, policy_ids: &[Uuid]) -> String {

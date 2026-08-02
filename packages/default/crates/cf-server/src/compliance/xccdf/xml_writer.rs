@@ -42,7 +42,7 @@ use super::super::interchange::{
 };
 use super::export_models::{
     XccdfBundleExport, XccdfCheckBody, XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
-    XccdfStandardCheck,
+    XccdfStandardCheck, VALID_FIX_COMPLEXITY, VALID_FIX_DISRUPTION,
 };
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -966,10 +966,6 @@ fn write_json_element(
 ///   … ident*, fixtext*, fix*, (check | complex-check), …
 ///
 /// `fix` must precede `check`.
-/// XCCDF severity enumeration values (from XCCDF 1.2 schema).
-const VALID_FIX_COMPLEXITY: &[&str] = &["unknown", "low", "medium", "high"];
-const VALID_FIX_DISRUPTION: &[&str] = &["unknown", "low", "medium", "high"];
-
 fn write_check_and_fix(
     writer: &mut Writer<Cursor<&mut Vec<u8>>>,
     pv: &XccdfPolicyExport,
@@ -991,8 +987,9 @@ fn write_check_and_fix(
                 reason: e.to_string(),
             })?;
 
-    // fix MUST precede check in the XCCDF Rule sequence. Preserve all imported
-    // fix attributes (system, id, complexity, disruption, content).
+    // fix MUST precede check in the XCCDF Rule sequence. All imported fix
+    // attributes (system, id, complexity, disruption) have been validated by
+    // parse_standard_fix; emit them unconditionally when present.
     if let Some(fix_data) = imported_fix {
         let generated_fix_id = format!("xccdf_crystalforge_fix_{}", pv.policy_version_id.simple());
         let fix_id = fix_data.id.as_deref().unwrap_or(generated_fix_id.as_str());
@@ -1003,16 +1000,11 @@ fn write_check_and_fix(
             fix.push_attribute(("system", CF_NIX_FIX_SYSTEM));
         }
         fix.push_attribute(("id", fix_id));
-        // Preserve XCCDF enumeration attributes if they are valid.
         if let Some(complexity) = fix_data.complexity.as_deref() {
-            if VALID_FIX_COMPLEXITY.contains(&complexity) {
-                fix.push_attribute(("complexity", complexity));
-            }
+            fix.push_attribute(("complexity", complexity));
         }
         if let Some(disruption) = fix_data.disruption.as_deref() {
-            if VALID_FIX_DISRUPTION.contains(&disruption) {
-                fix.push_attribute(("disruption", disruption));
-            }
+            fix.push_attribute(("disruption", disruption));
         }
         writer.write_event(Event::Start(fix))?;
         writer.write_event(Event::Text(BytesText::new(&fix_data.content)))?;
@@ -1057,6 +1049,10 @@ fn write_check_and_fix(
 }
 
 /// Emit a single imported standard XCCDF `<check>` element.
+///
+/// Preserves all behavior-affecting attributes: `system`, `selector`,
+/// `multi-check`, and `negate`. Any unsupported standard attributes captured
+/// in `unsupported_attrs` are logged at warn level for fidelity visibility.
 fn write_single_standard_check(
     writer: &mut Writer<Cursor<&mut Vec<u8>>>,
     std_check: &XccdfStandardCheck,
@@ -1065,6 +1061,22 @@ fn write_single_standard_check(
     check.push_attribute(("system", std_check.system.as_str()));
     if let Some(selector) = std_check.selector.as_deref() {
         check.push_attribute(("selector", selector));
+    }
+    if let Some(multi_check) = std_check.multi_check {
+        check.push_attribute(("multi-check", if multi_check { "true" } else { "false" }));
+    }
+    if let Some(negate) = std_check.negate {
+        check.push_attribute(("negate", if negate { "true" } else { "false" }));
+    }
+    // Log any unsupported standard check attributes for fidelity visibility.
+    for (key, val) in &std_check.unsupported_attrs {
+        tracing::warn!(
+            check_system = %std_check.system,
+            attr_key = %key,
+            attr_val = %val,
+            "unsupported standard XCCDF check attribute preserved in opaque source; \
+             may not affect CF evaluation"
+        );
     }
     writer.write_event(Event::Start(check))?;
     match &std_check.body {
@@ -3225,7 +3237,7 @@ mod tests {
                 "content_ref_name": "oval:com.example:def:1"
             }
         });
-        policy.opaque_xml = Some("<custom-xml/>".to_owned());
+        policy.opaque_xml = Some("<oval-definitions xmlns=\"http://oval.mitre.org/schema/oval-definitions-5\"><definition id=\"oval:com.example:def:1\" class=\"compliance\"><metadata><title>Check firewall</title></metadata></definition></oval-definitions>".to_owned());
         let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![policy])).unwrap();
         assert!(xml.contains("check-content-ref"));
         assert!(xml.contains("href=\"oval-definitions.xml\""));
@@ -3258,6 +3270,28 @@ mod tests {
     }
 
     #[test]
+    fn reference_only_check_with_trivial_opaque_xml_is_rejected() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
+                "content_ref_href": "oval-definitions.xml",
+                "content_ref_name": "oval:com.example:def:1"
+            }
+        });
+        // Trivial placeholder — too short and does not contain referenced content
+        policy.opaque_xml = Some("<custom-xml/>".to_owned());
+        let snap = make_single_policy_snapshot(vec![policy]);
+        assert!(
+            matches!(
+                write_bundle_xccdf_export(&snap),
+                Err(XccdfWriterError::MalformedImportedCheck { .. })
+            ),
+            "Reference check with trivial opaque_xml fallback must be rejected"
+        );
+    }
+
+    #[test]
     fn native_policy_with_imported_check_emits_both_standard_and_cf_checks() {
         let mut policy = test_policy("require_cf_agent", ImplementationState::Native, json!({}));
         policy.compliance_metadata = json!({
@@ -3284,6 +3318,49 @@ mod tests {
         assert!(
             xml.contains("cf:policy"),
             "CF policy element must be present"
+        );
+    }
+
+    #[test]
+    fn standard_check_multi_check_and_negate_attributes_are_preserved() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
+                "content": "Verify the firewall is enabled.",
+                "multi-check": "true",
+                "negate": "true"
+            }
+        });
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![policy])).unwrap();
+        assert!(
+            xml.contains("multi-check=\"true\""),
+            "multi-check attribute must be preserved"
+        );
+        assert!(
+            xml.contains("negate=\"true\""),
+            "negate attribute must be preserved"
+        );
+    }
+
+    #[test]
+    fn standard_check_multi_check_false_is_preserved() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
+                "content": "Verify the setting.",
+                "multi-check": "false"
+            }
+        });
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![policy])).unwrap();
+        assert!(
+            xml.contains("multi-check=\"false\""),
+            "multi-check=false must be preserved"
+        );
+        assert!(
+            !xml.contains("negate"),
+            "negate must not appear when not set"
         );
     }
 
@@ -3364,6 +3441,85 @@ mod tests {
         assert!(
             xml.contains("id=\"F-001r1_fix\""),
             "Imported fix ID must be preserved"
+        );
+    }
+
+    #[test]
+    fn imported_fix_with_invalid_complexity_is_rejected() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::Native, json!({}));
+        policy.compliance_metadata = json!({
+            "fix": {
+                "system": "urn:example:fix",
+                "content": "Apply the fix.",
+                "complexity": "extreme"
+            }
+        });
+        let snap = make_single_policy_snapshot(vec![policy]);
+        assert!(
+            matches!(
+                write_bundle_xccdf_export(&snap),
+                Err(XccdfWriterError::MalformedImportedFix { .. })
+            ),
+            "Invalid fix complexity must be rejected"
+        );
+    }
+
+    #[test]
+    fn imported_fix_with_invalid_disruption_is_rejected() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::Native, json!({}));
+        policy.compliance_metadata = json!({
+            "fix": {
+                "system": "urn:example:fix",
+                "content": "Apply the fix.",
+                "disruption": "catastrophic"
+            }
+        });
+        let snap = make_single_policy_snapshot(vec![policy]);
+        assert!(
+            matches!(
+                write_bundle_xccdf_export(&snap),
+                Err(XccdfWriterError::MalformedImportedFix { .. })
+            ),
+            "Invalid fix disruption must be rejected"
+        );
+    }
+
+    #[test]
+    fn imported_fix_with_invalid_ncname_id_is_rejected() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::Native, json!({}));
+        policy.compliance_metadata = json!({
+            "fix": {
+                "id": "has spaces and special@chars!",
+                "system": "urn:example:fix",
+                "content": "Apply the fix."
+            }
+        });
+        let snap = make_single_policy_snapshot(vec![policy]);
+        assert!(
+            matches!(
+                write_bundle_xccdf_export(&snap),
+                Err(XccdfWriterError::MalformedImportedFix { .. })
+            ),
+            "Fix ID with invalid NCName characters must be rejected"
+        );
+    }
+
+    #[test]
+    fn imported_fix_with_empty_system_is_rejected() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::Native, json!({}));
+        policy.compliance_metadata = json!({
+            "fix": {
+                "system": "",
+                "content": "Apply the fix."
+            }
+        });
+        let snap = make_single_policy_snapshot(vec![policy]);
+        assert!(
+            matches!(
+                write_bundle_xccdf_export(&snap),
+                Err(XccdfWriterError::MalformedImportedFix { .. })
+            ),
+            "Fix with empty system must be rejected"
         );
     }
 }

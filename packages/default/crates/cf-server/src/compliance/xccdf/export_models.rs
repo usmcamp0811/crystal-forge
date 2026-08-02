@@ -9,6 +9,21 @@ use uuid::Uuid;
 
 use super::super::canonical::{ImplementationState, PublicationState};
 
+/// Valid XCCDF 1.2 `<fix>` complexity enumeration values.
+pub(crate) const VALID_FIX_COMPLEXITY: &[&str] = &["unknown", "low", "medium", "high"];
+/// Valid XCCDF 1.2 `<fix>` disruption enumeration values.
+pub(crate) const VALID_FIX_DISRUPTION: &[&str] = &["unknown", "low", "medium", "high"];
+
+/// Validate a string as a XCCDF NCName: `[A-Za-z_][\w.-]*`.
+fn is_xccdf_ncname(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+}
+
 /// Complete data for a single source-object mapping (standard identifiers).
 #[derive(Debug, Clone)]
 pub struct XccdfSourceMapping {
@@ -31,11 +46,26 @@ pub enum XccdfCheckBody {
 }
 
 /// A validated imported standard XCCDF check element.
+///
+/// Preserves every XCCDF 1.2 `<check>` attribute that affects evaluation
+/// semantics. Unsupported attributes are captured in `unsupported_attrs`
+/// rather than silently dropped, so the writer can emit a fidelity warning
+/// or preserve them in opaque source content.
 #[derive(Debug, Clone)]
 pub struct XccdfStandardCheck {
     pub system: String,
     pub body: XccdfCheckBody,
     pub selector: Option<String>,
+    /// XCCDF 1.2 `multi-check` attribute: when `"true"`, the check may
+    /// produce multiple results (one per selector or target).
+    pub multi_check: Option<bool>,
+    /// XCCDF 1.2 `negate` attribute: when `"true"`, the check result is
+    /// inverted (pass becomes fail and vice versa).
+    pub negate: Option<bool>,
+    /// Any standard check attributes not represented in the typed fields.
+    /// Preserved for fidelity; the writer may emit a warning or embed them
+    /// in opaque source content.
+    pub unsupported_attrs: Vec<(String, String)>,
 }
 
 /// A validated imported standard XCCDF fix element.
@@ -87,6 +117,10 @@ pub enum ImportedCheckError {
     /// The check body is a reference-only form and no opaque_xml fallback is
     /// available. Standalone export requires self-contained check content.
     ReferenceOnlyWithoutFallback,
+    /// The check body is a reference-only form and opaque_xml is present but
+    /// contains only whitespace or a trivial placeholder. A self-contained
+    /// fallback for the referenced check content is required.
+    ReferenceFallbackInsufficient,
 }
 
 impl std::fmt::Display for ImportedCheckError {
@@ -116,6 +150,12 @@ impl std::fmt::Display for ImportedCheckError {
                  (href without inline content) and no opaque_xml fallback is available; \
                  standalone XCCDF export requires self-contained check content"
             ),
+            Self::ReferenceFallbackInsufficient => write!(
+                f,
+                "compliance_metadata.check is a reference-only form and opaque_xml is present \
+                 but contains only whitespace or a trivial placeholder; a self-contained \
+                 fallback for the referenced check content is required"
+            ),
         }
     }
 }
@@ -125,8 +165,15 @@ impl std::fmt::Display for ImportedCheckError {
 pub enum ImportedFixError {
     /// The `fix` object exists but `content` is missing or not a string.
     MissingContent,
-    /// The `fix` object exists but `id` is present and not a valid NCName.
+    /// The fix `id` is present but not a valid XCCDF NCName.
+    /// NCName: [A-Za-z_][\w.-]* (no whitespace, must start with letter or _).
     InvalidId,
+    /// The fix `complexity` is present but not a valid XCCDF enumeration value.
+    InvalidComplexity(String),
+    /// The fix `disruption` is present but not a valid XCCDF enumeration value.
+    InvalidDisruption(String),
+    /// The fix `system` is present but empty or not a string.
+    InvalidSystem,
 }
 
 impl std::fmt::Display for ImportedFixError {
@@ -138,7 +185,22 @@ impl std::fmt::Display for ImportedFixError {
             ),
             Self::InvalidId => write!(
                 f,
-                "compliance_metadata.fix.id is present but empty"
+                "compliance_metadata.fix.id is present but is not a valid XCCDF NCName \
+                 (must match [A-Za-z_][\\w.-]*)"
+            ),
+            Self::InvalidComplexity(val) => write!(
+                f,
+                "compliance_metadata.fix.complexity is {val:?} which is not a valid XCCDF \
+                 enumeration; expected one of: unknown, low, medium, high"
+            ),
+            Self::InvalidDisruption(val) => write!(
+                f,
+                "compliance_metadata.fix.disruption is {val:?} which is not a valid XCCDF \
+                 enumeration; expected one of: unknown, low, medium, high"
+            ),
+            Self::InvalidSystem => write!(
+                f,
+                "compliance_metadata.fix.system is present but empty or not a string"
             ),
         }
     }
@@ -194,9 +256,17 @@ impl XccdfPolicyExport {
             XccdfCheckBody::Inline { content }
         } else if has_href {
             // A reference-only check is not self-contained. It is valid only
-            // when opaque_xml provides a fallback that readers can use.
-            if self.opaque_xml.is_none() {
-                return Err(ImportedCheckError::ReferenceOnlyWithoutFallback);
+            // when opaque_xml provides a meaningful fallback that readers can
+            // use. An empty, whitespace-only, or trivial placeholder string
+            // does not make the referenced content resolvable.
+            match &self.opaque_xml {
+                None => {
+                    return Err(ImportedCheckError::ReferenceOnlyWithoutFallback);
+                }
+                Some(xml) if xml.trim().is_empty() || xml.len() < 20 => {
+                    return Err(ImportedCheckError::ReferenceFallbackInsufficient);
+                }
+                _ => {}
             }
             let href = value
                 .get("content_ref_href")
@@ -217,14 +287,56 @@ impl XccdfPolicyExport {
             .and_then(|v| v.as_str())
             .map(str::to_owned);
 
-        Ok(Some(XccdfStandardCheck { system, body, selector }))
+        let multi_check = value
+            .get("multi-check")
+            .and_then(|v| v.as_str())
+            .map(|s| s.eq_ignore_ascii_case("true"));
+
+        let negate = value
+            .get("negate")
+            .and_then(|v| v.as_str())
+            .map(|s| s.eq_ignore_ascii_case("true"));
+
+        // Capture any standard XCCDF check attributes not represented in the
+        // typed fields. Known keys are excluded; the rest are preserved for
+        // fidelity so the writer can emit a warning or embed them in opaque
+        // source content.
+        let known_keys: &[&str] = &[
+            "system",
+            "content",
+            "content_ref_href",
+            "content_ref_name",
+            "selector",
+            "multi-check",
+            "negate",
+        ];
+        let mut unsupported_attrs = Vec::new();
+        if let Some(obj) = value.as_object() {
+            for (key, val) in obj {
+                if !known_keys.contains(&key.as_str()) {
+                    if let Some(s) = val.as_str() {
+                        unsupported_attrs.push((key.clone(), s.to_owned()));
+                    }
+                }
+            }
+        }
+
+        Ok(Some(XccdfStandardCheck {
+            system,
+            body,
+            selector,
+            multi_check,
+            negate,
+            unsupported_attrs,
+        }))
     }
 
     /// Parse the imported standard XCCDF fix from compliance metadata.
     ///
     /// Returns `None` when no `fix` key is present.
     /// Returns `Err(ImportedFixError)` when a `fix` object exists but is
-    /// structurally invalid (missing content, empty id). Callers must propagate
+    /// structurally invalid. All fields are validated against XCCDF 1.2
+    /// schema requirements before being accepted. Callers must propagate
     /// errors rather than silently replacing with a synthesized fix.
     pub fn parse_standard_fix(
         &self,
@@ -240,29 +352,41 @@ impl XccdfPolicyExport {
             .ok_or(ImportedFixError::MissingContent)?
             .to_owned();
 
+        // Validate id as a XCCDF NCName: [A-Za-z_][\w.-]*
         let id = value.get("id").and_then(|v| v.as_str()).map(str::to_owned);
-        // Reject an empty id string — it produces invalid XCCDF.
         if let Some(ref id_str) = id {
-            if id_str.is_empty() {
+            if !is_xccdf_ncname(id_str) {
                 return Err(ImportedFixError::InvalidId);
             }
         }
 
+        // Validate system is a non-empty string if present.
+        let system = match value.get("system").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => Some(s.to_owned()),
+            Some(_) => return Err(ImportedFixError::InvalidSystem),
+            None => None,
+        };
+
+        // Validate complexity against XCCDF 1.2 enumeration.
+        let complexity = match value.get("complexity").and_then(|v| v.as_str()) {
+            Some(c) if VALID_FIX_COMPLEXITY.contains(&c) => Some(c.to_owned()),
+            Some(c) => return Err(ImportedFixError::InvalidComplexity(c.to_owned())),
+            None => None,
+        };
+
+        // Validate disruption against XCCDF 1.2 enumeration.
+        let disruption = match value.get("disruption").and_then(|v| v.as_str()) {
+            Some(d) if VALID_FIX_DISRUPTION.contains(&d) => Some(d.to_owned()),
+            Some(d) => return Err(ImportedFixError::InvalidDisruption(d.to_owned())),
+            None => None,
+        };
+
         Ok(Some(XccdfStandardFix {
             id,
-            system: value
-                .get("system")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned),
+            system,
             content,
-            complexity: value
-                .get("complexity")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned),
-            disruption: value
-                .get("disruption")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned),
+            complexity,
+            disruption,
         }))
     }
 }
