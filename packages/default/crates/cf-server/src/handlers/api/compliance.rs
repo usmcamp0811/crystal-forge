@@ -17,10 +17,12 @@ use crate::api::models::{
     ApiError, CreateComplianceBundleRequest, SystemComplianceBundle,
     SystemComplianceBundlesResponse, UpdateComplianceBundleRequest,
 };
-use crate::compliance::xccdf::export_models::{XccdfBundleExport, XccdfPolicyExport, XccdfSourceMapping};
-use crate::compliance::xccdf::xml_writer::write_bundle_xccdf_export;
 use crate::compliance::interchange::{InterchangeLimits, MAX_XCCDF_UPLOAD_BYTES};
+use crate::compliance::xccdf::export_models::{
+    XccdfBundleExport, XccdfPolicyExport, XccdfSourceMapping,
+};
 use crate::compliance::xccdf::parser::parse_xccdf;
+use crate::compliance::xccdf::xml_writer::write_bundle_xccdf_export;
 use crate::compliance::xccdf::zip_extractor::{
     PackageKind, detect_package_kind, extract_xccdf_from_zip,
 };
@@ -610,7 +612,6 @@ pub async fn export_bundle_xccdf(
     }
 }
 
-
 /// Errors from snapshot loading.
 enum ExportSnapshotError {
     NotFound,
@@ -751,8 +752,7 @@ async fn load_export_snapshot(
 
     // Reject missing policy versions: every membership entry must resolve.
     if policy_rows.len() != policy_version_ids.len() {
-        let found: std::collections::HashSet<Uuid> =
-            policy_rows.iter().map(|r| r.id).collect();
+        let found: std::collections::HashSet<Uuid> = policy_rows.iter().map(|r| r.id).collect();
         let missing: Vec<Uuid> = policy_version_ids
             .iter()
             .copied()
@@ -870,7 +870,9 @@ async fn load_export_snapshot(
     })
 }
 
-fn parse_publication_state(s: &str) -> Result<crate::compliance::canonical::PublicationState, anyhow::Error> {
+fn parse_publication_state(
+    s: &str,
+) -> Result<crate::compliance::canonical::PublicationState, anyhow::Error> {
     use crate::compliance::canonical::PublicationState;
     match s {
         "incomplete" => Ok(PublicationState::Incomplete),
@@ -882,7 +884,9 @@ fn parse_publication_state(s: &str) -> Result<crate::compliance::canonical::Publ
     }
 }
 
-fn parse_implementation_state(s: &str) -> Result<crate::compliance::canonical::ImplementationState, anyhow::Error> {
+fn parse_implementation_state(
+    s: &str,
+) -> Result<crate::compliance::canonical::ImplementationState, anyhow::Error> {
     use crate::compliance::canonical::ImplementationState;
     match s {
         "native" => Ok(ImplementationState::Native),
@@ -1712,13 +1716,17 @@ mod tests {
         let version_id = Uuid::new_v4();
         let policy_id = Uuid::new_v4();
         let policy_version_id = Uuid::new_v4();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let bundle_name = format!("Test Bundle for Export {suffix}");
+        let policy_name = format!("test-export-policy-{suffix}");
 
         // 1. compliance_bundles row
         sqlx::query(
             r#"INSERT INTO compliance_bundles (id, name, framework, layer, owner)
-               VALUES ($1, 'Test Bundle for Export', 'NIST', 'nixos', 'test')"#,
+               VALUES ($1, $2, 'NIST', 'nixos', 'test')"#,
         )
         .bind(bundle_id)
+        .bind(&bundle_name)
         .execute(pool)
         .await
         .expect("insert compliance_bundles");
@@ -1729,30 +1737,30 @@ mod tests {
                (id, bundle_id, version, publication_state, semantic_digest,
                 name, framework, layer, owner)
                VALUES ($1, $2, '1.0.0', 'draft', 'abc123',
-                       'Test Bundle for Export', 'NIST', 'nixos', 'test')"#,
+                       $3, 'NIST', 'nixos', 'test')"#,
         )
         .bind(version_id)
         .bind(bundle_id)
+        .bind(&bundle_name)
         .execute(pool)
         .await
         .expect("insert compliance_bundle_versions");
 
         // 3. Point bundle to draft version
-        sqlx::query(
-            "UPDATE compliance_bundles SET current_draft_version_id = $1 WHERE id = $2",
-        )
-        .bind(version_id)
-        .bind(bundle_id)
-        .execute(pool)
-        .await
-        .expect("update bundle draft version");
+        sqlx::query("UPDATE compliance_bundles SET current_draft_version_id = $1 WHERE id = $2")
+            .bind(version_id)
+            .bind(bundle_id)
+            .execute(pool)
+            .await
+            .expect("update bundle draft version");
 
         // 4. deployment_policies row (trigger auto-creates deployment_policy_versions)
         sqlx::query(
-            r#"INSERT INTO deployment_policies (id, name, policy_type, config)
-               VALUES ($1, 'test-export-policy', 'require_cf_agent', '{"strict": true}'::jsonb)"#,
+            r#"INSERT INTO deployment_policies (id, name, policy_type, enabled, config)
+               VALUES ($1, $2, 'require_packages', true, '{"packages": ["curl"]}'::jsonb)"#,
         )
         .bind(policy_id)
+        .bind(&policy_name)
         .execute(pool)
         .await
         .expect("insert deployment_policies");
@@ -1771,11 +1779,12 @@ mod tests {
             r#"INSERT INTO deployment_policy_versions
                (id, policy_id, version, publication_state, name, policy_type,
                 implementation_state, config, semantic_digest)
-               VALUES ($1, $2, '2.0.0', 'draft', 'test-export-policy',
-                       'require_cf_agent', 'native', '{"strict": true}'::jsonb, 'policy-digest')"#,
+               VALUES ($1, $2, '2.0.0', 'draft', $3,
+                       'require_packages', 'native', '{"packages": ["curl"]}'::jsonb, 'policy-digest')"#,
         )
         .bind(policy_version_id)
         .bind(policy_id)
+        .bind(&policy_name)
         .execute(pool)
         .await
         .expect("insert deployment_policy_versions");
@@ -1863,7 +1872,7 @@ mod tests {
             "Content-Disposition missing attachment; filename=: {cd}"
         );
         assert!(
-            cd.ends_with(".xml"),
+            cd.trim_end_matches('"').ends_with(".xml"),
             "Content-Disposition filename should end with .xml: {cd}"
         );
     }
@@ -1898,7 +1907,7 @@ mod tests {
             "body should contain <status> element"
         );
         assert!(
-            body.contains("<title>Test Bundle for Export</title>"),
+            body.contains("<title>Test Bundle for Export "),
             "body should contain the bundle title"
         );
     }
@@ -1951,12 +1960,14 @@ mod tests {
 
         let bundle_id = Uuid::new_v4();
         let version_id = Uuid::new_v4();
+        let bundle_name = format!("Empty Export Bundle {}", Uuid::new_v4().simple());
 
         sqlx::query(
             r#"INSERT INTO compliance_bundles (id, name, framework, layer, owner)
-               VALUES ($1, 'Empty Export Bundle', 'NIST', 'nixos', 'test')"#,
+               VALUES ($1, $2, 'NIST', 'nixos', 'test')"#,
         )
         .bind(bundle_id)
+        .bind(&bundle_name)
         .execute(&pool)
         .await
         .expect("insert empty bundle");
@@ -1966,22 +1977,21 @@ mod tests {
                (id, bundle_id, version, publication_state, semantic_digest,
                 name, framework, layer, owner)
                VALUES ($1, $2, '1.0.0', 'draft', 'empty-digest',
-                       'Empty Export Bundle', 'NIST', 'nixos', 'test')"#,
+                       $3, 'NIST', 'nixos', 'test')"#,
         )
         .bind(version_id)
         .bind(bundle_id)
+        .bind(&bundle_name)
         .execute(&pool)
         .await
         .expect("insert empty bundle version");
 
-        sqlx::query(
-            "UPDATE compliance_bundles SET current_draft_version_id = $1 WHERE id = $2",
-        )
-        .bind(version_id)
-        .bind(bundle_id)
-        .execute(&pool)
-        .await
-        .expect("update empty bundle draft version");
+        sqlx::query("UPDATE compliance_bundles SET current_draft_version_id = $1 WHERE id = $2")
+            .bind(version_id)
+            .bind(bundle_id)
+            .execute(&pool)
+            .await
+            .expect("update empty bundle draft version");
 
         let base = spawn_export_server(pool).await;
 

@@ -183,6 +183,13 @@ fn severity_for_type(policy_type: &str) -> &'static str {
     }
 }
 
+fn standard_severity(pv: &XccdfPolicyExport) -> &str {
+    pv.compliance_metadata
+        .get("severity")
+        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| severity_for_type(&pv.policy_type))
+}
+
 fn group_title_for_type(policy_type: &str) -> &'static str {
     match policy_type {
         "require_cf_agent" => "Crystal Forge Agent Requirement",
@@ -359,9 +366,13 @@ fn write_implementation(
             }
             writer.write_event(Event::Start(BytesStart::new("cf:require-packages")))?;
             for pkg in pkgs {
-                if let serde_json::Value::String(name) = pkg {
-                    cf_el(writer, "package", name)?;
-                }
+                let name = pkg
+                    .as_str()
+                    .ok_or_else(|| XccdfWriterError::MissingConfig {
+                        policy_type: pv.policy_type.clone(),
+                        field: "packages[] (must be strings)",
+                    })?;
+                cf_el(writer, "package", name)?;
             }
             writer.write_event(Event::End(BytesEnd::new("cf:require-packages")))?;
         }
@@ -450,6 +461,20 @@ fn write_implementation(
                     field: "days (must contain 1 to 7 items)",
                 });
             }
+            for day in days {
+                let value = day
+                    .as_str()
+                    .ok_or_else(|| XccdfWriterError::MissingConfig {
+                        policy_type: pv.policy_type.clone(),
+                        field: "days[] (must be strings)",
+                    })?;
+                if !matches!(value, "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun") {
+                    return Err(XccdfWriterError::MissingConfig {
+                        policy_type: pv.policy_type.clone(),
+                        field: "days[] (invalid weekday)",
+                    });
+                }
+            }
             let mut elem = BytesStart::new("cf:time-window");
             elem.push_attribute(("start-time", start));
             elem.push_attribute(("end-time", end));
@@ -492,6 +517,12 @@ fn write_implementation(
                     field: "distinct",
                 })?;
             let mut elem = BytesStart::new("cf:require-approvals");
+            if count == 0 {
+                return Err(XccdfWriterError::MissingConfig {
+                    policy_type: pv.policy_type.clone(),
+                    field: "count (must be positive)",
+                });
+            }
             elem.push_attribute(("count", count.to_string().as_str()));
             elem.push_attribute(("role", role));
             elem.push_attribute(("distinct", distinct.to_string().as_str()));
@@ -554,6 +585,12 @@ fn write_implementation(
                     field: "health_check.fail_threshold",
                 })?;
             let mut elem = BytesStart::new("cf:canary-rollout");
+            if pct == 0 {
+                return Err(XccdfWriterError::MissingConfig {
+                    policy_type: pv.policy_type.clone(),
+                    field: "percentage (must be positive)",
+                });
+            }
             elem.push_attribute(("percentage", pct.to_string().as_str()));
             elem.push_attribute(("observe-duration-minutes", dur.to_string().as_str()));
             elem.push_attribute(("selection-strategy", strat));
@@ -600,6 +637,12 @@ fn write_implementation(
                     policy_type: pv.policy_type.clone(),
                     field: "thresholds",
                 })?;
+            if thresholds.is_empty() {
+                return Err(XccdfWriterError::MissingConfig {
+                    policy_type: pv.policy_type.clone(),
+                    field: "thresholds (must contain at least one item)",
+                });
+            }
             let mut elem = BytesStart::new("cf:cve-threshold");
             elem.push_attribute(("no-scan-behavior", no_scan));
             elem.push_attribute(("allow-justifications", allow_just.to_string().as_str()));
@@ -662,6 +705,12 @@ fn write_custom_check(
             policy_type: pv.policy_type.clone(),
             field: "mode",
         })?;
+    if !matches!(mode, "all" | "any") {
+        return Err(XccdfWriterError::MissingConfig {
+            policy_type: pv.policy_type.clone(),
+            field: "mode (must be all or any)",
+        });
+    }
     let context = pv
         .config
         .get("context")
@@ -825,76 +874,104 @@ fn write_check_and_fix(
     writer: &mut Writer<Cursor<&mut Vec<u8>>>,
     pv: &XccdfPolicyExport,
 ) -> Result<(), XccdfWriterError> {
-    match pv.implementation_state {
-        ImplementationState::Native => {
-            // fix MUST precede check in the XCCDF Rule element sequence.
+    // fix MUST precede check in the XCCDF Rule sequence. Preserve imported
+    // fix fields when available; only synthesize authored guidance otherwise.
+    if let Some(fix_data) = pv.compliance_metadata.get("fix") {
+        if let Some(content) = fix_data.get("content").and_then(|v| v.as_str()) {
             let fix_id = format!("xccdf_crystalforge_fix_{}", pv.policy_version_id.simple());
             let mut fix = BytesStart::new("fix");
-            fix.push_attribute(("system", CF_NIX_FIX_SYSTEM));
+            if let Some(system) = fix_data.get("system").and_then(|v| v.as_str()) {
+                fix.push_attribute(("system", system));
+            } else {
+                fix.push_attribute(("system", CF_NIX_FIX_SYSTEM));
+            }
             fix.push_attribute(("id", fix_id.as_str()));
             writer.write_event(Event::Start(fix))?;
-            let fix_text = format!("Apply {} via Crystal Forge Nix evaluation", pv.policy_type);
-            writer.write_event(Event::Text(BytesText::new(&fix_text)))?;
+            writer.write_event(Event::Text(BytesText::new(content)))?;
             writer.write_event(Event::End(BytesEnd::new("fix")))?;
-
-            let mut check = BytesStart::new("check");
-            check.push_attribute(("system", CF_POLICY_CHECK_SYSTEM));
-            writer.write_event(Event::Start(check))?;
-            let mut ccr = BytesStart::new("check-content-ref");
-            let href = format!("urn:uuid:{}", pv.policy_version_id);
-            ccr.push_attribute(("href", href.as_str()));
-            ccr.push_attribute(("name", pv.policy_type.as_str()));
-            writer.write_event(Event::Empty(ccr))?;
-            writer.write_event(Event::End(BytesEnd::new("check")))?;
         }
-        ImplementationState::Manual => {
-            let mut check = BytesStart::new("check");
-            check.push_attribute(("system", CF_POLICY_CHECK_SYSTEM));
-            writer.write_event(Event::Start(check))?;
-            writer.write_event(Event::Start(BytesStart::new("check-content")))?;
-            let text = format!(
+    } else if pv.implementation_state == ImplementationState::Native {
+        let fix_id = format!("xccdf_crystalforge_fix_{}", pv.policy_version_id.simple());
+        let mut fix = BytesStart::new("fix");
+        fix.push_attribute(("system", CF_NIX_FIX_SYSTEM));
+        fix.push_attribute(("id", fix_id.as_str()));
+        writer.write_event(Event::Start(fix))?;
+        let fix_text = format!("Apply {} via Crystal Forge Nix evaluation", pv.policy_type);
+        writer.write_event(Event::Text(BytesText::new(&fix_text)))?;
+        writer.write_event(Event::End(BytesEnd::new("fix")))?;
+    }
+
+    let mut check = BytesStart::new("check");
+    // The executable CF policy requires the profile-defined check system.
+    // Any imported check system is retained in compliance-metadata-json.
+    check.push_attribute(("system", CF_POLICY_CHECK_SYSTEM));
+    writer.write_event(Event::Start(check))?;
+    writer.write_event(Event::Start(BytesStart::new("check-content")))?;
+    if let Some(content) = pv
+        .compliance_metadata
+        .get("check")
+        .and_then(|v| v.get("content"))
+        .and_then(|v| v.as_str())
+    {
+        writer.write_event(Event::Text(BytesText::new(content)))?;
+    } else {
+        let text = match pv.implementation_state {
+            ImplementationState::Native => {
+                format!("Crystal Forge {} policy check", pv.policy_type)
+            }
+            ImplementationState::Manual => format!(
                 "Manual ({}) – user must provide evidence of compliance",
                 pv.policy_type
-            );
-            writer.write_event(Event::Text(BytesText::new(&text)))?;
-            writer.write_event(Event::End(BytesEnd::new("check-content")))?;
-            writer.write_event(Event::End(BytesEnd::new("check")))?;
-        }
-        ImplementationState::Unbound => {
-            let mut check = BytesStart::new("check");
-            check.push_attribute(("system", CF_POLICY_CHECK_SYSTEM));
-            writer.write_event(Event::Start(check))?;
-            writer.write_event(Event::Start(BytesStart::new("check-content")))?;
-            let text = format!(
+            ),
+            ImplementationState::Unbound => format!(
                 "Unbound ({}) – requirement exists but has no implementation",
                 pv.policy_type
-            );
-            writer.write_event(Event::Text(BytesText::new(&text)))?;
-            writer.write_event(Event::End(BytesEnd::new("check-content")))?;
-            writer.write_event(Event::End(BytesEnd::new("check")))?;
-        }
-        ImplementationState::External => {
-            let mut check = BytesStart::new("check");
-            check.push_attribute(("system", CF_POLICY_CHECK_SYSTEM));
-            writer.write_event(Event::Start(check))?;
-            writer.write_event(Event::Start(BytesStart::new("check-content")))?;
-            let text = format!("External ({}) – checked by external system", pv.policy_type);
-            writer.write_event(Event::Text(BytesText::new(&text)))?;
-            writer.write_event(Event::End(BytesEnd::new("check-content")))?;
-            writer.write_event(Event::End(BytesEnd::new("check")))?;
-        }
-        ImplementationState::Opaque => {
-            let mut check = BytesStart::new("check");
-            check.push_attribute(("system", CF_POLICY_CHECK_SYSTEM));
-            writer.write_event(Event::Start(check))?;
-            writer.write_event(Event::Start(BytesStart::new("check-content")))?;
-            let text = format!(
+            ),
+            ImplementationState::External => {
+                format!("External ({}) – checked by external system", pv.policy_type)
+            }
+            ImplementationState::Opaque => format!(
                 "Opaque ({}) – CF preserves rule but cannot model check",
                 pv.policy_type
-            );
-            writer.write_event(Event::Text(BytesText::new(&text)))?;
-            writer.write_event(Event::End(BytesEnd::new("check-content")))?;
-            writer.write_event(Event::End(BytesEnd::new("check")))?;
+            ),
+        };
+        writer.write_event(Event::Text(BytesText::new(&text)))?;
+    }
+    write_cf_policy(writer, pv)?;
+    writer.write_event(Event::End(BytesEnd::new("check-content")))?;
+    writer.write_event(Event::End(BytesEnd::new("check")))?;
+    Ok(())
+}
+
+fn write_standard_rationale(
+    writer: &mut Writer<Cursor<&mut Vec<u8>>>,
+    pv: &XccdfPolicyExport,
+) -> Result<(), XccdfWriterError> {
+    if let Some(rationale) = pv
+        .compliance_metadata
+        .get("rationale")
+        .and_then(|v| v.as_str())
+    {
+        el(writer, "rationale", rationale)?;
+    }
+    Ok(())
+}
+
+fn write_standard_platforms(
+    writer: &mut Writer<Cursor<&mut Vec<u8>>>,
+    pv: &XccdfPolicyExport,
+) -> Result<(), XccdfWriterError> {
+    if let Some(platforms) = pv
+        .compliance_metadata
+        .get("platforms")
+        .and_then(|v| v.as_array())
+    {
+        for platform in platforms {
+            if let Some(idref) = platform.as_str() {
+                let mut element = BytesStart::new("platform");
+                element.push_attribute(("idref", idref));
+                writer.write_event(Event::Empty(element))?;
+            }
         }
     }
     Ok(())
@@ -984,11 +1061,6 @@ fn write_rule_content(
         // CF policy identity (always present)
         write_policy_identity(writer, pv)?;
 
-        // CF policy body is emitted for every state. Native states contain the
-        // typed implementation; non-native states contain `cf:unsupported`
-        // while retaining the exact state and canonical JSON fields.
-        write_cf_policy(writer, pv)?;
-
         // CF source-object mappings (when present)
         if !pv.source_mappings.is_empty() {
             write_source_mappings(writer, &pv.source_mappings)?;
@@ -1003,6 +1075,8 @@ fn write_rule_content(
     }
 
     // 5. ident* (after metadata, before fix/check)
+    write_standard_rationale(writer, pv)?;
+    write_standard_platforms(writer, pv)?;
     write_standard_idents(writer, pv)?;
 
     // 6. fix? + check (fix MUST precede check per XCCDF Rule content model)
@@ -1111,23 +1185,39 @@ pub fn write_bundle_xccdf_export(snapshot: &XccdfBundleExport) -> Result<String,
         sel.push_attribute(("selected", if policy.selected { "true" } else { "false" }));
         writer.write_event(Event::Empty(sel))?;
     }
+    writer.write_event(Event::Start(BytesStart::new("metadata")))?;
+    cf_el(&mut writer, "profile-role", "baseline")?;
+    writer.write_event(Event::End(BytesEnd::new("metadata")))?;
     writer.write_event(Event::End(BytesEnd::new("Profile")))?;
 
-    // Groups: one Group per policy_type, sorted deterministically by BTreeMap.
-    let mut groups: BTreeMap<String, Vec<&XccdfPolicyExport>> = BTreeMap::new();
+    // Groups preserve imported group identity when present in compliance
+    // metadata. Authored policies fall back to deterministic type groups.
+    let mut groups: BTreeMap<String, (String, Vec<&XccdfPolicyExport>)> = BTreeMap::new();
     for policy in &snapshot.policies {
+        let group_id = policy
+            .compliance_metadata
+            .get("group_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| group_id_for_type(&policy.policy_type));
+        let group_title = policy
+            .compliance_metadata
+            .get("group_title")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| group_title_for_type(&policy.policy_type).to_owned());
         groups
-            .entry(policy.policy_type.clone())
-            .or_default()
+            .entry(group_id)
+            .or_insert_with(|| (group_title, Vec::new()))
+            .1
             .push(policy);
     }
 
-    for (policy_type, policies) in &groups {
-        let gid = group_id_for_type(policy_type);
+    for (gid, (group_title, policies)) in &groups {
         let mut group = BytesStart::new("Group");
         group.push_attribute(("id", gid.as_str()));
         writer.write_event(Event::Start(group))?;
-        el(&mut writer, "title", group_title_for_type(policy_type))?;
+        el(&mut writer, "title", group_title)?;
 
         for pv in policies {
             let rid = pv.rule_id();
@@ -1135,7 +1225,7 @@ pub fn write_bundle_xccdf_export(snapshot: &XccdfBundleExport) -> Result<String,
             rule.push_attribute(("id", rid.as_str()));
             rule.push_attribute(("selected", if pv.selected { "true" } else { "false" }));
             rule.push_attribute(("weight", "10.0"));
-            rule.push_attribute(("severity", severity_for_type(&pv.policy_type)));
+            rule.push_attribute(("severity", standard_severity(pv)));
             writer.write_event(Event::Start(rule))?;
 
             write_rule_content(&mut writer, pv)?;
@@ -1833,6 +1923,91 @@ mod tests {
     }
 
     #[test]
+    fn invalid_typed_configuration_values_are_rejected() {
+        let cases = vec![
+            ("require_packages", json!({"packages": [1]})),
+            (
+                "custom_check",
+                json!({
+                    "mode": "sometimes",
+                    "context": "nixos-configuration-v1",
+                    "binding": "cfg",
+                    "expression": "true",
+                    "field_name": "enabled",
+                    "strict": true
+                }),
+            ),
+            (
+                "time_window",
+                json!({
+                    "start_time": "09:00",
+                    "end_time": "17:00",
+                    "timezone": "UTC",
+                    "action": "block",
+                    "days": ["monday"]
+                }),
+            ),
+            (
+                "require_approvals",
+                json!({"count": 0, "role": "admin", "distinct": true}),
+            ),
+            (
+                "canary_rollout",
+                json!({
+                    "percentage": 0,
+                    "observe_duration_minutes": 30,
+                    "selection_strategy": "random",
+                    "health_check": {"type": "systemd", "fail_threshold": 1}
+                }),
+            ),
+            (
+                "cve_threshold",
+                json!({
+                    "no_scan_behavior": "block",
+                    "allow_justifications": false,
+                    "require_acknowledgment": true,
+                    "thresholds": []
+                }),
+            ),
+        ];
+
+        for (policy_type, config) in cases {
+            let policy = test_policy(policy_type, ImplementationState::Native, config);
+            let snapshot = make_single_policy_snapshot(vec![policy]);
+            assert!(
+                matches!(
+                    write_bundle_xccdf_export(&snapshot),
+                    Err(XccdfWriterError::MissingConfig { .. })
+                ),
+                "invalid configuration for {policy_type} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn standard_xccdf_projection_preserves_imported_fields() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::Native, json!({}));
+        policy.compliance_metadata = json!({
+            "severity": "low",
+            "group_id": "xccdf_crystalforge_group_imported",
+            "group_title": "Imported Group",
+            "rationale": "Imported rationale",
+            "platforms": ["cpe:/o:example:nixos:1"],
+            "check": {"system": "urn:example:check", "content": "Imported check"},
+            "fix": {"system": "urn:example:fix", "content": "Imported fix"},
+            "identifiers": [{"system": "urn:example:id", "value": "V-0001"}],
+            "references": [{"href": "https://example.test/ref", "title": "Imported reference"}]
+        });
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![policy])).unwrap();
+        assert!(xml.contains("severity=\"low\""));
+        assert!(xml.contains("xccdf_crystalforge_group_imported"));
+        assert!(xml.contains("<rationale>Imported rationale</rationale>"));
+        assert!(xml.contains("idref=\"cpe:/o:example:nixos:1\""));
+        assert!(xml.contains("system=\"urn:example:fix\""));
+        assert!(xml.contains("Imported check"));
+    }
+
+    #[test]
     fn time_window_policy_type() {
         let pv = test_policy(
             "time_window",
@@ -1943,9 +2118,10 @@ mod tests {
             xml.contains(&format!("system=\"{CF_POLICY_CHECK_SYSTEM}\"")),
             "Missing CF check system"
         );
+        assert!(xml.contains("<check-content>"), "Missing check-content");
         assert!(
-            xml.contains("check-content-ref"),
-            "Missing check-content-ref"
+            xml.contains("<cf:policy schema-version=\"1\">"),
+            "Missing executable CF policy in check-content"
         );
         assert!(
             xml.contains(&format!("system=\"{CF_NIX_FIX_SYSTEM}\"")),

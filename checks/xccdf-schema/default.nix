@@ -311,6 +311,7 @@ pkgs.runCommand "xccdf-schema-validation" {
   xmllint --noout --schema ${xccdfSchemas}/xccdf/1.2/xccdf_1.2.xsd full-writer-output.xml
 
   xmllint --noout --schema ${xccdfSchemas}/xccdf/1.2/xccdf_1.2.xsd generated-writer-output.xml
+  test "$(xmllint --xpath 'count(//*[local-name()="check-content"]/*[local-name()="policy"])' generated-writer-output.xml)" = "1"
 
   # Validate the CF extension nodes extracted from the actual writer output
   # against the CF extension schema as well. The XCCDF schema validates the
@@ -319,12 +320,18 @@ pkgs.runCommand "xccdf-schema-validation" {
   xmllint --xpath '//*[local-name()="bundle" and namespace-uri()="urn:crystal-forge:xccdf:1"]' generated-writer-output.xml > generated-bundle.xml
   xmllint --xpath '//*[local-name()="policy-identity" and namespace-uri()="urn:crystal-forge:xccdf:1"]' generated-writer-output.xml > generated-policy-identity.xml
   xmllint --xpath '//*[local-name()="policy" and namespace-uri()="urn:crystal-forge:xccdf:1"]' generated-writer-output.xml > generated-policy.xml
+  xmllint --xpath '//*[local-name()="source-mappings" and namespace-uri()="urn:crystal-forge:xccdf:1"]' generated-writer-output.xml > generated-source-mappings.xml
+  xmllint --xpath '//*[local-name()="opaque-xml" and namespace-uri()="urn:crystal-forge:xccdf:1"]' generated-writer-output.xml > generated-opaque.xml
   sed -i 's#<cf:bundle#<cf:bundle xmlns:cf="urn:crystal-forge:xccdf:1"#' generated-bundle.xml
   sed -i 's#<cf:policy-identity#<cf:policy-identity xmlns:cf="urn:crystal-forge:xccdf:1"#' generated-policy-identity.xml
   sed -i 's#<cf:policy#<cf:policy xmlns:cf="urn:crystal-forge:xccdf:1"#' generated-policy.xml
+  sed -i 's#<cf:source-mappings#<cf:source-mappings xmlns:cf="urn:crystal-forge:xccdf:1"#' generated-source-mappings.xml
+  sed -i 's#<cf:opaque-xml#<cf:opaque-xml xmlns:cf="urn:crystal-forge:xccdf:1"#' generated-opaque.xml
   xmllint --noout --schema ${cfSchema} generated-bundle.xml
   xmllint --noout --schema ${cfSchema} generated-policy-identity.xml
   xmllint --noout --schema ${cfSchema} generated-policy.xml
+  xmllint --noout --schema ${cfSchema} generated-source-mappings.xml
+  xmllint --noout --schema ${cfSchema} generated-opaque.xml
 
   # --- OpenSCAP validation ---
   # Validate the comprehensive Benchmark fixture against OpenSCAP's built-in

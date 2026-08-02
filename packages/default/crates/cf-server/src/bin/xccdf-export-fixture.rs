@@ -1,5 +1,7 @@
 use crystal_forge::compliance::canonical::{ImplementationState, PublicationState};
-use crystal_forge::compliance::xccdf::export_models::{XccdfBundleExport, XccdfPolicyExport};
+use crystal_forge::compliance::xccdf::export_models::{
+    XccdfBundleExport, XccdfPolicyExport, XccdfSourceMapping,
+};
 use crystal_forge::compliance::xccdf::xml_writer::write_bundle_xccdf_export;
 use serde_json::json;
 use uuid::Uuid;
@@ -43,8 +45,14 @@ fn main() {
                 "references": [{"href": "https://crystal-forge.org/docs/agent", "title": "Agent documentation"}]
             }),
             dependencies: json!([]),
-            opaque_xml: None,
-            source_mappings: vec![],
+            opaque_xml: Some(
+                "<legacy-check xmlns=\"urn:example:legacy\">preserved</legacy-check>".into(),
+            ),
+            source_mappings: vec![XccdfSourceMapping {
+                object_kind: "rule".into(),
+                source_identity: "stig://CF-001".into(),
+                fidelity: "exact".into(),
+            }],
         }],
     };
 

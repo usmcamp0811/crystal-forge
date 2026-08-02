@@ -55,7 +55,8 @@ pub fn ComplianceView() -> Element {
     let mut environments = use_signal(Vec::<EnvironmentSummary>::new);
     let mut sys_filter = use_signal(|| "all".to_string());
     let mut selected_export_version_id = use_signal(|| None::<uuid::Uuid>);
-    let mut export_version_bundle_id = use_signal(|| None::<uuid::Uuid>);
+    let mut export_version_pointers =
+        use_signal(|| (None::<uuid::Uuid>, None::<uuid::Uuid>));
 
     // Generation counters guard against stale async responses overwriting the
     // state of a subsequently-selected bundle or system.  Each spawn captures
@@ -150,20 +151,31 @@ pub fn ComplianceView() -> Element {
 
     use_effect(move || {
         let bundle_id = *selected_bundle_id.read();
-        if *export_version_bundle_id.read() == bundle_id {
+        let bundles_snapshot = bundles.read().clone();
+        let pointers = bundle_id
+            .and_then(|bid| bundles_snapshot.iter().find(|b| b.id == bid))
+            .map(|bundle| {
+                (
+                    bundle.current_published_version_id,
+                    bundle.current_draft_version_id,
+                )
+            })
+            .unwrap_or((None, None));
+        if *export_version_pointers.read() == pointers {
             return;
         }
-        export_version_bundle_id.set(bundle_id);
-        let bundles_snapshot = bundles.read().clone();
-        let version_id = bundle_id
-            .and_then(|bid| bundles_snapshot.iter().find(|b| b.id == bid))
-            .and_then(|b| {
-                // Prefer published for auditor-facing exports; draft export
-                // remains available through the explicit version selector.
-                b.current_published_version_id
-                    .or(b.current_draft_version_id)
-            });
-        selected_export_version_id.set(version_id);
+        export_version_pointers.set(pointers);
+
+        // Preserve an explicit choice while it remains available. If the
+        // selected bundle is refreshed or published and the old version is no
+        // longer one of the current pointers, prefer published, then draft.
+        let current = *selected_export_version_id.read();
+        let next = if current.is_some_and(|id| pointers.0 == Some(id) || pointers.1 == Some(id)) {
+            current
+        } else {
+            pointers.0.or(pointers.1)
+        };
+        selected_export_version_id.set(next);
     });
 
     let on_evidence = move |system_id: uuid::Uuid| {
