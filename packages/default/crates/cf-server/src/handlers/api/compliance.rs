@@ -19,7 +19,7 @@ use crate::api::models::{
 };
 use crate::compliance::interchange::{InterchangeLimits, MAX_XCCDF_UPLOAD_BYTES};
 use crate::compliance::xccdf::export_models::{
-    XccdfBundleExport, XccdfPolicyExport, XccdfSourceMapping,
+    XccdfBundleExport, XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
 };
 use crate::compliance::xccdf::parser::parse_xccdf;
 use crate::compliance::xccdf::xml_writer::write_bundle_xccdf_export;
@@ -865,6 +865,8 @@ async fn load_export_snapshot(
     // All reads are complete. Commit the transaction to release the snapshot.
     tx.commit().await.map_err(|e| anyhow::anyhow!("{e:#}"))?;
 
+    let groups = build_export_groups(&policies);
+
     Ok(XccdfBundleExport {
         bundle_id: bv.bundle_id,
         bundle_version_id: bv.id,
@@ -879,9 +881,112 @@ async fn load_export_snapshot(
         framework_version: bv.framework_version,
         layer: bv.layer,
         owner: bv.owner,
-        groups: vec![],
+        groups,
         policies,
     })
+}
+
+/// Build a deterministic recursive group tree from imported group metadata.
+/// Foreign source IDs are retained in `source_id`; generated IDs are always
+/// NCName-safe XCCDF 1.2 IDs and therefore cannot inherit identifiers such as
+/// `V-268078` from XCCDF 1.1/STIG content.
+fn build_export_groups(policies: &[XccdfPolicyExport]) -> Vec<XccdfGroupExport> {
+    #[derive(Default)]
+    struct GroupNode {
+        source_id: Option<String>,
+        parent_source_id: Option<String>,
+        title: String,
+        description: Option<String>,
+        order: i32,
+        policy_ids: Vec<Uuid>,
+    }
+
+    let mut nodes: std::collections::BTreeMap<String, GroupNode> =
+        std::collections::BTreeMap::new();
+    for policy in policies {
+        let metadata = &policy.compliance_metadata;
+        let source_id = metadata
+            .get("group_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned);
+        let key = source_id
+            .clone()
+            .unwrap_or_else(|| format!("policy-type:{}", policy.policy_type));
+        let node = nodes.entry(key.clone()).or_insert_with(|| GroupNode {
+            source_id: source_id.clone(),
+            parent_source_id: metadata
+                .get("parent_group_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+            title: metadata
+                .get("group_title")
+                .and_then(|value| value.as_str())
+                .unwrap_or(&policy.policy_type)
+                .to_owned(),
+            description: metadata
+                .get("group_description")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+            order: metadata
+                .get("group_order")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(policy.policy_order as i64) as i32,
+            policy_ids: Vec::new(),
+        });
+        node.policy_ids.push(policy.policy_version_id);
+    }
+
+    fn generated_id(source_id: Option<&str>, policy_ids: &[Uuid]) -> String {
+        let source = source_id.unwrap_or("authored");
+        let slug: String = source
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() {
+                    character.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let suffix = policy_ids
+            .first()
+            .map(|id| id.simple().to_string())
+            .unwrap_or_else(|| "empty".to_string());
+        format!("xccdf_crystalforge_group_{slug}_{suffix}")
+    }
+
+    fn build_node(
+        key: &str,
+        nodes: &std::collections::BTreeMap<String, GroupNode>,
+    ) -> XccdfGroupExport {
+        let node = &nodes[key];
+        let mut children: Vec<XccdfGroupExport> = nodes
+            .iter()
+            .filter(|(child_key, child)| {
+                child_key.as_str() != key
+                    && child.parent_source_id.as_deref() == node.source_id.as_deref()
+            })
+            .map(|(child_key, _)| build_node(child_key, nodes))
+            .collect();
+        children.sort_by_key(|child| child.order);
+        XccdfGroupExport {
+            generated_id: generated_id(node.source_id.as_deref(), &node.policy_ids),
+            source_id: node.source_id.clone(),
+            title: node.title.clone(),
+            description: node.description.clone(),
+            order: node.order,
+            children,
+            policies: node.policy_ids.clone(),
+        }
+    }
+
+    let mut roots: Vec<XccdfGroupExport> = nodes
+        .iter()
+        .filter(|(_, node)| node.parent_source_id.is_none())
+        .map(|(key, _)| build_node(key, &nodes))
+        .collect();
+    roots.sort_by_key(|group| group.order);
+    roots
 }
 
 fn parse_publication_state(
