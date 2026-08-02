@@ -23,6 +23,7 @@ use crate::compliance::digest::{
 use crate::compliance::interchange::InterchangeLimits;
 use crate::compliance::xccdf::parser::parse_xccdf;
 use crate::compliance::xccdf::xml_writer::write_bundle_xccdf;
+use crate::compliance::xccdf::zip_extractor::extract_xccdf_from_zip;
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
     BundleValidationError, create_bundle as create_bundle_row, delete_bundle as delete_bundle_row,
@@ -319,7 +320,37 @@ pub async fn xccdf_preview(
         return bad_request("No file field named 'file' was attached");
     };
 
-    match parse_xccdf(&bytes, filename.as_deref(), &limits) {
+    // Dispatch on file type: extract XML from ZIP before parsing.
+    let (xml_bytes, xml_filename): (Vec<u8>, Option<String>) = {
+        let is_zip = filename
+            .as_deref()
+            .map(|f| f.to_lowercase().ends_with(".zip"))
+            .unwrap_or(false);
+
+        if is_zip {
+            match extract_xccdf_from_zip(&bytes, &limits) {
+                Ok(extracted) => (extracted.xml_bytes, Some(extracted.entry_name)),
+                Err(e) => {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(serde_json::json!({
+                            "error": "ZIP extraction failed",
+                            "errors": [{
+                                "code": e.code,
+                                "summary": e.message,
+                                "blocking": true,
+                            }],
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        } else {
+            (bytes, filename.clone())
+        }
+    };
+
+    match parse_xccdf(&xml_bytes, xml_filename.as_deref(), &limits) {
         Ok(parsed) => {
             // 422 for blocking validation errors.
             if parsed.errors.iter().any(|e| e.blocking) {
@@ -929,5 +960,78 @@ mod tests {
 
         let response = post_multipart(&base, &token, body).await;
         assert_eq!(response.status().as_u16(), 400);
+    }
+
+    // ── ZIP upload tests ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_accepts_zip_containing_single_xml() {
+        use std::io::Write;
+        use zip::CompressionMethod;
+        use zip::write::{FileOptions, SimpleFileOptions};
+
+        let pool = test_pool_from_env().await;
+        let token = admin_session_token(&pool).await;
+        let base = spawn_preview_server(pool).await;
+
+        // Build a ZIP containing exactly one XCCDF XML file.
+        let mut zip_bytes = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_bytes));
+            let opts: SimpleFileOptions =
+                FileOptions::default().compression_method(CompressionMethod::Stored);
+            w.start_file("benchmark.xml", opts).expect("start_file");
+            w.write_all(minimal_xccdf().as_bytes()).expect("write xml");
+            w.finish().expect("zip finish");
+        }
+
+        let mut body = Vec::new();
+        push_file_field(&mut body, "file", "package.zip", &zip_bytes);
+        finish_multipart(&mut body);
+
+        let response = post_multipart(&base, &token, body).await;
+        assert_eq!(response.status().as_u16(), 200);
+        let json: serde_json::Value = response.json().await.expect("json body");
+        // The XML was extracted and parsed; filename reflects the inner entry.
+        assert_eq!(json["document_class"], "foreignxccdf");
+        assert_eq!(json["rule_count"], 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_rejects_zip_with_no_xml() {
+        use std::io::Write;
+        use zip::CompressionMethod;
+        use zip::write::{FileOptions, SimpleFileOptions};
+
+        let pool = test_pool_from_env().await;
+        let token = admin_session_token(&pool).await;
+        let base = spawn_preview_server(pool).await;
+
+        let mut zip_bytes = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_bytes));
+            let opts: SimpleFileOptions =
+                FileOptions::default().compression_method(CompressionMethod::Stored);
+            w.start_file("readme.txt", opts).expect("start_file");
+            w.write_all(b"no xml here").expect("write txt");
+            w.finish().expect("zip finish");
+        }
+
+        let mut body = Vec::new();
+        push_file_field(&mut body, "file", "package.zip", &zip_bytes);
+        finish_multipart(&mut body);
+
+        let response = post_multipart(&base, &token, body).await;
+        assert_eq!(response.status().as_u16(), 422);
+        let json: serde_json::Value = response.json().await.expect("json body");
+        let codes: Vec<&str> = json["errors"]
+            .as_array()
+            .expect("errors array")
+            .iter()
+            .filter_map(|e| e["code"].as_str())
+            .collect();
+        assert!(codes.contains(&"ZIP_NO_XML"), "got codes: {codes:?}");
     }
 }
