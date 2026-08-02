@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-01 22:36'
+updated_date: '2026-08-02 01:47'
 labels:
   - frontend
   - web-ui
@@ -1300,6 +1300,26 @@ Verification for this slice:
 Remaining limitations: DB-backed ignored tests still require a migrated isolated `CRYSTAL_FORGE_TEST_DATABASE_URL`; SQLx metadata was not refreshed; `nix build .#checks.x86_64-linux.web-ui --no-link` was not rerun in this slice. P2 review items remain deferred unless explicitly scoped.
 
 Committed and pushed review-fix commit `244e73d9` (`Fix notification preference and pagination races`) to branch `TASK-414-account-notifications-sessions` for MR !314. Active task worktree and dev integration worktree are clean after push. Remaining limitations are unchanged: DB-backed ignored tests still need a migrated isolated `CRYSTAL_FORGE_TEST_DATABASE_URL`, SQLx metadata has not been refreshed, and the Nix web-ui check was not rerun in this slice.
+
+Continued MR !314 UI review-fix work:
+- Added an AppShell-provided `AccountNotificationsContext` for top-bar notification items, unread count, pagination cursor, loading state, loading-more state, and non-destructive error state.
+- Refreshed the top-bar notification feed when the bell opens and added `Load more` support using the server `next_cursor`.
+- Added `aria-expanded`/`aria-haspopup`, Escape close handling on the panel, and focus restoration to the bell for backdrop/Escape close.
+- Added Enter/Space activation for notification rows and changed notification click behavior to close/navigate immediately while marking read asynchronously.
+- Changed notification errors to render as a banner without hiding the current feed.
+- Added cursor escaping in the web API client.
+- Improved active-session rows to render browser/OS labels with relative last-active text and wrapping-friendly layout.
+- Added pending/disabled states for individual session revocation and Sign out everywhere confirmation actions.
+
+Verification for this slice:
+- `nix develop -c rustfmt --edition 2024 packages/web-ui/src/components/layout/topbar.rs packages/web-ui/src/components/layout/app_shell.rs packages/web-ui/src/components/layout/mod.rs packages/web-ui/src/api/client.rs packages/web-ui/src/views/profile.rs && git diff --check` passed.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` passed with existing warnings.
+- `node --check checks/web-ui/tests/integration-test.js` passed.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo test --bin crystal-forge-ui notification_save'` passed: 3 passed.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo test --bin crystal-forge-ui notification_preference_merge'` passed: 2 passed.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml'` passed with existing warnings.
+
+A mistaken non-Nix server `cargo check` was run first and failed because `pkg-config`/OpenSSL were unavailable outside the dev shell; it was rerun with `nix develop` successfully. A combined web-ui test filter command also failed because Cargo accepts only one test filter; the two filters were rerun separately and passed.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
