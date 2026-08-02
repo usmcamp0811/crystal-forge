@@ -19,11 +19,11 @@ use crate::api::models::{
 };
 use crate::compliance::interchange::{InterchangeLimits, MAX_XCCDF_UPLOAD_BYTES};
 use crate::compliance::xccdf::export_models::{
-    GroupProjectionError, XccdfBundleExport, XccdfGroupExport, XccdfPolicyExport,
-    XccdfSourceMapping,
+    GroupProjectionError, ImportedCheckError, ImportedFixError, XccdfBundleExport,
+    XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
 };
 use crate::compliance::xccdf::parser::parse_xccdf;
-use crate::compliance::xccdf::xml_writer::write_bundle_xccdf_export;
+use crate::compliance::xccdf::xml_writer::{XccdfWriterError, write_bundle_xccdf_export};
 use crate::compliance::xccdf::zip_extractor::{
     PackageKind, detect_package_kind, extract_xccdf_from_zip,
 };
@@ -243,7 +243,33 @@ pub async fn xccdf_preview(
     // * Accumulation uses MAX_XCCDF_UPLOAD_BYTES (the larger of the XML and ZIP
     //   limits) so that a 50 MiB ZIP package is not rejected before content
     //   detection.  After detection the correct per-type limit is enforced.
-    while let Ok(Some(mut field)) = multipart.next_field().await {
+    loop {
+        let mut field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(e) if is_body_limit_error(&e) => {
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(ApiError {
+                        error: "Request too large".into(),
+                        message: "Multipart request exceeds the route body limit".into(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiError {
+                        error: "Malformed multipart request".into(),
+                        message: format!("Unable to decode multipart upload: {e}"),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+        };
         let field_name = field.name().map(String::from);
         let has_filename = field.file_name().is_some();
 
@@ -584,6 +610,49 @@ pub async fn export_bundle_xccdf(
     let snapshot = match load_export_snapshot(&pool, version_id).await {
         Ok(s) => s,
         Err(ExportSnapshotError::NotFound) => return not_found(),
+        Err(ExportSnapshotError::InvalidGroupProjection { source }) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiError {
+                    error: "validation_error".into(),
+                    message: format!("Invalid group structure: {source}"),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(ExportSnapshotError::InvalidImportedCheck {
+            policy_version_id,
+            source,
+        }) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiError {
+                    error: "validation_error".into(),
+                    message: format!(
+                        "Policy {policy_version_id} has invalid imported check: {source}"
+                    ),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(ExportSnapshotError::InvalidImportedFix {
+            policy_version_id,
+            source,
+        }) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiError {
+                    error: "validation_error".into(),
+                    message: format!(
+                        "Policy {policy_version_id} has invalid imported fix: {source}"
+                    ),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
         Err(ExportSnapshotError::Db(e)) => {
             tracing::error!(error = %e, %version_id, "failed to load export snapshot");
             return internal_error("Failed to load bundle version for export");
@@ -606,6 +675,30 @@ pub async fn export_bundle_xccdf(
             )
                 .into_response()
         }
+        Err(XccdfWriterError::MalformedImportedCheck {
+            policy_version_id,
+            reason,
+        }) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ApiError {
+                error: "validation_error".into(),
+                message: format!("Policy {policy_version_id} has invalid imported check: {reason}"),
+                details: None,
+            }),
+        )
+            .into_response(),
+        Err(XccdfWriterError::MalformedImportedFix {
+            policy_version_id,
+            reason,
+        }) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ApiError {
+                error: "validation_error".into(),
+                message: format!("Policy {policy_version_id} has invalid imported fix: {reason}"),
+                details: None,
+            }),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("XCCDF export write error: {e:#}");
             internal_error("Failed to generate XCCDF export")
@@ -613,9 +706,20 @@ pub async fn export_bundle_xccdf(
     }
 }
 
-/// Errors from snapshot loading.
+/// Errors from snapshot loading and validation.
 enum ExportSnapshotError {
     NotFound,
+    InvalidGroupProjection {
+        source: GroupProjectionError,
+    },
+    InvalidImportedCheck {
+        policy_version_id: Uuid,
+        source: ImportedCheckError,
+    },
+    InvalidImportedFix {
+        policy_version_id: Uuid,
+        source: ImportedFixError,
+    },
     Db(anyhow::Error),
 }
 
@@ -866,25 +970,26 @@ async fn load_export_snapshot(
     // All reads are complete. Commit the transaction to release the snapshot.
     tx.commit().await.map_err(|e| anyhow::anyhow!("{e:#}"))?;
 
-    let groups = build_export_groups(&policies).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let groups = build_export_groups(&policies)
+        .map_err(|source| ExportSnapshotError::InvalidGroupProjection { source })?;
 
     // Prevalidate imported standard checks and fixes. Fail-fast before the
     // writer starts emitting XML so that errors surface cleanly as HTTP 422
     // rather than mid-write failures.
     for pv in &policies {
-        if let Some(standard_check) = pv.parse_standard_check().map_err(|e| {
-            anyhow::anyhow!(
-                "policy version {}: {e}",
-                pv.policy_version_id
-            )
+        if let Some(standard_check) = pv.parse_standard_check().map_err(|source| {
+            ExportSnapshotError::InvalidImportedCheck {
+                policy_version_id: pv.policy_version_id,
+                source,
+            }
         })? {
             drop(standard_check);
         }
-        if let Some(standard_fix) = pv.parse_standard_fix().map_err(|e| {
-            anyhow::anyhow!(
-                "policy version {}: {e}",
-                pv.policy_version_id
-            )
+        if let Some(standard_fix) = pv.parse_standard_fix().map_err(|source| {
+            ExportSnapshotError::InvalidImportedFix {
+                policy_version_id: pv.policy_version_id,
+                source,
+            }
         })? {
             drop(standard_fix);
         }
@@ -1503,6 +1608,23 @@ mod tests {
         finish_multipart(&mut body);
 
         let response = post_multipart(&base, &token, body).await;
+        assert_eq!(response.status().as_u16(), 400);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_rejects_malformed_multipart_with_400() {
+        let pool = test_pool_from_env().await;
+        let token = admin_session_token(&pool).await;
+        let base = spawn_preview_server(pool).await;
+
+        let response = post_multipart(
+            &base,
+            &token,
+            b"--XCFTESTBOUNDARY\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\ntruncated"
+                .to_vec(),
+        )
+        .await;
         assert_eq!(response.status().as_u16(), 400);
     }
 
