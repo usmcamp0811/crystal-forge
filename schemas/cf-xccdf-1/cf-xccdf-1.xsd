@@ -20,7 +20,7 @@
   <xs:element name="bundle" type="cf:bundleType"/>
   <xs:complexType name="bundleType"><xs:sequence><xs:element name="framework" type="cf:frameworkType" minOccurs="0"/><xs:element name="layer" type="xs:string" minOccurs="0"/><xs:element name="owner" type="xs:string" minOccurs="0"/><xs:element name="content-digest" type="cf:digestType"/></xs:sequence><xs:attribute name="schema-version" type="xs:positiveInteger" use="required" fixed="1"/><xs:attribute name="bundle-id" type="cf:uuidUrn" use="required"/><xs:attribute name="bundle-version-id" type="cf:uuidUrn" use="required"/><xs:attribute name="publication-state" type="cf:publicationState" use="required"/></xs:complexType>
   <xs:complexType name="frameworkType"><xs:attribute name="name" type="xs:string" use="required"/><xs:attribute name="version" type="xs:string"/></xs:complexType>
-  <xs:complexType name="digestType"><xs:simpleContent><xs:extension base="xs:string"><xs:attribute name="algorithm" type="xs:string" use="required" fixed="sha-256"/></xs:extension></xs:simpleContent></xs:complexType>
+  <xs:complexType name="digestType"><xs:simpleContent><xs:extension base="xs:string"><xs:attribute name="algorithm" type="xs:string" use="required" fixed="sha-256"/><xs:attribute name="canonical-model" type="xs:string" use="required" fixed="cf-model-json-1"/></xs:extension></xs:simpleContent></xs:complexType>
 
   <xs:element name="profile-role" type="xs:string"/>
   <xs:element name="policy-identity" type="cf:policyIdentityType"/>
@@ -29,6 +29,7 @@
   <xs:element name="policy" type="cf:policyType"/>
   <xs:element name="source-mappings" type="cf:sourceMappingsType"/>
   <xs:element name="opaque-xml" type="xs:string"/>
+  <xs:element name="source-group-id" type="xs:string"/>
   <xs:complexType name="sourceMappingsType"><xs:sequence><xs:element name="source" type="cf:sourceMappingType" minOccurs="1" maxOccurs="unbounded"/></xs:sequence></xs:complexType>
   <xs:complexType name="sourceMappingType"><xs:sequence><xs:element name="object-kind" type="xs:string"/><xs:element name="source-identity" type="xs:string"/><xs:element name="fidelity" type="xs:string"/></xs:sequence></xs:complexType>
   <xs:complexType name="policyType"><xs:sequence><xs:element name="execution" type="cf:executionType"/><xs:element name="implementation" type="cf:implementationType"/><xs:element name="dependencies" type="cf:dependenciesType" minOccurs="0"/><xs:element name="config-json" type="xs:string"/><xs:element name="compliance-metadata-json" type="xs:string"/><xs:element name="dependencies-json" type="xs:string"/></xs:sequence><xs:attribute name="schema-version" type="xs:positiveInteger" use="required" fixed="1"/></xs:complexType>

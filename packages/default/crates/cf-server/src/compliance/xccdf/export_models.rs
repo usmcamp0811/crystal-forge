@@ -17,6 +17,23 @@ pub struct XccdfSourceMapping {
     pub fidelity: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct XccdfStandardCheck {
+    pub system: String,
+    pub content: Option<String>,
+    pub content_ref_href: Option<String>,
+    pub content_ref_name: Option<String>,
+    pub selector: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct XccdfStandardFix {
+    pub system: Option<String>,
+    pub content: String,
+    pub complexity: Option<String>,
+    pub disruption: Option<String>,
+}
+
 /// Complete data for a single policy version in an export.
 #[derive(Debug, Clone)]
 pub struct XccdfPolicyExport {
@@ -25,6 +42,8 @@ pub struct XccdfPolicyExport {
     pub version: String,
     pub publication_state: PublicationState,
     pub semantic_digest: String,
+    pub digest_algorithm: String,
+    pub canonicalization_version: String,
     pub name: String,
     pub description: Option<String>,
     pub policy_type: String,
@@ -40,6 +59,64 @@ pub struct XccdfPolicyExport {
     pub source_mappings: Vec<XccdfSourceMapping>,
 }
 
+impl XccdfPolicyExport {
+    pub fn standard_check(&self) -> Option<XccdfStandardCheck> {
+        let value = self.compliance_metadata.get("check")?;
+        Some(XccdfStandardCheck {
+            system: value.get("system")?.as_str()?.to_owned(),
+            content: value
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            content_ref_href: value
+                .get("content_ref_href")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            content_ref_name: value
+                .get("content_ref_name")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            selector: value
+                .get("selector")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+        })
+    }
+
+    pub fn standard_fix(&self) -> Option<XccdfStandardFix> {
+        let value = self.compliance_metadata.get("fix")?;
+        Some(XccdfStandardFix {
+            system: value
+                .get("system")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            content: value.get("content")?.as_str()?.to_owned(),
+            complexity: value
+                .get("complexity")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            disruption: value
+                .get("disruption")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+        })
+    }
+}
+
+/// A recursively ordered XCCDF group projection. `source_id` preserves an
+/// imported foreign identifier; `generated_id` is always the NCName-safe ID
+/// emitted into the XCCDF 1.2 document.
+#[derive(Debug, Clone)]
+pub struct XccdfGroupExport {
+    pub generated_id: String,
+    pub source_id: Option<String>,
+    pub title: String,
+    pub description: Option<String>,
+    pub order: i32,
+    pub children: Vec<XccdfGroupExport>,
+    pub policies: Vec<Uuid>,
+}
+
 /// Complete data for a bundle version export.
 ///
 /// This is the single input to the XML writer. It contains everything needed
@@ -51,12 +128,15 @@ pub struct XccdfBundleExport {
     pub version: String,
     pub publication_state: PublicationState,
     pub semantic_digest: String,
+    pub digest_algorithm: String,
+    pub canonicalization_version: String,
     pub name: String,
     pub description: Option<String>,
     pub framework: String,
     pub framework_version: Option<String>,
     pub layer: String,
     pub owner: String,
+    pub groups: Vec<XccdfGroupExport>,
     pub policies: Vec<XccdfPolicyExport>,
 }
 

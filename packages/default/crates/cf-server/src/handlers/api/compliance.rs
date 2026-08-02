@@ -650,6 +650,8 @@ async fn load_export_snapshot(
         version: String,
         publication_state: String,
         semantic_digest: String,
+        digest_algorithm: String,
+        canonicalization_version: String,
         name: String,
         description: Option<String>,
         framework: String,
@@ -660,7 +662,8 @@ async fn load_export_snapshot(
 
     let bv: BundleVersionRow = sqlx::query_as(
         r#"
-        SELECT id, bundle_id, version, publication_state, semantic_digest,
+         SELECT id, bundle_id, version, publication_state, semantic_digest,
+                digest_algorithm, canonicalization_version,
                name, description, framework, framework_version, layer, owner
         FROM compliance_bundle_versions
         WHERE id = $1
@@ -706,12 +709,15 @@ async fn load_export_snapshot(
             version: bv.version,
             publication_state,
             semantic_digest: bv.semantic_digest,
+            digest_algorithm: bv.digest_algorithm.clone(),
+            canonicalization_version: bv.canonicalization_version.clone(),
             name: bv.name,
             description: bv.description,
             framework: bv.framework,
             framework_version: bv.framework_version,
             layer: bv.layer,
             owner: bv.owner,
+            groups: vec![],
             policies: vec![],
         });
     }
@@ -723,6 +729,8 @@ async fn load_export_snapshot(
         version: String,
         publication_state: String,
         semantic_digest: String,
+        digest_algorithm: String,
+        canonicalization_version: String,
         name: String,
         description: Option<String>,
         policy_type: String,
@@ -737,7 +745,8 @@ async fn load_export_snapshot(
 
     let policy_rows: Vec<PolicyVersionRow> = sqlx::query_as(
         r#"
-        SELECT id, policy_id, version, publication_state, semantic_digest,
+         SELECT id, policy_id, version, publication_state, semantic_digest,
+                digest_algorithm, canonicalization_version,
                name, description, policy_type, implementation_state,
                execution_phase, config, compliance_metadata, dependencies,
                opaque_xml, enabled_by_default
@@ -833,6 +842,8 @@ async fn load_export_snapshot(
             version: pv.version,
             publication_state: pub_state,
             semantic_digest: pv.semantic_digest,
+            digest_algorithm: pv.digest_algorithm,
+            canonicalization_version: pv.canonicalization_version,
             name: pv.name,
             description: pv.description,
             policy_type: pv.policy_type,
@@ -860,12 +871,15 @@ async fn load_export_snapshot(
         version: bv.version,
         publication_state,
         semantic_digest: bv.semantic_digest,
+        digest_algorithm: bv.digest_algorithm,
+        canonicalization_version: bv.canonicalization_version,
         name: bv.name,
         description: bv.description,
         framework: bv.framework,
         framework_version: bv.framework_version,
         layer: bv.layer,
         owner: bv.owner,
+        groups: vec![],
         policies,
     })
 }

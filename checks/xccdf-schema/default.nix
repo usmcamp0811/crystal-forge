@@ -48,7 +48,7 @@ pkgs.runCommand "xccdf-schema-validation" {
         <cf:framework name="NIST SP 800-53" version="5.1"/>
         <cf:layer>nixos</cf:layer>
         <cf:owner>crystal-forge</cf:owner>
-        <cf:content-digest algorithm="sha-256">abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789</cf:content-digest>
+        <cf:content-digest algorithm="sha-256" canonical-model="cf-model-json-1">abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789</cf:content-digest>
       </cf:bundle>
     </metadata>
     <Profile id="xccdf_crystalforge_profile_default" extends="xccdf_crystalforge_profile_base">
@@ -176,7 +176,7 @@ pkgs.runCommand "xccdf-schema-validation" {
                       selected="true"
                       policy-order="1">
     <cf:policy-version>1.0.0</cf:policy-version>
-    <cf:content-digest algorithm="sha-256">fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321</cf:content-digest>
+    <cf:content-digest algorithm="sha-256" canonical-model="cf-model-json-1">fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321</cf:content-digest>
   </cf:policy-identity>
   XML
 
@@ -205,7 +205,7 @@ pkgs.runCommand "xccdf-schema-validation" {
         <cf:framework name="NIST SP 800-53" version="5.1"/>
         <cf:layer>nixos</cf:layer>
         <cf:owner>crystal-forge</cf:owner>
-        <cf:content-digest algorithm="sha-256">1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef</cf:content-digest>
+        <cf:content-digest algorithm="sha-256" canonical-model="cf-model-json-1">1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef</cf:content-digest>
       </cf:bundle>
     </metadata>
     <Profile id="xccdf_crystalforge_profile_full" extends="xccdf_crystalforge_profile_base">
@@ -237,7 +237,7 @@ pkgs.runCommand "xccdf-schema-validation" {
                             selected="true"
                             policy-order="1">
           <cf:policy-version>1.0.0</cf:policy-version>
-          <cf:content-digest algorithm="sha-256">abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789</cf:content-digest>
+          <cf:content-digest algorithm="sha-256" canonical-model="cf-model-json-1">abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789</cf:content-digest>
         </cf:policy-identity>
         <cf:policy xmlns:cf="urn:crystal-forge:xccdf:1" schema-version="1">
           <cf:execution phase="nix-evaluation" strict="true"/>
@@ -271,7 +271,7 @@ pkgs.runCommand "xccdf-schema-validation" {
                             selected="true"
                             policy-order="2">
           <cf:policy-version>1.0.0</cf:policy-version>
-          <cf:content-digest algorithm="sha-256">0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef</cf:content-digest>
+          <cf:content-digest algorithm="sha-256" canonical-model="cf-model-json-1">0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef</cf:content-digest>
         </cf:policy-identity>
         <cf:policy xmlns:cf="urn:crystal-forge:xccdf:1" schema-version="1">
           <cf:execution phase="nix-evaluation" strict="true"/>

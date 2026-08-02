@@ -537,7 +537,7 @@ fn XccdfVersionSelector(props: XccdfVersionSelectorProps) -> Element {
             div {
                 class: "sd-callout sd-callout-info",
                 style: "display:flex;align-items:center;gap:10px;",
-                label { style: "font-size:12px;font-weight:600;", "XCCDF export version" }
+                label { style: "font-size:12px;font-weight:600;", "Current XCCDF export version" }
                 select {
                     class: "input focus-ring",
                     style: "width:auto;min-width:260px;",
