@@ -7,10 +7,6 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::super::interchange::{
-    CF_POLICY_CHECK_SYSTEM, CF_XCCDF_NAMESPACE, XCCDF_1_1_NAMESPACE, XCCDF_NAMESPACE,
-};
-
 // ── Document-level types ─────────────────────────────────────────────────────
 
 /// Classification of an uploaded XCCDF document.
@@ -116,15 +112,42 @@ pub struct ParsedRule {
 
 // ── Check / Fix ───────────────────────────────────────────────────────────────
 
+/// The body of an XCCDF check — exactly one form is valid.
+///
+/// XCCDF 1.2 defines `<check-content-ref>` and `<check-content>` as exclusive
+/// alternatives within a `<check>`. Both cannot coexist.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CheckBody {
+    /// Inline check content. Contains the check text directly.
+    Inline { content: String },
+    /// External reference. `href` is required; `name` is optional.
+    Reference { href: String, name: Option<String> },
+}
+
+/// A validated XCCDF check element.
+///
+/// Preserves every XCCDF 1.2 `<check>` attribute that affects evaluation
+/// semantics: `system`, `selector`, `multi-check`, and `negate`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckContent {
     pub system: String,
-    pub content: String,
+    pub body: CheckBody,
     pub selector: Option<String>,
+    /// XCCDF 1.2 `multi-check` attribute: when true, the check may
+    /// produce multiple results (one per selector or target).
+    pub multi_check: Option<bool>,
+    /// XCCDF 1.2 `negate` attribute: when true, the check result is
+    /// inverted (pass becomes fail and vice versa).
+    pub negate: Option<bool>,
 }
 
+/// A validated XCCDF fix element.
+///
+/// Preserves `id`, `system`, `complexity`, `disruption`, and body content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FixContent {
+    /// XCCDF fix identifier (NCName).
+    pub id: Option<String>,
     pub system: Option<String>,
     pub content: String,
     pub complexity: Option<String>,

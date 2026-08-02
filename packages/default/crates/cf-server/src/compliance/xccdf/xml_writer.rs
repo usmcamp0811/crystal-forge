@@ -42,7 +42,7 @@ use super::super::interchange::{
 };
 use super::export_models::{
     XccdfBundleExport, XccdfCheckBody, XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
-    XccdfStandardCheck, VALID_FIX_COMPLEXITY, VALID_FIX_DISRUPTION,
+    XccdfStandardCheck,
 };
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -1024,8 +1024,8 @@ fn write_check_and_fix(
     // different system URI. When a native policy also has an imported standard
     // check, emit the standard check first (for standards consumers), then the
     // CF executable check (for Crystal Forge consumers). When the imported
-    // check body is reference-only, the opaque_xml presence was already
-    // validated by parse_standard_check, so both a ref and cf:policy appear.
+    // check body is reference-only, parse_standard_check rejects it because
+    // the current single-document export cannot include the referenced file.
     let is_native = pv.implementation_state == ImplementationState::Native;
 
     if is_native {
@@ -1051,8 +1051,9 @@ fn write_check_and_fix(
 /// Emit a single imported standard XCCDF `<check>` element.
 ///
 /// Preserves all behavior-affecting attributes: `system`, `selector`,
-/// `multi-check`, and `negate`. Any unsupported standard attributes captured
-/// in `unsupported_attrs` are logged at warn level for fidelity visibility.
+/// `multi-check`, and `negate`. Unknown attributes cause export rejection
+/// at parse time (see `parse_standard_check`), so this function only needs
+/// to emit the typed fields.
 fn write_single_standard_check(
     writer: &mut Writer<Cursor<&mut Vec<u8>>>,
     std_check: &XccdfStandardCheck,
@@ -1067,16 +1068,6 @@ fn write_single_standard_check(
     }
     if let Some(negate) = std_check.negate {
         check.push_attribute(("negate", if negate { "true" } else { "false" }));
-    }
-    // Log any unsupported standard check attributes for fidelity visibility.
-    for (key, val) in &std_check.unsupported_attrs {
-        tracing::warn!(
-            check_system = %std_check.system,
-            attr_key = %key,
-            attr_val = %val,
-            "unsupported standard XCCDF check attribute preserved in opaque source; \
-             may not affect CF evaluation"
-        );
     }
     writer.write_event(Event::Start(check))?;
     match &std_check.body {
@@ -3228,7 +3219,33 @@ mod tests {
     }
 
     #[test]
-    fn imported_reference_check_is_preserved_for_non_native_policy() {
+    fn reference_only_check_is_always_rejected() {
+        // Reference-only checks are always rejected because the current writer
+        // returns a single XML document, not a ZIP or SCAP package, so the
+        // referenced external content cannot be included in the export.
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
+                "content_ref_href": "oval-definitions.xml",
+                "content_ref_name": "oval:com.example:def:1"
+            }
+        });
+        let snap = make_single_policy_snapshot(vec![policy]);
+        assert!(
+            matches!(
+                write_bundle_xccdf_export(&snap),
+                Err(XccdfWriterError::MalformedImportedCheck { .. })
+            ),
+            "Reference-only check must be rejected"
+        );
+    }
+
+    #[test]
+    fn reference_only_check_with_long_opaque_xml_is_still_rejected() {
+        // Even with a long opaque_xml, reference-only checks are rejected
+        // because opaque_xml is a CF extension element, not a usable inline
+        // check body.
         let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
         policy.compliance_metadata = json!({
             "check": {
@@ -3238,34 +3255,13 @@ mod tests {
             }
         });
         policy.opaque_xml = Some("<oval-definitions xmlns=\"http://oval.mitre.org/schema/oval-definitions-5\"><definition id=\"oval:com.example:def:1\" class=\"compliance\"><metadata><title>Check firewall</title></metadata></definition></oval-definitions>".to_owned());
-        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![policy])).unwrap();
-        assert!(xml.contains("check-content-ref"));
-        assert!(xml.contains("href=\"oval-definitions.xml\""));
-        assert!(xml.contains("name=\"oval:com.example:def:1\""));
-        assert!(
-            !xml.contains("<check-content>"),
-            "Reference check must not emit inline content"
-        );
-    }
-
-    #[test]
-    fn reference_only_check_without_opaque_xml_is_rejected() {
-        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
-        policy.compliance_metadata = json!({
-            "check": {
-                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
-                "content_ref_href": "oval-definitions.xml",
-                "content_ref_name": "oval:com.example:def:1"
-            }
-            // No opaque_xml fallback
-        });
         let snap = make_single_policy_snapshot(vec![policy]);
         assert!(
             matches!(
                 write_bundle_xccdf_export(&snap),
                 Err(XccdfWriterError::MalformedImportedCheck { .. })
             ),
-            "Reference-only check without opaque_xml must be rejected"
+            "Reference-only check with long opaque_xml must still be rejected"
         );
     }
 
@@ -3279,7 +3275,6 @@ mod tests {
                 "content_ref_name": "oval:com.example:def:1"
             }
         });
-        // Trivial placeholder — too short and does not contain referenced content
         policy.opaque_xml = Some("<custom-xml/>".to_owned());
         let snap = make_single_policy_snapshot(vec![policy]);
         assert!(
@@ -3287,7 +3282,7 @@ mod tests {
                 write_bundle_xccdf_export(&snap),
                 Err(XccdfWriterError::MalformedImportedCheck { .. })
             ),
-            "Reference check with trivial opaque_xml fallback must be rejected"
+            "Reference check with trivial opaque_xml must be rejected"
         );
     }
 
@@ -3344,13 +3339,14 @@ mod tests {
     }
 
     #[test]
-    fn standard_check_multi_check_false_is_preserved() {
+    fn standard_check_multi_check_false_and_negate_zero_are_preserved() {
         let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
         policy.compliance_metadata = json!({
             "check": {
                 "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
                 "content": "Verify the setting.",
-                "multi-check": "false"
+                "multi-check": "false",
+                "negate": "0"
             }
         });
         let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![policy])).unwrap();
@@ -3359,8 +3355,8 @@ mod tests {
             "multi-check=false must be preserved"
         );
         assert!(
-            !xml.contains("negate"),
-            "negate must not appear when not set"
+            xml.contains("negate=\"false\""),
+            "negate=0 must be emitted as negate=false"
         );
     }
 
@@ -3520,6 +3516,194 @@ mod tests {
                 Err(XccdfWriterError::MalformedImportedFix { .. })
             ),
             "Fix with empty system must be rejected"
+        );
+    }
+
+    // ── Boolean parsing tests ──────────────────────────────────────────────
+
+    #[test]
+    fn negate_one_is_emitted_as_true() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
+                "content": "Verify the setting.",
+                "negate": "1"
+            }
+        });
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![policy])).unwrap();
+        assert!(
+            xml.contains("negate=\"true\""),
+            "negate=\"1\" must be emitted as negate=\"true\""
+        );
+    }
+
+    #[test]
+    fn negate_zero_is_emitted_as_false() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
+                "content": "Verify the setting.",
+                "negate": "0"
+            }
+        });
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![policy])).unwrap();
+        assert!(
+            xml.contains("negate=\"false\""),
+            "negate=\"0\" must be emitted as negate=\"false\""
+        );
+    }
+
+    #[test]
+    fn multi_check_true_string_is_preserved() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
+                "content": "Verify the setting.",
+                "multi-check": "true"
+            }
+        });
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![policy])).unwrap();
+        assert!(
+            xml.contains("multi-check=\"true\""),
+            "multi-check=\"true\" must be preserved"
+        );
+    }
+
+    #[test]
+    fn multi_check_false_string_is_preserved() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
+                "content": "Verify the setting.",
+                "multi-check": "false"
+            }
+        });
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![policy])).unwrap();
+        assert!(
+            xml.contains("multi-check=\"false\""),
+            "multi-check=\"false\" must be preserved"
+        );
+    }
+
+    #[test]
+    fn negate_yes_is_rejected() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
+                "content": "Verify the setting.",
+                "negate": "yes"
+            }
+        });
+        let snap = make_single_policy_snapshot(vec![policy]);
+        assert!(
+            matches!(
+                write_bundle_xccdf_export(&snap),
+                Err(XccdfWriterError::MalformedImportedCheck { .. })
+            ),
+            "negate=\"yes\" must be rejected as invalid XSD boolean"
+        );
+    }
+
+    #[test]
+    fn multi_check_invalid_value_is_rejected() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
+                "content": "Verify the setting.",
+                "multi-check": "on"
+            }
+        });
+        let snap = make_single_policy_snapshot(vec![policy]);
+        assert!(
+            matches!(
+                write_bundle_xccdf_export(&snap),
+                Err(XccdfWriterError::MalformedImportedCheck { .. })
+            ),
+            "multi-check=\"on\" must be rejected as invalid XSD boolean"
+        );
+    }
+
+    #[test]
+    fn json_boolean_negate_is_accepted() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
+                "content": "Verify the setting.",
+                "negate": true
+            }
+        });
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![policy])).unwrap();
+        assert!(
+            xml.contains("negate=\"true\""),
+            "JSON boolean negate=true must be accepted and emitted as negate=\"true\""
+        );
+    }
+
+    #[test]
+    fn json_boolean_multi_check_false_is_accepted() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
+                "content": "Verify the setting.",
+                "multi-check": false
+            }
+        });
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![policy])).unwrap();
+        assert!(
+            xml.contains("multi-check=\"false\""),
+            "JSON boolean multi-check=false must be accepted and emitted"
+        );
+    }
+
+    // ── Unsupported attribute tests ─────────────────────────────────────────
+
+    #[test]
+    fn unsupported_check_attribute_is_rejected() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
+                "content": "Verify the setting.",
+                "unknown-attr": "some-value"
+            }
+        });
+        let snap = make_single_policy_snapshot(vec![policy]);
+        assert!(
+            matches!(
+                write_bundle_xccdf_export(&snap),
+                Err(XccdfWriterError::MalformedImportedCheck { .. })
+            ),
+            "Unknown check attributes must cause export rejection"
+        );
+    }
+
+    // ── Inline check content test ───────────────────────────────────────────
+
+    #[test]
+    fn inline_check_content_exports_successfully() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "http://oval.mitre.org/XMLSchema/oval-definitions-5",
+                "content": "Verify the firewall is enabled."
+            }
+        });
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![policy])).unwrap();
+        assert!(
+            xml.contains("check-content"),
+            "Inline check must emit check-content element"
+        );
+        assert!(
+            xml.contains("Verify the firewall is enabled."),
+            "Inline check content must be preserved"
         );
     }
 }

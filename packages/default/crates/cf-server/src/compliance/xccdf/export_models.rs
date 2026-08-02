@@ -9,6 +9,10 @@ use uuid::Uuid;
 
 use super::super::canonical::{ImplementationState, PublicationState};
 
+/// Backwards-compatible export-model name for the canonical parser check body.
+/// The parser, preview, and writer therefore share one body representation.
+pub type XccdfCheckBody = super::models::CheckBody;
+
 /// Valid XCCDF 1.2 `<fix>` complexity enumeration values.
 pub(crate) const VALID_FIX_COMPLEXITY: &[&str] = &["unknown", "low", "medium", "high"];
 /// Valid XCCDF 1.2 `<fix>` disruption enumeration values.
@@ -24,6 +28,29 @@ fn is_xccdf_ncname(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
 }
 
+/// Parse a value as a strict XSD boolean lexical representation.
+///
+/// Accepted string values: `"true"`, `"1"`, `"false"`, `"0"`.
+/// Also accepts native JSON boolean values (`true`/`false`).
+/// Returns `Err` for any other value — does not silently coerce.
+fn parse_xsd_boolean(attribute: &str, value: &Value) -> Result<bool, ImportedCheckError> {
+    match value {
+        Value::Bool(b) => Ok(*b),
+        Value::String(s) => match s.as_str() {
+            "true" | "1" => Ok(true),
+            "false" | "0" => Ok(false),
+            other => Err(ImportedCheckError::InvalidBoolean {
+                attribute: attribute.to_owned(),
+                value: other.to_owned(),
+            }),
+        },
+        other => Err(ImportedCheckError::InvalidBoolean {
+            attribute: attribute.to_owned(),
+            value: other.to_string(),
+        }),
+    }
+}
+
 /// Complete data for a single source-object mapping (standard identifiers).
 #[derive(Debug, Clone)]
 pub struct XccdfSourceMapping {
@@ -32,40 +59,22 @@ pub struct XccdfSourceMapping {
     pub fidelity: String,
 }
 
-/// The body of an imported XCCDF standard check — exactly one form is valid.
-///
-/// XCCDF 1.2 defines `<check-content-ref>` and `<check-content>` as exclusive
-/// alternatives within a `<check>`. Both cannot coexist, and a ref name
-/// without an href is also invalid.
-#[derive(Debug, Clone)]
-pub enum XccdfCheckBody {
-    /// Inline check content. Contains the check text directly.
-    Inline { content: String },
-    /// External reference. `href` is required; `name` is optional.
-    Reference { href: String, name: Option<String> },
-}
-
 /// A validated imported standard XCCDF check element.
 ///
 /// Preserves every XCCDF 1.2 `<check>` attribute that affects evaluation
-/// semantics. Unsupported attributes are captured in `unsupported_attrs`
-/// rather than silently dropped, so the writer can emit a fidelity warning
-/// or preserve them in opaque source content.
+/// semantics. Unknown attributes cause export rejection rather than silent
+/// data loss.
 #[derive(Debug, Clone)]
 pub struct XccdfStandardCheck {
     pub system: String,
     pub body: XccdfCheckBody,
     pub selector: Option<String>,
-    /// XCCDF 1.2 `multi-check` attribute: when `"true"`, the check may
+    /// XCCDF 1.2 `multi-check` attribute: when true, the check may
     /// produce multiple results (one per selector or target).
     pub multi_check: Option<bool>,
-    /// XCCDF 1.2 `negate` attribute: when `"true"`, the check result is
+    /// XCCDF 1.2 `negate` attribute: when true, the check result is
     /// inverted (pass becomes fail and vice versa).
     pub negate: Option<bool>,
-    /// Any standard check attributes not represented in the typed fields.
-    /// Preserved for fidelity; the writer may emit a warning or embed them
-    /// in opaque source content.
-    pub unsupported_attrs: Vec<(String, String)>,
 }
 
 /// A validated imported standard XCCDF fix element.
@@ -114,13 +123,25 @@ pub enum ImportedCheckError {
     RefNameWithoutHref,
     /// Neither inline content nor a reference is present.
     EmptyBody,
-    /// The check body is a reference-only form and no opaque_xml fallback is
-    /// available. Standalone export requires self-contained check content.
+    /// The check body is a reference-only form. A standalone XCCDF XML export
+    /// must not contain an unresolved external check reference unless the
+    /// export package contains the referenced resource. Since the current
+    /// writer returns one XML document (not a ZIP or SCAP package), this is
+    /// always rejected.
     ReferenceOnlyWithoutFallback,
-    /// The check body is a reference-only form and opaque_xml is present but
-    /// contains only whitespace or a trivial placeholder. A self-contained
-    /// fallback for the referenced check content is required.
-    ReferenceFallbackInsufficient,
+    /// A check attribute has a value that is not a valid XSD boolean lexical
+    /// representation. Only `"true"`, `"1"`, `"false"`, `"0"`, and native
+    /// JSON booleans are accepted.
+    InvalidBoolean {
+        attribute: String,
+        value: String,
+    },
+    /// The check contains attributes not represented in the typed model.
+    /// These must not be silently dropped. Export is rejected with a typed
+    /// validation error identifying the affected attribute names.
+    UnsupportedCheckAttributes {
+        attributes: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for ImportedCheckError {
@@ -147,14 +168,19 @@ impl std::fmt::Display for ImportedCheckError {
             Self::ReferenceOnlyWithoutFallback => write!(
                 f,
                 "compliance_metadata.check is a reference-only form \
-                 (href without inline content) and no opaque_xml fallback is available; \
-                 standalone XCCDF export requires self-contained check content"
+                 (href without inline content); standalone XCCDF export requires \
+                 self-contained check content"
             ),
-            Self::ReferenceFallbackInsufficient => write!(
+            Self::InvalidBoolean { attribute, value } => write!(
                 f,
-                "compliance_metadata.check is a reference-only form and opaque_xml is present \
-                 but contains only whitespace or a trivial placeholder; a self-contained \
-                 fallback for the referenced check content is required"
+                "compliance_metadata.check.{attribute} is {value:?} which is not a valid \
+                 XSD boolean; expected one of: \"true\", \"1\", \"false\", \"0\""
+            ),
+            Self::UnsupportedCheckAttributes { attributes } => write!(
+                f,
+                "compliance_metadata.check contains unsupported attributes that cannot be \
+                 silently dropped: {}",
+                attributes.join(", ")
             ),
         }
     }
@@ -214,8 +240,9 @@ impl XccdfPolicyExport {
     /// structurally invalid. Callers must propagate errors rather than silently
     /// replacing with a synthesized check.
     ///
-    /// A reference-only check body is rejected unless `opaque_xml` is present
-    /// to provide a self-contained fallback for standalone artifact consumers.
+    /// Reference-only checks are always rejected because the current writer
+    /// returns a single XML document, not a ZIP or SCAP package, so the
+    /// referenced external content cannot be included in the export.
     pub fn parse_standard_check(&self) -> Result<Option<XccdfStandardCheck>, ImportedCheckError> {
         let value = match self.compliance_metadata.get("check") {
             Some(v) => v,
@@ -255,29 +282,12 @@ impl XccdfPolicyExport {
                 .to_owned();
             XccdfCheckBody::Inline { content }
         } else if has_href {
-            // A reference-only check is not self-contained. It is valid only
-            // when opaque_xml provides a meaningful fallback that readers can
-            // use. An empty, whitespace-only, or trivial placeholder string
-            // does not make the referenced content resolvable.
-            match &self.opaque_xml {
-                None => {
-                    return Err(ImportedCheckError::ReferenceOnlyWithoutFallback);
-                }
-                Some(xml) if xml.trim().is_empty() || xml.len() < 20 => {
-                    return Err(ImportedCheckError::ReferenceFallbackInsufficient);
-                }
-                _ => {}
-            }
-            let href = value
-                .get("content_ref_href")
-                .and_then(|v| v.as_str())
-                .unwrap()
-                .to_owned();
-            let name = value
-                .get("content_ref_name")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned);
-            XccdfCheckBody::Reference { href, name }
+            // Reference-only checks are always rejected. A standalone XCCDF
+            // XML export must not contain an unresolved external reference.
+            // The opaque_xml field is a Crystal Forge extension element, not
+            // a usable inline check body — it does not satisfy the XCCDF
+            // requirement for self-contained check content.
+            return Err(ImportedCheckError::ReferenceOnlyWithoutFallback);
         } else {
             return Err(ImportedCheckError::EmptyBody);
         };
@@ -287,20 +297,20 @@ impl XccdfPolicyExport {
             .and_then(|v| v.as_str())
             .map(str::to_owned);
 
-        let multi_check = value
-            .get("multi-check")
-            .and_then(|v| v.as_str())
-            .map(|s| s.eq_ignore_ascii_case("true"));
+        let multi_check = match value.get("multi-check") {
+            Some(v) => Some(parse_xsd_boolean("multi-check", v)?),
+            None => None,
+        };
 
-        let negate = value
-            .get("negate")
-            .and_then(|v| v.as_str())
-            .map(|s| s.eq_ignore_ascii_case("true"));
+        let negate = match value.get("negate") {
+            Some(v) => Some(parse_xsd_boolean("negate", v)?),
+            None => None,
+        };
 
-        // Capture any standard XCCDF check attributes not represented in the
-        // typed fields. Known keys are excluded; the rest are preserved for
-        // fidelity so the writer can emit a warning or embed them in opaque
-        // source content.
+        // Reject any unknown attributes. Unknown check attributes must not
+        // be silently dropped — they may affect evaluation semantics. The
+        // export is rejected with a typed validation error identifying the
+        // affected attributes.
         let known_keys: &[&str] = &[
             "system",
             "content",
@@ -310,15 +320,18 @@ impl XccdfPolicyExport {
             "multi-check",
             "negate",
         ];
-        let mut unsupported_attrs = Vec::new();
+        let mut unsupported = Vec::new();
         if let Some(obj) = value.as_object() {
-            for (key, val) in obj {
+            for key in obj.keys() {
                 if !known_keys.contains(&key.as_str()) {
-                    if let Some(s) = val.as_str() {
-                        unsupported_attrs.push((key.clone(), s.to_owned()));
-                    }
+                    unsupported.push(key.clone());
                 }
             }
+        }
+        if !unsupported.is_empty() {
+            return Err(ImportedCheckError::UnsupportedCheckAttributes {
+                attributes: unsupported,
+            });
         }
 
         Ok(Some(XccdfStandardCheck {
@@ -327,7 +340,6 @@ impl XccdfPolicyExport {
             selector,
             multi_check,
             negate,
-            unsupported_attrs,
         }))
     }
 

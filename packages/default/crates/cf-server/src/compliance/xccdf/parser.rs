@@ -146,6 +146,41 @@ fn attr<'a>(attrs: &'a HashMap<Vec<u8>, String>, key: &[u8]) -> Option<&'a str> 
     attrs.get(key).map(String::as_str)
 }
 
+/// Parse an XSD boolean lexical value from an attribute string.
+///
+/// Accepted values: `"true"`, `"1"`, `"false"`, `"0"`.
+/// Returns `None` for unrecognized values; the caller records a blocking
+/// diagnostic rather than silently coercing the value to `false`.
+fn parse_xsd_boolean(s: &str) -> Option<bool> {
+    match s {
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_check_boolean(
+    attrs: &HashMap<Vec<u8>, String>,
+    key: &[u8],
+    errors: &mut Vec<Diagnostic>,
+) -> Option<bool> {
+    let value = attr(attrs, key)?;
+    match parse_xsd_boolean(value) {
+        Some(parsed) => Some(parsed),
+        None => {
+            errors.push(Diagnostic::error(
+                "INVALID_XSD_BOOLEAN",
+                &format!(
+                    "{} must be one of true, 1, false, or 0; got {:?}",
+                    String::from_utf8_lossy(key),
+                    value
+                ),
+            ));
+            None
+        }
+    }
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 /// Parse a raw byte slice as XCCDF/XML with security limits applied.
@@ -476,6 +511,22 @@ impl ParserState {
                 self.parse_check_start(&attrs);
                 ParseControl::Continue
             }
+            (ElementNamespace::Xccdf, b"check-content-ref") => {
+                if let Some(ref mut check) = self.current_check {
+                    let Some(href) = attr(&attrs, b"href").filter(|value| !value.is_empty()) else {
+                        self.errors.push(Diagnostic::error(
+                            "CHECK_REF_MISSING_HREF",
+                            "check-content-ref requires a non-empty href attribute",
+                        ));
+                        return ParseControl::Abort;
+                    };
+                    check.body = CheckBody::Reference {
+                        href: href.to_owned(),
+                        name: attr(&attrs, b"name").map(str::to_owned),
+                    };
+                }
+                ParseControl::Continue
+            }
             (ElementNamespace::Xccdf, b"fix") => {
                 self.parse_fix_start(&attrs);
                 ParseControl::Continue
@@ -601,10 +652,15 @@ impl ParserState {
             }
             (ElementNamespace::Xccdf, b"check-content") => {
                 if let Some(ref mut check) = self.current_check {
-                    check.content = self.current_text.clone();
+                    check.body = CheckBody::Inline {
+                        content: self.current_text.clone(),
+                    };
                 }
             }
             (ElementNamespace::Xccdf, b"fix") => {
+                if let Some(ref mut fix) = self.current_fix {
+                    fix.content = self.current_text.clone();
+                }
                 let fix = self.current_fix.take();
                 if let Some(ref mut rule) = self.current_rule {
                     rule.fix = fix;
@@ -926,18 +982,26 @@ impl ParserState {
     fn parse_check_start(&mut self, attrs: &HashMap<Vec<u8>, String>) {
         let system = attr(attrs, b"system").unwrap_or("").to_string();
         let selector = attr(attrs, b"selector").map(String::from);
+        let multi_check = parse_check_boolean(attrs, b"multi-check", &mut self.errors);
+        let negate = parse_check_boolean(attrs, b"negate", &mut self.errors);
         self.current_check = Some(CheckContent {
             system,
-            content: String::new(),
+            body: CheckBody::Inline {
+                content: String::new(),
+            },
             selector,
+            multi_check,
+            negate,
         });
     }
 
     fn parse_fix_start(&mut self, attrs: &HashMap<Vec<u8>, String>) {
+        let id = attr(attrs, b"id").map(String::from);
         let system = attr(attrs, b"system").map(String::from);
         let complexity = attr(attrs, b"complexity").map(String::from);
         let disruption = attr(attrs, b"disruption").map(String::from);
         self.current_fix = Some(FixContent {
+            id,
             system,
             content: String::new(),
             complexity,
@@ -1075,6 +1139,70 @@ mod tests {
         assert_eq!(parsed.errors.len(), 0);
         assert_eq!(parsed.rules.len(), 1);
         assert_eq!(parsed.rules[0].id, "xccdf_org.crystalforge_rule_test");
+    }
+
+    #[test]
+    fn parses_check_and_fix_fidelity_fields() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="b">
+  <status>draft</status>
+  <title>Test</title>
+  <version>1</version>
+  <Rule id="r">
+    <title>Rule</title>
+    <fix id="fix-1" system="urn:example:fix" complexity="medium" disruption="low">Apply it</fix>
+    <check system="urn:example:check" selector="sel" multi-check="1" negate="0">
+      <check-content>Verify it</check-content>
+    </check>
+  </Rule>
+</Benchmark>"#;
+        let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
+        assert!(parsed.errors.is_empty(), "unexpected errors: {:?}", parsed.errors);
+        let rule = &parsed.rules[0];
+        let check = rule.check.as_ref().expect("check");
+        assert_eq!(check.system, "urn:example:check");
+        assert_eq!(check.selector.as_deref(), Some("sel"));
+        assert_eq!(check.multi_check, Some(true));
+        assert_eq!(check.negate, Some(false));
+        assert!(matches!(
+            &check.body,
+            CheckBody::Inline { content } if content == "Verify it"
+        ));
+        let fix = rule.fix.as_ref().expect("fix");
+        assert_eq!(fix.id.as_deref(), Some("fix-1"));
+        assert_eq!(fix.system.as_deref(), Some("urn:example:fix"));
+        assert_eq!(fix.complexity.as_deref(), Some("medium"));
+        assert_eq!(fix.disruption.as_deref(), Some("low"));
+        assert_eq!(fix.content, "Apply it");
+    }
+
+    #[test]
+    fn parses_check_content_reference() {
+        let xml = r#"<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="b">
+  <status>draft</status><title>Test</title><version>1</version>
+  <Rule id="r"><title>Rule</title>
+    <check system="urn:example:check"><check-content-ref href="checks.xml" name="check-1"/></check>
+  </Rule>
+</Benchmark>"#;
+        let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
+        let check = parsed.rules[0].check.as_ref().expect("check");
+        assert!(matches!(
+            &check.body,
+            CheckBody::Reference { href, name }
+                if href == "checks.xml" && name.as_deref() == Some("check-1")
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_check_boolean() {
+        let xml = r#"<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="b">
+  <status>draft</status><title>Test</title><version>1</version>
+  <Rule id="r"><title>Rule</title>
+    <check system="urn:example:check" negate="yes"><check-content>Verify</check-content></check>
+  </Rule>
+</Benchmark>"#;
+        let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
+        assert!(parsed.errors.iter().any(|error| error.code == "INVALID_XSD_BOOLEAN"));
     }
 
     #[test]
