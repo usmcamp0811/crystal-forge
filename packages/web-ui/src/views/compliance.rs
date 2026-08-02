@@ -55,6 +55,7 @@ pub fn ComplianceView() -> Element {
     let mut environments = use_signal(Vec::<EnvironmentSummary>::new);
     let mut sys_filter = use_signal(|| "all".to_string());
     let mut selected_export_version_id = use_signal(|| None::<uuid::Uuid>);
+    let mut export_version_bundle_id = use_signal(|| None::<uuid::Uuid>);
 
     // Generation counters guard against stale async responses overwriting the
     // state of a subsequently-selected bundle or system.  Each spawn captures
@@ -149,12 +150,18 @@ pub fn ComplianceView() -> Element {
 
     use_effect(move || {
         let bundle_id = *selected_bundle_id.read();
+        if *export_version_bundle_id.read() == bundle_id {
+            return;
+        }
+        export_version_bundle_id.set(bundle_id);
         let bundles_snapshot = bundles.read().clone();
         let version_id = bundle_id
             .and_then(|bid| bundles_snapshot.iter().find(|b| b.id == bid))
             .and_then(|b| {
-                b.current_draft_version_id
-                    .or(b.current_published_version_id)
+                // Prefer published for auditor-facing exports; draft export
+                // remains available through the explicit version selector.
+                b.current_published_version_id
+                    .or(b.current_draft_version_id)
             });
         selected_export_version_id.set(version_id);
     });
@@ -223,9 +230,23 @@ pub fn ComplianceView() -> Element {
                             // Export XCCDF: enabled when a bundle version is selected.
                             let bundle_selected = selected_bundle_id.read().is_some();
                             let has_version = selected_export_version_id.read().is_some();
+                            let export_label = selected_bundle.as_ref().and_then(|bundle| {
+                                let selected = *selected_export_version_id.read();
+                                if selected == bundle.current_published_version_id {
+                                    bundle.current_published_version.as_ref().map(|version| {
+                                        format!("Export XCCDF: {version} published")
+                                    })
+                                } else if selected == bundle.current_draft_version_id {
+                                    bundle.current_draft_version.as_ref().map(|version| {
+                                        format!("Export XCCDF: {version} draft")
+                                    })
+                                } else {
+                                    None
+                                }
+                            }).unwrap_or_else(|| "Export XCCDF".to_string());
                             items.push(if bundle_selected && has_version {
                                 IOMenuItem::action_with_icon(
-                                    "Export this bundle (XCCDF .xml)",
+                                    export_label,
                                     IconName::Download,
                                 )
                             } else if bundle_selected {
@@ -313,12 +334,17 @@ pub fn ComplianceView() -> Element {
                     // Right: bundle content
                     if let Some(bundle) = selected_bundle {
                         div { style: "display:flex;flex-direction:column;gap:14px;min-width:0;",
-                            BundleHeader {
-                                bundle: bundle.clone(),
-                                on_edit: move |_| show_edit_bundle.set(true),
-                                is_admin,
-                            }
-                            if let Some(err) = systems_error.read().as_ref() {
+                             BundleHeader {
+                                 bundle: bundle.clone(),
+                                 on_edit: move |_| show_edit_bundle.set(true),
+                                 is_admin,
+                             }
+                             XccdfVersionSelector {
+                                 bundle: bundle.clone(),
+                                 selected_version_id: *selected_export_version_id.read(),
+                                 on_select: move |version_id| selected_export_version_id.set(version_id),
+                             }
+                             if let Some(err) = systems_error.read().as_ref() {
                                 div { class: "sd-callout sd-callout-danger",
                                     Icon { name: IconName::X, size: 13 }
                                     div { style: "font-size:12px;display:flex;flex-direction:column;gap:6px;",
@@ -475,6 +501,59 @@ pub fn ComplianceView() -> Element {
             ImportStigModal {
                 environments: environments.read().clone(),
                 on_close: move |_| show_import_stig.set(false),
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct XccdfVersionSelectorProps {
+    bundle: ComplianceBundleSummary,
+    selected_version_id: Option<uuid::Uuid>,
+    on_select: EventHandler<Option<uuid::Uuid>>,
+}
+
+#[component]
+fn XccdfVersionSelector(props: XccdfVersionSelectorProps) -> Element {
+    let bundle = &props.bundle;
+    let selected = props.selected_version_id;
+    let has_version = bundle.current_published_version_id.is_some()
+        || bundle.current_draft_version_id.is_some();
+
+    rsx! {
+        if has_version {
+            div {
+                class: "sd-callout sd-callout-info",
+                style: "display:flex;align-items:center;gap:10px;",
+                label { style: "font-size:12px;font-weight:600;", "XCCDF export version" }
+                select {
+                    class: "input focus-ring",
+                    style: "width:auto;min-width:260px;",
+                    value: selected.map(|id| id.to_string()).unwrap_or_default(),
+                    onchange: move |event| {
+                        props.on_select.call(uuid::Uuid::parse_str(&event.value()).ok());
+                    },
+                    if let Some(version_id) = bundle.current_published_version_id {
+                        option {
+                            value: "{version_id}",
+                            selected: selected == Some(version_id),
+                            "Export XCCDF: {bundle.current_published_version.clone().unwrap_or_else(|| \"published\".to_string())} published"
+                        }
+                    }
+                    if let Some(version_id) = bundle.current_draft_version_id {
+                        option {
+                            value: "{version_id}",
+                            selected: selected == Some(version_id),
+                            "Export XCCDF: {bundle.current_draft_version.clone().unwrap_or_else(|| \"draft\".to_string())} draft"
+                        }
+                    }
+                }
+            }
+        } else {
+            div {
+                class: "sd-callout sd-callout-warning",
+                style: "font-size:12px;",
+                "No published or draft version is available for XCCDF export."
             }
         }
     }

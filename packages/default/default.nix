@@ -106,6 +106,7 @@ let
       "--bin" "server"
       "--bin" "hardening-worker"
       "--bin" "test-agent"
+      "--bin" "xccdf-export-fixture"
       "--features" "cf-server/embedded-ui"
     ];
     cargoCheckFlags = cargoBuildFlags;

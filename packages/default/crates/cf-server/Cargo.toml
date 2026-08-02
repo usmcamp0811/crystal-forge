@@ -80,6 +80,10 @@ name = "test-agent"
 path = "src/bin/test-agent.rs"
 
 [[bin]]
+name = "xccdf-export-fixture"
+path = "src/bin/xccdf-export-fixture.rs"
+
+[[bin]]
 name = "hardening-worker"
 path = "src/bin/hardening-worker.rs"
 

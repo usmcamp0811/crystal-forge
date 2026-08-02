@@ -64,16 +64,16 @@ impl XccdfBundleExport {
     /// Stable benchmark ID derived from the bundle-version UUID.
     pub fn benchmark_id(&self) -> String {
         format!(
-            "xccdf_org.crystalforge.benchmark:{}",
-            self.bundle_version_id
+            "xccdf_crystalforge_benchmark_{}",
+            self.bundle_version_id.simple()
         )
     }
 
     /// Stable baseline profile ID.
     pub fn profile_id(&self) -> String {
         format!(
-            "xccdf_org.crystalforge.profile:{}:baseline",
-            self.bundle_version_id
+            "xccdf_crystalforge_profile_{}_baseline",
+            self.bundle_version_id.simple()
         )
     }
 }
@@ -82,8 +82,8 @@ impl XccdfPolicyExport {
     /// Stable rule ID derived from the policy-version UUID.
     pub fn rule_id(&self) -> String {
         format!(
-            "xccdf_org.crystalforge.rule:{}",
-            self.policy_version_id
+            "xccdf_crystalforge_rule_{}",
+            self.policy_version_id.simple()
         )
     }
 }
