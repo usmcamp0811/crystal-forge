@@ -228,111 +228,14 @@ pub async fn xccdf_preview(
     }
 
     let limits = InterchangeLimits::default();
-    let mut accumulated = Vec::new();
-    let mut filename: Option<String> = None;
-    let mut total_bytes: usize = 0;
-    let mut received_file = false;
 
-    // Read multipart incrementally.
-    //
-    // * Only the field named exactly "file" is accepted as the upload field.
-    //   Any field with a filename but a different name is rejected (400).
-    // * Exactly one upload file is accepted; a second file field is rejected (400).
-    // * Non-file fields are drained to satisfy the route-level body limit
-    //   without contributing to the accumulated bytes.
-    // * Accumulation uses MAX_XCCDF_UPLOAD_BYTES (the larger of the XML and ZIP
-    //   limits) so that a 50 MiB ZIP package is not rejected before content
-    //   detection.  After detection the correct per-type limit is enforced.
-    loop {
-        let mut field = match multipart.next_field().await {
-            Ok(Some(field)) => field,
-            Ok(None) => break,
-            Err(e) if is_body_limit_error(&e) => {
-                return (
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    Json(ApiError {
-                        error: "Request too large".into(),
-                        message: "Multipart request exceeds the route body limit".into(),
-                        details: None,
-                    }),
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(ApiError {
-                        error: "Malformed multipart request".into(),
-                        message: format!("Unable to decode multipart upload: {e}"),
-                        details: None,
-                    }),
-                )
-                    .into_response();
-            }
-        };
-        let field_name = field.name().map(String::from);
-        let has_filename = field.file_name().is_some();
+    let upload = match read_multipart_upload(&mut multipart).await {
+        Ok(upload) => upload,
+        Err(error) => return multipart_read_error_response(error),
+    };
 
-        if has_filename {
-            // Enforce field name == "file".
-            if field_name.as_deref() != Some("file") {
-                return bad_request(
-                    "Upload field must be named 'file'; unexpected field name in multipart",
-                );
-            }
-            // Reject a second file field.
-            if received_file {
-                return bad_request("Exactly one file field named 'file' is required");
-            }
-            received_file = true;
-            filename = field.file_name().map(String::from);
-        }
-
-        // Read incrementally.
-        loop {
-            match field.chunk().await {
-                Ok(Some(chunk)) => {
-                    if !has_filename {
-                        // Drain non-file fields without accumulating.
-                        continue;
-                    }
-                    total_bytes += chunk.len();
-                    if total_bytes > MAX_XCCDF_UPLOAD_BYTES {
-                        return (
-                            StatusCode::PAYLOAD_TOO_LARGE,
-                            Json(ApiError {
-                                error: "File too large".into(),
-                                message: format!(
-                                    "Upload exceeds the {} byte limit",
-                                    MAX_XCCDF_UPLOAD_BYTES
-                                ),
-                                details: None,
-                            }),
-                        )
-                            .into_response();
-                    }
-                    accumulated.extend_from_slice(&chunk);
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    if is_body_limit_error(&e) {
-                        return (
-                            StatusCode::PAYLOAD_TOO_LARGE,
-                            Json(ApiError {
-                                error: "Request too large".into(),
-                                message: "Multipart request exceeds the route body limit".into(),
-                                details: None,
-                            }),
-                        )
-                            .into_response();
-                    }
-                    return internal_error(&format!("Failed to read upload: {e}"));
-                }
-            }
-        }
-    }
-
-    let bytes = accumulated;
+    let bytes = upload.bytes;
+    let filename = upload.filename;
     if bytes.is_empty() {
         return bad_request("No file field named 'file' was attached");
     };
@@ -609,54 +512,7 @@ pub async fn export_bundle_xccdf(
 
     let snapshot = match load_export_snapshot(&pool, version_id).await {
         Ok(s) => s,
-        Err(ExportSnapshotError::NotFound) => return not_found(),
-        Err(ExportSnapshotError::InvalidGroupProjection { source }) => {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(ApiError {
-                    error: "validation_error".into(),
-                    message: format!("Invalid group structure: {source}"),
-                    details: None,
-                }),
-            )
-                .into_response();
-        }
-        Err(ExportSnapshotError::InvalidImportedCheck {
-            policy_version_id,
-            source,
-        }) => {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(ApiError {
-                    error: "validation_error".into(),
-                    message: format!(
-                        "Policy {policy_version_id} has invalid imported check: {source}"
-                    ),
-                    details: None,
-                }),
-            )
-                .into_response();
-        }
-        Err(ExportSnapshotError::InvalidImportedFix {
-            policy_version_id,
-            source,
-        }) => {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(ApiError {
-                    error: "validation_error".into(),
-                    message: format!(
-                        "Policy {policy_version_id} has invalid imported fix: {source}"
-                    ),
-                    details: None,
-                }),
-            )
-                .into_response();
-        }
-        Err(ExportSnapshotError::Db(e)) => {
-            tracing::error!(error = %e, %version_id, "failed to load export snapshot");
-            return internal_error("Failed to load bundle version for export");
-        }
+        Err(error) => return export_snapshot_error_response(error, version_id),
     };
 
     match write_bundle_xccdf_export(&snapshot) {
@@ -726,6 +582,52 @@ enum ExportSnapshotError {
 impl From<anyhow::Error> for ExportSnapshotError {
     fn from(e: anyhow::Error) -> Self {
         Self::Db(e)
+    }
+}
+
+fn export_snapshot_error_response(
+    error: ExportSnapshotError,
+    version_id: Uuid,
+) -> axum::response::Response {
+    match error {
+        ExportSnapshotError::NotFound => not_found(),
+        ExportSnapshotError::InvalidGroupProjection { source } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ApiError {
+                error: "validation_error".into(),
+                message: format!("Invalid group structure: {source}"),
+                details: None,
+            }),
+        )
+            .into_response(),
+        ExportSnapshotError::InvalidImportedCheck {
+            policy_version_id,
+            source,
+        } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ApiError {
+                error: "validation_error".into(),
+                message: format!("Policy {policy_version_id} has invalid imported check: {source}"),
+                details: None,
+            }),
+        )
+            .into_response(),
+        ExportSnapshotError::InvalidImportedFix {
+            policy_version_id,
+            source,
+        } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ApiError {
+                error: "validation_error".into(),
+                message: format!("Policy {policy_version_id} has invalid imported fix: {source}"),
+                details: None,
+            }),
+        )
+            .into_response(),
+        ExportSnapshotError::Db(error) => {
+            tracing::error!(error = %error, %version_id, "failed to load export snapshot");
+            internal_error("Failed to load bundle version for export")
+        }
     }
 }
 
@@ -1307,6 +1209,103 @@ pub async fn policy_interchange_export(
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
+#[derive(Debug, PartialEq, Eq)]
+struct MultipartUpload {
+    bytes: Vec<u8>,
+    filename: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MultipartReadError {
+    TooLarge,
+    Malformed,
+    InvalidFieldName,
+    MultipleFiles,
+}
+
+async fn read_multipart_upload(
+    multipart: &mut Multipart,
+) -> Result<MultipartUpload, MultipartReadError> {
+    let mut accumulated = Vec::new();
+    let mut filename = None;
+    let mut received_file = false;
+
+    loop {
+        let mut field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(error) if is_body_limit_error(&error) => {
+                return Err(MultipartReadError::TooLarge);
+            }
+            Err(_) => return Err(MultipartReadError::Malformed),
+        };
+        let field_name = field.name().map(String::from);
+        let has_filename = field.file_name().is_some();
+
+        if has_filename {
+            if field_name.as_deref() != Some("file") {
+                return Err(MultipartReadError::InvalidFieldName);
+            }
+            if received_file {
+                return Err(MultipartReadError::MultipleFiles);
+            }
+            received_file = true;
+            filename = field.file_name().map(String::from);
+        }
+
+        loop {
+            match field.chunk().await {
+                Ok(Some(chunk)) if has_filename => {
+                    if accumulated.len() + chunk.len() > MAX_XCCDF_UPLOAD_BYTES {
+                        return Err(MultipartReadError::TooLarge);
+                    }
+                    accumulated.extend_from_slice(&chunk);
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(error) if is_body_limit_error(&error) => {
+                    return Err(MultipartReadError::TooLarge);
+                }
+                Err(_) => return Err(MultipartReadError::Malformed),
+            }
+        }
+    }
+
+    Ok(MultipartUpload {
+        bytes: accumulated,
+        filename,
+    })
+}
+
+fn multipart_read_error_response(error: MultipartReadError) -> axum::response::Response {
+    match error {
+        MultipartReadError::TooLarge => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ApiError {
+                error: "Request too large".into(),
+                message: "Multipart request exceeds the upload limit".into(),
+                details: None,
+            }),
+        )
+            .into_response(),
+        MultipartReadError::Malformed => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "Malformed multipart request".into(),
+                message: "Unable to decode multipart upload".into(),
+                details: None,
+            }),
+        )
+            .into_response(),
+        MultipartReadError::InvalidFieldName => bad_request(
+            "Upload field must be named 'file'; unexpected field name in multipart",
+        ),
+        MultipartReadError::MultipleFiles => {
+            bad_request("Exactly one file field named 'file' is required")
+        }
+    }
+}
+
 fn forbidden() -> axum::response::Response {
     (
         StatusCode::FORBIDDEN,
@@ -1383,6 +1382,9 @@ mod tests {
     use crate::queries::auth_identity::{create_user_session, sync_user_role};
     use crate::queries::users::insert_user;
     use axum::Router;
+    use axum::body::Body;
+    use axum::extract::FromRequest;
+    use axum::http::Request;
     use axum::extract::DefaultBodyLimit;
     use axum::routing::{get, post};
     use chrono::Utc;
@@ -1492,6 +1494,82 @@ mod tests {
             .send()
             .await
             .expect("preview request completes")
+    }
+
+    #[tokio::test]
+    async fn multipart_reader_classifies_truncated_body_as_400() {
+        let request = Request::builder()
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .body(Body::from(
+                b"--XCFTESTBOUNDARY\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\ntruncated"
+                    .to_vec(),
+            ))
+            .expect("request");
+        let mut multipart = Multipart::from_request(request, &())
+            .await
+            .expect("multipart extractor accepts request stream");
+
+        assert_eq!(
+            read_multipart_upload(&mut multipart).await,
+            Err(MultipartReadError::Malformed)
+        );
+        assert_eq!(
+            multipart_read_error_response(MultipartReadError::Malformed)
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn export_invalid_imported_check_maps_to_422() {
+        let response = export_snapshot_error_response(
+            ExportSnapshotError::InvalidImportedCheck {
+                policy_version_id: Uuid::nil(),
+                source: ImportedCheckError::InvalidBoolean {
+                    attribute: "negate".into(),
+                    value: "yes".into(),
+                },
+            },
+            Uuid::nil(),
+        );
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn export_invalid_imported_fix_maps_to_422() {
+        let response = export_snapshot_error_response(
+            ExportSnapshotError::InvalidImportedFix {
+                policy_version_id: Uuid::nil(),
+                source: ImportedFixError::InvalidId,
+            },
+            Uuid::nil(),
+        );
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn export_invalid_group_projection_maps_to_422() {
+        let response = export_snapshot_error_response(
+            ExportSnapshotError::InvalidGroupProjection {
+                source: GroupProjectionError::EmptyOrphan {
+                    group_source_id: "orphan".into(),
+                },
+            },
+            Uuid::nil(),
+        );
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn export_internal_error_maps_to_500() {
+        let response = export_snapshot_error_response(
+            ExportSnapshotError::Db(anyhow::anyhow!("database unavailable")),
+            Uuid::nil(),
+        );
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]
