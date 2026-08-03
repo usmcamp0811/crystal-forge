@@ -22,7 +22,7 @@ use crate::compliance::xccdf::export_models::{
     GroupProjectionError, ImportedCheckError, ImportedFixError, XccdfBundleExport,
     XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
 };
-use crate::compliance::xccdf::import_models::XccdfImportPlan;
+use crate::compliance::xccdf::import_models::{XccdfCommittedImportResult, XccdfImportPlan};
 use crate::compliance::xccdf::importer::{
     build_policy_records, check_document_class, validate_import_plan, validate_sha256_match,
 };
@@ -35,6 +35,7 @@ use crate::queries::compliance::{
     get_system_evidence, list_bundle_systems, list_bundles, list_system_bundles,
     update_bundle as update_bundle_row,
 };
+use crate::queries::compliance_interchange;
 
 /// `GET /api/v1/compliance/bundles`
 pub async fn list_compliance_bundles(
@@ -415,25 +416,22 @@ pub async fn xccdf_import(
 
     let policy_records = build_policy_records(&validated);
 
-    // Persistence is implemented in the following commit.  This commit
-    // exercises package processing, plan parsing, digest checks,
-    // document-class gating, and plan validation only.
-    let _ = policy_records;
-    let _ = user_id;
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(ApiError {
-            error: "IMPORT_NOT_IMPLEMENTED".into(),
-            message: "Package processing and plan validation are implemented; \
-                      durable persistence is implemented in the following commit"
-                .into(),
-            details: Some(serde_json::json!({
-                "source_sha256": pkg.provenance.sha256,
-                "created_policy_count": build_policy_records(&validated).len(),
-            })),
-        }),
+    let result = compliance_interchange::commit_foreign_import(
+        &pool,
+        user_id,
+        pkg,
+        validated,
+        policy_records,
     )
-        .into_response()
+    .await;
+
+    match result {
+        Ok(committed) => (StatusCode::CREATED, Json(committed)).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "XCCDF import commit failed");
+            internal_error("Failed to commit XCCDF import")
+        }
+    }
 }
 
 /// `GET /api/v1/compliance/bundle-versions/:version_id/xccdf`

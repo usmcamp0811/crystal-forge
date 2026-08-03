@@ -2865,8 +2865,8 @@ mod tests {
 
     // ── Round-trip tests ───────────────────────────────────────────────────────
 
-    use super::super::models::DocumentClass;
     use super::super::models::CheckBody;
+    use super::super::models::DocumentClass;
     use super::super::parser::parse_xccdf;
     use crate::compliance::interchange::InterchangeLimits;
 
@@ -2884,12 +2884,24 @@ mod tests {
         });
         let snapshot = make_single_policy_snapshot(vec![policy]);
         let xml = write_bundle_xccdf_export(&snapshot).unwrap();
-        let parsed = parse_xccdf(xml.as_bytes(), Some("round-trip.xml"), &InterchangeLimits::default())
-            .unwrap();
-        assert!(parsed.errors.is_empty(), "unexpected parser errors: {:?}", parsed.errors);
+        let parsed = parse_xccdf(
+            xml.as_bytes(),
+            Some("round-trip.xml"),
+            &InterchangeLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            parsed.errors.is_empty(),
+            "unexpected parser errors: {:?}",
+            parsed.errors
+        );
 
         let checks = &parsed.rules[0].checks;
-        assert_eq!(checks.len(), 2, "dual-check export must parse as two checks");
+        assert_eq!(
+            checks.len(),
+            2,
+            "dual-check export must parse as two checks"
+        );
 
         let imported = &checks[0];
         assert_eq!(imported.system, "urn:example:oval");

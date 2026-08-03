@@ -10,6 +10,7 @@ pub mod cache_push;
 pub mod commits;
 pub mod commits_artifacts;
 pub mod compliance;
+pub mod compliance_interchange;
 pub mod config_health;
 pub mod cve_scans;
 pub mod cves;

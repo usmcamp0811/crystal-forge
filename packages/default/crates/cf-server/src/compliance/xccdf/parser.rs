@@ -1199,7 +1199,11 @@ mod tests {
   </Rule>
 </Benchmark>"#;
         let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
-        assert!(parsed.errors.is_empty(), "unexpected errors: {:?}", parsed.errors);
+        assert!(
+            parsed.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parsed.errors
+        );
         let rule = &parsed.rules[0];
         let check = rule.checks.first().expect("check");
         assert_eq!(check.system, "urn:example:check");
@@ -1244,18 +1248,29 @@ mod tests {
   </Rule>
 </Benchmark>"#;
         let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
-        assert!(parsed.errors.iter().any(|error| error.code == "INVALID_XSD_BOOLEAN"));
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|error| error.code == "INVALID_XSD_BOOLEAN")
+        );
     }
 
     #[test]
     fn rejects_check_without_body() {
         let parsed = parse_xccdf(
-            doc_with_body(r#"<Rule id="r"><title>Rule</title><check system="s"/></Rule>"#).as_bytes(),
+            doc_with_body(r#"<Rule id="r"><title>Rule</title><check system="s"/></Rule>"#)
+                .as_bytes(),
             None,
             &InterchangeLimits::default(),
         )
         .unwrap();
-        assert!(parsed.errors.iter().any(|error| error.code == "CHECK_BODY_MISSING"));
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|error| error.code == "CHECK_BODY_MISSING")
+        );
         assert!(parsed.rules[0].checks.is_empty());
     }
 
@@ -1269,7 +1284,12 @@ mod tests {
             &InterchangeLimits::default(),
         )
         .unwrap();
-        assert!(parsed.errors.iter().any(|error| error.code == "CHECK_BODY_AMBIGUOUS"));
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|error| error.code == "CHECK_BODY_AMBIGUOUS")
+        );
         assert!(parsed.rules[0].checks.is_empty());
     }
 
@@ -1283,7 +1303,12 @@ mod tests {
             &InterchangeLimits::default(),
         )
         .unwrap();
-        assert!(parsed.errors.iter().any(|error| error.code == "CHECK_BODY_AMBIGUOUS"));
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|error| error.code == "CHECK_BODY_AMBIGUOUS")
+        );
         assert!(parsed.rules[0].checks.is_empty());
     }
 
@@ -1297,7 +1322,12 @@ mod tests {
             &InterchangeLimits::default(),
         )
         .unwrap();
-        assert!(parsed.errors.iter().any(|error| error.code == "CHECK_BODY_AMBIGUOUS"));
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|error| error.code == "CHECK_BODY_AMBIGUOUS")
+        );
         assert!(parsed.rules[0].checks.is_empty());
     }
 

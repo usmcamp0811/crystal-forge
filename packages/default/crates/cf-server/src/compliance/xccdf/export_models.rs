@@ -132,16 +132,11 @@ pub enum ImportedCheckError {
     /// A check attribute has a value that is not a valid XSD boolean lexical
     /// representation. Only `"true"`, `"1"`, `"false"`, `"0"`, and native
     /// JSON booleans are accepted.
-    InvalidBoolean {
-        attribute: String,
-        value: String,
-    },
+    InvalidBoolean { attribute: String, value: String },
     /// The check contains attributes not represented in the typed model.
     /// These must not be silently dropped. Export is rejected with a typed
     /// validation error identifying the affected attribute names.
-    UnsupportedCheckAttributes {
-        attributes: Vec<String>,
-    },
+    UnsupportedCheckAttributes { attributes: Vec<String> },
 }
 
 impl std::fmt::Display for ImportedCheckError {
@@ -350,9 +345,7 @@ impl XccdfPolicyExport {
     /// structurally invalid. All fields are validated against XCCDF 1.2
     /// schema requirements before being accepted. Callers must propagate
     /// errors rather than silently replacing with a synthesized fix.
-    pub fn parse_standard_fix(
-        &self,
-    ) -> Result<Option<XccdfStandardFix>, ImportedFixError> {
+    pub fn parse_standard_fix(&self) -> Result<Option<XccdfStandardFix>, ImportedFixError> {
         let value = match self.compliance_metadata.get("fix") {
             Some(v) => v,
             None => return Ok(None),
