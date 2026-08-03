@@ -5,7 +5,10 @@
 //! Crystal Forge extension namespace.
 
 pub mod export_models;
+pub mod import_models;
+pub mod importer;
 pub mod models;
+pub mod package;
 pub mod parser;
 pub mod xml_writer;
 pub mod zip_extractor;

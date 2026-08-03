@@ -22,11 +22,13 @@ use crate::compliance::xccdf::export_models::{
     GroupProjectionError, ImportedCheckError, ImportedFixError, XccdfBundleExport,
     XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
 };
-use crate::compliance::xccdf::parser::parse_xccdf;
-use crate::compliance::xccdf::xml_writer::{XccdfWriterError, write_bundle_xccdf_export};
-use crate::compliance::xccdf::zip_extractor::{
-    PackageKind, detect_package_kind, extract_xccdf_from_zip,
+use crate::compliance::xccdf::import_models::XccdfImportPlan;
+use crate::compliance::xccdf::importer::{
+    build_policy_records, check_document_class, validate_import_plan, validate_sha256_match,
 };
+use crate::compliance::xccdf::package::{ProcessingError, process_xccdf_bytes};
+use crate::compliance::xccdf::xml_writer::{XccdfWriterError, write_bundle_xccdf_export};
+use crate::compliance::xccdf::zip_extractor::PackageKind;
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
     BundleValidationError, create_bundle as create_bundle_row, delete_bundle as delete_bundle_row,
@@ -234,50 +236,127 @@ pub async fn xccdf_preview(
         Err(error) => return multipart_read_error_response(error),
     };
 
-    let bytes = upload.bytes;
-    let filename = upload.filename;
-    if bytes.is_empty() {
+    if upload.bytes.is_empty() {
         return bad_request("No file field named 'file' was attached");
+    }
+
+    let pkg = match process_xccdf_bytes(upload.bytes, upload.filename, &limits) {
+        Ok(pkg) => pkg,
+        Err(e) => return processing_error_response(e),
     };
 
-    // ── Content-based package detection ───────────────────────────────────────
-    //
-    // The byte signature of the uploaded content is authoritative. The filename
-    // extension is used only to detect explicit mismatches (ZIP bytes named
-    // .xml, or XML bytes named .zip); files without a recognised extension are
-    // accepted if their bytes identify them as XML or ZIP.
+    let p = &pkg.provenance;
+    let original_sha256 = p.sha256.clone();
+    let package_source_json = build_preview_source_json(p);
+    let parsed = pkg.parsed;
+    let xml_filename = p.selected_entry.clone();
 
-    let package_kind = detect_package_kind(&bytes);
+    if parsed.errors.iter().any(|e| e.blocking) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "XCCDF validation failed",
+                "sha256": original_sha256,
+                "source": package_source_json,
+                "errors": parsed.errors.iter().map(|e| serde_json::json!({
+                    "code": e.code, "summary": e.summary, "blocking": e.blocking,
+                })).collect::<Vec<_>>(),
+                "warnings": parsed.warnings.iter().map(|w| serde_json::json!({
+                    "code": w.code, "summary": w.summary,
+                })).collect::<Vec<_>>(),
+            })),
+        )
+            .into_response();
+    }
 
-    // Extract the filename extension (the part after the last dot in the
-    // filename segment, not a directory component).
-    let file_ext = filename
-        .as_deref()
-        .and_then(|f| f.rsplit('/').next()) // last path segment
-        .and_then(|seg| {
-            let dot_pos = seg.rfind('.')?;
-            if dot_pos == 0 {
-                None
-            } else {
-                Some(&seg[dot_pos + 1..])
-            }
+    let rule_summaries: Vec<serde_json::Value> = parsed
+        .rules
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "title": r.title,
+                "severity": r.severity,
+                "is_native": r.cf_policy_meta.is_some(),
+            })
         })
-        .map(|e| e.to_lowercase());
+        .collect();
 
-    let has_xml_ext = file_ext.as_deref() == Some("xml");
-    let has_zip_ext = file_ext.as_deref() == Some("zip");
-    // Whether the file has any extension that is NOT .xml or .zip.
-    let has_wrong_ext = file_ext.is_some() && !has_xml_ext && !has_zip_ext;
+    let response = serde_json::json!({
+        "sha256": original_sha256,
+        "source": package_source_json,
+        "filename": xml_filename,
+        "xccdf_namespace_version": parsed.xccdf_namespace_version,
+        "xccdf_version": parsed.xccdf_version,
+        "document_class": format!("{:?}", parsed.class).to_lowercase(),
+        "fidelity": format!("{:?}", parsed.fidelity).to_lowercase(),
+        "fidelity_losses": parsed.fidelity_losses,
+        "benchmark": parsed.benchmark.map(|bm| serde_json::json!({
+            "id": bm.id,
+            "title": bm.title,
+            "version": bm.version,
+            "status": bm.status,
+            "platforms": bm.platforms,
+        })),
+        "profiles": parsed.profiles.iter().map(|p| serde_json::json!({
+            "id": p.id,
+            "title": p.title,
+            "rule_count": p.select_ids.len(),
+        })).collect::<Vec<_>>(),
+        "rules": rule_summaries,
+        "rule_count": parsed.rules.len(),
+        "profile_count": parsed.profiles.len(),
+        "cf_bundle_meta": parsed.cf_bundle_meta.map(|m| serde_json::json!({
+            "bundle_id": m.bundle_id,
+            "bundle_version_id": m.bundle_version_id,
+            "publication_state": m.publication_state,
+        })),
+        "errors": parsed.errors.iter().map(|e| serde_json::json!({
+            "code": e.code, "summary": e.summary, "blocking": e.blocking,
+        })).collect::<Vec<_>>(),
+        "warnings": parsed.warnings.iter().map(|w| serde_json::json!({
+            "code": w.code, "summary": w.summary,
+        })).collect::<Vec<_>>(),
+    });
+    (StatusCode::OK, Json(response)).into_response()
+}
 
-    // Reject unknown content signatures (bytes are neither ZIP nor XML).
-    let kind = match package_kind {
-        Some(k) => k,
-        None => {
+/// `POST /api/v1/compliance/xccdf/import`
+///
+/// Accepts one XML or ZIP file (field name "file") and one JSON import plan
+/// (field name "plan") via multipart upload.  Reparses the package, validates
+/// the plan, and commits all durable records in a single atomic transaction.
+pub async fn xccdf_import(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !has_admin_role(&roles) {
+        return forbidden();
+    }
+
+    let limits = InterchangeLimits::default();
+
+    let (file_upload, plan_bytes) = match read_multipart_file_and_plan(&mut multipart).await {
+        Ok(pair) => pair,
+        Err(err) => return multipart_read_error_response(err),
+    };
+
+    if file_upload.bytes.is_empty() {
+        return bad_request("No 'file' field was attached");
+    }
+
+    let plan: XccdfImportPlan = match serde_json::from_slice(&plan_bytes) {
+        Ok(p) => p,
+        Err(e) => {
             return (
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                StatusCode::BAD_REQUEST,
                 Json(ApiError {
-                    error: "Unsupported content".into(),
-                    message: "Uploaded bytes are neither an XML document nor a ZIP archive".into(),
+                    error: "IMPORT_PLAN_INVALID".into(),
+                    message: format!("Import plan JSON is malformed: {e}"),
                     details: None,
                 }),
             )
@@ -285,212 +364,73 @@ pub async fn xccdf_preview(
         }
     };
 
-    // Reject if the file carries a recognised-but-wrong extension (.txt,
-    // .pdf, etc.), or if the extension explicitly contradicts the content
-    // (.xml extension with ZIP bytes, .zip extension with XML bytes).
-    // Files with no extension or with the correct extension are accepted.
-    let mismatch: Option<&str> = if has_wrong_ext {
-        Some("file extension is not .xml or .zip")
-    } else {
-        match kind {
-            PackageKind::Zip if has_xml_ext => Some("ZIP bytes uploaded with an .xml extension"),
-            PackageKind::Xml if has_zip_ext => Some("XML bytes uploaded with a .zip extension"),
-            _ => None,
-        }
+    let pkg = match process_xccdf_bytes(file_upload.bytes, file_upload.filename, &limits) {
+        Ok(pkg) => pkg,
+        Err(e) => return processing_error_response(e),
     };
-    if let Some(reason) = mismatch {
+
+    if let Some(err) = validate_sha256_match(&plan.expected_sha256, &pkg.provenance.sha256) {
+        let status = if err.code == "SOURCE_DIGEST_MISMATCH" {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::UNPROCESSABLE_ENTITY
+        };
         return (
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            status,
             Json(ApiError {
-                error: "Content/extension mismatch".into(),
-                message: reason.into(),
+                error: err.code.into(),
+                message: err.message,
                 details: None,
             }),
         )
             .into_response();
     }
 
-    // Apply the per-type transport size limit now that we know what the content
-    // is.  The accumulation limit above is the union maximum (ZIP); this step
-    // enforces the tighter per-type limit for plain XML.
-    let size_check = match kind {
-        PackageKind::Xml => limits.check_xml_size(bytes.len()),
-        PackageKind::Zip => limits.check_zip_size(bytes.len()),
-    };
-    if let Err(ref e) = size_check {
+    if let Some(err) = check_document_class(&pkg.parsed) {
         return (
-            StatusCode::PAYLOAD_TOO_LARGE,
+            StatusCode::UNPROCESSABLE_ENTITY,
             Json(ApiError {
-                error: "File too large".into(),
-                message: e.to_string(),
+                error: err.code.into(),
+                message: err.message,
                 details: None,
             }),
         )
             .into_response();
     }
 
-    // Compute the original package digest; this is what the import step must
-    // verify to guard against TOCTOU between preview and commit.
-    use sha2::{Digest as _, Sha256};
-    let original_sha256 = hex::encode(Sha256::digest(&bytes));
-    let original_size = bytes.len();
-    let original_filename = filename.clone().unwrap_or_default();
-
-    // ── ZIP extraction or direct XML pass-through ─────────────────────────────
-
-    let (xml_bytes, xml_filename, package_source_json) = match kind {
-        PackageKind::Zip => match extract_xccdf_from_zip(&bytes, &limits) {
-            Ok(extracted) => {
-                let src = serde_json::json!({
-                    "package_kind": "zip_package",
-                    "original_filename": original_filename,
-                    "original_size": original_size,
-                    "original_sha256": original_sha256,
-                    "selected_entry": extracted.entry_name,
-                    "selected_xml_sha256": extracted.xml_sha256,
-                    "archive_file_count": extracted.archive_file_count,
-                });
-                let entry_name = extracted.entry_name.clone();
-                (extracted.xml_bytes, Some(entry_name), src)
-            }
-            Err(e) => {
-                let status = if e.http_status == 413 {
-                    StatusCode::PAYLOAD_TOO_LARGE
-                } else {
-                    StatusCode::UNPROCESSABLE_ENTITY
-                };
-                let mut error_json = serde_json::json!({
-                    "error": "ZIP extraction failed",
-                    "sha256": original_sha256,
-                    "source": serde_json::json!({
-                        "package_kind": "zip_package",
-                        "original_filename": original_filename,
-                        "original_size": original_size,
-                        "original_sha256": original_sha256,
-                    }),
-                    "errors": [{
-                        "code": e.code,
-                        "summary": e.message,
-                        "blocking": true,
-                    }],
-                });
-                if !e.candidates.is_empty() {
-                    error_json["candidates"] = serde_json::json!(e.candidates);
-                }
-                return (status, Json(error_json)).into_response();
-            }
-        },
-        PackageKind::Xml => {
-            let src = serde_json::json!({
-                "package_kind": "direct_xml",
-                "original_filename": original_filename,
-                "original_size": original_size,
-                "original_sha256": original_sha256,
-            });
-            (bytes, filename.clone(), src)
+    let validated = match validate_import_plan(plan, &pkg.parsed) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiError {
+                    error: err.code.into(),
+                    message: err.message,
+                    details: None,
+                }),
+            )
+                .into_response();
         }
     };
 
-    match parse_xccdf(&xml_bytes, xml_filename.as_deref(), &limits) {
-        Ok(parsed) => {
-            // 422 for blocking validation errors — include full source
-            // provenance so the UI can show which package failed.
-            if parsed.errors.iter().any(|e| e.blocking) {
-                return (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(serde_json::json!({
-                        "error": "XCCDF validation failed",
-                        "sha256": original_sha256,
-                        "source": package_source_json,
-                        "errors": parsed.errors.iter().map(|e| serde_json::json!({
-                            "code": e.code, "summary": e.summary, "blocking": e.blocking,
-                        })).collect::<Vec<_>>(),
-                        "warnings": parsed.warnings.iter().map(|w| serde_json::json!({
-                            "code": w.code, "summary": w.summary,
-                        })).collect::<Vec<_>>(),
-                    })),
-                )
-                    .into_response();
-            }
-            // 200 for successful parse with non-blocking warnings only.
-            let rule_summaries: Vec<serde_json::Value> = parsed
-                .rules
-                .iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "id": r.id,
-                        "title": r.title,
-                        "severity": r.severity,
-                        "is_native": r.cf_policy_meta.is_some(),
-                    })
-                })
-                .collect();
+    let policy_records = build_policy_records(&validated);
 
-            let response = serde_json::json!({
-                // `sha256` is the original package digest (ZIP or XML).
-                // Use this value to verify the import step sees the same file.
-                "sha256": original_sha256,
-                "source": package_source_json,
-                "filename": xml_filename,
-                "xccdf_namespace_version": parsed.xccdf_namespace_version,
-                "xccdf_version": parsed.xccdf_version,
-                "document_class": format!("{:?}", parsed.class).to_lowercase(),
-                "fidelity": format!("{:?}", parsed.fidelity).to_lowercase(),
-                "fidelity_losses": parsed.fidelity_losses,
-                "benchmark": parsed.benchmark.map(|bm| serde_json::json!({
-                    "id": bm.id,
-                    "title": bm.title,
-                    "version": bm.version,
-                    "status": bm.status,
-                    "platforms": bm.platforms,
-                })),
-                "profiles": parsed.profiles.iter().map(|p| serde_json::json!({
-                    "id": p.id,
-                    "title": p.title,
-                    "rule_count": p.select_ids.len(),
-                })).collect::<Vec<_>>(),
-                "rules": rule_summaries,
-                "rule_count": parsed.rules.len(),
-                "profile_count": parsed.profiles.len(),
-                "cf_bundle_meta": parsed.cf_bundle_meta.map(|m| serde_json::json!({
-                    "bundle_id": m.bundle_id,
-                    "bundle_version_id": m.bundle_version_id,
-                    "publication_state": m.publication_state,
-                })),
-                "errors": parsed.errors.iter().map(|e| serde_json::json!({
-                    "code": e.code, "summary": e.summary, "blocking": e.blocking,
-                })).collect::<Vec<_>>(),
-                "warnings": parsed.warnings.iter().map(|w| serde_json::json!({
-                    "code": w.code, "summary": w.summary,
-                })).collect::<Vec<_>>(),
-            });
-            (StatusCode::OK, Json(response)).into_response()
-        }
-        Err(e) => {
-            tracing::error!("XCCDF parse error: {e:#}");
-            internal_error(&format!("Failed to parse XCCDF: {e}"))
-        }
-    }
-}
-
-/// `POST /api/v1/compliance/xccdf/import`
-///
-/// Accepts the same file plus an import plan and commits atomically.
-/// Full implementation arrives in phase 4.
-pub async fn xccdf_import(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
-        return forbidden();
-    };
-    if !has_admin_role(&roles) {
-        return forbidden();
-    }
+    // Persistence is implemented in the following commit.  This commit
+    // exercises package processing, plan parsing, digest checks,
+    // document-class gating, and plan validation only.
+    let _ = policy_records;
+    let _ = user_id;
     (
         StatusCode::NOT_IMPLEMENTED,
-        Json(XccdfImportResult {
-            bundle_version_id: None,
-            created_policy_count: 0,
-            reused_policy_count: 0,
-            errors: vec!["XCCDF import not yet implemented".to_string()],
+        Json(ApiError {
+            error: "IMPORT_NOT_IMPLEMENTED".into(),
+            message: "Package processing and plan validation are implemented; \
+                      durable persistence is implemented in the following commit"
+                .into(),
+            details: Some(serde_json::json!({
+                "source_sha256": pkg.provenance.sha256,
+                "created_policy_count": build_policy_records(&validated).len(),
+            })),
         }),
     )
         .into_response()
@@ -887,12 +827,13 @@ async fn load_export_snapshot(
         })? {
             drop(standard_check);
         }
-        if let Some(standard_fix) = pv.parse_standard_fix().map_err(|source| {
-            ExportSnapshotError::InvalidImportedFix {
-                policy_version_id: pv.policy_version_id,
-                source,
-            }
-        })? {
+        if let Some(standard_fix) =
+            pv.parse_standard_fix()
+                .map_err(|source| ExportSnapshotError::InvalidImportedFix {
+                    policy_version_id: pv.policy_version_id,
+                    source,
+                })?
+        {
             drop(standard_fix);
         }
     }
@@ -1016,10 +957,7 @@ fn build_export_groups(
                 .find(|(_, n)| n.source_id.as_deref() == Some(parent.as_str()))
                 .map(|(k, _)| k.clone())
             {
-                children_of
-                    .entry(parent_key)
-                    .or_default()
-                    .push(key.clone());
+                children_of.entry(parent_key).or_default().push(key.clone());
             }
         }
     }
@@ -1209,6 +1147,179 @@ pub async fn policy_interchange_export(
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
+/// Read a multipart body containing a "file" field and a "plan" JSON field.
+///
+/// Accepts the fields in any order. Rejects duplicate fields, unknown file-type
+/// fields with the wrong name, and bodies that exceed the upload limit.
+async fn read_multipart_file_and_plan(
+    multipart: &mut Multipart,
+) -> Result<(MultipartUpload, Vec<u8>), MultipartReadError> {
+    let mut file: Option<MultipartUpload> = None;
+    let mut plan: Option<Vec<u8>> = None;
+
+    loop {
+        let mut field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) if is_body_limit_error(&e) => return Err(MultipartReadError::TooLarge),
+            Err(_) => return Err(MultipartReadError::Malformed),
+        };
+
+        let field_name = field.name().map(String::from);
+        let has_filename = field.file_name().is_some();
+
+        if has_filename {
+            if field_name.as_deref() != Some("file") {
+                return Err(MultipartReadError::InvalidFieldName);
+            }
+            if file.is_some() {
+                return Err(MultipartReadError::MultipleFiles);
+            }
+            let filename = field.file_name().map(String::from);
+            let mut bytes = Vec::new();
+            loop {
+                match field.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if bytes.len() + chunk.len() > MAX_XCCDF_UPLOAD_BYTES {
+                            return Err(MultipartReadError::TooLarge);
+                        }
+                        bytes.extend_from_slice(&chunk);
+                    }
+                    Ok(None) => break,
+                    Err(e) if is_body_limit_error(&e) => return Err(MultipartReadError::TooLarge),
+                    Err(_) => return Err(MultipartReadError::Malformed),
+                }
+            }
+            file = Some(MultipartUpload { bytes, filename });
+        } else if field_name.as_deref() == Some("plan") {
+            if plan.is_some() {
+                return Err(MultipartReadError::MultipleFiles); // reuse variant for duplicate plan
+            }
+            let mut bytes = Vec::new();
+            loop {
+                match field.chunk().await {
+                    Ok(Some(chunk)) => {
+                        // Plans are expected to be small; cap at 1 MiB.
+                        if bytes.len() + chunk.len() > 1024 * 1024 {
+                            return Err(MultipartReadError::TooLarge);
+                        }
+                        bytes.extend_from_slice(&chunk);
+                    }
+                    Ok(None) => break,
+                    Err(e) if is_body_limit_error(&e) => return Err(MultipartReadError::TooLarge),
+                    Err(_) => return Err(MultipartReadError::Malformed),
+                }
+            }
+            plan = Some(bytes);
+        }
+        // Unknown non-file fields are drained and ignored.
+    }
+
+    let file = file.ok_or_else(|| MultipartReadError::InvalidFieldName)?;
+    let plan = plan.ok_or_else(|| MultipartReadError::InvalidFieldName)?;
+    Ok((file, plan))
+}
+
+/// Convert a [`ProcessingError`] into an HTTP response.
+fn processing_error_response(e: ProcessingError) -> axum::response::Response {
+    match e {
+        ProcessingError::UnknownContentType => (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(ApiError {
+                error: "Unsupported content".into(),
+                message: "Uploaded bytes are neither an XML document nor a ZIP archive".into(),
+                details: None,
+            }),
+        )
+            .into_response(),
+        ProcessingError::ContentExtensionMismatch { reason } => (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(ApiError {
+                error: "Content/extension mismatch".into(),
+                message: reason.into(),
+                details: None,
+            }),
+        )
+            .into_response(),
+        ProcessingError::TooLarge {
+            subject,
+            actual,
+            maximum,
+        } => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ApiError {
+                error: "File too large".into(),
+                message: format!(
+                    "{subject} upload ({actual} bytes) exceeds the {maximum} byte limit"
+                ),
+                details: None,
+            }),
+        )
+            .into_response(),
+        ProcessingError::ZipExtraction {
+            code,
+            message,
+            http_status,
+            candidates,
+        } => {
+            let status = if http_status == 413 {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::UNPROCESSABLE_ENTITY
+            };
+            let mut body = serde_json::json!({
+                "error": "ZIP extraction failed",
+                "errors": [{ "code": code, "summary": message, "blocking": true }],
+            });
+            if !candidates.is_empty() {
+                body["candidates"] = serde_json::json!(candidates);
+            }
+            (status, Json(body)).into_response()
+        }
+        ProcessingError::BlockingDiagnostics { parsed } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "XCCDF validation failed",
+                "errors": parsed.errors.iter().map(|e| serde_json::json!({
+                    "code": e.code, "summary": e.summary, "blocking": e.blocking,
+                })).collect::<Vec<_>>(),
+                "warnings": parsed.warnings.iter().map(|w| serde_json::json!({
+                    "code": w.code, "summary": w.summary,
+                })).collect::<Vec<_>>(),
+            })),
+        )
+            .into_response(),
+        ProcessingError::Internal(e) => {
+            tracing::error!(error = %e, "XCCDF package processing failed");
+            internal_error("Failed to process XCCDF package")
+        }
+    }
+}
+
+/// Build the `"source"` JSON object for the preview response.
+fn build_preview_source_json(
+    p: &crate::compliance::xccdf::package::PackageProvenance,
+) -> serde_json::Value {
+    use crate::compliance::xccdf::zip_extractor::PackageKind;
+    match p.package_kind {
+        PackageKind::Xml => serde_json::json!({
+            "package_kind": "direct_xml",
+            "original_filename": p.filename,
+            "original_size": p.size_bytes,
+            "original_sha256": p.sha256,
+        }),
+        PackageKind::Zip => serde_json::json!({
+            "package_kind": "zip_package",
+            "original_filename": p.filename,
+            "original_size": p.size_bytes,
+            "original_sha256": p.sha256,
+            "selected_entry": p.selected_entry,
+            "selected_xml_sha256": p.selected_xml_sha256,
+            "archive_file_count": p.archive_file_count,
+        }),
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct MultipartUpload {
     bytes: Vec<u8>,
@@ -1297,9 +1408,9 @@ fn multipart_read_error_response(error: MultipartReadError) -> axum::response::R
             }),
         )
             .into_response(),
-        MultipartReadError::InvalidFieldName => bad_request(
-            "Upload field must be named 'file'; unexpected field name in multipart",
-        ),
+        MultipartReadError::InvalidFieldName => {
+            bad_request("Upload field must be named 'file'; unexpected field name in multipart")
+        }
         MultipartReadError::MultipleFiles => {
             bad_request("Exactly one file field named 'file' is required")
         }
@@ -1383,9 +1494,9 @@ mod tests {
     use crate::queries::users::insert_user;
     use axum::Router;
     use axum::body::Body;
+    use axum::extract::DefaultBodyLimit;
     use axum::extract::FromRequest;
     use axum::http::Request;
-    use axum::extract::DefaultBodyLimit;
     use axum::routing::{get, post};
     use chrono::Utc;
 
@@ -1517,8 +1628,7 @@ mod tests {
             Err(MultipartReadError::Malformed)
         );
         assert_eq!(
-            multipart_read_error_response(MultipartReadError::Malformed)
-                .status(),
+            multipart_read_error_response(MultipartReadError::Malformed).status(),
             StatusCode::BAD_REQUEST
         );
     }
