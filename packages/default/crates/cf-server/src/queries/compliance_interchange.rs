@@ -1647,4 +1647,71 @@ mod tests {
             .execute(pool)
             .await;
     }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn cf_native_sequential_idempotent_reimport_succeeds() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let (bytes, bundle_id, bundle_version_id, policy_id, policy_version_id) =
+            native_fixture_bytes();
+
+        let pkg = make_package(bytes.clone());
+        let (validated, records) =
+            crate::compliance::xccdf::importer::validate_cf_native_document(&pkg.parsed)
+                .expect("native fixture should validate");
+
+        let first = commit_cf_native_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("first sequential import");
+        assert_eq!(first.created_policy_versions, 1);
+        assert_eq!(first.reused_policy_versions, 0);
+
+        let second_pkg = make_package(bytes);
+        let (second_validated, second_records) =
+            crate::compliance::xccdf::importer::validate_cf_native_document(&second_pkg.parsed)
+                .expect("native fixture should validate on repeat");
+
+        let second =
+            commit_cf_native_import(&pool, user_id, second_pkg, second_validated, second_records)
+                .await
+                .expect("second sequential import");
+        assert_eq!(
+            second.created_policy_versions, 0,
+            "should not create duplicate versions"
+        );
+        assert_eq!(
+            second.reused_policy_versions, 1,
+            "should reuse exact version"
+        );
+        assert_eq!(second.bundle_id, bundle_id, "bundle id must match");
+        assert_eq!(
+            second.bundle_version_id, bundle_version_id,
+            "bundle version id must match"
+        );
+
+        let bundle_versions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_bundle_versions WHERE bundle_id = $1",
+        )
+        .bind(bundle_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            bundle_versions, 1,
+            "should not create duplicate bundle versions"
+        );
+
+        let policy_versions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policy_versions WHERE policy_id = $1",
+        )
+        .bind(policy_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            policy_versions, 1,
+            "should not create duplicate policy versions"
+        );
+    }
 }
