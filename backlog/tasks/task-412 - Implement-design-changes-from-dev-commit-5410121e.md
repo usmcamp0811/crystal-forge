@@ -1312,6 +1312,8 @@ This is a cross-cutting, security-sensitive feature with 44 acceptance criteria 
 Before implementation, approve the phased delivery/subtask breakdown and the dependency-selection phase. These are material architecture and workflow decisions; a single unstructured implementation pass would not be safely reviewable.
 
 Continuation from 8ade2843: implement only CF-native XCCDF reconciliation in two focused commits. First add strict typed CF-native metadata/payload parsing, canonical digest verification, typed reconciliation decisions/conflicts, and planner/native payload tests without changing the completed foreign package pipeline. Second integrate the planner into the existing atomic import transaction with deterministic advisory locks, idempotent reuse/create paths, mappings/audit/HTTP 409/422 handling, and live PostgreSQL tests for exact reimport, conflicts, mixed reconciliation, mapping conflicts, and concurrency. Preserve the existing source-artifact, transaction, excluded-rule, and live foreign-test behavior unless regression tests require changes.
+
+Stabilization gate continuation from c7138212: first add non-ignored live/native concurrency, mixed-reconciliation, identity/digest, bundle, mapping, and idempotent reimport fixtures; verify locked re-read/order and make only minimal reconciliation fixes. Second reproduce and fix GET /api/v1/scanning/deployed with a failing live endpoint test, keeping scanning changes separate. Third run targeted/full checks, update MR description, and report unrun checks explicitly.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -1355,4 +1357,6 @@ MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/313. 
 Continuation requested from commit 8ade2843. Initial exploration found CF-native classes are currently rejected; parser retains only partial CF metadata; importer generates random IDs; persistence always creates new lineages/versions. Existing migrations provide version identities, draft/published pointers, immutability, source mappings, and triggers.
 
 Implemented and pushed commits 78575bee and fbf5477c. CF-native parser now captures typed identity/digest/config metadata, strict validation recalculates policy and bundle digests, reconciliation planner emits deterministic reuse/create/conflict decisions, and the existing import endpoint routes valid native documents through an atomic locked persistence path. Added exact native reimport live test and source mapping idempotency. Verification: SQLx offline cargo check passed; compliance suite 251 passed/25 ignored; live compliance interchange suite 6 passed/0 failed; Nix xccdf-schema check passed. Remaining scope: broader conflict/mixed/concurrency live fixtures and final full MR verification are not yet complete.
+
+User requested stabilization gate: reconciliation coverage, concurrent safety, deployed scanning HTTP 500 reproduction/fix, checks, and MR description update. No trust/publication/assignment/JSON-TOML/UI expansion.
 <!-- SECTION:NOTES:END -->
