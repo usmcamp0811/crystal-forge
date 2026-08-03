@@ -33,6 +33,10 @@ use crate::compliance::xccdf::import_models::ImportedPolicyRecord;
 use crate::compliance::xccdf::import_models::{ValidatedImportPlan, XccdfCommittedImportResult};
 use crate::compliance::xccdf::importer::build_policy_records;
 use crate::compliance::xccdf::package::{ProcessedXccdfPackage, build_package_context};
+use crate::compliance::xccdf::reconciliation::{
+    ExistingPolicyIdentity, NativePolicyIdentity, NativeReconcileFailure, ReconcileConflict,
+    ReconcileDecision, plan_policy_reconciliation,
+};
 
 // ── Parser version identifier ─────────────────────────────────────────────────
 
@@ -215,7 +219,7 @@ pub async fn commit_foreign_import(
         .bind("0.1-draft") // initial draft version label
         .bind(&rec.name)
         .bind(&rec.description)
-        .bind(rec.implementation_state)
+        .bind(&rec.implementation_state)
         .bind(&rec.compliance_metadata)
         .bind(&rec.opaque_xml)
         .bind(source_artifact_id)
@@ -303,14 +307,14 @@ pub async fn commit_foreign_import(
         let canonical = PolicyVersionCanonical {
             name: rec.name.clone(),
             description: rec.description.clone(),
-            policy_type: "imported_xccdf".to_owned(),
-            implementation_state: rec.implementation_state.to_owned(),
-            execution_phase: "not-applicable".to_owned(),
-            config: serde_json::json!({}),
+            policy_type: rec.policy_type.clone(),
+            implementation_state: rec.implementation_state.clone(),
+            execution_phase: rec.execution_phase.clone(),
+            config: rec.config.clone(),
             compliance_metadata: rec.compliance_metadata.clone(),
-            dependencies: serde_json::json!([]),
+            dependencies: rec.dependencies.clone(),
             opaque_xml_digest,
-            enabled_by_default: Some(false),
+            enabled_by_default: Some(rec.enabled_by_default),
         };
 
         write_policy_version_digest(&mut tx, rec.policy_id, &canonical)
@@ -382,12 +386,643 @@ pub async fn commit_foreign_import(
         bundle_id,
         bundle_version_id,
         created_policy_count: policy_records.len() as u32,
+        created_policy_lineages: policy_records.len() as u32,
+        created_policy_versions: policy_records.len() as u32,
+        reused_policy_versions: 0,
+        bundle_lineage_created: true,
+        bundle_version_created: true,
         excluded_rule_count,
         created_policy_version_ids,
         source_sha256,
         bundle_semantic_digest,
         warnings: vec![],
     })
+}
+
+/// Commit a validated CF-native import. Unlike the foreign path, portable UUIDs
+/// are authoritative and existing immutable versions are reused rather than
+/// copied into new local lineages.
+pub async fn commit_cf_native_import(
+    pool: &PgPool,
+    importing_user_id: Uuid,
+    pkg: ProcessedXccdfPackage,
+    validated: ValidatedImportPlan,
+    policy_records: Vec<ImportedPolicyRecord>,
+) -> Result<XccdfCommittedImportResult> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to begin import transaction")?;
+    let source_sha256 = pkg.provenance.sha256.clone();
+    let source_artifact_id = upsert_source_artifact(&mut tx, importing_user_id, &pkg).await?;
+
+    let mut lock_keys: Vec<(u8, Uuid)> = policy_records
+        .iter()
+        .flat_map(|r| [(0, r.policy_id), (1, r.policy_version_id)])
+        .chain(std::iter::once((
+            2,
+            pkg.parsed
+                .cf_bundle_meta
+                .as_ref()
+                .map(|m| m.bundle_id)
+                .unwrap_or_default(),
+        )))
+        .chain(std::iter::once((
+            3,
+            pkg.parsed
+                .cf_bundle_meta
+                .as_ref()
+                .map(|m| m.bundle_version_id)
+                .unwrap_or_default(),
+        )))
+        .collect();
+    lock_keys.sort();
+    lock_keys.dedup();
+    for (kind, id) in &lock_keys {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("cf-native:{kind}:{id}"))
+            .execute(&mut *tx)
+            .await
+            .context("failed to acquire CF-native reconciliation lock")?;
+    }
+
+    let lineage_ids: Vec<Uuid> = policy_records.iter().map(|r| r.policy_id).collect();
+    let version_ids: Vec<Uuid> = policy_records.iter().map(|r| r.policy_version_id).collect();
+    let existing: Vec<(Uuid, Uuid, String, String)> = sqlx::query_as(
+        "SELECT policy_id, id, policy_type, semantic_digest FROM deployment_policy_versions \
+         WHERE id = ANY($1) OR policy_id = ANY($2)",
+    )
+    .bind(&version_ids)
+    .bind(&lineage_ids)
+    .fetch_all(&mut *tx)
+    .await
+    .context("failed to load CF-native policy identities")?;
+    let existing_identities: Vec<ExistingPolicyIdentity> = existing
+        .into_iter()
+        .map(
+            |(lineage_id, version_id, policy_type, semantic_digest)| ExistingPolicyIdentity {
+                lineage_id,
+                version_id,
+                policy_type,
+                semantic_digest,
+            },
+        )
+        .collect();
+    let imported_identities: Vec<NativePolicyIdentity> = policy_records
+        .iter()
+        .map(|r| NativePolicyIdentity {
+            lineage_id: r.policy_id,
+            version_id: r.policy_version_id,
+            policy_type: r.policy_type.clone(),
+            semantic_digest: r.semantic_digest.clone().unwrap_or_default(),
+            source_rule_id: r.source_rule_id.clone(),
+        })
+        .collect();
+    let policy_plan = plan_policy_reconciliation(&imported_identities, &existing_identities);
+    if !policy_plan.conflicts.is_empty() {
+        return Err(anyhow::Error::new(NativeReconcileFailure {
+            conflicts: policy_plan.conflicts,
+        }));
+    }
+
+    let mut resolved_versions = Vec::with_capacity(policy_records.len());
+    let mut created_lineages = 0u32;
+    let mut created_versions = 0u32;
+    let mut reused_versions = 0u32;
+    let mut created_version_ids = Vec::new();
+    let records_by_version: std::collections::HashMap<Uuid, &ImportedPolicyRecord> = policy_records
+        .iter()
+        .map(|record| (record.policy_version_id, record))
+        .collect();
+    for (identity, decision) in policy_plan.decisions.iter() {
+        let record = records_by_version
+            .get(&identity.version_id)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("CF-native policy plan lost source record"))?;
+        match decision {
+            ReconcileDecision::ReuseExact {
+                local_version_id, ..
+            } => {
+                resolved_versions.push(*local_version_id);
+                reused_versions += 1;
+            }
+            ReconcileDecision::CreateLineageAndVersion {
+                portable_lineage_id,
+                portable_version_id,
+            } => {
+                create_native_policy_lineage_and_version(&mut tx, importing_user_id, record)
+                    .await?;
+                debug_assert_eq!(*portable_lineage_id, record.policy_id);
+                debug_assert_eq!(*portable_version_id, record.policy_version_id);
+                resolved_versions.push(record.policy_version_id);
+                created_version_ids.push(record.policy_version_id);
+                created_lineages += 1;
+                created_versions += 1;
+            }
+            ReconcileDecision::CreateVersionInExistingLineage {
+                local_lineage_id,
+                portable_version_id,
+            } => {
+                let draft: Option<Uuid> = sqlx::query_scalar(
+                    "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1 FOR UPDATE",
+                )
+                .bind(local_lineage_id)
+                .fetch_one(&mut *tx)
+                .await
+                .context("failed to lock existing policy lineage")?;
+                if draft.is_some() {
+                    return Err(anyhow::Error::new(NativeReconcileFailure {
+                        conflicts: vec![ReconcileConflict::VersionDigestMismatch {
+                            lineage_id: *local_lineage_id,
+                            version_id: *portable_version_id,
+                            local_digest: "current draft already exists".into(),
+                            imported_digest: record.semantic_digest.clone().unwrap_or_default(),
+                            source_rule_id: record.source_rule_id.clone(),
+                        }],
+                    }));
+                }
+                insert_native_policy_version(&mut tx, importing_user_id, record).await?;
+                resolved_versions.push(record.policy_version_id);
+                created_version_ids.push(record.policy_version_id);
+                created_versions += 1;
+            }
+        }
+    }
+    if !created_version_ids.is_empty() {
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET source_artifact_id = $1 WHERE id = ANY($2)",
+        )
+        .bind(source_artifact_id)
+        .bind(&created_version_ids)
+        .execute(&mut *tx)
+        .await
+        .context("failed to attach CF-native source artifact to policies")?;
+    }
+    let resolved_by_version: std::collections::HashMap<Uuid, Uuid> = policy_plan
+        .decisions
+        .iter()
+        .zip(resolved_versions.iter())
+        .map(|(identity, resolved)| (identity.0.version_id, *resolved))
+        .collect();
+
+    let bundle_meta = pkg
+        .parsed
+        .cf_bundle_meta
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("validated CF-native import has no bundle metadata"))?;
+    let bundle_digest = bundle_meta.digest.clone().unwrap_or_default();
+    let bundle_id = bundle_meta.bundle_id;
+    let bundle_version_id = bundle_meta.bundle_version_id;
+    let existing_bundle: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT bundle_id, semantic_digest FROM compliance_bundle_versions WHERE id = $1",
+    )
+    .bind(bundle_version_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("failed to load CF-native bundle identity")?;
+    if let Some((local_bundle_id, local_digest)) = existing_bundle.as_ref() {
+        if *local_bundle_id != bundle_id || *local_digest != bundle_digest {
+            return Err(anyhow::Error::new(NativeReconcileFailure {
+                conflicts: vec![ReconcileConflict::VersionDigestMismatch {
+                    lineage_id: bundle_id,
+                    version_id: bundle_version_id,
+                    local_digest: local_digest.clone(),
+                    imported_digest: bundle_digest,
+                    source_rule_id: "bundle".into(),
+                }],
+            }));
+        }
+        let local_membership: Vec<(Uuid, bool)> = sqlx::query_as(
+            "SELECT policy_version_id, selected FROM compliance_bundle_version_policies \
+             WHERE bundle_version_id = $1 ORDER BY policy_order",
+        )
+        .bind(bundle_version_id)
+        .fetch_all(&mut *tx)
+        .await
+        .context("failed to load CF-native bundle membership")?;
+        let mut expected_membership: Vec<(Uuid, bool, i32)> = policy_records
+            .iter()
+            .map(|record| {
+                (
+                    resolved_by_version[&record.policy_version_id],
+                    record.selected,
+                    record.policy_order,
+                )
+            })
+            .collect();
+        expected_membership.sort_by_key(|(_, _, order)| *order);
+        let expected_membership: Vec<(Uuid, bool)> = expected_membership
+            .into_iter()
+            .map(|(version_id, selected, _)| (version_id, selected))
+            .collect();
+        if local_membership != expected_membership {
+            return Err(anyhow::Error::new(NativeReconcileFailure {
+                conflicts: vec![ReconcileConflict::VersionDigestMismatch {
+                    lineage_id: bundle_id,
+                    version_id: bundle_version_id,
+                    local_digest: "bundle membership differs".into(),
+                    imported_digest: bundle_digest,
+                    source_rule_id: "bundle".into(),
+                }],
+            }));
+        }
+    }
+    let bundle_version_created = existing_bundle.is_none();
+    let lineage_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM compliance_bundles WHERE id = $1)")
+            .bind(bundle_id)
+            .fetch_one(&mut *tx)
+            .await
+            .context("failed to inspect CF-native bundle lineage")?;
+    if bundle_version_created {
+        if lineage_exists {
+            let current_draft: Option<Uuid> = sqlx::query_scalar(
+                "SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1 FOR UPDATE",
+            )
+            .bind(bundle_id)
+            .fetch_one(&mut *tx)
+            .await
+            .context("failed to lock CF-native bundle lineage")?;
+            if current_draft.is_some() {
+                return Err(anyhow::Error::new(NativeReconcileFailure {
+                    conflicts: vec![ReconcileConflict::VersionDigestMismatch {
+                        lineage_id: bundle_id,
+                        version_id: bundle_version_id,
+                        local_digest: "current draft already exists".into(),
+                        imported_digest: bundle_digest,
+                        source_rule_id: "bundle".into(),
+                    }],
+                }));
+            }
+        } else {
+            create_native_bundle_lineage(
+                &mut tx,
+                importing_user_id,
+                &validated,
+                bundle_id,
+                bundle_version_id,
+                &bundle_digest,
+            )
+            .await?;
+        }
+        if lineage_exists {
+            insert_native_bundle_version(
+                &mut tx,
+                importing_user_id,
+                &validated,
+                bundle_id,
+                bundle_version_id,
+                &bundle_digest,
+            )
+            .await?;
+        }
+        sqlx::query("UPDATE compliance_bundle_versions SET source_artifact_id = $1 WHERE id = $2")
+            .bind(source_artifact_id)
+            .bind(bundle_version_id)
+            .execute(&mut *tx)
+            .await
+            .context("failed to attach CF-native source artifact")?;
+    }
+
+    for record in &policy_records {
+        let policy_version_id = resolved_by_version[&record.policy_version_id];
+        sqlx::query(
+            "INSERT INTO compliance_bundle_version_policies \
+             (bundle_version_id, policy_version_id, policy_order, selected) VALUES ($1, $2, $3, $4) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(bundle_version_id)
+        .bind(policy_version_id)
+        .bind(record.policy_order)
+        .bind(record.selected)
+        .execute(&mut *tx)
+        .await
+        .context("failed to persist CF-native bundle membership")?;
+        upsert_native_mapping(
+            &mut tx,
+            source_artifact_id,
+            "rule",
+            &record.source_rule_id,
+            Some(policy_version_id),
+            None,
+        )
+        .await?;
+    }
+    if bundle_version_created {
+        sqlx::query("UPDATE compliance_bundle_versions SET semantic_digest = $1 WHERE id = $2")
+            .bind(&bundle_digest)
+            .bind(bundle_version_id)
+            .execute(&mut *tx)
+            .await
+            .context("failed to finalize CF-native bundle digest")?;
+    }
+    if let Some(benchmark) = pkg.parsed.benchmark.as_ref() {
+        upsert_native_mapping(
+            &mut tx,
+            source_artifact_id,
+            "benchmark",
+            &benchmark.id,
+            None,
+            Some(bundle_version_id),
+        )
+        .await?;
+    }
+    for profile in &pkg.parsed.profiles {
+        upsert_native_mapping(
+            &mut tx,
+            source_artifact_id,
+            "profile",
+            &profile.id,
+            None,
+            Some(bundle_version_id),
+        )
+        .await?;
+    }
+    for group in &pkg.parsed.groups {
+        upsert_native_mapping(
+            &mut tx,
+            source_artifact_id,
+            "group",
+            &group.id,
+            None,
+            Some(bundle_version_id),
+        )
+        .await?;
+    }
+    let metadata = serde_json::json!({
+        "source_artifact_id": source_artifact_id,
+        "original_sha256": source_sha256,
+        "bundle_id": bundle_id,
+        "bundle_version_id": bundle_version_id,
+        "created_policy_lineages": created_lineages,
+        "created_policy_versions": created_versions,
+        "reused_policy_versions": reused_versions,
+        "bundle_lineage_created": !lineage_exists,
+        "bundle_version_created": bundle_version_created,
+        "conflict_count": 0,
+        "trust_state": "untrusted",
+        "publication_state": "draft"
+    });
+    sqlx::query(
+        "INSERT INTO admin_audit_events (actor_user_id, actor_identifier, action, target, metadata) \
+         VALUES ($1, $1::text, 'xccdf_imported', $2, $3)",
+    )
+    .bind(importing_user_id)
+    .bind(format!("bundle:{bundle_id}"))
+    .bind(metadata)
+    .execute(&mut *tx)
+    .await
+    .context("failed to write CF-native audit event")?;
+    tx.commit()
+        .await
+        .context("failed to commit CF-native import")?;
+
+    Ok(XccdfCommittedImportResult {
+        source_artifact_id,
+        bundle_id,
+        bundle_version_id,
+        created_policy_count: created_versions,
+        created_policy_lineages: created_lineages,
+        created_policy_versions: created_versions,
+        reused_policy_versions: reused_versions,
+        bundle_lineage_created: !lineage_exists,
+        bundle_version_created,
+        excluded_rule_count: 0,
+        created_policy_version_ids: created_version_ids,
+        source_sha256,
+        bundle_semantic_digest: bundle_digest,
+        warnings: vec![],
+    })
+}
+
+async fn upsert_source_artifact(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    importing_user_id: Uuid,
+    pkg: &ProcessedXccdfPackage,
+) -> Result<Uuid> {
+    let media_type = match pkg.provenance.package_kind {
+        crate::compliance::xccdf::zip_extractor::PackageKind::Xml => "application/xml",
+        crate::compliance::xccdf::zip_extractor::PackageKind::Zip => "application/zip",
+    };
+    let filename = pkg.provenance.filename.as_deref().unwrap_or("unknown");
+    let detected = pkg.parsed.xccdf_namespace_version.map(str::to_owned);
+    let context = build_package_context(&pkg.provenance);
+    sqlx::query(
+        "INSERT INTO compliance_source_artifacts \
+         (content, filename, media_type, sha256, parser_version, detected_xccdf_version, package_context, imported_by) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (sha256) DO NOTHING",
+    )
+    .bind(&pkg.original_bytes)
+    .bind(filename)
+    .bind(media_type)
+    .bind(&pkg.provenance.sha256)
+    .bind(CF_PARSER_VERSION)
+    .bind(detected)
+    .bind(context)
+    .bind(importing_user_id)
+    .execute(&mut **tx)
+    .await
+    .context("failed to upsert source artifact")?;
+    sqlx::query_scalar("SELECT id FROM compliance_source_artifacts WHERE sha256 = $1")
+        .bind(&pkg.provenance.sha256)
+        .fetch_one(&mut **tx)
+        .await
+        .context("failed to load source artifact")
+}
+
+async fn create_native_policy_lineage_and_version(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    record: &ImportedPolicyRecord,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO deployment_policies (id, name, description, policy_type, config, enabled) \
+         VALUES ($1,$2,$3,$4,$5,false)",
+    )
+    .bind(record.policy_id)
+    .bind(&record.name)
+    .bind(&record.description)
+    .bind(&record.policy_type)
+    .bind(&record.config)
+    .execute(&mut **tx)
+    .await
+    .context("failed to create CF-native policy lineage")?;
+    let generated: Uuid = sqlx::query_scalar(
+        "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+    )
+    .bind(record.policy_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    sqlx::query("DELETE FROM deployment_policy_versions WHERE id = $1")
+        .bind(generated)
+        .execute(&mut **tx)
+        .await
+        .context("failed to replace trigger-created policy draft")?;
+    insert_native_policy_version(tx, user_id, record).await
+}
+
+async fn insert_native_policy_version(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    record: &ImportedPolicyRecord,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO deployment_policy_versions \
+         (id, policy_id, version, publication_state, name, description, policy_type, \
+          implementation_state, execution_phase, config, compliance_metadata, dependencies, \
+          semantic_digest, digest_algorithm, canonicalization_version, source_artifact_id, \
+          opaque_xml, created_by, enabled_by_default) \
+         VALUES ($1,$2,$3,'draft',$4,$5,$6,$7,$8,$9,$10,$11,$12,'sha-256','cf-model-json-1',$13,$14,$15,$16)",
+    )
+    .bind(record.policy_version_id)
+    .bind(record.policy_id)
+    .bind(record.version.as_deref().unwrap_or("0.1.0"))
+    .bind(&record.name)
+    .bind(&record.description)
+    .bind(&record.policy_type)
+    .bind(&record.implementation_state)
+    .bind(&record.execution_phase)
+    .bind(&record.config)
+    .bind(&record.compliance_metadata)
+    .bind(&record.dependencies)
+    .bind(record.semantic_digest.as_deref().unwrap_or("pending"))
+    .bind(Option::<Uuid>::None)
+    .bind(&record.opaque_xml)
+    .bind(user_id)
+    .bind(record.enabled_by_default)
+    .execute(&mut **tx)
+    .await
+    .context("failed to create CF-native policy version")?;
+    sqlx::query("UPDATE deployment_policies SET current_draft_version_id = $1 WHERE id = $2")
+        .bind(record.policy_version_id)
+        .bind(record.policy_id)
+        .execute(&mut **tx)
+        .await
+        .context("failed to set CF-native policy draft pointer")?;
+    Ok(())
+}
+
+async fn create_native_bundle_lineage(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    validated: &ValidatedImportPlan,
+    bundle_id: Uuid,
+    bundle_version_id: Uuid,
+    digest: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO compliance_bundles (id,name,framework,version,description,layer,owner) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7)",
+    )
+    .bind(bundle_id)
+    .bind(&validated.bundle.name)
+    .bind(&validated.bundle.framework)
+    .bind(&validated.bundle.version)
+    .bind(&validated.bundle.description)
+    .bind(validated.bundle.layer.as_deref().unwrap_or("fleet"))
+    .bind(
+        validated
+            .bundle
+            .owner
+            .as_deref()
+            .unwrap_or("Platform Security"),
+    )
+    .execute(&mut **tx)
+    .await
+    .context("failed to create CF-native bundle lineage")?;
+    let generated: Uuid =
+        sqlx::query_scalar("SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1")
+            .bind(bundle_id)
+            .fetch_one(&mut **tx)
+            .await?;
+    sqlx::query("DELETE FROM compliance_bundle_versions WHERE id = $1")
+        .bind(generated)
+        .execute(&mut **tx)
+        .await
+        .context("failed to replace trigger-created bundle draft")?;
+    insert_native_bundle_version(tx, user_id, validated, bundle_id, bundle_version_id, digest).await
+}
+
+async fn insert_native_bundle_version(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    validated: &ValidatedImportPlan,
+    bundle_id: Uuid,
+    bundle_version_id: Uuid,
+    digest: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO compliance_bundle_versions \
+         (id,bundle_id,version,publication_state,name,framework,framework_version,description,layer,owner,semantic_digest,source_artifact_id,created_by) \
+         VALUES ($1,$2,'0.1.0','draft',$3,$4,$5,$6,$7,$8,$9,NULL,$10)",
+    )
+    .bind(bundle_version_id)
+    .bind(bundle_id)
+    .bind(&validated.bundle.name)
+    .bind(&validated.bundle.framework)
+    .bind(&validated.bundle.version)
+    .bind(&validated.bundle.description)
+    .bind(validated.bundle.layer.as_deref().unwrap_or("fleet"))
+    .bind(validated.bundle.owner.as_deref().unwrap_or("Platform Security"))
+    .bind(digest)
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await
+    .context("failed to create CF-native bundle version")?;
+    sqlx::query("UPDATE compliance_bundles SET current_draft_version_id = $1 WHERE id = $2")
+        .bind(bundle_version_id)
+        .bind(bundle_id)
+        .execute(&mut **tx)
+        .await
+        .context("failed to set CF-native bundle draft pointer")?;
+    sqlx::query("UPDATE compliance_bundle_versions SET semantic_digest = $1 WHERE id = $2")
+        .bind(digest)
+        .bind(bundle_version_id)
+        .execute(&mut **tx)
+        .await
+        .context("failed to restore CF-native bundle digest")?;
+    Ok(())
+}
+
+async fn upsert_native_mapping(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    source_artifact_id: Uuid,
+    object_kind: &str,
+    source_identity: &str,
+    policy_version_id: Option<Uuid>,
+    bundle_version_id: Option<Uuid>,
+) -> Result<()> {
+    let existing: Option<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT policy_version_id, bundle_version_id FROM compliance_source_object_mappings \
+         WHERE source_artifact_id=$1 AND object_kind=$2 AND source_identity=$3",
+    )
+    .bind(source_artifact_id)
+    .bind(object_kind)
+    .bind(source_identity)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some((existing_policy, existing_bundle)) = existing {
+        if existing_policy != policy_version_id || existing_bundle != bundle_version_id {
+            anyhow::bail!(
+                "CF_NATIVE_MAPPING_CONFLICT: source mapping already targets a different local object"
+            );
+        }
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO compliance_source_object_mappings \
+         (source_artifact_id,object_kind,source_identity,policy_version_id,bundle_version_id,fidelity) \
+         VALUES ($1,$2,$3,$4,$5,'native_exact')",
+    )
+    .bind(source_artifact_id)
+    .bind(object_kind)
+    .bind(source_identity)
+    .bind(policy_version_id)
+    .bind(bundle_version_id)
+    .execute(&mut **tx)
+    .await
+    .context("failed to persist CF-native source mapping")?;
+    Ok(())
 }
 
 // ── Database-backed tests ─────────────────────────────────────────────────────
@@ -472,6 +1107,79 @@ mod tests {
     async fn test_pool() -> Option<PgPool> {
         let url = std::env::var("DATABASE_URL").ok()?;
         sqlx::postgres::PgPool::connect(&url).await.ok()
+    }
+
+    fn native_fixture_bytes() -> (Vec<u8>, Uuid, Uuid, Uuid, Uuid) {
+        use crate::compliance::digest::{BundleVersionCanonical, PolicyVersionCanonical};
+        let bundle_id = Uuid::new_v4();
+        let bundle_version_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+        let policy_version_id = Uuid::new_v4();
+        let bundle_name = format!("Native Fixture Bundle {bundle_id}");
+        let policy_name = format!("Native Agent Requirement {policy_id}");
+        let config = serde_json::json!({
+            "mode": "all",
+            "context": "nixos-configuration-v1",
+            "binding": "cfg",
+            "rules": [{
+                "field_name": "agentEnabled",
+                "description": "The agent is enabled",
+                "expression": "cfg.config.services.crystal-forge-agent.enable",
+                "strict": true
+            }]
+        });
+        let metadata = serde_json::json!({});
+        let dependencies = serde_json::json!([]);
+        let policy_digest = PolicyVersionCanonical {
+            name: policy_name.clone(),
+            description: Some("Requires the Crystal Forge agent".into()),
+            policy_type: "custom_check".into(),
+            implementation_state: "native".into(),
+            execution_phase: "nix-evaluation".into(),
+            config: config.clone(),
+            compliance_metadata: metadata.clone(),
+            dependencies: dependencies.clone(),
+            opaque_xml_digest: None,
+            enabled_by_default: Some(true),
+        }
+        .compute_digest();
+        let bundle_digest = BundleVersionCanonical {
+            name: bundle_name.clone(),
+            framework: "CF-TEST".into(),
+            framework_version: Some("1.0".into()),
+            description: Some("Native fixture".into()),
+            layer: "os".into(),
+            owner: "Tests".into(),
+            members: vec![crate::compliance::digest::BundleMembershipEntry {
+                policy_version_id,
+                selected: true,
+            }],
+        }
+        .compute_digest();
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" xmlns:cf="urn:crystal-forge:xccdf:1" id="xccdf_test_native_{bundle_version_id}">
+  <status>draft</status><title>{bundle_name}</title><description>Native fixture</description><version>1.0</version>
+  <cf:bundle schema-version="1" bundle-id="urn:uuid:{bundle_id}" bundle-version-id="urn:uuid:{bundle_version_id}" publication-state="draft">
+    <cf:framework name="CF-TEST" version="1.0"/><cf:layer>os</cf:layer><cf:owner>Tests</cf:owner>
+    <cf:content-digest algorithm="sha-256" canonical-model="cf-model-json-1">{bundle_digest}</cf:content-digest>
+  </cf:bundle>
+  <Profile id="xccdf_test_profile"><select idref="xccdf_test_rule_{policy_version_id}" selected="true"/></Profile>
+  <Rule id="xccdf_test_rule_{policy_version_id}"><title>{policy_name}</title><description>Requires the Crystal Forge agent</description>
+    <cf:policy-identity policy-id="urn:uuid:{policy_id}" policy-version-id="urn:uuid:{policy_version_id}" publication-state="draft" enabled-default="true" implementation-state="native" selected="true" policy-order="0">
+      <cf:policy-version>1.0</cf:policy-version><cf:content-digest algorithm="sha-256" canonical-model="cf-model-json-1">{policy_digest}</cf:content-digest>
+    </cf:policy-identity>
+    <check system="urn:crystal-forge:check-system:policy:1"><check-content><cf:policy schema-version="1" policy-type="custom_check"><cf:execution phase="nix-evaluation" strict="true"/><cf:implementation state="native"><cf:custom-check mode="all" context="nixos-configuration-v1" binding="cfg"><cf:rule field-name="agentEnabled" strict="true"><cf:description>The agent is enabled</cf:description><cf:expression language="nix">cfg.config.services.crystal-forge-agent.enable</cf:expression></cf:rule></cf:custom-check></cf:implementation><cf:config-json>{config}</cf:config-json><cf:compliance-metadata-json>{metadata}</cf:compliance-metadata-json><cf:dependencies-json>{dependencies}</cf:dependencies-json></cf:policy></check-content></check>
+  </Rule>
+</Benchmark>"#
+        );
+        (
+            xml.into_bytes(),
+            bundle_id,
+            bundle_version_id,
+            policy_id,
+            policy_version_id,
+        )
     }
 
     /// Insert a test user and return its UUID. The user owns the imported
@@ -619,6 +1327,52 @@ mod tests {
 
         // Cleanup.
         cleanup_import(&pool, result.bundle_id, &result.created_policy_version_ids).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn cf_native_reimport_reuses_exact_identities() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let (bytes, bundle_id, bundle_version_id, policy_id, policy_version_id) =
+            native_fixture_bytes();
+        let pkg = make_package(bytes.clone());
+        let (validated, records) =
+            crate::compliance::xccdf::importer::validate_cf_native_document(&pkg.parsed)
+                .expect("native fixture should validate");
+        let first = commit_cf_native_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("first native import");
+        assert_eq!(first.created_policy_versions, 1);
+        assert_eq!(first.reused_policy_versions, 0);
+
+        let pkg = make_package(bytes);
+        let (validated, records) =
+            crate::compliance::xccdf::importer::validate_cf_native_document(&pkg.parsed)
+                .expect("native fixture should validate on repeat");
+        let second = commit_cf_native_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("second native import");
+        assert_eq!(second.created_policy_versions, 0);
+        assert_eq!(second.reused_policy_versions, 1);
+        assert_eq!(second.bundle_id, bundle_id);
+        assert_eq!(second.bundle_version_id, bundle_version_id);
+
+        let policy_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policy_versions WHERE policy_id = $1",
+        )
+        .bind(policy_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let version_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policy_versions WHERE id = $1")
+                .bind(policy_version_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(policy_count, 1);
+        assert_eq!(version_count, 1);
     }
 
     #[tokio::test]

@@ -24,9 +24,11 @@ use crate::compliance::xccdf::export_models::{
 };
 use crate::compliance::xccdf::import_models::XccdfImportPlan;
 use crate::compliance::xccdf::importer::{
-    build_policy_records, check_document_class, validate_import_plan, validate_sha256_match,
+    build_policy_records, check_document_class, validate_cf_native_document, validate_import_plan,
+    validate_sha256_match,
 };
 use crate::compliance::xccdf::package::{ProcessingError, process_xccdf_bytes};
+use crate::compliance::xccdf::reconciliation::NativeReconcileFailure;
 use crate::compliance::xccdf::xml_writer::{XccdfWriterError, write_bundle_xccdf_export};
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
@@ -396,6 +398,78 @@ pub async fn xccdf_import(
             }),
         )
             .into_response();
+    }
+
+    if matches!(
+        pkg.parsed.class,
+        crate::compliance::xccdf::models::DocumentClass::CfNativeExact
+    ) {
+        let (validated, policy_records) = match validate_cf_native_document(&pkg.parsed) {
+            Ok(value) => value,
+            Err(err) => {
+                let status = if err.code == "CF_NATIVE_DIGEST_MISMATCH" {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::UNPROCESSABLE_ENTITY
+                };
+                return (
+                    status,
+                    Json(ApiError {
+                        error: err.code.into(),
+                        message: err.message,
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        let result = compliance_interchange::commit_cf_native_import(
+            &pool,
+            user_id,
+            pkg,
+            validated,
+            policy_records,
+        )
+        .await;
+        return match result {
+            Ok(committed) => (StatusCode::CREATED, Json(committed)).into_response(),
+            Err(error) => {
+                if let Some(conflict) = error.downcast_ref::<NativeReconcileFailure>() {
+                    let conflicts = conflict
+                        .conflicts
+                        .iter()
+                        .map(|value| {
+                            serde_json::json!({
+                                "code": value.code(),
+                                "conflict": format!("{value:?}"),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(ApiError {
+                            error: "CF_NATIVE_CONFLICT".into(),
+                            message: conflict.to_string(),
+                            details: Some(serde_json::json!({ "conflicts": conflicts })),
+                        }),
+                    )
+                        .into_response();
+                }
+                if error.to_string().starts_with("CF_NATIVE_MAPPING_CONFLICT") {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(ApiError {
+                            error: "CF_NATIVE_MAPPING_CONFLICT".into(),
+                            message: "source mapping targets a different local object".into(),
+                            details: None,
+                        }),
+                    )
+                        .into_response();
+                }
+                tracing::error!(error = %error, "CF-native XCCDF import commit failed");
+                internal_error("Failed to commit XCCDF import")
+            }
+        };
     }
 
     let validated = match validate_import_plan(plan, &pkg.parsed) {
