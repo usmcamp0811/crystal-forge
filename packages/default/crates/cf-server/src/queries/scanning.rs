@@ -338,7 +338,15 @@ pub async fn get_scan_deployed(
     };
     let rows = sqlx::query(
         r#"
-        WITH latest_commit_per_flake AS (
+        WITH latest_system_state AS (
+            SELECT DISTINCT ON (s.id)
+                s.id AS system_id,
+                ss.store_path AS current_store_path
+            FROM systems s
+            LEFT JOIN system_states ss ON ss.hostname = s.hostname
+            ORDER BY s.id, ss.timestamp DESC NULLS LAST, ss.id DESC
+        ),
+        latest_commit_per_flake AS (
             -- Order by commit_timestamp DESC first (newest git commit wins),
             -- then by id DESC as a tiebreaker for identical timestamps.
             SELECT DISTINCT ON (flake_id) id AS commit_id, flake_id
@@ -362,11 +370,12 @@ pub async fn get_scan_deployed(
                 COALESCE(cs.medium_count, 0)::int      AS medium_count,
                 COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) AS lifecycle_at
             FROM systems s
+            LEFT JOIN latest_system_state lss ON lss.system_id = s.id
             JOIN derivations d
               ON d.derivation_name =
                      COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
               AND d.store_path IS NOT NULL
-              AND d.store_path = s.current_store_path
+              AND d.store_path = lss.current_store_path
             LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
             LEFT JOIN commits c ON c.id = d.commit_id
             LEFT JOIN flakes f ON f.id = c.flake_id
@@ -453,13 +462,22 @@ pub async fn get_scan_deployed(
     // Total count query for informational display (not used for has_more).
     let total: i64 = sqlx::query_scalar(
         r#"
+        WITH latest_system_state AS (
+            SELECT DISTINCT ON (s.id)
+                s.id AS system_id,
+                ss.store_path AS current_store_path
+            FROM systems s
+            LEFT JOIN system_states ss ON ss.hostname = s.hostname
+            ORDER BY s.id, ss.timestamp DESC NULLS LAST, ss.id DESC
+        )
         SELECT COUNT(DISTINCT d.id)
         FROM systems s
+        LEFT JOIN latest_system_state lss ON lss.system_id = s.id
         JOIN derivations d
           ON d.derivation_name =
                  COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
           AND d.store_path IS NOT NULL
-          AND d.store_path = s.current_store_path
+          AND d.store_path = lss.current_store_path
         WHERE s.is_active = TRUE
           AND d.derivation_type = 'nixos'
         "#,
