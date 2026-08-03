@@ -1353,4 +1353,6 @@ MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/313. 
 - 7 new xml_writer tests, all 124 compliance tests pass
 
 Continuation requested from commit 8ade2843. Initial exploration found CF-native classes are currently rejected; parser retains only partial CF metadata; importer generates random IDs; persistence always creates new lineages/versions. Existing migrations provide version identities, draft/published pointers, immutability, source mappings, and triggers.
+
+Implemented and pushed commits 78575bee and fbf5477c. CF-native parser now captures typed identity/digest/config metadata, strict validation recalculates policy and bundle digests, reconciliation planner emits deterministic reuse/create/conflict decisions, and the existing import endpoint routes valid native documents through an atomic locked persistence path. Added exact native reimport live test and source mapping idempotency. Verification: SQLx offline cargo check passed; compliance suite 251 passed/25 ignored; live compliance interchange suite 6 passed/0 failed; Nix xccdf-schema check passed. Remaining scope: broader conflict/mixed/concurrency live fixtures and final full MR verification are not yet complete.
 <!-- SECTION:NOTES:END -->
