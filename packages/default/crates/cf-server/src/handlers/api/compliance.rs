@@ -22,13 +22,12 @@ use crate::compliance::xccdf::export_models::{
     GroupProjectionError, ImportedCheckError, ImportedFixError, XccdfBundleExport,
     XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
 };
-use crate::compliance::xccdf::import_models::{XccdfCommittedImportResult, XccdfImportPlan};
+use crate::compliance::xccdf::import_models::XccdfImportPlan;
 use crate::compliance::xccdf::importer::{
     build_policy_records, check_document_class, validate_import_plan, validate_sha256_match,
 };
 use crate::compliance::xccdf::package::{ProcessingError, process_xccdf_bytes};
 use crate::compliance::xccdf::xml_writer::{XccdfWriterError, write_bundle_xccdf_export};
-use crate::compliance::xccdf::zip_extractor::PackageKind;
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
     BundleValidationError, create_bundle as create_bundle_row, delete_bundle as delete_bundle_row,

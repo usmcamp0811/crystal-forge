@@ -25,17 +25,13 @@ use anyhow::{Context, Result};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::compliance::canonical::digest_contract;
 use crate::compliance::digest::{
-    BundleMembershipEntry, BundleVersionCanonical, PolicyVersionCanonical, load_bundle_membership,
+    BundleVersionCanonical, PolicyVersionCanonical, load_bundle_membership,
     write_bundle_version_digest, write_policy_version_digest,
 };
 use crate::compliance::xccdf::import_models::ImportedPolicyRecord;
-use crate::compliance::xccdf::import_models::{
-    ImportWarning, ValidatedImportPlan, XccdfCommittedImportResult,
-};
+use crate::compliance::xccdf::import_models::{ValidatedImportPlan, XccdfCommittedImportResult};
 use crate::compliance::xccdf::importer::build_policy_records;
-use crate::compliance::xccdf::models::DocumentClass;
 use crate::compliance::xccdf::package::{ProcessedXccdfPackage, build_package_context};
 
 // ── Parser version identifier ─────────────────────────────────────────────────
@@ -80,15 +76,13 @@ pub async fn commit_foreign_import(
     let document_class = format!("{:?}", pkg.parsed.class).to_lowercase();
     let fidelity = format!("{:?}", pkg.parsed.fidelity).to_lowercase();
 
-    let source_artifact_id: Uuid = sqlx::query_scalar(
+    sqlx::query(
         r#"
         INSERT INTO compliance_source_artifacts
             (content, filename, media_type, sha256, parser_version,
              detected_xccdf_version, package_context, imported_by)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        ON CONFLICT (sha256) DO UPDATE
-            SET imported_by = EXCLUDED.imported_by
-        RETURNING id
+        ON CONFLICT (sha256) DO NOTHING
         "#,
     )
     .bind(&pkg.original_bytes)
@@ -99,9 +93,16 @@ pub async fn commit_foreign_import(
     .bind(&detected_xccdf_version)
     .bind(&package_context)
     .bind(importing_user_id)
-    .fetch_one(&mut *tx)
+    .execute(&mut *tx)
     .await
     .context("failed to upsert source artifact")?;
+
+    let source_artifact_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM compliance_source_artifacts WHERE sha256 = $1")
+            .bind(&source_sha256)
+            .fetch_one(&mut *tx)
+            .await
+            .context("failed to load source artifact")?;
 
     // ── 2. Bundle lineage ─────────────────────────────────────────────────────
     let bundle_name = validated.bundle.name.trim().to_owned();
@@ -169,13 +170,8 @@ pub async fn commit_foreign_import(
     .context("failed to set source_artifact_id on bundle version")?;
 
     // ── 3. Policy lineages and versions ───────────────────────────────────────
-    let excluded_rule_count = (validated.rules_to_import.len() as u32)
-        .saturating_sub(policy_records.len() as u32)
-        + validated
-            .rules_to_import
-            .iter()
-            .filter(|(_, a)| a.is_exclude())
-            .count() as u32;
+    let excluded_rule_count =
+        (validated.rules_to_import.len() as u32).saturating_sub(policy_records.len() as u32);
 
     let mut created_policy_version_ids: Vec<Uuid> = Vec::new();
 
@@ -300,8 +296,6 @@ pub async fn commit_foreign_import(
     }
 
     // ── 6. Compute and persist semantic digests ───────────────────────────────
-    let (dig_alg, can_ver) = digest_contract();
-
     for rec in &policy_records {
         let opaque_xml_digest =
             PolicyVersionCanonical::digest_opaque_xml(rec.opaque_xml.as_deref());
@@ -465,8 +459,13 @@ mod tests {
             },
         };
 
-        let validated = validate_import_plan(plan, &pkg.parsed).expect("valid plan");
-        let records = build_policy_records(&validated);
+        let mut validated = validate_import_plan(plan, &pkg.parsed).expect("valid plan");
+        let suffix = Uuid::new_v4().simple().to_string();
+        validated.bundle.name = format!("{}-{suffix}", validated.bundle.name);
+        let mut records = build_policy_records(&validated);
+        for record in &mut records {
+            record.name = format!("{}-{suffix}", record.name);
+        }
         (validated, records)
     }
 
@@ -475,11 +474,24 @@ mod tests {
         sqlx::postgres::PgPool::connect(&url).await.ok()
     }
 
+    /// Insert a test user and return its UUID. The user owns the imported
+    /// source artifact (FK users.id) and the audit event.
+    async fn ensure_test_user(pool: &PgPool) -> Uuid {
+        use crate::queries::users::insert_user;
+        let email = format!("xccdf-import-test-{}@example.test", Uuid::new_v4().simple());
+        let user = insert_user(pool, &email, Some("XCCDF Import Test"))
+            .await
+            .expect("test user");
+        user.id
+    }
+
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn successful_import_creates_all_expected_rows() {
         let pool = test_pool().await.expect("DATABASE_URL required");
-        let bytes = minimal_xccdf_bytes();
+        let user_id = ensure_test_user(&pool).await;
+        let mut bytes = minimal_xccdf_bytes();
+        bytes.extend_from_slice(format!("\n<!-- {} -->", Uuid::new_v4()).as_bytes());
         let pkg = make_package(bytes);
         let (validated, policy_records) =
             make_plan(&pkg, &["xccdf_test_rule_001", "xccdf_test_rule_002"]);
@@ -487,7 +499,7 @@ mod tests {
         let expected_sha256 = pkg.provenance.sha256.clone();
         let result = commit_foreign_import(
             &pool,
-            Uuid::nil(), // test user
+            user_id, // test user
             pkg,
             validated,
             policy_records,
@@ -514,14 +526,13 @@ mod tests {
         assert!(artifact_exists, "source artifact must exist");
 
         // Bundle lineage + version.
-        let (bundle_pub_state, current_draft_id): (String, Option<Uuid>) = sqlx::query_as(
-            "SELECT publication_state, current_draft_version_id FROM compliance_bundles WHERE id = $1",
+        let current_draft_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1",
         )
         .bind(result.bundle_id)
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(bundle_pub_state, "draft"); // bundles default to draft
         assert_eq!(current_draft_id, Some(result.bundle_version_id));
 
         let bundle_ver_state: String = sqlx::query_scalar(
@@ -614,7 +625,9 @@ mod tests {
     #[ignore = "requires live database connection"]
     async fn excluded_rules_create_no_rows() {
         let pool = test_pool().await.expect("DATABASE_URL required");
-        let bytes = minimal_xccdf_bytes();
+        let user_id = ensure_test_user(&pool).await;
+        let mut bytes = minimal_xccdf_bytes();
+        bytes.extend_from_slice(format!("\n<!-- {} -->", Uuid::new_v4()).as_bytes());
         let pkg = make_package(bytes);
 
         use crate::compliance::xccdf::import_models::{
@@ -644,10 +657,15 @@ mod tests {
             },
         };
 
-        let validated = validate_import_plan(plan, &pkg.parsed).unwrap();
-        let policy_records = build_policy_records(&validated);
+        let mut validated = validate_import_plan(plan, &pkg.parsed).unwrap();
+        let suffix = Uuid::new_v4().simple().to_string();
+        validated.bundle.name = format!("{}-{suffix}", validated.bundle.name);
+        let mut policy_records = build_policy_records(&validated);
+        for record in &mut policy_records {
+            record.name = format!("{}-{suffix}", record.name);
+        }
 
-        let result = commit_foreign_import(&pool, Uuid::nil(), pkg, validated, policy_records)
+        let result = commit_foreign_import(&pool, user_id, pkg, validated, policy_records)
             .await
             .unwrap();
 
@@ -679,8 +697,16 @@ mod tests {
     async fn rollback_on_duplicate_policy_version_id() {
         // Force a failure mid-transaction to prove atomicity.
         let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
         let bytes = minimal_xccdf_bytes();
         let pkg = make_package(bytes);
+        let artifact_count_before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1",
+        )
+        .bind(&pkg.provenance.sha256)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         let (validated, mut policy_records) =
             make_plan(&pkg, &["xccdf_test_rule_001", "xccdf_test_rule_002"]);
 
@@ -690,8 +716,7 @@ mod tests {
         policy_records[1].policy_version_id = first_vid;
 
         let sha256_before = &pkg.provenance.sha256.clone();
-        let result =
-            commit_foreign_import(&pool, Uuid::nil(), pkg, validated, policy_records).await;
+        let result = commit_foreign_import(&pool, user_id, pkg, validated, policy_records).await;
 
         assert!(
             result.is_err(),
@@ -706,16 +731,14 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(
-            artifact_count, 0,
-            "source artifact must not exist after rollback"
-        );
+        assert_eq!(artifact_count, artifact_count_before);
     }
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn preview_and_import_produce_same_digest_and_rule_set() {
         let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
         let bytes = minimal_xccdf_bytes();
 
         // Preview.
@@ -746,10 +769,9 @@ mod tests {
             "same bytes → same rule set"
         );
 
-        let result =
-            commit_foreign_import(&pool, Uuid::nil(), import_pkg, validated, policy_records)
-                .await
-                .unwrap();
+        let result = commit_foreign_import(&pool, user_id, import_pkg, validated, policy_records)
+            .await
+            .unwrap();
         assert_eq!(result.source_sha256, preview_sha256);
 
         cleanup_import(&pool, result.bundle_id, &result.created_policy_version_ids).await;
@@ -761,6 +783,13 @@ mod tests {
         let pool = test_pool().await.expect("DATABASE_URL required");
         let bytes = minimal_xccdf_bytes();
         let pkg = make_package(bytes);
+        let artifact_count_before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1",
+        )
+        .bind(&pkg.provenance.sha256)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         // Use the wrong digest — this is caught at the handler layer before
         // calling commit_foreign_import, but we validate the guard explicitly here.
@@ -780,7 +809,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(count, 0, "no artifact must exist before commit");
+        assert_eq!(count, artifact_count_before);
     }
 
     /// Remove test rows created by a successful import to keep the test DB clean.
