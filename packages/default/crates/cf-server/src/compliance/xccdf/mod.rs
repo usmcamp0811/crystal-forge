@@ -10,5 +10,6 @@ pub mod importer;
 pub mod models;
 pub mod package;
 pub mod parser;
+pub mod reconciliation;
 pub mod xml_writer;
 pub mod zip_extractor;

@@ -232,6 +232,10 @@ impl ImportPlanError {
             ),
         )
     }
+
+    pub fn cf_native_invalid(code: &'static str, message: impl Into<String>) -> Self {
+        Self::new(code, message)
+    }
 }
 
 // ── Import result (outbound to caller) ────────────────────────────────────────
@@ -273,8 +277,19 @@ pub struct ImportedPolicyRecord {
     pub source_rule_id: String,
     /// Rule order in the source document (0-based).
     pub source_rule_order: usize,
-    /// `manual`, `unbound`, or `opaque`.
-    pub implementation_state: &'static str,
+    /// `native`, `manual`, `unbound`, or `opaque`.
+    pub implementation_state: String,
+    /// Native policy type from the typed CF payload.
+    pub policy_type: String,
+    pub version: Option<String>,
+    pub execution_phase: String,
+    pub config: serde_json::Value,
+    pub dependencies: serde_json::Value,
+    pub enabled_by_default: bool,
+    pub portable: bool,
+    pub semantic_digest: Option<String>,
+    pub selected: bool,
+    pub policy_order: i32,
     /// Human-readable policy name from the rule title, falling back to the rule ID.
     pub name: String,
     pub description: Option<String>,

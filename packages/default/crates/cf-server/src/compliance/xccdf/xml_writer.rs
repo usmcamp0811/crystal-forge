@@ -350,6 +350,9 @@ fn write_cf_policy(
 ) -> Result<(), XccdfWriterError> {
     let mut policy = BytesStart::new("cf:policy");
     policy.push_attribute(("schema-version", "1"));
+    if pv.implementation_state != ImplementationState::Native {
+        policy.push_attribute(("policy-type", pv.policy_type.as_str()));
+    }
     writer.write_event(Event::Start(policy))?;
 
     let mut exec = BytesStart::new("cf:execution");
@@ -3160,6 +3163,57 @@ mod tests {
             .expect("matching policy in snapshot");
         assert_eq!(meta.policy_id, expected_policy.policy_id);
         assert_eq!(meta.policy_version_id, expected_policy.policy_version_id);
+    }
+
+    #[test]
+    fn round_trip_native_payload_passes_reconciliation_validation() {
+        let mut snap = full_test_snapshot();
+        for policy in &mut snap.policies {
+            let canonical = crate::compliance::digest::PolicyVersionCanonical {
+                name: policy.name.clone(),
+                description: policy.description.clone(),
+                policy_type: policy.policy_type.clone(),
+                implementation_state: implementation_state_str(policy.implementation_state).into(),
+                execution_phase: policy.execution_phase.clone(),
+                config: policy.config.clone(),
+                compliance_metadata: policy.compliance_metadata.clone(),
+                dependencies: policy.dependencies.clone(),
+                opaque_xml_digest:
+                    crate::compliance::digest::PolicyVersionCanonical::digest_opaque_xml(
+                        policy.opaque_xml.as_deref(),
+                    ),
+                enabled_by_default: Some(policy.enabled_default),
+            };
+            policy.semantic_digest = canonical.compute_digest();
+        }
+        let mut ordered_policies = snap.policies.clone();
+        ordered_policies.sort_by_key(|policy| policy.policy_order);
+        let members = ordered_policies
+            .iter()
+            .map(|policy| crate::compliance::digest::BundleMembershipEntry {
+                policy_version_id: policy.policy_version_id,
+                selected: policy.selected,
+            })
+            .collect();
+        snap.semantic_digest = crate::compliance::digest::BundleVersionCanonical {
+            name: snap.name.clone(),
+            framework: snap.framework.clone(),
+            framework_version: snap.framework_version.clone(),
+            description: snap.description.clone(),
+            layer: snap.layer.clone(),
+            owner: snap.owner.clone(),
+            members,
+        }
+        .compute_digest();
+        let xml = write_bundle_xccdf_export(&snap).unwrap();
+        let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
+        let result = crate::compliance::xccdf::importer::validate_cf_native_document(&parsed);
+        if let Err(error) = result {
+            panic!(
+                "native round trip should validate: {} ({})",
+                error.code, error.message
+            );
+        }
     }
 
     /// Round-trip: standard ident elements are preserved.

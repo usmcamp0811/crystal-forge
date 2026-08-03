@@ -580,13 +580,98 @@ impl ParserState {
                 }
                 ParseControl::Continue
             }
+            (ElementNamespace::CrystalForge, b"implementation") => {
+                self.saw_supported_cf_content = true;
+                if let Some(meta) = self
+                    .current_rule
+                    .as_mut()
+                    .and_then(|r| r.cf_policy_meta.as_mut())
+                {
+                    meta.implementation_state = attr(&attrs, b"state").map(str::to_owned);
+                }
+                ParseControl::Continue
+            }
+            (ElementNamespace::CrystalForge, b"config-json")
+            | (ElementNamespace::CrystalForge, b"compliance-metadata-json")
+            | (ElementNamespace::CrystalForge, b"dependencies-json") => {
+                self.saw_supported_cf_content = true;
+                ParseControl::Continue
+            }
+            (ElementNamespace::CrystalForge, implementation)
+                if matches!(
+                    implementation,
+                    b"require-crystal-forge-agent"
+                        | b"require-packages"
+                        | b"custom-check"
+                        | b"require-cve-check"
+                        | b"time-window"
+                        | b"require-approvals"
+                        | b"canary-rollout"
+                        | b"cve-threshold"
+                        | b"unsupported"
+                ) =>
+            {
+                self.saw_supported_cf_content = true;
+                if let Some(meta) = self
+                    .current_rule
+                    .as_mut()
+                    .and_then(|r| r.cf_policy_meta.as_mut())
+                {
+                    if meta.policy_type.is_none() {
+                        meta.policy_type =
+                            Some(if implementation == b"require-crystal-forge-agent" {
+                                "require_cf_agent".into()
+                            } else {
+                                String::from_utf8_lossy(implementation).replace('-', "_")
+                            });
+                    }
+                }
+                ParseControl::Continue
+            }
             // Recognised CF text-only elements (content captured in handle_end).
+            (ElementNamespace::CrystalForge, b"content-digest") => {
+                let policy_digest = if let Some(meta) = self
+                    .current_rule
+                    .as_mut()
+                    .and_then(|r| r.cf_policy_meta.as_mut())
+                {
+                    meta.digest_algorithm = attr(&attrs, b"algorithm").map(str::to_owned);
+                    meta.canonicalization_version =
+                        attr(&attrs, b"canonical-model").map(str::to_owned);
+                    true
+                } else {
+                    false
+                };
+                if !policy_digest {
+                    if let Some(meta) = self.cf_bundle_meta.as_mut() {
+                        meta.digest_algorithm = attr(&attrs, b"algorithm").map(str::to_owned);
+                        meta.canonicalization_version =
+                            attr(&attrs, b"canonical-model").map(str::to_owned);
+                    }
+                }
+                self.saw_supported_cf_content = true;
+                ParseControl::Continue
+            }
             (
                 ElementNamespace::CrystalForge,
-                b"policy" | b"framework" | b"layer" | b"owner" | b"content-digest"
-                | b"policy-version",
+                b"policy" | b"framework" | b"layer" | b"owner" | b"policy-version",
             ) => {
                 self.saw_supported_cf_content = true;
+                if local_name == b"policy" {
+                    if let Some(meta) = self
+                        .current_rule
+                        .as_mut()
+                        .and_then(|r| r.cf_policy_meta.as_mut())
+                    {
+                        meta.policy_type = attr(&attrs, b"policy-type").map(str::to_owned);
+                    }
+                }
+                if local_name == b"framework" {
+                    if let Some(meta) = self.cf_bundle_meta.as_mut() {
+                        meta.framework = attr(&attrs, b"name").map(str::to_owned);
+                        meta.framework_version = attr(&attrs, b"version").map(str::to_owned);
+                    }
+                }
                 ParseControl::Continue
             }
             // Unknown CF-namespace element: marks the document as using an
@@ -730,7 +815,9 @@ impl ParserState {
             // ── Crystal Forge extension text elements ──────────────────────
             (ElementNamespace::CrystalForge, b"framework") => {
                 if let Some(ref mut meta) = self.cf_bundle_meta {
-                    meta.framework = Some(self.current_text.clone());
+                    if !self.current_text.is_empty() {
+                        meta.framework = Some(self.current_text.clone());
+                    }
                 }
             }
             (ElementNamespace::CrystalForge, b"layer") => {
@@ -744,15 +831,20 @@ impl ParserState {
                 }
             }
             (ElementNamespace::CrystalForge, b"content-digest") => {
-                if let Some(ref mut meta) = self
+                let policy_digest = if let Some(ref mut meta) = self
                     .current_rule
                     .as_mut()
                     .and_then(|r| r.cf_policy_meta.as_mut())
                 {
                     meta.digest = Some(self.current_text.clone());
-                }
-                if let Some(ref mut meta) = self.cf_bundle_meta {
-                    meta.digest = Some(self.current_text.clone());
+                    true
+                } else {
+                    false
+                };
+                if !policy_digest {
+                    if let Some(ref mut meta) = self.cf_bundle_meta {
+                        meta.digest = Some(self.current_text.clone());
+                    }
                 }
             }
             (ElementNamespace::CrystalForge, b"policy-version") => {
@@ -762,6 +854,33 @@ impl ParserState {
                     .and_then(|r| r.cf_policy_meta.as_mut())
                 {
                     meta.version = Some(self.current_text.clone());
+                }
+            }
+            (ElementNamespace::CrystalForge, b"config-json") => {
+                if let Some(meta) = self
+                    .current_rule
+                    .as_mut()
+                    .and_then(|r| r.cf_policy_meta.as_mut())
+                {
+                    meta.config = serde_json::from_str(&self.current_text).ok();
+                }
+            }
+            (ElementNamespace::CrystalForge, b"compliance-metadata-json") => {
+                if let Some(meta) = self
+                    .current_rule
+                    .as_mut()
+                    .and_then(|r| r.cf_policy_meta.as_mut())
+                {
+                    meta.compliance_metadata = serde_json::from_str(&self.current_text).ok();
+                }
+            }
+            (ElementNamespace::CrystalForge, b"dependencies-json") => {
+                if let Some(meta) = self
+                    .current_rule
+                    .as_mut()
+                    .and_then(|r| r.cf_policy_meta.as_mut())
+                {
+                    meta.dependencies = serde_json::from_str(&self.current_text).ok();
                 }
             }
             _ => {}
@@ -1064,12 +1183,15 @@ impl ParserState {
         self.cf_bundle_meta = Some(CfBundleMeta {
             bundle_id: bundle_id.unwrap_or_else(Uuid::nil),
             bundle_version_id: bvid.unwrap_or_else(Uuid::nil),
+            schema_version: attr(attrs, b"schema-version").map(str::to_owned),
             publication_state: state,
             framework: None,
             framework_version: None,
             layer: None,
             owner: None,
             digest: None,
+            digest_algorithm: None,
+            canonicalization_version: None,
         });
     }
 
@@ -1088,12 +1210,20 @@ impl ParserState {
                 policy_id: policy_id.unwrap_or_else(Uuid::nil),
                 policy_version_id: pvid.unwrap_or_else(Uuid::nil),
                 publication_state: state,
+                enabled_default: attr(attrs, b"enabled-default").and_then(parse_xsd_boolean),
+                selected: attr(attrs, b"selected").and_then(parse_xsd_boolean),
+                policy_order: attr(attrs, b"policy-order").and_then(|value| value.parse().ok()),
+                implementation_state: attr(attrs, b"implementation-state").map(str::to_owned),
                 version: None,
                 execution_phase: None,
                 strict: None,
                 policy_type: None,
                 config: None,
+                compliance_metadata: None,
+                dependencies: None,
                 digest: None,
+                digest_algorithm: None,
+                canonicalization_version: None,
             });
         }
     }

@@ -7,6 +7,10 @@
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+use crate::compliance::digest::{
+    BundleMembershipEntry, BundleVersionCanonical, PolicyVersionCanonical,
+};
+use crate::compliance::interchange::{CANONICALIZATION_VERSION, DIGEST_ALGORITHM};
 use crate::compliance::xccdf::import_models::{
     ImportPlanError, ImportedPolicyRecord, ValidatedImportPlan, XccdfImportPlan,
     XccdfRuleImportAction,
@@ -20,9 +24,11 @@ use crate::compliance::xccdf::models::{DocumentClass, ParsedRule, ParsedXccdf};
 pub fn check_document_class(parsed: &ParsedXccdf) -> Option<ImportPlanError> {
     match parsed.class {
         DocumentClass::ForeignXccdf => None, // supported
-        DocumentClass::CfNativeExact | DocumentClass::CfNativeUnsupportedExtension => Some(
-            ImportPlanError::document_class_unsupported(&format!("{:?}", parsed.class)),
-        ),
+        DocumentClass::CfNativeExact => validate_cf_native_document(parsed).err(),
+        DocumentClass::CfNativeUnsupportedExtension => Some(ImportPlanError::cf_native_invalid(
+            "CF_NATIVE_PROFILE_UNSUPPORTED",
+            "the document uses unsupported Crystal Forge extension content",
+        )),
         DocumentClass::InvalidXccdf => {
             // Blocking diagnostics have already been checked by the package
             // processor. An InvalidXccdf with no blocking errors can arrive
@@ -34,6 +40,248 @@ pub fn check_document_class(parsed: &ParsedXccdf) -> Option<ImportPlanError> {
             "unsupported_package",
         )),
     }
+}
+
+/// Validate the complete CF-native contract and construct portable records.
+/// This is intentionally typed and digest-checking: a document that claims to
+/// be CF-native is never silently downgraded to the foreign import path.
+pub fn validate_cf_native_document(
+    parsed: &ParsedXccdf,
+) -> Result<(ValidatedImportPlan, Vec<ImportedPolicyRecord>), ImportPlanError> {
+    let bundle = parsed.cf_bundle_meta.as_ref().ok_or_else(|| {
+        ImportPlanError::cf_native_invalid(
+            "CF_NATIVE_METADATA_INVALID",
+            "CF-native document is missing required bundle metadata",
+        )
+    })?;
+    if bundle.bundle_id.is_nil() || bundle.bundle_version_id.is_nil() {
+        return Err(ImportPlanError::cf_native_invalid(
+            "CF_NATIVE_METADATA_INVALID",
+            "CF-native bundle identities must be valid UUIDs",
+        ));
+    }
+    if bundle.schema_version.as_deref() != Some("1") {
+        return Err(ImportPlanError::cf_native_invalid(
+            "CF_NATIVE_PROFILE_UNSUPPORTED",
+            "unsupported or missing Crystal Forge bundle schema version",
+        ));
+    }
+    if !matches!(
+        bundle.publication_state.as_str(),
+        "incomplete" | "draft" | "interim" | "accepted" | "deprecated"
+    ) {
+        return Err(ImportPlanError::cf_native_invalid(
+            "CF_NATIVE_METADATA_INVALID",
+            "invalid bundle publication state",
+        ));
+    }
+    if bundle.digest_algorithm.as_deref() != Some(DIGEST_ALGORITHM) {
+        return Err(ImportPlanError::cf_native_invalid(
+            "CF_NATIVE_DIGEST_ALGORITHM_UNSUPPORTED",
+            "CF-native bundle digest algorithm must be sha-256",
+        ));
+    }
+    if bundle.canonicalization_version.as_deref() != Some(CANONICALIZATION_VERSION) {
+        return Err(ImportPlanError::cf_native_invalid(
+            "CF_NATIVE_CANONICALIZATION_UNSUPPORTED",
+            "CF-native bundle canonicalization must be cf-model-json-1",
+        ));
+    }
+    let benchmark = parsed.benchmark.as_ref().ok_or_else(|| {
+        ImportPlanError::cf_native_invalid("CF_NATIVE_METADATA_INVALID", "missing XCCDF benchmark")
+    })?;
+    let mut records = Vec::with_capacity(parsed.rules.len());
+    let mut rules = Vec::with_capacity(parsed.rules.len());
+    for (order, rule) in parsed.rules.iter().enumerate() {
+        let meta = rule.cf_policy_meta.as_ref().ok_or_else(|| {
+            ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_METADATA_INVALID",
+                format!("rule {} is missing CF policy identity", rule.id),
+            )
+        })?;
+        if meta.policy_id.is_nil() || meta.policy_version_id.is_nil() {
+            return Err(ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_METADATA_INVALID",
+                format!("rule {} has invalid portable identity", rule.id),
+            ));
+        }
+        let policy_type = meta.policy_type.clone().ok_or_else(|| {
+            ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_POLICY_TYPE_UNSUPPORTED",
+                format!("rule {} has no typed CF policy implementation", rule.id),
+            )
+        })?;
+        let implementation_state = meta.implementation_state.clone().ok_or_else(|| {
+            ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_PAYLOAD_INVALID",
+                format!("rule {} has no implementation state", rule.id),
+            )
+        })?;
+        let enabled_default = meta.enabled_default.ok_or_else(|| {
+            ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_METADATA_INVALID",
+                format!("rule {} has invalid enabled-default metadata", rule.id),
+            )
+        })?;
+        let selected = meta.selected.ok_or_else(|| {
+            ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_METADATA_INVALID",
+                format!("rule {} has invalid selected metadata", rule.id),
+            )
+        })?;
+        let policy_order = meta.policy_order.ok_or_else(|| {
+            ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_METADATA_INVALID",
+                format!("rule {} has invalid policy-order metadata", rule.id),
+            )
+        })?;
+        if !matches!(
+            implementation_state.as_str(),
+            "native" | "manual" | "external" | "unbound" | "opaque"
+        ) {
+            return Err(ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_PAYLOAD_INVALID",
+                format!("rule {} has invalid implementation state", rule.id),
+            ));
+        }
+        if meta.digest_algorithm.as_deref() != Some(DIGEST_ALGORITHM)
+            || meta.canonicalization_version.as_deref() != Some(CANONICALIZATION_VERSION)
+        {
+            return Err(ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_DIGEST_ALGORITHM_UNSUPPORTED",
+                format!("rule {} has unsupported digest contract", rule.id),
+            ));
+        }
+        let imported_digest = meta.digest.clone().ok_or_else(|| {
+            ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_METADATA_INVALID",
+                format!("rule {} is missing semantic digest", rule.id),
+            )
+        })?;
+        let compliance_metadata = meta
+            .compliance_metadata
+            .clone()
+            .unwrap_or_else(|| ImportedPolicyRecord::build_compliance_metadata(rule));
+        let config = meta.config.clone().ok_or_else(|| {
+            ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_PAYLOAD_INVALID",
+                format!("rule {} is missing typed configuration", rule.id),
+            )
+        })?;
+        let dependencies = meta
+            .dependencies
+            .clone()
+            .unwrap_or_else(|| serde_json::json!([]));
+        let canonical = PolicyVersionCanonical {
+            name: rule.title.clone().unwrap_or_else(|| rule.id.clone()),
+            description: rule.description.clone(),
+            policy_type: policy_type.clone(),
+            implementation_state: implementation_state.clone(),
+            execution_phase: meta.execution_phase.clone().ok_or_else(|| {
+                ImportPlanError::cf_native_invalid(
+                    "CF_NATIVE_PAYLOAD_INVALID",
+                    format!("rule {} is missing execution phase", rule.id),
+                )
+            })?,
+            config: config.clone(),
+            compliance_metadata: compliance_metadata.clone(),
+            dependencies: dependencies.clone(),
+            opaque_xml_digest: PolicyVersionCanonical::digest_opaque_xml(
+                rule.preserved_xml.as_deref(),
+            ),
+            enabled_by_default: Some(enabled_default),
+        };
+        let recalculated_digest = canonical.compute_digest();
+        if recalculated_digest != imported_digest {
+            return Err(ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_DIGEST_MISMATCH",
+                format!(
+                    "rule {} semantic digest does not match its typed payload (imported {}, recalculated {})",
+                    rule.id, imported_digest, recalculated_digest
+                ),
+            ));
+        }
+        let version = meta.version.clone();
+        records.push(ImportedPolicyRecord {
+            policy_id: meta.policy_id,
+            policy_version_id: meta.policy_version_id,
+            source_rule_id: rule.id.clone(),
+            source_rule_order: rule.rule_order.unwrap_or(order),
+            implementation_state,
+            policy_type,
+            version,
+            execution_phase: canonical.execution_phase.clone(),
+            config,
+            dependencies,
+            enabled_by_default: enabled_default,
+            portable: true,
+            semantic_digest: Some(imported_digest),
+            selected,
+            policy_order,
+            name: canonical.name,
+            description: canonical.description,
+            compliance_metadata,
+            opaque_xml: rule.preserved_xml.clone(),
+        });
+        rules.push((
+            rule.clone(),
+            XccdfRuleImportAction::CreateUnbound {
+                rule_id: rule.id.clone(),
+            },
+        ));
+    }
+    let mut ordered_records: Vec<&ImportedPolicyRecord> = records.iter().collect();
+    ordered_records.sort_by_key(|record| record.policy_order);
+    let members = ordered_records
+        .into_iter()
+        .map(|record| BundleMembershipEntry {
+            policy_version_id: record.policy_version_id,
+            selected: record.selected,
+        })
+        .collect();
+    let bundle_canonical = BundleVersionCanonical {
+        name: benchmark
+            .title
+            .clone()
+            .unwrap_or_else(|| bundle.bundle_id.to_string()),
+        framework: bundle.framework.clone().ok_or_else(|| {
+            ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_METADATA_INVALID",
+                "missing bundle framework",
+            )
+        })?,
+        framework_version: bundle.framework_version.clone(),
+        description: benchmark.description.clone(),
+        layer: bundle.layer.clone().unwrap_or_else(|| "fleet".into()),
+        owner: bundle
+            .owner
+            .clone()
+            .unwrap_or_else(|| "Platform Security".into()),
+        members,
+    };
+    if bundle.digest.as_deref() != Some(bundle_canonical.compute_digest().as_str()) {
+        return Err(ImportPlanError::cf_native_invalid(
+            "CF_NATIVE_DIGEST_MISMATCH",
+            format!(
+                "bundle semantic digest does not match its typed payload (imported {}, recalculated {})",
+                bundle.digest.as_deref().unwrap_or(""),
+                bundle_canonical.compute_digest()
+            ),
+        ));
+    }
+    let validated = ValidatedImportPlan {
+        expected_sha256: parsed.source_sha256.clone(),
+        bundle: crate::compliance::xccdf::import_models::ImportedBundlePlan {
+            name: bundle_canonical.name,
+            framework: bundle_canonical.framework,
+            version: benchmark.version.clone().unwrap_or_else(|| "1".into()),
+            layer: Some(bundle_canonical.layer),
+            owner: Some(bundle_canonical.owner),
+            description: bundle_canonical.description,
+        },
+        rules_to_import: rules,
+    };
+    Ok((validated, records))
 }
 
 // ── SHA-256 validation helpers ────────────────────────────────────────────────
@@ -171,7 +419,7 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
         .iter()
         .enumerate()
         .filter_map(|(order_in_selected, (rule, action))| {
-            let impl_state = action.implementation_state()?; // None = Exclude
+            let impl_state = action.implementation_state()?.to_owned(); // None = Exclude
 
             let name = rule
                 .title
@@ -194,6 +442,16 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
                 source_rule_id: rule.id.clone(),
                 source_rule_order: rule.rule_order.unwrap_or(order_in_selected),
                 implementation_state: impl_state,
+                policy_type: "imported_xccdf".into(),
+                version: None,
+                execution_phase: "not-applicable".into(),
+                config: serde_json::json!({}),
+                dependencies: serde_json::json!([]),
+                enabled_by_default: false,
+                portable: false,
+                semantic_digest: None,
+                selected: true,
+                policy_order: rule.rule_order.unwrap_or(order_in_selected) as i32,
                 name,
                 description: rule.description.clone(),
                 compliance_metadata,
@@ -474,12 +732,12 @@ mod tests {
     }
 
     #[test]
-    fn cf_native_document_is_rejected_as_unsupported() {
+    fn malformed_cf_native_document_is_rejected_as_invalid_metadata() {
         let mut parsed = minimal_foreign_parsed(&["r1"]);
         parsed.class = DocumentClass::CfNativeExact;
         let err = check_document_class(&parsed);
         assert!(err.is_some());
-        assert_eq!(err.unwrap().code, "IMPORT_DOCUMENT_CLASS_UNSUPPORTED");
+        assert_eq!(err.unwrap().code, "CF_NATIVE_METADATA_INVALID");
     }
 
     #[test]

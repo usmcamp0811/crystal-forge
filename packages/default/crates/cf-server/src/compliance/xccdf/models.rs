@@ -196,12 +196,15 @@ pub struct ParsedValue {
 pub struct CfBundleMeta {
     pub bundle_id: Uuid,
     pub bundle_version_id: Uuid,
+    pub schema_version: Option<String>,
     pub publication_state: String,
     pub framework: Option<String>,
     pub framework_version: Option<String>,
     pub layer: Option<String>,
     pub owner: Option<String>,
     pub digest: Option<String>,
+    pub digest_algorithm: Option<String>,
+    pub canonicalization_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,12 +212,20 @@ pub struct CfPolicyMeta {
     pub policy_id: Uuid,
     pub policy_version_id: Uuid,
     pub publication_state: String,
+    pub enabled_default: Option<bool>,
+    pub selected: Option<bool>,
+    pub policy_order: Option<i32>,
+    pub implementation_state: Option<String>,
     pub version: Option<String>,
     pub execution_phase: Option<String>,
     pub strict: Option<bool>,
     pub policy_type: Option<String>,
     pub config: Option<serde_json::Value>,
+    pub compliance_metadata: Option<serde_json::Value>,
+    pub dependencies: Option<serde_json::Value>,
     pub digest: Option<String>,
+    pub digest_algorithm: Option<String>,
+    pub canonicalization_version: Option<String>,
 }
 
 // ── Signature ─────────────────────────────────────────────────────────────────
