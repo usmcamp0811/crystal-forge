@@ -97,7 +97,7 @@ pub struct ParsedRule {
     pub severity: Option<String>,
     pub weight: Option<f64>,
     pub version: Option<String>,
-    pub check: Option<CheckContent>,
+    pub checks: Vec<CheckContent>,
     pub fix: Option<FixContent>,
     pub identifiers: Vec<StandardIdentifier>,
     pub references: Vec<Reference>,

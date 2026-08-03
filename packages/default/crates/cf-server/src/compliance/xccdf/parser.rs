@@ -395,10 +395,19 @@ struct ParserState {
     current_rule: Option<ParsedRule>,
     current_profile: Option<ParsedProfile>,
     current_group: Option<ParsedGroup>,
-    current_check: Option<CheckContent>,
+    current_check: Option<PendingCheck>,
     current_fix: Option<FixContent>,
     current_ident: Option<StandardIdentifier>,
     current_ref: Option<Reference>,
+}
+
+struct PendingCheck {
+    system: String,
+    selector: Option<String>,
+    multi_check: Option<bool>,
+    negate: Option<bool>,
+    body: Option<CheckBody>,
+    body_error: bool,
 }
 
 impl ParserState {
@@ -518,12 +527,21 @@ impl ParserState {
                             "CHECK_REF_MISSING_HREF",
                             "check-content-ref requires a non-empty href attribute",
                         ));
+                        check.body_error = true;
                         return ParseControl::Abort;
                     };
-                    check.body = CheckBody::Reference {
-                        href: href.to_owned(),
-                        name: attr(&attrs, b"name").map(str::to_owned),
-                    };
+                    if check.body.is_some() {
+                        self.errors.push(Diagnostic::error(
+                            "CHECK_BODY_AMBIGUOUS",
+                            "check contains more than one check-content or check-content-ref body",
+                        ));
+                        check.body_error = true;
+                    } else {
+                        check.body = Some(CheckBody::Reference {
+                            href: href.to_owned(),
+                            name: attr(&attrs, b"name").map(str::to_owned),
+                        });
+                    }
                 }
                 ParseControl::Continue
             }
@@ -645,16 +663,41 @@ impl ParserState {
                 }
             }
             (ElementNamespace::Xccdf, b"check") => {
-                let check = self.current_check.take();
-                if let Some(ref mut rule) = self.current_rule {
-                    rule.check = check;
+                if let Some(check) = self.current_check.take() {
+                    if check.body_error {
+                        // A diagnostic was already emitted for the invalid
+                        // body combination; do not construct a lossy check.
+                    } else if let Some(body) = check.body {
+                        if let Some(ref mut rule) = self.current_rule {
+                            rule.checks.push(CheckContent {
+                                system: check.system,
+                                body,
+                                selector: check.selector,
+                                multi_check: check.multi_check,
+                                negate: check.negate,
+                            });
+                        }
+                    } else {
+                        self.errors.push(Diagnostic::error(
+                            "CHECK_BODY_MISSING",
+                            "check must contain exactly one check-content or check-content-ref body",
+                        ));
+                    }
                 }
             }
             (ElementNamespace::Xccdf, b"check-content") => {
                 if let Some(ref mut check) = self.current_check {
-                    check.body = CheckBody::Inline {
-                        content: self.current_text.clone(),
-                    };
+                    if check.body.is_some() {
+                        self.errors.push(Diagnostic::error(
+                            "CHECK_BODY_AMBIGUOUS",
+                            "check contains more than one check-content or check-content-ref body",
+                        ));
+                        check.body_error = true;
+                    } else {
+                        check.body = Some(CheckBody::Inline {
+                            content: self.current_text.clone(),
+                        });
+                    }
                 }
             }
             (ElementNamespace::Xccdf, b"fix") => {
@@ -915,7 +958,7 @@ impl ParserState {
             severity,
             weight,
             version: None,
-            check: None,
+            checks: vec![],
             fix: None,
             identifiers: vec![],
             references: vec![],
@@ -984,14 +1027,13 @@ impl ParserState {
         let selector = attr(attrs, b"selector").map(String::from);
         let multi_check = parse_check_boolean(attrs, b"multi-check", &mut self.errors);
         let negate = parse_check_boolean(attrs, b"negate", &mut self.errors);
-        self.current_check = Some(CheckContent {
+        self.current_check = Some(PendingCheck {
             system,
-            body: CheckBody::Inline {
-                content: String::new(),
-            },
             selector,
             multi_check,
             negate,
+            body: None,
+            body_error: false,
         });
     }
 
@@ -1103,7 +1145,7 @@ fn classify(state: &mut ParserState) {
         // Foreign XCCDF: all rules are preserved opaque unless the user maps them.
         state.fidelity = Fidelity::PreservedOpaque;
         for rule in &mut state.rules {
-            if rule.check.is_none() {
+            if rule.checks.is_empty() {
                 state.fidelity_losses.push(format!(
                     "Rule '{}' has no check content — will be stored as unbound",
                     rule.id
@@ -1159,7 +1201,7 @@ mod tests {
         let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
         assert!(parsed.errors.is_empty(), "unexpected errors: {:?}", parsed.errors);
         let rule = &parsed.rules[0];
-        let check = rule.check.as_ref().expect("check");
+        let check = rule.checks.first().expect("check");
         assert_eq!(check.system, "urn:example:check");
         assert_eq!(check.selector.as_deref(), Some("sel"));
         assert_eq!(check.multi_check, Some(true));
@@ -1185,7 +1227,7 @@ mod tests {
   </Rule>
 </Benchmark>"#;
         let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
-        let check = parsed.rules[0].check.as_ref().expect("check");
+        let check = parsed.rules[0].checks.first().expect("check");
         assert!(matches!(
             &check.body,
             CheckBody::Reference { href, name }
@@ -1203,6 +1245,60 @@ mod tests {
 </Benchmark>"#;
         let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
         assert!(parsed.errors.iter().any(|error| error.code == "INVALID_XSD_BOOLEAN"));
+    }
+
+    #[test]
+    fn rejects_check_without_body() {
+        let parsed = parse_xccdf(
+            doc_with_body(r#"<Rule id="r"><title>Rule</title><check system="s"/></Rule>"#).as_bytes(),
+            None,
+            &InterchangeLimits::default(),
+        )
+        .unwrap();
+        assert!(parsed.errors.iter().any(|error| error.code == "CHECK_BODY_MISSING"));
+        assert!(parsed.rules[0].checks.is_empty());
+    }
+
+    #[test]
+    fn rejects_check_with_inline_and_reference_bodies() {
+        let parsed = parse_xccdf(
+            doc_with_body(
+                r#"<Rule id="r"><title>Rule</title><check system="s"><check-content>one</check-content><check-content-ref href="checks.xml"/></check></Rule>"#,
+            ).as_bytes(),
+            None,
+            &InterchangeLimits::default(),
+        )
+        .unwrap();
+        assert!(parsed.errors.iter().any(|error| error.code == "CHECK_BODY_AMBIGUOUS"));
+        assert!(parsed.rules[0].checks.is_empty());
+    }
+
+    #[test]
+    fn rejects_check_with_two_inline_bodies() {
+        let parsed = parse_xccdf(
+            doc_with_body(
+                r#"<Rule id="r"><title>Rule</title><check system="s"><check-content>one</check-content><check-content>two</check-content></check></Rule>"#,
+            ).as_bytes(),
+            None,
+            &InterchangeLimits::default(),
+        )
+        .unwrap();
+        assert!(parsed.errors.iter().any(|error| error.code == "CHECK_BODY_AMBIGUOUS"));
+        assert!(parsed.rules[0].checks.is_empty());
+    }
+
+    #[test]
+    fn rejects_check_with_two_reference_bodies() {
+        let parsed = parse_xccdf(
+            doc_with_body(
+                r#"<Rule id="r"><title>Rule</title><check system="s"><check-content-ref href="one.xml"/><check-content-ref href="two.xml"/></check></Rule>"#,
+            ).as_bytes(),
+            None,
+            &InterchangeLimits::default(),
+        )
+        .unwrap();
+        assert!(parsed.errors.iter().any(|error| error.code == "CHECK_BODY_AMBIGUOUS"));
+        assert!(parsed.rules[0].checks.is_empty());
     }
 
     #[test]

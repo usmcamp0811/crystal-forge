@@ -2866,8 +2866,49 @@ mod tests {
     // ── Round-trip tests ───────────────────────────────────────────────────────
 
     use super::super::models::DocumentClass;
+    use super::super::models::CheckBody;
     use super::super::parser::parse_xccdf;
     use crate::compliance::interchange::InterchangeLimits;
+
+    #[test]
+    fn dual_checks_survive_real_writer_parser_round_trip() {
+        let mut policy = test_policy("require_cf_agent", ImplementationState::Native, json!({}));
+        policy.compliance_metadata = json!({
+            "check": {
+                "system": "urn:example:oval",
+                "selector": "oval:example:selector",
+                "multi-check": "1",
+                "negate": "0",
+                "content": "Evaluate the imported standards check."
+            }
+        });
+        let snapshot = make_single_policy_snapshot(vec![policy]);
+        let xml = write_bundle_xccdf_export(&snapshot).unwrap();
+        let parsed = parse_xccdf(xml.as_bytes(), Some("round-trip.xml"), &InterchangeLimits::default())
+            .unwrap();
+        assert!(parsed.errors.is_empty(), "unexpected parser errors: {:?}", parsed.errors);
+
+        let checks = &parsed.rules[0].checks;
+        assert_eq!(checks.len(), 2, "dual-check export must parse as two checks");
+
+        let imported = &checks[0];
+        assert_eq!(imported.system, "urn:example:oval");
+        assert_eq!(imported.selector.as_deref(), Some("oval:example:selector"));
+        assert_eq!(imported.multi_check, Some(true));
+        assert_eq!(imported.negate, Some(false));
+        assert!(matches!(
+            &imported.body,
+            CheckBody::Inline { content }
+                if content == "Evaluate the imported standards check."
+        ));
+
+        let crystal_forge = &checks[1];
+        assert_eq!(crystal_forge.system, CF_POLICY_CHECK_SYSTEM);
+        assert_eq!(crystal_forge.selector, None);
+        assert_eq!(crystal_forge.multi_check, None);
+        assert_eq!(crystal_forge.negate, None);
+        assert!(matches!(&crystal_forge.body, CheckBody::Inline { .. }));
+    }
 
     fn full_test_snapshot() -> XccdfBundleExport {
         let bundle_id = Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
