@@ -1377,6 +1377,59 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
+    async fn cf_native_concurrent_identical_imports_are_serialized() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let (bytes, bundle_id, bundle_version_id, policy_id, policy_version_id) =
+            native_fixture_bytes();
+
+        let import = |bytes: Vec<u8>| {
+            let pool = pool.clone();
+            async move {
+                let pkg = make_package(bytes);
+                let (validated, records) =
+                    crate::compliance::xccdf::importer::validate_cf_native_document(&pkg.parsed)
+                        .expect("native fixture should validate");
+                commit_cf_native_import(&pool, user_id, pkg, validated, records).await
+            }
+        };
+
+        let (first, second) = tokio::join!(import(bytes.clone()), import(bytes));
+        let first = first.expect("first concurrent native import");
+        let second = second.expect("second concurrent native import");
+
+        assert_eq!(first.bundle_id, bundle_id);
+        assert_eq!(second.bundle_id, bundle_id);
+        assert_eq!(first.bundle_version_id, bundle_version_id);
+        assert_eq!(second.bundle_version_id, bundle_version_id);
+        assert_eq!(
+            first.created_policy_versions + second.created_policy_versions,
+            1
+        );
+        assert_eq!(
+            first.reused_policy_versions + second.reused_policy_versions,
+            1
+        );
+
+        let policy_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policy_versions WHERE policy_id = $1",
+        )
+        .bind(policy_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let version_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policy_versions WHERE id = $1")
+                .bind(policy_version_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(policy_count, 1);
+        assert_eq!(version_count, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
     async fn excluded_rules_create_no_rows() {
         let pool = test_pool().await.expect("DATABASE_URL required");
         let user_id = ensure_test_user(&pool).await;
