@@ -3,7 +3,7 @@ id: TASK-412
 title: Implement CF-XCCDF bundle and policy interchange and design updates
 status: In Progress
 assignee:
-  - gpt-5.6-terra
+  - '@gpt-5.6-luna'
 created_date: '2026-08-01 01:04'
 updated_date: '2026-08-09 23:37'
 labels:
@@ -1310,6 +1310,8 @@ This is a cross-cutting, security-sensitive feature with 44 acceptance criteria 
 
 ### Required approval
 Before implementation, approve the phased delivery/subtask breakdown and the dependency-selection phase. These are material architecture and workflow decisions; a single unstructured implementation pass would not be safely reviewable.
+
+Continuation from 8ade2843: implement only CF-native XCCDF reconciliation in two focused commits. First add strict typed CF-native metadata/payload parsing, canonical digest verification, typed reconciliation decisions/conflicts, and planner/native payload tests without changing the completed foreign package pipeline. Second integrate the planner into the existing atomic import transaction with deterministic advisory locks, idempotent reuse/create paths, mappings/audit/HTTP 409/422 handling, and live PostgreSQL tests for exact reimport, conflicts, mixed reconciliation, mapping conflicts, and concurrency. Preserve the existing source-artifact, transaction, excluded-rule, and live foreign-test behavior unless regression tests require changes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -1349,4 +1351,6 @@ MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/313. 
 - Rewrote xml_writer.rs completely: XCCDF 1.2 Benchmark with Groups by policy_type, Rules with severity/weight, CF extensions, source mappings, check/fix elements for all 8 policy types
 
 - 7 new xml_writer tests, all 124 compliance tests pass
+
+Continuation requested from commit 8ade2843. Initial exploration found CF-native classes are currently rejected; parser retains only partial CF metadata; importer generates random IDs; persistence always creates new lineages/versions. Existing migrations provide version identities, draft/published pointers, immutability, source mappings, and triggers.
 <!-- SECTION:NOTES:END -->
