@@ -273,6 +273,36 @@ mod tests {
     }
 
     #[test]
+    fn version_under_wrong_lineage_is_conflict() {
+        let imported = item(1, 2, "a");
+        let existing = ExistingPolicyIdentity {
+            lineage_id: Uuid::from_u128(9),
+            version_id: imported.version_id,
+            policy_type: imported.policy_type.clone(),
+            semantic_digest: imported.semantic_digest.clone(),
+        };
+        let plan = plan_policy_reconciliation(&[imported], &[existing]);
+        assert_eq!(plan.conflicts[0].code(), "CF_NATIVE_IDENTITY_CONFLICT");
+    }
+
+    #[test]
+    fn mixed_reuse_and_creation_is_planned_without_conflict() {
+        let reused = item(1, 2, "a");
+        let created = item(3, 4, "b");
+        let plan =
+            plan_policy_reconciliation(&[reused.clone(), created.clone()], &[local(&reused)]);
+        assert!(plan.conflicts.is_empty());
+        assert!(matches!(
+            plan.decisions[0].1,
+            ReconcileDecision::ReuseExact { .. }
+        ));
+        assert!(matches!(
+            plan.decisions[1].1,
+            ReconcileDecision::CreateLineageAndVersion { .. }
+        ));
+    }
+
+    #[test]
     fn conflicts_are_sorted_by_identity() {
         let a = item(2, 2, "new");
         let b = item(1, 2, "new");

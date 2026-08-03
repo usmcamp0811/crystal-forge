@@ -389,8 +389,13 @@ pub async fn xccdf_import(
     }
 
     if let Some(err) = check_document_class(&pkg.parsed) {
+        let status = if err.code == "CF_NATIVE_DIGEST_MISMATCH" {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::UNPROCESSABLE_ENTITY
+        };
         return (
-            StatusCode::UNPROCESSABLE_ENTITY,
+            status,
             Json(ApiError {
                 error: err.code.into(),
                 message: err.message,
