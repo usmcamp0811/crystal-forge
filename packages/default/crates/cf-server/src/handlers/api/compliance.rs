@@ -1094,7 +1094,11 @@ async fn persist_assignment(
     };
 
     let exclusions = payload.exclusions.clone().unwrap_or_default();
-    let additions = payload.additions.clone().unwrap_or_default();
+    // The persistence schema intentionally has no insertion-order column for
+    // additions. Use stable portable identity order so equivalent requests do
+    // not depend on database insertion order.
+    let mut additions = payload.additions.clone().unwrap_or_default();
+    additions.sort();
     let overrides: Vec<PolicyOverride> = payload
         .value_overrides
         .clone()
@@ -1126,6 +1130,43 @@ async fn persist_assignment(
         Ok(tx) => tx,
         Err(_) => return Err(internal_error("Failed to start transaction")),
     };
+
+    // Assignment uniqueness is defined by bundle lineage + target, not by a
+    // mutable/draft bundle-version row. Lock the target identity while checking
+    // it so concurrent creates cannot silently create ambiguous assignments.
+    let duplicate_assignment: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT a.id
+           FROM compliance_bundle_assignments a
+           JOIN compliance_bundle_versions bv ON bv.id = a.bundle_version_id
+           WHERE bv.bundle_id = (
+               SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1
+           )
+             AND a.scope_type = $2
+             AND (($2 = 'environment' AND a.environment_id = $3)
+               OR ($2 = 'system' AND a.system_id = $3))
+             AND ($4::uuid IS NULL OR a.id <> $4)
+           FOR UPDATE"#,
+    )
+    .bind(payload.bundle_version_id)
+    .bind(scope_type)
+    .bind(payload.scope_id)
+    .bind(assignment_id_opt)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|_| internal_error("Failed to validate assignment uniqueness"))?;
+
+    if duplicate_assignment.is_some() {
+        let _ = tx.rollback().await;
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "Assignment already exists",
+                "message": "An assignment for this bundle lineage and target already exists",
+                "code": "ASSIGNMENT_SCOPE_CONFLICT"
+            })),
+        )
+            .into_response());
+    }
 
     // Resolve to validate the assignment and compute the digest
     let outcome = resolve_effective_policy_set(&mut tx, &input)
