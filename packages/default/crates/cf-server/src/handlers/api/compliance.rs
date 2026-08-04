@@ -5913,4 +5913,93 @@ mod tests {
             .expect("create assignment");
         assert_eq!(response.status().as_u16(), 422);
     }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn assignment_exclusion_and_addition_resolve_deterministically() {
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (baseline_a, baseline_a_version, _) = make_draft_policy(
+            &pool,
+            &format!("assignment-baseline-a-{}", Uuid::new_v4().simple()),
+        )
+        .await;
+        let (baseline_b, baseline_b_version, _) = make_draft_policy(
+            &pool,
+            &format!("assignment-baseline-b-{}", Uuid::new_v4().simple()),
+        )
+        .await;
+        let (addition, addition_version, _) = make_draft_policy(
+            &pool,
+            &format!("assignment-addition-{}", Uuid::new_v4().simple()),
+        )
+        .await;
+        db_publish_policy_version(&pool, baseline_a, baseline_a_version).await;
+        db_publish_policy_version(&pool, baseline_b, baseline_b_version).await;
+        db_publish_policy_version(&pool, addition, addition_version).await;
+
+        let (_, bundle_version_id, bundle_digest) = make_draft_bundle(
+            &pool,
+            &format!("assignment-overlay-bundle-{}", Uuid::new_v4().simple()),
+            &[baseline_a_version, baseline_b_version],
+        )
+        .await;
+        let base = spawn_phase1_server(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let publish = client
+            .post(format!(
+                "{base}/api/v1/compliance/bundle-versions/{bundle_version_id}/publish"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({"expected_semantic_digest": bundle_digest}))
+            .send()
+            .await
+            .expect("publish bundle");
+        assert_eq!(publish.status().as_u16(), 200);
+
+        let environment_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(environment_id)
+            .bind(format!("asgn-overlay-{}", environment_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert environment");
+
+        let create = client
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bundle_version_id,
+                "scope_type": "environment",
+                "scope_id": environment_id,
+                "exclusions": [baseline_a_version],
+                "additions": [addition_version]
+            }))
+            .send()
+            .await
+            .expect("create assignment");
+        assert_eq!(create.status().as_u16(), 201);
+        let assignment: serde_json::Value = create.json().await.expect("assignment json");
+        let assignment_id: Uuid = assignment["id"]
+            .as_str()
+            .and_then(|value| value.parse().ok())
+            .expect("assignment id");
+
+        let effective = client
+            .get(format!(
+                "{base}/api/v1/compliance/assignments/{assignment_id}/effective-policies"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("effective policies");
+        assert_eq!(effective.status().as_u16(), 200);
+        let effective: serde_json::Value = effective.json().await.expect("effective json");
+        let policies = effective["policies"].as_array().expect("policies");
+        assert_eq!(policies.len(), 2);
+        assert_eq!(policies[0]["policy_version_id"], baseline_b_version.to_string());
+        assert_eq!(policies[0]["source"], "baseline");
+        assert_eq!(policies[1]["policy_version_id"], addition_version.to_string());
+        assert_eq!(policies[1]["source"], "addition");
+    }
 }
