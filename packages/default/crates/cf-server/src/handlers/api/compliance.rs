@@ -1326,6 +1326,22 @@ async fn persist_assignment(
         }
     }
 
+    // Child-table invalidation triggers set the digest to `pending`. Restore the
+    // canonical digest after all overlay rows have been written, still inside
+    // the same transaction.
+    if let Err(e) = sqlx::query(
+        "UPDATE compliance_bundle_assignments SET assignment_overlay_digest = $2 WHERE id = $1",
+    )
+    .bind(assignment_id)
+    .bind(&effective_set_digest)
+    .execute(&mut *tx)
+    .await
+    {
+        let _ = tx.rollback().await;
+        tracing::error!("Failed to persist assignment digest: {e}");
+        return Err(internal_error("Failed to persist assignment digest"));
+    }
+
     // Commit
     if let Err(e) = tx.commit().await {
         tracing::error!("Failed to commit assignment: {e}");
@@ -3551,7 +3567,7 @@ mod tests {
 
     /// Spawn a minimal axum server that wires all Phase 1 trust/publication routes.
     async fn spawn_phase1_server(pool: PgPool) -> String {
-        use axum::routing::post;
+        use axum::routing::{delete, get, post, put};
         let app = Router::new()
             // Trust
             .route(
@@ -3579,6 +3595,32 @@ mod tests {
             .route(
                 "/api/v1/compliance/bundles/:bundle_id/drafts",
                 post(create_bundle_draft),
+            )
+            .route(
+                "/api/v1/compliance/assignments",
+                post(create_assignment),
+            )
+            .route(
+                "/api/v1/compliance/assignments/:id",
+                get(get_assignment)
+                    .put(update_assignment)
+                    .delete(delete_assignment),
+            )
+            .route(
+                "/api/v1/compliance/assignments/:id/effective-policies",
+                get(get_assignment_effective_policies),
+            )
+            .route(
+                "/api/v1/compliance/assignments/preview",
+                post(preview_assignment),
+            )
+            .route(
+                "/api/v1/environments/:id/compliance-assignments",
+                get(list_environment_assignments),
+            )
+            .route(
+                "/api/v1/systems/:id/compliance-assignments",
+                get(list_system_assignments),
             )
             .with_state(pool);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -5707,5 +5749,127 @@ mod tests {
             !body.contains("<Rule"),
             "empty bundle should not contain <Rule> elements"
         );
+    }
+
+    // ── Phase 2: assignment live tests ──────────────────────────────────────
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn assignment_create_and_effective_policy_resolution() {
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (policy_id, policy_version_id, _) =
+            make_draft_policy(&pool, &format!("assignment-policy-{}", Uuid::new_v4().simple()))
+                .await;
+        db_publish_policy_version(&pool, policy_id, policy_version_id).await;
+        let (bundle_id, bundle_version_id, bundle_digest) = make_draft_bundle(
+            &pool,
+            &format!("assignment-bundle-{}", Uuid::new_v4().simple()),
+            &[policy_version_id],
+        )
+        .await;
+        let base = spawn_phase1_server(pool.clone()).await;
+        let client = reqwest::Client::new();
+
+        let publish = client
+            .post(format!(
+                "{base}/api/v1/compliance/bundle-versions/{bundle_version_id}/publish"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({"expected_semantic_digest": bundle_digest}))
+            .send()
+            .await
+            .expect("publish bundle");
+        assert_eq!(publish.status().as_u16(), 200);
+
+        let environment_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO environments (id, name) VALUES ($1, $2)",
+        )
+        .bind(environment_id)
+        .bind(format!("assignment-env-{}", environment_id.simple()))
+        .execute(&pool)
+        .await
+        .expect("insert environment");
+
+        let create = client
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bundle_version_id,
+                "scope_type": "environment",
+                "scope_id": environment_id,
+                "enforcement_mode": "enforce"
+            }))
+            .send()
+            .await
+            .expect("create assignment");
+        assert_eq!(create.status().as_u16(), 201);
+        let assignment: serde_json::Value = create.json().await.expect("assignment json");
+        let assignment_id: Uuid = assignment["id"]
+            .as_str()
+            .and_then(|value| value.parse().ok())
+            .expect("assignment id");
+        assert_ne!(assignment["assignment_overlay_digest"], "pending");
+
+        let digest: (String,) = sqlx::query_as(
+            "SELECT assignment_overlay_digest FROM compliance_bundle_assignments WHERE id = $1",
+        )
+        .bind(assignment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("assignment digest");
+        assert_ne!(digest.0, "pending");
+
+        let effective = client
+            .get(format!(
+                "{base}/api/v1/compliance/assignments/{assignment_id}/effective-policies"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("effective policies");
+        assert_eq!(effective.status().as_u16(), 200);
+        let effective: serde_json::Value = effective.json().await.expect("effective json");
+        assert_eq!(effective["bundle_version_id"], bundle_version_id.to_string());
+        assert_eq!(effective["policies"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn assignment_rejects_draft_bundle() {
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (policy_id, policy_version_id, _) =
+            make_draft_policy(&pool, &format!("assignment-draft-policy-{}", Uuid::new_v4().simple()))
+                .await;
+        db_publish_policy_version(&pool, policy_id, policy_version_id).await;
+        let (_, bundle_version_id, _) = make_draft_bundle(
+            &pool,
+            &format!("assignment-draft-bundle-{}", Uuid::new_v4().simple()),
+            &[policy_version_id],
+        )
+        .await;
+        let environment_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(environment_id)
+            .bind(format!("asgn-draft-{}", environment_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert environment");
+        let base = spawn_phase1_server(pool).await;
+
+        let response = reqwest::Client::new()
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bundle_version_id,
+                "scope_type": "environment",
+                "scope_id": environment_id
+            }))
+            .send()
+            .await
+            .expect("create assignment");
+        assert_eq!(response.status().as_u16(), 422);
     }
 }
