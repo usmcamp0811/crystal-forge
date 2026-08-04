@@ -381,7 +381,7 @@ pub async fn write_assignment_effective_set_digest(
 
     // Exclusions.
     let exclusions: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT policy_version_id FROM compliance_assignment_exclusions WHERE assignment_id = $1 ORDER BY policy_version_id",
+        "SELECT policy_version_id FROM compliance_assignment_exclusions WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1) ORDER BY policy_version_id",
     )
     .bind(assignment_id)
     .fetch_all(&mut **tx)
@@ -389,7 +389,7 @@ pub async fn write_assignment_effective_set_digest(
 
     // Additions.
     let additions: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_id = $1 ORDER BY policy_version_id",
+        "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1) ORDER BY policy_version_id",
     )
     .bind(assignment_id)
     .fetch_all(&mut **tx)
@@ -406,7 +406,7 @@ pub async fn write_assignment_effective_set_digest(
         r#"
         SELECT policy_version_id, value_path, value
         FROM compliance_assignment_value_overrides
-        WHERE assignment_id = $1
+        WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)
         ORDER BY policy_version_id, value_path
         "#,
     )
@@ -436,7 +436,7 @@ pub async fn write_assignment_effective_set_digest(
               AND NOT EXISTS (
                   SELECT 1
                   FROM compliance_assignment_exclusions ex
-                  WHERE ex.assignment_id = $1
+                   WHERE ex.assignment_version_id = a.current_version_id
                     AND ex.policy_version_id = bvp.policy_version_id
               )
 
@@ -449,7 +449,7 @@ pub async fn write_assignment_effective_set_digest(
                     ORDER BY aa.policy_version_id
                 )::integer AS source_order
             FROM compliance_assignment_additions aa
-            WHERE aa.assignment_id = $1
+            WHERE aa.assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)
         )
         SELECT policy_version_id
         FROM overlay

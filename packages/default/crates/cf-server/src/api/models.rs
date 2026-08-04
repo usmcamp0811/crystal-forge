@@ -2822,6 +2822,7 @@ pub struct CreateAssignmentRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssignmentResponse {
     pub id: Uuid,
+    pub current_version_id: Uuid,
     pub bundle_version_id: Uuid,
     pub scope_type: String,
     pub scope_id: Uuid,
@@ -2837,6 +2838,8 @@ pub struct AssignmentResponse {
 /// Request to update an assignment (replaces exclusions, additions, overrides).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateAssignmentRequest {
+    /// Immutable assignment version this update is expected to replace.
+    pub expected_version_id: Uuid,
     pub enforcement_mode: Option<String>,
     pub exclusions: Option<Vec<Uuid>>,
     pub additions: Option<Vec<Uuid>>,

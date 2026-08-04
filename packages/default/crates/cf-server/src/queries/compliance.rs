@@ -151,10 +151,11 @@ pub async fn ensure_bundle_draft(
         let new_assignment_id: Uuid = sqlx::query_scalar(
             r#"
             INSERT INTO compliance_bundle_assignments
-                (bundle_version_id, scope_type, environment_id, system_id,
+                (bundle_id, bundle_version_id, scope_type, environment_id, system_id,
                  enforcement_mode, provenance, assignment_overlay_digest,
                  created_by, updated_by)
-            VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $7)
+            VALUES ((SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1),
+                    $1, $2, $3, $4, $5, $6, 'pending', $7, $7)
             RETURNING id
             "#,
         )
@@ -168,15 +169,38 @@ pub async fn ensure_bundle_draft(
         .fetch_one(&mut **tx)
         .await?;
 
+        let new_assignment_version_id: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO compliance_bundle_assignment_versions
+               (assignment_id, version_number, bundle_version_id, enforcement_mode,
+                assignment_overlay_digest, provenance, created_by)
+               SELECT $1, 1, bundle_version_id, enforcement_mode,
+                      assignment_overlay_digest, provenance, created_by
+               FROM compliance_bundle_assignments WHERE id = $1
+               RETURNING id"#,
+        )
+        .bind(new_assignment_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        sqlx::query(
+            "UPDATE compliance_bundle_assignments SET current_version_id = $2 WHERE id = $1",
+        )
+        .bind(new_assignment_id)
+        .bind(new_assignment_version_id)
+        .execute(&mut **tx)
+        .await?;
+
         // Copy exclusions.
         sqlx::query(
             r#"
-            INSERT INTO compliance_assignment_exclusions (assignment_id, policy_version_id)
-            SELECT $1, policy_version_id
-            FROM compliance_assignment_exclusions WHERE assignment_id = $2
+            INSERT INTO compliance_assignment_exclusions
+                (assignment_id, assignment_version_id, policy_version_id)
+            SELECT $1, $2, policy_version_id
+            FROM compliance_assignment_exclusions
+            WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $3)
             "#,
         )
         .bind(new_assignment_id)
+        .bind(new_assignment_version_id)
         .bind(pa.id)
         .execute(&mut **tx)
         .await?;
@@ -184,12 +208,15 @@ pub async fn ensure_bundle_draft(
         // Copy additions.
         sqlx::query(
             r#"
-            INSERT INTO compliance_assignment_additions (assignment_id, policy_version_id)
-            SELECT $1, policy_version_id
-            FROM compliance_assignment_additions WHERE assignment_id = $2
+            INSERT INTO compliance_assignment_additions
+                (assignment_id, assignment_version_id, policy_version_id)
+            SELECT $1, $2, policy_version_id
+            FROM compliance_assignment_additions
+            WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $3)
             "#,
         )
         .bind(new_assignment_id)
+        .bind(new_assignment_version_id)
         .bind(pa.id)
         .execute(&mut **tx)
         .await?;
@@ -198,12 +225,14 @@ pub async fn ensure_bundle_draft(
         sqlx::query(
             r#"
             INSERT INTO compliance_assignment_value_overrides
-                (assignment_id, policy_version_id, value_path, value)
-            SELECT $1, policy_version_id, value_path, value
-            FROM compliance_assignment_value_overrides WHERE assignment_id = $2
+                (assignment_id, assignment_version_id, policy_version_id, value_path, value)
+            SELECT $1, $2, policy_version_id, value_path, value
+            FROM compliance_assignment_value_overrides
+            WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $3)
             "#,
         )
         .bind(new_assignment_id)
+        .bind(new_assignment_version_id)
         .bind(pa.id)
         .execute(&mut **tx)
         .await?;

@@ -727,17 +727,19 @@ pub async fn resolve_system_effective_policies(
     let assignments = sqlx::query_as::<
         _,
         (
-            Uuid,   // assignment_id
+            Uuid,   // current_version_id
             Uuid,   // bundle_version_id
             String, // scope_type
             String, // enforcement_mode
             String, // overlay_digest
         ),
     >(
-        r#"SELECT id, bundle_version_id, scope_type, enforcement_mode, assignment_overlay_digest
+        r#"SELECT current_version_id, bundle_version_id, scope_type, enforcement_mode, assignment_overlay_digest
            FROM compliance_bundle_assignments
-           WHERE (scope_type = 'environment' AND environment_id = $2)
-              OR (scope_type = 'system' AND system_id = $1)
+           WHERE active AND current_version_id IS NOT NULL
+             AND ((scope_type = 'environment' AND environment_id = $2)
+               OR (scope_type = 'system' AND system_id = $1)
+             )
            ORDER BY id"#,
     )
     .bind(system_id)
@@ -758,28 +760,29 @@ pub async fn resolve_system_effective_policies(
 
     let mut tx = pool.begin().await.context("begin resolution transaction")?;
 
-    for (assignment_id, bundle_version_id, scope_type, enforcement_mode, _) in &assignments {
+    for (assignment_version_id, bundle_version_id, scope_type, enforcement_mode, _) in &assignments
+    {
         // Load exclusions and additions for this assignment
         let exclusions: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT policy_version_id FROM compliance_assignment_exclusions WHERE assignment_id = $1",
+             "SELECT policy_version_id FROM compliance_assignment_exclusions WHERE assignment_version_id = $1",
         )
-        .bind(assignment_id)
+        .bind(assignment_version_id)
         .fetch_all(&mut *tx)
         .await
         .context("load assignment exclusions")?;
 
         let additions: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_id = $1 ORDER BY policy_version_id",
+             "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_version_id = $1 ORDER BY policy_version_id",
         )
-        .bind(assignment_id)
+        .bind(assignment_version_id)
         .fetch_all(&mut *tx)
         .await
         .context("load assignment additions")?;
 
         let overrides: Vec<PolicyOverride> = sqlx::query_as::<_, (Uuid, String, serde_json::Value)>(
-            "SELECT policy_version_id, value_path, value FROM compliance_assignment_value_overrides WHERE assignment_id = $1",
+            "SELECT policy_version_id, value_path, value FROM compliance_assignment_value_overrides WHERE assignment_version_id = $1",
         )
-        .bind(assignment_id)
+        .bind(assignment_version_id)
         .fetch_all(&mut *tx)
         .await
         .context("load assignment overrides")?
