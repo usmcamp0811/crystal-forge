@@ -1314,6 +1314,8 @@ Before implementation, approve the phased delivery/subtask breakdown and the dep
 Continuation from 8ade2843: implement only CF-native XCCDF reconciliation in two focused commits. First add strict typed CF-native metadata/payload parsing, canonical digest verification, typed reconciliation decisions/conflicts, and planner/native payload tests without changing the completed foreign package pipeline. Second integrate the planner into the existing atomic import transaction with deterministic advisory locks, idempotent reuse/create paths, mappings/audit/HTTP 409/422 handling, and live PostgreSQL tests for exact reimport, conflicts, mixed reconciliation, mapping conflicts, and concurrency. Preserve the existing source-artifact, transaction, excluded-rule, and live foreign-test behavior unless regression tests require changes.
 
 Stabilization gate continuation from c7138212: first add non-ignored live/native concurrency, mixed-reconciliation, identity/digest, bundle, mapping, and idempotent reimport fixtures; verify locked re-read/order and make only minimal reconciliation fixes. Second reproduce and fix GET /api/v1/scanning/deployed with a failing live endpoint test, keeping scanning changes separate. Third run targeted/full checks, update MR description, and report unrun checks explicitly.
+
+Phase 2 assignment mutation slice (isolated branch TASK-412-phase2-atomicity): inspect existing assignment lineage/version schema and audit conventions; introduce immutable assignment-version child records with expected_version_id optimistic concurrency; refactor create/update/deactivate into one transactional mutation service with deterministic advisory lock order (target, bundle lineage, sorted policy lineages, assignment lineage); add typed 409/404/422 error mapping and transactional audit metadata; inject test-only failure points and live rollback/concurrency tests before broader resolver/evaluation integration. Preserve existing assignment route permissions and do not touch unrelated dirty worktree files.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -1366,4 +1368,6 @@ Commits: c236ddd2 (trust/publish ops), 26b9ce60 (test structure), d53d1e13 (atom
 
 Live test results: 49 passed, 0 failed
 Default suite: 938 passed, 0 failed, 272 ignored
+
+Started isolated worktree /home/mcamp/code/crystal-forge/crystal-forge-task412-phase2 at remote head 3a818c50 on branch TASK-412-phase2-atomicity. Original dirty worktree remains untouched. Initial inspection confirms current assignment updates mutate one mutable compliance_bundle_assignments row and delete/reinsert child rows; no assignment version table or expected-version field exists yet. Existing assignment uniqueness is per bundle_version_id + target, while resolver comments describe bundle lineage semantics; audit uses admin_audit_events via insert_admin_audit_event.
 <!-- SECTION:NOTES:END -->
