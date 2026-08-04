@@ -434,6 +434,31 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/systems/:system_id/compliance",
             get(compliance::get_system_compliance_bundles),
         )
+        // Phase 1: Trust and publication endpoints
+        .route(
+            "/api/v1/policy-versions/:version_id/trust",
+            post(compliance::trust_policy_version),
+        )
+        .route(
+            "/api/v1/policy-versions/:version_id/publish",
+            post(compliance::publish_policy_version),
+        )
+        .route(
+            "/api/v1/policies/:policy_id/drafts",
+            post(compliance::create_policy_draft),
+        )
+        .route(
+            "/api/v1/compliance/bundle-versions/:version_id/trust",
+            post(compliance::trust_bundle_version),
+        )
+        .route(
+            "/api/v1/compliance/bundle-versions/:version_id/publish",
+            post(compliance::publish_bundle_version),
+        )
+        .route(
+            "/api/v1/compliance/bundles/:bundle_id/drafts",
+            post(compliance::create_bundle_draft),
+        )
         // CF-XCCDF import/export and bundle version endpoints
         .route(
             "/api/v1/compliance/xccdf/preview",

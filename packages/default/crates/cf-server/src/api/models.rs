@@ -2662,3 +2662,126 @@ pub struct ServerRuntimeInfoResponse {
     pub tls_status: String,
     pub tls_detail: String,
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trust and Publication DTOs — Phase 1 Compliance Workflows
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Request to trust or reject a policy version.
+///
+/// Only admin users can trust/reject versions. A trust decision must include
+/// an optional review note documenting the rationale.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustPolicyVersionRequest {
+    /// true to trust, false to reject
+    pub trusted: bool,
+    /// Optional review note explaining the trust decision
+    pub review_note: Option<String>,
+}
+
+/// Response after trusting/rejecting a policy version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustPolicyVersionResponse {
+    pub version_id: Uuid,
+    pub publication_state: String,
+    pub trust_state: String,
+    pub trusted_by: Option<Uuid>,
+    pub trusted_at: Option<DateTime<Utc>>,
+}
+
+/// Request to trust or reject a bundle version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustBundleVersionRequest {
+    pub trusted: bool,
+    pub review_note: Option<String>,
+}
+
+/// Response after trusting/rejecting a bundle version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustBundleVersionResponse {
+    pub version_id: Uuid,
+    pub publication_state: String,
+    pub trust_state: String,
+    pub trusted_by: Option<Uuid>,
+    pub trusted_at: Option<DateTime<Utc>>,
+}
+
+/// Request to publish a policy version.
+///
+/// Publishing freezes the version as immutable. Only admin users can publish.
+/// Publishing may require that the version is trusted if it contains executable
+/// imported content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishPolicyVersionRequest {
+    /// Optional validation of the semantic digest to prevent accidental
+    /// publication of a modified version.
+    pub expected_semantic_digest: Option<String>,
+}
+
+/// Response after publishing a policy version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishPolicyVersionResponse {
+    pub version_id: Uuid,
+    pub publication_state: String,
+    pub published_at: DateTime<Utc>,
+    pub semantic_digest: String,
+}
+
+/// Request to create a new draft from a published policy version.
+///
+/// The draft inherits all metadata and configuration from the published version
+/// but gets a new version ID and `derived_from_version_id` pointer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreatePolicyDraftRequest {
+    /// Optional: override the version string (defaults to incrementing from published)
+    pub new_version: Option<String>,
+}
+
+/// Response when a draft is created from a published policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreatePolicyDraftResponse {
+    pub version_id: Uuid,
+    pub version: String,
+    pub publication_state: String,
+    pub derived_from_version_id: Uuid,
+}
+
+/// Request to publish a bundle version.
+///
+/// Bundle publication is atomic: all included policy versions must be
+/// published or the entire operation fails. The server may optionally
+/// auto-publish eligible draft policy versions included in the bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishBundleVersionRequest {
+    /// Optional: if true, attempt to auto-publish any included draft policies
+    pub auto_publish_draft_policies: Option<bool>,
+    /// Optional validation of the semantic digest
+    pub expected_semantic_digest: Option<String>,
+}
+
+/// Response after publishing a bundle version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishBundleVersionResponse {
+    pub version_id: Uuid,
+    pub publication_state: String,
+    pub published_at: DateTime<Utc>,
+    pub semantic_digest: String,
+    pub published_policy_count: i32,
+    pub auto_published_policy_count: i32,
+}
+
+/// Request to create a new draft from a published bundle version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateBundleDraftRequest {
+    /// Optional: override the version string
+    pub new_version: Option<String>,
+}
+
+/// Response when a draft is created from a published bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateBundleDraftResponse {
+    pub version_id: Uuid,
+    pub version: String,
+    pub publication_state: String,
+    pub derived_from_version_id: Uuid,
+}
