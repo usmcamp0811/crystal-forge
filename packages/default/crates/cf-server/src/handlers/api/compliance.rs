@@ -2553,21 +2553,22 @@ mod tests {
         assert_eq!(response.status().as_u16(), 400);
     }
 
-    // ── Phase 1: Trust and Publication tests ──────────────────────────────────
+    // ── Phase 1: Trust and Publication Tests ──────────────────────────────────
+    // These tests verify the complete trust and publication lifecycle.
+    // They use the established live-database harness and remain marked as ignored.
+    // Run with: cargo test --lib -- --ignored trust_policy_ --exact (or similar)
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn trust_policy_version_succeeds_for_admin() {
         let pool = test_pool_from_env().await;
-        let token = admin_session_token(&pool).await;
-
-        // Create a policy with a version
         let policy_id = Uuid::new_v4();
         let version_id = Uuid::new_v4();
 
+        // Create a policy and version
         sqlx::query(
             r#"INSERT INTO deployment_policies (id, name, policy_type, enabled, config)
-               VALUES ($1, 'test-policy', 'custom_check', false, '{}')"#,
+               VALUES ($1, 'test-trust-policy', 'custom_check', false, '{}')"#,
         )
         .bind(policy_id)
         .execute(&pool)
@@ -2577,7 +2578,7 @@ mod tests {
         sqlx::query(
             r#"INSERT INTO deployment_policy_versions
                (id, policy_id, version, name, policy_type, config, semantic_digest, publication_state)
-               VALUES ($1, $2, '1.0.0', 'test-policy', 'custom_check', '{}', 'test-digest', 'draft')"#,
+               VALUES ($1, $2, '1.0.0', 'test-trust-policy', 'custom_check', '{}', 'digest123', 'draft')"#,
         )
         .bind(version_id)
         .bind(policy_id)
@@ -2585,111 +2586,61 @@ mod tests {
         .await
         .expect("insert version");
 
-        // Trust the version via the handler
+        let token = admin_session_token(&pool).await;
         let base = spawn_preview_server(pool.clone()).await;
         let client = reqwest::Client::new();
-        let request_body = serde_json::json!({
-            "trusted": true,
-            "review_note": "Reviewed and approved"
-        });
 
+        // Trust the version
         let response = client
             .post(format!("{base}/api/v1/policy-versions/{version_id}/trust"))
             .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .json(&request_body)
+            .json(&serde_json::json!({
+                "trusted": true,
+                "review_note": "Reviewed and approved for testing"
+            }))
             .send()
             .await
             .expect("trust request completes");
 
-        assert_eq!(response.status().as_u16(), 200, "trust should succeed");
+        assert_eq!(response.status().as_u16(), 200, "trust should succeed for admin");
 
-        // Verify the version is marked as trusted in the database
-        let trusted_state: (String,) = sqlx::query_as(
-            r#"SELECT trust_state FROM deployment_policy_versions WHERE id = $1"#,
+        // Verify database state
+        let (trust_state, trusted_by, trusted_at, review_note): (String, Option<Uuid>, Option<chrono::DateTime<chrono::Utc>>, Option<String>) = sqlx::query_as(
+            r#"SELECT trust_state, trusted_by, trusted_at, trust_review_note
+               FROM deployment_policy_versions WHERE id = $1"#,
         )
         .bind(version_id)
         .fetch_one(&pool)
         .await
-        .expect("fetch trust_state");
+        .expect("fetch trust state");
 
-        assert_eq!(trusted_state.0, "trusted");
-    }
+        assert_eq!(trust_state, "trusted", "trust_state should be 'trusted'");
+        assert!(trusted_by.is_some(), "trusted_by should be set");
+        assert!(trusted_at.is_some(), "trusted_at should be set");
+        assert_eq!(review_note, Some("Reviewed and approved for testing".to_string()));
 
-    #[tokio::test]
-    #[ignore = "requires live database connection"]
-    async fn publish_policy_version_succeeds() {
-        let pool = test_pool_from_env().await;
-        let token = admin_session_token(&pool).await;
-
-        // Create a policy with a draft version
-        let policy_id = Uuid::new_v4();
-        let version_id = Uuid::new_v4();
-        let test_digest = "abc123";
-
-        sqlx::query(
-            r#"INSERT INTO deployment_policies (id, name, policy_type, enabled, config)
-               VALUES ($1, 'test-policy', 'custom_check', false, '{}')"#,
-        )
-        .bind(policy_id)
-        .execute(&pool)
-        .await
-        .expect("insert policy");
-
-        sqlx::query(
-            r#"INSERT INTO deployment_policy_versions
-               (id, policy_id, version, name, policy_type, config, semantic_digest, publication_state)
-               VALUES ($1, $2, '1.0.0', 'test-policy', 'custom_check', '{}', $3, 'draft')"#,
-        )
-        .bind(version_id)
-        .bind(policy_id)
-        .bind(test_digest)
-        .execute(&pool)
-        .await
-        .expect("insert version");
-
-        // Publish the version
-        let base = spawn_preview_server(pool.clone()).await;
-        let client = reqwest::Client::new();
-        let request_body = serde_json::json!({
-            "expected_semantic_digest": test_digest
-        });
-
-        let response = client
-            .post(format!("{base}/api/v1/policy-versions/{version_id}/publish"))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .json(&request_body)
-            .send()
-            .await
-            .expect("publish request completes");
-
-        assert_eq!(response.status().as_u16(), 200, "publish should succeed");
-
-        // Verify the version is now published
-        let pub_state: (String, bool) = sqlx::query_as(
-            r#"SELECT publication_state, published_at IS NOT NULL FROM deployment_policy_versions WHERE id = $1"#,
+        // Verify publication state unchanged
+        let pub_state: (String,) = sqlx::query_as(
+            r#"SELECT publication_state FROM deployment_policy_versions WHERE id = $1"#,
         )
         .bind(version_id)
         .fetch_one(&pool)
         .await
         .expect("fetch publication_state");
 
-        assert_eq!(pub_state.0, "accepted");
-        assert!(pub_state.1, "published_at should be set");
+        assert_eq!(pub_state.0, "draft", "publication_state should remain draft after trust");
     }
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
-    async fn publish_policy_version_rejects_digest_mismatch() {
+    async fn trust_policy_version_rejection() {
         let pool = test_pool_from_env().await;
-        let token = admin_session_token(&pool).await;
-
         let policy_id = Uuid::new_v4();
         let version_id = Uuid::new_v4();
-        let test_digest = "abc123";
 
         sqlx::query(
             r#"INSERT INTO deployment_policies (id, name, policy_type, enabled, config)
-               VALUES ($1, 'test-policy', 'custom_check', false, '{}')"#,
+               VALUES ($1, 'test-reject-policy', 'custom_check', false, '{}')"#,
         )
         .bind(policy_id)
         .execute(&pool)
@@ -2699,7 +2650,120 @@ mod tests {
         sqlx::query(
             r#"INSERT INTO deployment_policy_versions
                (id, policy_id, version, name, policy_type, config, semantic_digest, publication_state)
-               VALUES ($1, $2, '1.0.0', 'test-policy', 'custom_check', '{}', $3, 'draft')"#,
+               VALUES ($1, $2, '1.0.0', 'test-reject-policy', 'custom_check', '{}', 'digest456', 'draft')"#,
+        )
+        .bind(version_id)
+        .bind(policy_id)
+        .execute(&pool)
+        .await
+        .expect("insert version");
+
+        let token = admin_session_token(&pool).await;
+        let base = spawn_preview_server(pool.clone()).await;
+        let client = reqwest::Client::new();
+
+        // Reject the version
+        let response = client
+            .post(format!("{base}/api/v1/policy-versions/{version_id}/trust"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "trusted": false,
+                "review_note": "Rejected: unsafe expression"
+            }))
+            .send()
+            .await
+            .expect("trust request completes");
+
+        assert_eq!(response.status().as_u16(), 200);
+
+        let (trust_state,): (String,) = sqlx::query_as(
+            r#"SELECT trust_state FROM deployment_policy_versions WHERE id = $1"#,
+        )
+        .bind(version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch trust state");
+
+        assert_eq!(trust_state, "rejected");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn trust_bundle_version_succeeds() {
+        let pool = test_pool_from_env().await;
+        let bundle_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+
+        // Create a bundle and version
+        sqlx::query(
+            r#"INSERT INTO compliance_bundles (id, name, framework, layer, owner)
+               VALUES ($1, 'test-trust-bundle', 'NIST', 'nixos', 'test')"#,
+        )
+        .bind(bundle_id)
+        .execute(&pool)
+        .await
+        .expect("insert bundle");
+
+        sqlx::query(
+            r#"INSERT INTO compliance_bundle_versions
+               (id, bundle_id, version, name, framework, layer, owner, semantic_digest, publication_state)
+               VALUES ($1, $2, '1.0.0', 'test-trust-bundle', 'NIST', 'nixos', 'test', 'digest789', 'draft')"#,
+        )
+        .bind(version_id)
+        .bind(bundle_id)
+        .execute(&pool)
+        .await
+        .expect("insert version");
+
+        let token = admin_session_token(&pool).await;
+        let base = spawn_preview_server(pool.clone()).await;
+        let client = reqwest::Client::new();
+
+        let response = client
+            .post(format!("{base}/api/v1/compliance/bundle-versions/{version_id}/trust"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "trusted": true,
+                "review_note": "Approved bundle"
+            }))
+            .send()
+            .await
+            .expect("trust request completes");
+
+        assert_eq!(response.status().as_u16(), 200);
+
+        let (trust_state,): (String,) = sqlx::query_as(
+            r#"SELECT trust_state FROM compliance_bundle_versions WHERE id = $1"#,
+        )
+        .bind(version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch trust state");
+
+        assert_eq!(trust_state, "trusted");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn publish_policy_version_succeeds() {
+        let pool = test_pool_from_env().await;
+        let policy_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        let test_digest = "abc123digest";
+
+        sqlx::query(
+            r#"INSERT INTO deployment_policies (id, name, policy_type, enabled, config)
+               VALUES ($1, 'test-pub-policy', 'custom_check', false, '{}')"#,
+        )
+        .bind(policy_id)
+        .execute(&pool)
+        .await
+        .expect("insert policy");
+
+        sqlx::query(
+            r#"INSERT INTO deployment_policy_versions
+               (id, policy_id, version, name, policy_type, config, semantic_digest, publication_state)
+               VALUES ($1, $2, '1.0.0', 'test-pub-policy', 'custom_check', '{}', $3, 'draft')"#,
         )
         .bind(version_id)
         .bind(policy_id)
@@ -2708,37 +2772,92 @@ mod tests {
         .await
         .expect("insert version");
 
-        let base = spawn_preview_server(pool).await;
+        let token = admin_session_token(&pool).await;
+        let base = spawn_preview_server(pool.clone()).await;
         let client = reqwest::Client::new();
-        let request_body = serde_json::json!({
-            "expected_semantic_digest": "wrong_digest"
-        });
 
         let response = client
             .post(format!("{base}/api/v1/policy-versions/{version_id}/publish"))
             .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .json(&request_body)
+            .json(&serde_json::json!({
+                "expected_semantic_digest": test_digest
+            }))
             .send()
             .await
             .expect("publish request completes");
 
-        // Should reject with 422 UNPROCESSABLE_ENTITY
-        assert_eq!(response.status().as_u16(), 422, "digest mismatch should reject");
+        assert_eq!(response.status().as_u16(), 200, "publish should succeed");
+
+        // Verify immutability
+        let (pub_state, has_published_at, current_pub_version_id): (String, bool, Option<Uuid>) = sqlx::query_as(
+            r#"SELECT publication_state, published_at IS NOT NULL, current_published_version_id
+               FROM deployment_policies WHERE id = $1"#,
+        )
+        .bind(policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch policy");
+
+        assert_eq!(pub_state, "accepted");
+        assert!(has_published_at);
+        assert_eq!(current_pub_version_id, Some(version_id));
     }
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
-    async fn publish_policy_already_published_returns_409() {
+    async fn publish_policy_digest_mismatch_returns_422() {
         let pool = test_pool_from_env().await;
-        let token = admin_session_token(&pool).await;
-
         let policy_id = Uuid::new_v4();
         let version_id = Uuid::new_v4();
-        let test_digest = "abc123";
 
         sqlx::query(
             r#"INSERT INTO deployment_policies (id, name, policy_type, enabled, config)
-               VALUES ($1, 'test-policy', 'custom_check', false, '{}')"#,
+               VALUES ($1, 'test-mismatch-policy', 'custom_check', false, '{}')"#,
+        )
+        .bind(policy_id)
+        .execute(&pool)
+        .await
+        .expect("insert policy");
+
+        sqlx::query(
+            r#"INSERT INTO deployment_policy_versions
+               (id, policy_id, version, name, policy_type, config, semantic_digest, publication_state)
+               VALUES ($1, $2, '1.0.0', 'test-mismatch-policy', 'custom_check', '{}', 'correct-digest', 'draft')"#,
+        )
+        .bind(version_id)
+        .bind(policy_id)
+        .execute(&pool)
+        .await
+        .expect("insert version");
+
+        let token = admin_session_token(&pool).await;
+        let base = spawn_preview_server(pool).await;
+        let client = reqwest::Client::new();
+
+        let response = client
+            .post(format!("{base}/api/v1/policy-versions/{version_id}/publish"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "expected_semantic_digest": "wrong-digest"
+            }))
+            .send()
+            .await
+            .expect("publish request completes");
+
+        assert_eq!(response.status().as_u16(), 422, "digest mismatch should return 422");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn publish_already_published_returns_409() {
+        let pool = test_pool_from_env().await;
+        let policy_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        let test_digest = "def456digest";
+
+        sqlx::query(
+            r#"INSERT INTO deployment_policies (id, name, policy_type, enabled, config)
+               VALUES ($1, 'test-409-policy', 'custom_check', false, '{}')"#,
         )
         .bind(policy_id)
         .execute(&pool)
@@ -2748,31 +2867,139 @@ mod tests {
         sqlx::query(
             r#"INSERT INTO deployment_policy_versions
                (id, policy_id, version, name, policy_type, config, semantic_digest, publication_state, published_at)
-               VALUES ($1, $2, '1.0.0', 'test-policy', 'custom_check', '{}', $3, 'accepted', CURRENT_TIMESTAMP)"#,
+               VALUES ($1, $2, '1.0.0', 'test-409-policy', 'custom_check', '{}', $3, 'accepted', CURRENT_TIMESTAMP)"#,
         )
         .bind(version_id)
         .bind(policy_id)
         .bind(test_digest)
         .execute(&pool)
         .await
-        .expect("insert already published version");
+        .expect("insert already-published version");
 
+        let token = admin_session_token(&pool).await;
         let base = spawn_preview_server(pool).await;
         let client = reqwest::Client::new();
-        let request_body = serde_json::json!({
-            "expected_semantic_digest": test_digest
-        });
 
         let response = client
             .post(format!("{base}/api/v1/policy-versions/{version_id}/publish"))
             .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .json(&request_body)
+            .json(&serde_json::json!({
+                "expected_semantic_digest": test_digest
+            }))
             .send()
             .await
             .expect("publish request completes");
 
-        // Should reject with 409 CONFLICT
-        assert_eq!(response.status().as_u16(), 409, "already published should return conflict");
+        assert_eq!(response.status().as_u16(), 409, "already published should return 409 CONFLICT");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn publish_bundle_with_single_policy_succeeds() {
+        let pool = test_pool_from_env().await;
+        let user_id = admin_session_token(&pool).await;
+        
+        let bundle_id = Uuid::new_v4();
+        let bundle_version_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+        let policy_version_id = Uuid::new_v4();
+        let bundle_digest = "bundle-digest-001";
+
+        // Create policy and version (published)
+        sqlx::query(
+            r#"INSERT INTO deployment_policies (id, name, policy_type, enabled, config)
+               VALUES ($1, 'bundle-test-policy', 'custom_check', false, '{}')"#,
+        )
+        .bind(policy_id)
+        .execute(&pool)
+        .await
+        .expect("insert policy");
+
+        sqlx::query(
+            r#"INSERT INTO deployment_policy_versions
+               (id, policy_id, version, name, policy_type, config, semantic_digest, publication_state, published_at)
+               VALUES ($1, $2, '1.0.0', 'bundle-test-policy', 'custom_check', '{}', 'pol-digest', 'accepted', CURRENT_TIMESTAMP)"#,
+        )
+        .bind(policy_version_id)
+        .bind(policy_id)
+        .execute(&pool)
+        .await
+        .expect("insert published policy version");
+
+        // Create bundle and version (draft)
+        sqlx::query(
+            r#"INSERT INTO compliance_bundles (id, name, framework, layer, owner)
+               VALUES ($1, 'test-bundle-pub', 'NIST', 'nixos', 'test')"#,
+        )
+        .bind(bundle_id)
+        .execute(&pool)
+        .await
+        .expect("insert bundle");
+
+        sqlx::query(
+            r#"INSERT INTO compliance_bundle_versions
+               (id, bundle_id, version, name, framework, layer, owner, semantic_digest, publication_state)
+               VALUES ($1, $2, '1.0.0', 'test-bundle-pub', 'NIST', 'nixos', 'test', $3, 'draft')"#,
+        )
+        .bind(bundle_version_id)
+        .bind(bundle_id)
+        .bind(bundle_digest)
+        .execute(&pool)
+        .await
+        .expect("insert bundle version");
+
+        // Add policy to bundle
+        sqlx::query(
+            r#"INSERT INTO compliance_bundle_version_policies
+               (bundle_version_id, policy_version_id, policy_order, selected)
+               VALUES ($1, $2, 0, true)"#,
+        )
+        .bind(bundle_version_id)
+        .bind(policy_version_id)
+        .execute(&pool)
+        .await
+        .expect("insert membership");
+
+        let token = admin_session_token(&pool).await;
+        let base = spawn_preview_server(pool.clone()).await;
+        let client = reqwest::Client::new();
+
+        // Publish the bundle
+        let response = client
+            .post(format!("{base}/api/v1/compliance/bundle-versions/{bundle_version_id}/publish"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "expected_semantic_digest": bundle_digest
+            }))
+            .send()
+            .await
+            .expect("publish request completes");
+
+        assert_eq!(response.status().as_u16(), 200, "bundle publication should succeed");
+
+        // Verify bundle is published
+        let (bundle_pub_state, has_bundle_published_at): (String, bool) = sqlx::query_as(
+            r#"SELECT publication_state, published_at IS NOT NULL
+               FROM compliance_bundle_versions WHERE id = $1"#,
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch bundle state");
+
+        assert_eq!(bundle_pub_state, "accepted");
+        assert!(has_bundle_published_at);
+
+        // Verify membership is unchanged
+        let member_count: (i64,) = sqlx::query_as(
+            r#"SELECT COUNT(*) FROM compliance_bundle_version_policies WHERE bundle_version_id = $1"#,
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count members");
+
+        assert_eq!(member_count.0, 1);
     }
 
     // ── ZIP upload tests ──────────────────────────────────────────────────────
