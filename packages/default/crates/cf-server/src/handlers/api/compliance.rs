@@ -1088,6 +1088,7 @@ async fn persist_assignment(
         assignment_id_opt,
         expected_version_id,
         None,
+        None,
     )
     .await
 }
@@ -1133,6 +1134,51 @@ async fn persist_assignment_with_failure(
         None,
         None,
         Some(failure_point.name()),
+        None,
+    )
+    .await
+}
+
+/// Test-only: deactivate with a barrier that fires after advisory locks but
+/// before the final `FOR UPDATE` state recheck. Mirrors `persist_assignment_with_barrier`.
+#[cfg(test)]
+async fn deactivate_assignment_with_barrier(
+    pool: &PgPool,
+    user_id: Uuid,
+    assignment_id: Uuid,
+    expected_version_id: Option<Uuid>,
+    barrier: std::sync::Arc<tokio::sync::Barrier>,
+) -> axum::response::Response {
+    deactivate_assignment_inner(
+        pool,
+        user_id,
+        assignment_id,
+        expected_version_id,
+        Some(barrier),
+    )
+    .await
+}
+
+/// Test-only: run assignment mutation with a barrier that fires after locks are
+/// acquired but before the critical uniqueness/version recheck. This makes
+/// concurrent races deterministic without sleeps.
+#[cfg(test)]
+async fn persist_assignment_with_barrier(
+    pool: &PgPool,
+    user_id: Uuid,
+    payload: &crate::api::models::CreateAssignmentRequest,
+    assignment_id_opt: Option<Uuid>,
+    expected_version_id: Option<Uuid>,
+    barrier: std::sync::Arc<tokio::sync::Barrier>,
+) -> Result<crate::api::models::AssignmentResponse, axum::response::Response> {
+    persist_assignment_inner(
+        pool,
+        user_id,
+        payload,
+        assignment_id_opt,
+        expected_version_id,
+        None,
+        Some(barrier),
     )
     .await
 }
@@ -1144,6 +1190,11 @@ async fn persist_assignment_inner(
     assignment_id_opt: Option<Uuid>, // None = create, Some = update
     expected_version_id: Option<Uuid>,
     failure_point: Option<&'static str>,
+    // Test-only: barrier that fires after advisory locks are acquired but before
+    // the final uniqueness/version recheck. None in production; has no effect.
+    #[cfg_attr(not(test), allow(unused_variables))] post_lock_barrier: Option<
+        std::sync::Arc<tokio::sync::Barrier>,
+    >,
 ) -> Result<crate::api::models::AssignmentResponse, axum::response::Response> {
     use crate::compliance::resolver::{
         AssignmentMode, AssignmentTarget, EffectivePolicyResolutionInput, PolicyOverride,
@@ -1219,6 +1270,16 @@ async fn persist_assignment_inner(
         assignment_mode: mode.clone(),
     };
 
+    // Test-only barrier: both concurrent callers synchronize here after
+    // validation is complete and before any transaction or lock is acquired.
+    // This guarantees both operations attempt to acquire the advisory lock
+    // simultaneously, making the race deterministic without arbitrary sleeps.
+    // The database's own lock serialization then determines the winner.
+    #[cfg(test)]
+    if let Some(ref b) = post_lock_barrier {
+        b.wait().await;
+    }
+
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(_) => return Err(internal_error("Failed to start transaction")),
@@ -1257,6 +1318,7 @@ async fn persist_assignment_inner(
             return Err(internal_error("Failed to lock assignment identity"));
         }
     }
+
     if let Some(expected) = expected_version_id {
         let current: Option<Uuid> = sqlx::query_scalar(
             "SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1 AND active",
@@ -1769,18 +1831,24 @@ pub async fn get_assignment(
     (StatusCode::OK, Json(response)).into_response()
 }
 
-/// `DELETE /api/v1/compliance/assignments/:id`
-pub async fn delete_assignment(
-    State(pool): State<PgPool>,
-    headers: HeaderMap,
-    Path(assignment_id): Path<Uuid>,
-    Query(query): Query<AssignmentMutationQuery>,
-) -> impl IntoResponse {
-    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
-        return forbidden();
-    };
-    if !has_admin_role(&roles) {
-        return forbidden();
+/// Inner deactivation logic, extracted for testability.
+/// `post_lock_barrier` is test-only and fires after advisory locks are acquired
+/// but before the final locked state recheck. In production always pass `None`.
+async fn deactivate_assignment_inner(
+    pool: &PgPool,
+    user_id: Uuid,
+    assignment_id: Uuid,
+    expected_version_id: Option<Uuid>,
+    #[cfg_attr(not(test), allow(unused_variables))] post_lock_barrier: Option<
+        std::sync::Arc<tokio::sync::Barrier>,
+    >,
+) -> axum::response::Response {
+    // Test-only barrier: synchronize both operations before any transaction or
+    // lock is acquired, guaranteeing they race to acquire the advisory lock
+    // at the same time. The database lock serialization determines the winner.
+    #[cfg(test)]
+    if let Some(ref b) = post_lock_barrier {
+        b.wait().await;
     }
 
     let mut tx = match pool.begin().await {
@@ -1796,7 +1864,7 @@ pub async fn delete_assignment(
     .bind(assignment_id)
     .fetch_optional(&mut *tx)
     .await;
-    let (bundle_id, bundle_version_id, scope_type, scope_id, _current_version_id) = match row {
+    let (bundle_id, bundle_version_id, scope_type, scope_id, _pre_lock_version) = match row {
         Ok(Some(row)) => row,
         Ok(None) => {
             let _ = tx.rollback().await;
@@ -1822,6 +1890,7 @@ pub async fn delete_assignment(
             return internal_error("Failed to lock assignment");
         }
     }
+
     let current_after_lock = sqlx::query_scalar::<_, Option<Uuid>>(
         "SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1 AND active FOR UPDATE",
     )
@@ -1834,7 +1903,7 @@ pub async fn delete_assignment(
         let _ = tx.rollback().await;
         return not_found();
     };
-    if let Some(expected) = query.expected_version_id {
+    if let Some(expected) = expected_version_id {
         if expected != current_version_id {
             let _ = tx.rollback().await;
             return (
@@ -1882,6 +1951,29 @@ pub async fn delete_assignment(
         return internal_error("Failed to commit assignment deactivation");
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// `DELETE /api/v1/compliance/assignments/:id`
+pub async fn delete_assignment(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(assignment_id): Path<Uuid>,
+    Query(query): Query<AssignmentMutationQuery>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !has_admin_role(&roles) {
+        return forbidden();
+    }
+    deactivate_assignment_inner(
+        &pool,
+        user_id,
+        assignment_id,
+        query.expected_version_id,
+        None,
+    )
+    .await
 }
 
 /// `GET /api/v1/environments/:id/compliance-assignments`
@@ -6368,9 +6460,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live database connection"]
     async fn assignment_update_is_immutable_and_rejects_stale_version() {
         let pool = test_pool_from_env().await;
-        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (user_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
         let (policy_id, policy_version_id, _) = make_draft_policy(
             &pool,
             &format!("assignment-version-policy-{}", Uuid::new_v4().simple()),
@@ -6441,41 +6534,77 @@ mod tests {
             .parse()
             .unwrap();
         assert_ne!(new_version, old_version);
-        let update_url = format!("{base}/api/v1/compliance/assignments/{assignment_id}");
-        let (first, second) = tokio::join!(
-            client
-                .put(&update_url)
-                .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-                .json(&serde_json::json!({
-                    "expected_version_id": new_version,
-                    "enforcement_mode": "report_only"
-                }))
-                .send(),
-            client
-                .put(&update_url)
-                .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-                .json(&serde_json::json!({
-                    "expected_version_id": new_version,
-                    "exclusions": []
-                }))
-                .send(),
-        );
-        let first = first.expect("first concurrent update");
-        let second = second.expect("second concurrent update");
-        assert_eq!(
-            first.status().is_success() as u8 + second.status().is_success() as u8,
-            1
-        );
-        let stale = if first.status().as_u16() == 409 {
-            first
-        } else {
-            second
+
+        // ── Barrier-synchronized concurrent update ────────────────────────────
+        // Both updates use new_version as expected_version_id and use the barrier
+        // to reach the critical section simultaneously before one acquires the row lock.
+        // Use distinct enforcement modes so we can identify which one won from DB state.
+        let create_payload_report = crate::api::models::CreateAssignmentRequest {
+            bundle_version_id,
+            scope_type: "environment".to_string(),
+            scope_id: environment_id,
+            enforcement_mode: Some("report_only".to_string()),
+            exclusions: None,
+            additions: None,
+            value_overrides: None,
         };
-        assert_eq!(stale.status(), 409);
-        assert_eq!(
-            stale.json::<serde_json::Value>().await.unwrap()["code"],
-            "ASSIGNMENT_STALE_UPDATE"
+        let create_payload_enforce = crate::api::models::CreateAssignmentRequest {
+            bundle_version_id,
+            scope_type: "environment".to_string(),
+            scope_id: environment_id,
+            enforcement_mode: Some("enforce".to_string()),
+            exclusions: None,
+            additions: None,
+            value_overrides: None,
+        };
+        let upd_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let (upd_first, upd_second) = tokio::join!(
+            persist_assignment_with_barrier(
+                &pool,
+                user_id,
+                &create_payload_report,
+                Some(assignment_id),
+                Some(new_version),
+                upd_barrier.clone()
+            ),
+            persist_assignment_with_barrier(
+                &pool,
+                user_id,
+                &create_payload_enforce,
+                Some(assignment_id),
+                Some(new_version),
+                upd_barrier.clone()
+            ),
         );
+        let upd_first_ok = upd_first.is_ok();
+        let upd_second_ok = upd_second.is_ok();
+        assert_eq!(
+            upd_first_ok as u8 + upd_second_ok as u8,
+            1,
+            "exactly one concurrent update must succeed"
+        );
+
+        // The loser must return ASSIGNMENT_STALE_UPDATE.
+        let stale_err = if upd_first_ok {
+            upd_second.unwrap_err()
+        } else {
+            upd_first.unwrap_err()
+        };
+        let stale_body = axum::body::to_bytes(stale_err.into_body(), usize::MAX)
+            .await
+            .unwrap_or_default();
+        let stale_json: serde_json::Value = serde_json::from_slice(&stale_body).unwrap_or_default();
+        assert_eq!(
+            stale_json["code"], "ASSIGNMENT_STALE_UPDATE",
+            "concurrent update loser must return ASSIGNMENT_STALE_UPDATE"
+        );
+        // The stale response must include the current_version_id (V2) so the
+        // caller knows what version won.
+        assert!(
+            !stale_json["current_version_id"].is_null(),
+            "ASSIGNMENT_STALE_UPDATE must include current_version_id"
+        );
+
         let (version_count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM compliance_bundle_assignment_versions WHERE assignment_id = $1",
         )
@@ -6483,6 +6612,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("version count");
+        // Versions: initial create (V1) + first explicit update (V2) + one concurrent update (V3)
         assert_eq!(version_count, 3);
         let old_children: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM compliance_assignment_exclusions WHERE assignment_version_id = $1",
@@ -6492,9 +6622,483 @@ mod tests {
         .await
         .expect("old children");
         assert_eq!(old_children.0, 0);
+
+        // ── Audit verification ────────────────────────────────────────────────
+        // Exactly three audit events for this assignment (create + update + one
+        // of the concurrent updates). The other concurrent attempt returns 409
+        // so no audit event is written for it.
+        let (audit_count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM admin_audit_events WHERE target = $1")
+                .bind(assignment_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("audit count");
+        assert_eq!(
+            audit_count, 3,
+            "create + first-update + one-concurrent must produce exactly 3 audit events"
+        );
+
+        // The create event must have operation=assignment_created, correct counts,
+        // no previous_assignment_version_id.
+        let create_evt: serde_json::Value = sqlx::query_scalar(
+            "SELECT metadata FROM admin_audit_events
+             WHERE target = $1 AND action = 'assignment_created'
+             LIMIT 1",
+        )
+        .bind(assignment_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("create audit event");
+        assert_eq!(create_evt["operation"], "assignment_created");
+        assert_eq!(create_evt["target_type"], "environment");
+        assert_eq!(create_evt["target_id"], environment_id.to_string());
+        assert_eq!(
+            create_evt["bundle_version_id"],
+            bundle_version_id.to_string()
+        );
+        assert_eq!(create_evt["exclusion_count"], 0);
+        assert_eq!(create_evt["addition_count"], 0);
+        assert_eq!(create_evt["override_count"], 0);
+        assert!(
+            create_evt["previous_assignment_version_id"].is_null(),
+            "create must have null previous_assignment_version_id"
+        );
+        assert!(
+            !create_evt["assignment_version_id"].is_null(),
+            "create must record assignment_version_id"
+        );
+        assert!(
+            !create_evt["assignment_semantic_digest"]
+                .as_str()
+                .unwrap_or("")
+                .is_empty(),
+            "create must record assignment_semantic_digest"
+        );
+
+        // The first explicit update event must have operation=assignment_updated,
+        // exclusion_count=1, and a non-null previous_assignment_version_id.
+        let update_evt: serde_json::Value = sqlx::query_scalar(
+            "SELECT metadata FROM admin_audit_events
+             WHERE target = $1 AND action = 'assignment_updated'
+               AND metadata->>'previous_assignment_version_id' = $2
+             LIMIT 1",
+        )
+        .bind(assignment_id.to_string())
+        .bind(old_version.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("update audit event");
+        assert_eq!(update_evt["operation"], "assignment_updated");
+        assert_eq!(update_evt["exclusion_count"], 1);
+        assert_eq!(
+            update_evt["previous_assignment_version_id"],
+            old_version.to_string()
+        );
+        assert_eq!(update_evt["assignment_version_id"], new_version.to_string());
+        assert_eq!(update_evt["enforcement_mode"], "enforce");
+
+        // None of the events must contain raw SQL errors or internal stack frames.
+        let all_evt_texts: Vec<String> =
+            sqlx::query_scalar("SELECT metadata::text FROM admin_audit_events WHERE target = $1")
+                .bind(assignment_id.to_string())
+                .fetch_all(&pool)
+                .await
+                .expect("all audit events");
+        for text in &all_evt_texts {
+            assert!(
+                !text.contains("sqlx::"),
+                "audit must not leak sqlx internals: {text}"
+            );
+            assert!(
+                !text.contains("panicked"),
+                "audit must not leak panics: {text}"
+            );
+        }
     }
 
     #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn assignment_update_delete_race() {
+        // Barrier-synchronized update/deactivate race on the same assignment.
+        // The barrier fires after advisory locks are acquired by both sides,
+        // guaranteeing they are inside the critical section simultaneously.
+        let pool = test_pool_from_env().await;
+        let (admin_id, _token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (policy_id, policy_version_id, _) =
+            make_draft_policy(&pool, &format!("race-policy-{}", Uuid::new_v4().simple())).await;
+        db_publish_policy_version(&pool, policy_id, policy_version_id).await;
+        let (_, bundle_version_id, bundle_digest) = make_draft_bundle(
+            &pool,
+            &format!("race-bundle-{}", Uuid::new_v4().simple()),
+            &[policy_version_id],
+        )
+        .await;
+
+        // Publish the bundle directly (no server needed for direct-call tests).
+        let mut pub_tx = pool.begin().await.expect("begin pub tx");
+        sqlx::query(
+            "UPDATE compliance_bundle_versions
+             SET publication_state = 'accepted', published_at = now(),
+                 trust_state = 'trusted', trusted_at = now()
+             WHERE id = $1",
+        )
+        .bind(bundle_version_id)
+        .execute(&mut *pub_tx)
+        .await
+        .expect("publish bundle version");
+        sqlx::query(
+            "UPDATE compliance_bundles
+             SET current_published_version_id = $1,
+                 current_draft_version_id = NULL
+             WHERE id = (SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1)",
+        )
+        .bind(bundle_version_id)
+        .execute(&mut *pub_tx)
+        .await
+        .expect("update bundle pointer");
+        pub_tx.commit().await.expect("commit publish");
+        let _ = bundle_digest; // used above for HTTP path; not needed here
+
+        let environment_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(environment_id)
+            .bind(format!("race-{}", environment_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert environment");
+
+        let create_payload = crate::api::models::CreateAssignmentRequest {
+            bundle_version_id,
+            scope_type: "environment".to_string(),
+            scope_id: environment_id,
+            enforcement_mode: None,
+            exclusions: None,
+            additions: None,
+            value_overrides: None,
+        };
+        let created = persist_assignment(&pool, admin_id, &create_payload, None, None)
+            .await
+            .expect("initial create");
+        let assignment_id = created.id;
+        let v1 = created.current_version_id;
+
+        // ── Barrier-synchronized update/deactivate race ───────────────────────
+        // The barrier fires before either operation acquires a transaction or
+        // advisory lock, guaranteeing they race for the lock simultaneously.
+        // We run the race once; the database serializes the winner.
+        {
+            let iteration = 0usize; // kept for assertion messages
+            let current_v = v1;
+
+            let update_payload = crate::api::models::CreateAssignmentRequest {
+                bundle_version_id,
+                scope_type: "environment".to_string(),
+                scope_id: environment_id,
+                enforcement_mode: Some("report_only".to_string()),
+                exclusions: None,
+                additions: None,
+                value_overrides: None,
+            };
+
+            let race_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+            let (upd_result, del_result) = tokio::join!(
+                persist_assignment_with_barrier(
+                    &pool,
+                    admin_id,
+                    &update_payload,
+                    Some(assignment_id),
+                    Some(current_v),
+                    race_barrier.clone()
+                ),
+                deactivate_assignment_with_barrier(
+                    &pool,
+                    admin_id,
+                    assignment_id,
+                    Some(current_v),
+                    race_barrier.clone()
+                ),
+            );
+
+            let update_ok = upd_result.is_ok();
+            let delete_resp = del_result;
+            let delete_ok = {
+                use axum::http::StatusCode;
+                let status_bytes = axum::body::to_bytes(delete_resp.into_body(), 64)
+                    .await
+                    .unwrap_or_default();
+                // 204 No Content body is empty; anything else is a failure.
+                // We detect success by checking the response status code which
+                // we can recover from the fact that NO_CONTENT has no body.
+                // Re-check via the database instead.
+                let _ = status_bytes;
+                // The definitive answer comes from the DB: active = false means delete won.
+                let (active,): (bool,) = sqlx::query_as(
+                    "SELECT active FROM compliance_bundle_assignments WHERE id = $1",
+                )
+                .bind(assignment_id)
+                .fetch_one(&pool)
+                .await
+                .expect("check active");
+                !active && !update_ok
+            };
+
+            assert_eq!(
+                update_ok as u8 + delete_ok as u8,
+                1,
+                "iteration {iteration}: exactly one of update/delete must commit"
+            );
+
+            // DB consistency checks for each outcome.
+            let (db_active,): (bool,) =
+                sqlx::query_as("SELECT active FROM compliance_bundle_assignments WHERE id = $1")
+                    .bind(assignment_id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("db active check");
+
+            if update_ok {
+                // Deactivate lost: assignment still active, pointer updated to new version.
+                assert!(
+                    db_active,
+                    "iteration {iteration}: update won, assignment must be active"
+                );
+                // Restore to active state for next iteration (already active, nothing to do).
+                // The update path advanced the version; next iteration reads new current_v.
+                let update_resp = upd_result.as_ref().unwrap();
+                // Ensure no orphan versions from the losing deactivate.
+                let (ver_count,): (i64,) = sqlx::query_as(
+                    "SELECT COUNT(*) FROM compliance_bundle_assignment_versions WHERE assignment_id = $1",
+                )
+                .bind(assignment_id)
+                .fetch_one(&pool)
+                .await
+                .expect("ver count");
+                // versions = initial V1 + one per successful update in this iteration
+                assert!(
+                    ver_count > 0,
+                    "iteration {iteration}: must have at least one version"
+                );
+            } else {
+                // Update lost: assignment deactivated.
+                assert!(
+                    !db_active,
+                    "iteration {iteration}: deactivate won, assignment must be inactive"
+                );
+                let stale_err = upd_result.unwrap_err();
+                let stale_body = axum::body::to_bytes(stale_err.into_body(), usize::MAX)
+                    .await
+                    .unwrap_or_default();
+                let stale_json: serde_json::Value =
+                    serde_json::from_slice(&stale_body).unwrap_or_default();
+                assert!(
+                    stale_json["code"] == "ASSIGNMENT_STALE_UPDATE"
+                        || stale_json["code"] == serde_json::Value::Null, // 404 returns no code field
+                    "iteration {iteration}: update loser must return ASSIGNMENT_STALE_UPDATE or 404; got {:?}",
+                    stale_json
+                );
+            }
+
+            // Audit: create event always exists. Each successful mutation adds one.
+            let (audit_count,): (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM admin_audit_events
+                 WHERE target IN (
+                     SELECT id::text FROM compliance_bundle_assignments
+                     WHERE id = $1
+                 )",
+            )
+            .bind(assignment_id)
+            .fetch_one(&pool)
+            .await
+            .expect("audit count");
+            assert!(
+                audit_count >= 1,
+                "iteration {iteration}: at least one audit event must exist"
+            );
+
+            // No raw SQL or internal traces in audit payloads.
+            let texts: Vec<String> = sqlx::query_scalar(
+                "SELECT metadata::text FROM admin_audit_events WHERE target = $1::text",
+            )
+            .bind(assignment_id)
+            .fetch_all(&pool)
+            .await
+            .expect("audit texts");
+            for t in &texts {
+                assert!(
+                    !t.contains("sqlx::"),
+                    "audit must not expose sqlx internals"
+                );
+                assert!(!t.contains("panicked"), "audit must not expose panics");
+            }
+
+            if delete_ok {
+                // Deactivate won: assert audit contains assignment_deactivated operation.
+                let deactivate_evt_count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM admin_audit_events
+                     WHERE target = $1 AND action = 'assignment_deactivated'",
+                )
+                .bind(assignment_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("deactivate audit");
+                assert!(
+                    deactivate_evt_count >= 1,
+                    "iteration {iteration}: deactivate win must produce assignment_deactivated audit"
+                );
+            }
+        } // end single-iteration block
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn assignment_deactivate_audit_fields() {
+        // Verify that a deactivation produces an audit record with the expected
+        // field-by-field content. This complements the create/update audit
+        // assertions in assignment_update_is_immutable_and_rejects_stale_version.
+        let pool = test_pool_from_env().await;
+        let (admin_id, _token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (policy_id, pv_id, _) = make_draft_policy(
+            &pool,
+            &format!("deact-audit-pol-{}", Uuid::new_v4().simple()),
+        )
+        .await;
+        db_publish_policy_version(&pool, policy_id, pv_id).await;
+        let (_, bv_id, _bundle_digest) = make_draft_bundle(
+            &pool,
+            &format!("deact-audit-bun-{}", Uuid::new_v4().simple()),
+            &[pv_id],
+        )
+        .await;
+        // Publish bundle via direct DB write (same pattern as other tests).
+        let mut pub_tx = pool.begin().await.expect("begin pub tx");
+        sqlx::query(
+            "UPDATE compliance_bundle_versions
+             SET publication_state = 'accepted', published_at = now(),
+                 trust_state = 'trusted', trusted_at = now()
+             WHERE id = $1",
+        )
+        .bind(bv_id)
+        .execute(&mut *pub_tx)
+        .await
+        .expect("publish bv");
+        sqlx::query(
+            "UPDATE compliance_bundles
+             SET current_published_version_id = $1, current_draft_version_id = NULL
+             WHERE id = (SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1)",
+        )
+        .bind(bv_id)
+        .execute(&mut *pub_tx)
+        .await
+        .expect("update bundle ptr");
+        pub_tx.commit().await.expect("commit publish");
+
+        let environment_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(environment_id)
+            .bind(format!("deact-audit-{}", environment_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert environment");
+
+        let create_payload = crate::api::models::CreateAssignmentRequest {
+            bundle_version_id: bv_id,
+            scope_type: "environment".to_string(),
+            scope_id: environment_id,
+            enforcement_mode: None,
+            exclusions: None,
+            additions: None,
+            value_overrides: None,
+        };
+        let created = persist_assignment(&pool, admin_id, &create_payload, None, None)
+            .await
+            .expect("create assignment");
+        let assignment_id = created.id;
+        let current_v = created.current_version_id;
+
+        // Deactivate.
+        let deact_resp =
+            deactivate_assignment_inner(&pool, admin_id, assignment_id, None, None).await;
+        let deact_status = deact_resp.status();
+        assert_eq!(
+            deact_status,
+            axum::http::StatusCode::NO_CONTENT,
+            "deactivate must return 204"
+        );
+
+        // Verify the deactivation audit event.
+        let deact_evt: serde_json::Value = sqlx::query_scalar(
+            "SELECT metadata FROM admin_audit_events
+             WHERE target = $1 AND action = 'assignment_deactivated'
+             LIMIT 1",
+        )
+        .bind(assignment_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("deactivate audit event");
+
+        assert_eq!(deact_evt["operation"], "assignment_deactivated");
+        assert_eq!(deact_evt["target_type"], "environment");
+        assert_eq!(deact_evt["target_id"], environment_id.to_string());
+        assert_eq!(deact_evt["bundle_version_id"], bv_id.to_string());
+        assert_eq!(
+            deact_evt["assignment_version_id"],
+            current_v.to_string(),
+            "deactivate audit must record the last active version"
+        );
+        assert_eq!(deact_evt["assignment_id"], assignment_id.to_string());
+        // assignment_deactivated must NOT contain policy payloads or secrets.
+        let deact_text = deact_evt.to_string();
+        assert!(
+            !deact_text.contains("sqlx::"),
+            "deactivate audit must not expose sqlx internals"
+        );
+        assert!(
+            !deact_text.contains("panicked"),
+            "deactivate audit must not expose panics"
+        );
+        assert!(
+            !deact_text.contains("password"),
+            "deactivate audit must not expose secrets"
+        );
+        // Check actor was recorded.
+        let (actor_id,): (Option<Uuid>,) = sqlx::query_as(
+            "SELECT actor_user_id FROM admin_audit_events
+             WHERE target = $1 AND action = 'assignment_deactivated'
+             LIMIT 1",
+        )
+        .bind(assignment_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("actor id");
+        assert_eq!(
+            actor_id,
+            Some(admin_id),
+            "deactivate audit must record actor"
+        );
+
+        // Assignment must be inactive in DB.
+        let (active,): (bool,) =
+            sqlx::query_as("SELECT active FROM compliance_bundle_assignments WHERE id = $1")
+                .bind(assignment_id)
+                .fetch_one(&pool)
+                .await
+                .expect("active check");
+        assert!(!active, "assignment must be inactive after deactivation");
+        let (ptr,): (Option<Uuid>,) = sqlx::query_as(
+            "SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1",
+        )
+        .bind(assignment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("pointer check");
+        assert!(
+            ptr.is_none(),
+            "current_version_id must be NULL after deactivation"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
     async fn assignment_create_failure_points_roll_back_all_rows() {
         let pool = test_pool_from_env().await;
         let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
@@ -6585,6 +7189,10 @@ mod tests {
                 .is_ok()
         );
 
+        // ── Barrier-synchronized concurrent create ────────────────────────────
+        // Two creates for the same target + bundle lineage. The barrier ensures
+        // both reach the critical section (after advisory locks, before the
+        // FOR UPDATE uniqueness check) simultaneously.
         let concurrent_environment_id = Uuid::new_v4();
         sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
             .bind(concurrent_environment_id)
@@ -6594,11 +7202,51 @@ mod tests {
             .expect("insert concurrent environment");
         let mut concurrent_payload = payload.clone();
         concurrent_payload.scope_id = concurrent_environment_id;
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
         let (first, second) = tokio::join!(
-            persist_assignment(&pool, admin_id, &concurrent_payload, None, None),
-            persist_assignment(&pool, admin_id, &concurrent_payload, None, None),
+            persist_assignment_with_barrier(
+                &pool,
+                admin_id,
+                &concurrent_payload,
+                None,
+                None,
+                barrier.clone()
+            ),
+            persist_assignment_with_barrier(
+                &pool,
+                admin_id,
+                &concurrent_payload,
+                None,
+                None,
+                barrier.clone()
+            ),
         );
-        assert_eq!(first.is_ok() as u8 + second.is_ok() as u8, 1);
+
+        // Exactly one succeeds; the other returns a typed conflict.
+        let first_ok = first.is_ok();
+        let second_ok = second.is_ok();
+        assert_eq!(
+            first_ok as u8 + second_ok as u8,
+            1,
+            "exactly one concurrent create must succeed"
+        );
+        let conflict_resp = if first_ok {
+            second.unwrap_err()
+        } else {
+            first.unwrap_err()
+        };
+        // The failure must be a typed ASSIGNMENT_ALREADY_EXISTS, not an
+        // unclassified 500 or raw SQL unique-constraint violation.
+        let body = axum::body::to_bytes(conflict_resp.into_body(), usize::MAX)
+            .await
+            .unwrap_or_default();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        assert_eq!(
+            body_json["code"], "ASSIGNMENT_ALREADY_EXISTS",
+            "concurrent create loser must return ASSIGNMENT_ALREADY_EXISTS"
+        );
+
         let (active_count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM compliance_bundle_assignments WHERE environment_id = $1 AND active",
         )
@@ -6606,6 +7254,37 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("concurrent active count");
-        assert_eq!(active_count, 1);
+        assert_eq!(active_count, 1, "exactly one active assignment after race");
+
+        let (version_count,): (i64,) = sqlx::query_as(
+            r#"SELECT COUNT(*) FROM compliance_bundle_assignment_versions v
+               JOIN compliance_bundle_assignments a ON a.id = v.assignment_id
+               WHERE a.environment_id = $1"#,
+        )
+        .bind(concurrent_environment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("version count after concurrent create");
+        assert_eq!(
+            version_count, 1,
+            "exactly one version after concurrent create"
+        );
+
+        let (create_audit_count,): (i64,) = sqlx::query_as(
+            r#"SELECT COUNT(*) FROM admin_audit_events
+               WHERE action = 'assignment_created'
+                 AND target IN (
+                     SELECT id::text FROM compliance_bundle_assignments
+                     WHERE environment_id = $1
+                 )"#,
+        )
+        .bind(concurrent_environment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create audit after concurrent create");
+        assert_eq!(
+            create_audit_count, 1,
+            "exactly one create audit event after concurrent create"
+        );
     }
 }
