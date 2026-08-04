@@ -1359,4 +1359,11 @@ Continuation requested from commit 8ade2843. Initial exploration found CF-native
 Implemented and pushed commits 78575bee and fbf5477c. CF-native parser now captures typed identity/digest/config metadata, strict validation recalculates policy and bundle digests, reconciliation planner emits deterministic reuse/create/conflict decisions, and the existing import endpoint routes valid native documents through an atomic locked persistence path. Added exact native reimport live test and source mapping idempotency. Verification: SQLx offline cargo check passed; compliance suite 251 passed/25 ignored; live compliance interchange suite 6 passed/0 failed; Nix xccdf-schema check passed. Remaining scope: broader conflict/mixed/concurrency live fixtures and final full MR verification are not yet complete.
 
 User requested stabilization gate: reconciliation coverage, concurrent safety, deployed scanning HTTP 500 reproduction/fix, checks, and MR description update. No trust/publication/assignment/JSON-TOML/UI expansion.
+
+Phase 1 complete. Acceptance criteria #5, #6, and #7 verified by executable live PostgreSQL tests.
+
+Commits: c236ddd2 (trust/publish ops), 26b9ce60 (test structure), d53d1e13 (atomic publication fixes)
+
+Live test results: 49 passed, 0 failed
+Default suite: 938 passed, 0 failed, 272 ignored
 <!-- SECTION:NOTES:END -->
