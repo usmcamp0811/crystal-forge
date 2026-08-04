@@ -1084,7 +1084,10 @@ pub async fn run_commit_evaluation_loop(
     // between derivation persistence and build-job activation.
     match recover_orphaned_derivation_build_jobs(&pool).await {
         Ok(count) if count > 0 => {
-            info!("🔄 Startup: queued {} orphaned build-eligible derivations", count);
+            info!(
+                "🔄 Startup: queued {} orphaned build-eligible derivations",
+                count
+            );
             queue_notifier.notify_build_queue();
         }
         Ok(_) => {}
@@ -1212,7 +1215,10 @@ async fn run_builder_recovery_loop(
         // created without requiring manual intervention or a service restart.
         match recover_orphaned_derivation_build_jobs(&pool).await {
             Ok(count) if count > 0 => {
-                info!("🔄 Periodic recovery: queued {} orphaned build-eligible derivations", count);
+                info!(
+                    "🔄 Periodic recovery: queued {} orphaned build-eligible derivations",
+                    count
+                );
                 queue_notifier.notify_build_queue();
             }
             Ok(_) => {}
