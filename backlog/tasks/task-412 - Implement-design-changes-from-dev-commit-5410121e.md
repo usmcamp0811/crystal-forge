@@ -1321,53 +1321,7 @@ Phase 2 assignment mutation slice (isolated branch TASK-412-phase2-atomicity): i
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Dedicated worktree created at `/home/mcamp/code/crystal-forge/TASK-412-cf-xccdf-interchange` on branch `TASK-412-cf-xccdf-interchange`, based on `dev` at `2fdbfa839544628aad4bc802b71d7988cdedc60a`. Initial task research and scope planning are underway.
+Current branch TASK-412-cf-xccdf-interchange remains pushed at a0adeb84. Verification: migration 0204 applied successfully to postgres://crystal_forge@127.0.0.1/crystal_forge; resolver tests 13 passed; existing ignored assignment regression tests 3 passed; new immutable/stale update test passed; new rollback test passed across 7 hooks and concurrent create; complete default server lib suite 954 passed, 275 ignored; SQLX_OFFLINE cargo check passed; cargo fmt --all --check passed; git diff --check passed; remote head equals local. Existing unrelated deployment/mod.rs remains modified and unstaged.
 
-User approved the recorded seven-phase delivery plan on 2026-07-31. Proceeding with phase 1: freeze the interchange contract and establish vendored-schema/parser test foundations.
-
-Phase 1 foundation added: `cf-server::compliance::interchange` freezes the XCCDF and Crystal Forge namespace/check-system identifiers, canonicalization/digest versions, and bounded XML/ZIP/parser resource limits with unit tests. Added the initial typed `cf-xccdf-1.xsd` extension schema and provenance record. Verification: `SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml --lib compliance::interchange` passed (2 tests); `xmllint --noout schemas/cf-xccdf-1/cf-xccdf-1.xsd` passed; `git diff --check` passed. A broad `cargo test` without `SQLX_OFFLINE=true` cannot compile because it attempts database connections; broad `rustfmt --check` also reports pre-existing formatting differences in unrelated server files, which were not retained. Remaining phase-1 work: vendor the complete NIST XCCDF 1.2 schema dependency set and add the no-network Nix validation check.
-
-Completed remaining phase-1 schema foundation. Added `xccdf-1-2-schemas`, a pinned Nix package that stages the OpenSCAP-provided XCCDF 1.2.1, CPE language/naming, and XML namespace schemas into a self-contained output. Added the `xccdf-schema` Nix check, which validates a minimal XCCDF Benchmark and CF native custom-check fixture with `xmllint`; `nix build .#checks.x86_64-linux.xccdf-schema --no-link` passed. The check uses only vendored Nix-store schema inputs and performs no runtime schema retrieval. Proceeding to phase 2 migrations/canonical model work.
-
-Verification before MR:
-- `nix build .#checks.x86_64-linux.web-ui --no-link` → PASS
-- `nix build .#checks.x86_64-linux.xccdf-schema --no-link` → PASS
-- `SQLX_OFFLINE=true cargo test --lib compliance::` → 26 passed
-- `cargo check` (server SQLX_OFFLINE, web-ui wasm32) → no errors
-- `cargo fmt` applied to all new/modified files; pre-existing diffs in dev base are out of scope
-- Pre-existing `cargo fmt --all --check` failures are in `dev` branch base files not touched by this task; AC #41 requires a clean pass — noted in MR
-- `nix flake check --keep-going` not yet run locally; CI will be authoritative (AC #43)
-
-MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/313. Moved to Review.
-
-## Slice 3 - Phase 1+2+3 Progress
-
-### Phase 3 (DB snapshot loader + XML writer): COMPLETE
-
-- Replaced handler export_bundle_xccdf to use load_export_snapshot + write_bundle_xccdf_export
-
-- Implemented load_export_snapshot() with full bundle_version + membership + policy_versions + source_mappings in single read-only connection
-
-- Added ExportSnapshotError enum, parse_publication_state(), parse_implementation_state()
-
-- Removed old load_bundle_membership_txless
-
-- Rewrote xml_writer.rs completely: XCCDF 1.2 Benchmark with Groups by policy_type, Rules with severity/weight, CF extensions, source mappings, check/fix elements for all 8 policy types
-
-- 7 new xml_writer tests, all 124 compliance tests pass
-
-Continuation requested from commit 8ade2843. Initial exploration found CF-native classes are currently rejected; parser retains only partial CF metadata; importer generates random IDs; persistence always creates new lineages/versions. Existing migrations provide version identities, draft/published pointers, immutability, source mappings, and triggers.
-
-Implemented and pushed commits 78575bee and fbf5477c. CF-native parser now captures typed identity/digest/config metadata, strict validation recalculates policy and bundle digests, reconciliation planner emits deterministic reuse/create/conflict decisions, and the existing import endpoint routes valid native documents through an atomic locked persistence path. Added exact native reimport live test and source mapping idempotency. Verification: SQLx offline cargo check passed; compliance suite 251 passed/25 ignored; live compliance interchange suite 6 passed/0 failed; Nix xccdf-schema check passed. Remaining scope: broader conflict/mixed/concurrency live fixtures and final full MR verification are not yet complete.
-
-User requested stabilization gate: reconciliation coverage, concurrent safety, deployed scanning HTTP 500 reproduction/fix, checks, and MR description update. No trust/publication/assignment/JSON-TOML/UI expansion.
-
-Phase 1 complete. Acceptance criteria #5, #6, and #7 verified by executable live PostgreSQL tests.
-
-Commits: c236ddd2 (trust/publish ops), 26b9ce60 (test structure), d53d1e13 (atomic publication fixes)
-
-Live test results: 49 passed, 0 failed
-Default suite: 938 passed, 0 failed, 272 ignored
-
-Started isolated worktree /home/mcamp/code/crystal-forge/crystal-forge-task412-phase2 at remote head 3a818c50 on branch TASK-412-phase2-atomicity. Original dirty worktree remains untouched. Initial inspection confirms current assignment updates mutate one mutable compliance_bundle_assignments row and delete/reinsert child rows; no assignment version table or expected-version field exists yet. Existing assignment uniqueness is per bundle_version_id + target, while resolver comments describe bundle lineage semantics; audit uses admin_audit_events via insert_admin_audit_event.
+Phase 2 atomicity slice implemented and pushed in commits 9be3725b and a0adeb84. Added migration 0204 with assignment lineage current_version_id, immutable assignment versions, version-keyed overlay children, bundle-lineage active uniqueness, deactivation support, and immutability triggers. Assignment create/update now run transactionally with deterministic advisory keys, expected_version_id stale 409 responses, pointer-only version advancement, audit writes, and test-only rollback failure injection. Live PostgreSQL tests passed for all seven failure points, immutable/stale updates, concurrent updates, and concurrent creates; existing assignment regression tests and resolver tests also passed. Remaining gap for this slice: no dedicated update/delete race test or full field-by-field audit metadata assertion has been added yet; do not claim mutation slice complete until those are covered. Original unrelated deployment/mod.rs working-tree modification remains untouched.
 <!-- SECTION:NOTES:END -->
