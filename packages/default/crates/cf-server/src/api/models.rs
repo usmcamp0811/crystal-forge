@@ -2785,3 +2785,106 @@ pub struct CreateBundleDraftResponse {
     pub publication_state: String,
     pub derived_from_version_id: Uuid,
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 2: Compliance Bundle Assignment DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single value override targeting one policy in the effective set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyValueOverride {
+    pub policy_version_id: Uuid,
+    /// JSON path within the policy config, e.g. "rules.0.expression"
+    pub value_path: String,
+    pub value: serde_json::Value,
+}
+
+/// Request to create a compliance bundle assignment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateAssignmentRequest {
+    /// Exact immutable bundle version ID (must be in 'accepted' state).
+    pub bundle_version_id: Uuid,
+    /// "environment" or "system"
+    pub scope_type: String,
+    /// UUID of the environment or system.
+    pub scope_id: Uuid,
+    /// "enforce" (default) or "report_only"
+    pub enforcement_mode: Option<String>,
+    /// Policy version IDs to exclude from the baseline.
+    pub exclusions: Option<Vec<Uuid>>,
+    /// Additional policy version IDs to add beyond the baseline.
+    pub additions: Option<Vec<Uuid>>,
+    /// Value overrides targeting policies in the effective set.
+    pub value_overrides: Option<Vec<PolicyValueOverride>>,
+}
+
+/// Response when an assignment is created.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssignmentResponse {
+    pub id: Uuid,
+    pub bundle_version_id: Uuid,
+    pub scope_type: String,
+    pub scope_id: Uuid,
+    pub enforcement_mode: String,
+    pub exclusions: Vec<Uuid>,
+    pub additions: Vec<Uuid>,
+    pub value_overrides: Vec<PolicyValueOverride>,
+    pub assignment_overlay_digest: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Request to update an assignment (replaces exclusions, additions, overrides).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateAssignmentRequest {
+    pub enforcement_mode: Option<String>,
+    pub exclusions: Option<Vec<Uuid>>,
+    pub additions: Option<Vec<Uuid>>,
+    pub value_overrides: Option<Vec<PolicyValueOverride>>,
+}
+
+/// Request to preview an assignment before saving.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewAssignmentRequest {
+    pub bundle_version_id: Uuid,
+    pub scope_type: String,
+    pub scope_id: Uuid,
+    pub enforcement_mode: Option<String>,
+    pub exclusions: Option<Vec<Uuid>>,
+    pub additions: Option<Vec<Uuid>>,
+    pub value_overrides: Option<Vec<PolicyValueOverride>>,
+}
+
+/// A single resolved policy in the effective set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectivePolicyDto {
+    pub policy_version_id: Uuid,
+    pub policy_lineage_id: Uuid,
+    pub policy_type: String,
+    /// "baseline" or "addition"
+    pub source: String,
+    pub baseline_order: Option<i32>,
+    pub addition_order: Option<i32>,
+    pub overrides: Vec<PolicyValueOverride>,
+    pub effective_config: serde_json::Value,
+    pub enforcement_mode: String,
+}
+
+/// Response containing the resolved effective policy set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectivePolicySetResponse {
+    pub bundle_version_id: Uuid,
+    pub assignment_id: Option<Uuid>,
+    pub scope_type: String,
+    pub scope_id: Uuid,
+    pub policies: Vec<EffectivePolicyDto>,
+    pub effective_set_digest: String,
+    pub warnings: Vec<String>,
+}
+
+/// Structured resolution conflict returned as part of a 422 response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolutionConflictDto {
+    pub code: String,
+    pub message: String,
+}

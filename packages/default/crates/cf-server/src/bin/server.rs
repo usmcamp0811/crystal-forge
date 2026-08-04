@@ -459,6 +459,33 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/compliance/bundles/:bundle_id/drafts",
             post(compliance::create_bundle_draft),
         )
+        // Phase 2: Bundle assignment endpoints
+        .route(
+            "/api/v1/compliance/assignments",
+            post(compliance::create_assignment),
+        )
+        .route(
+            "/api/v1/compliance/assignments/:id",
+            get(compliance::get_assignment)
+                .put(compliance::update_assignment)
+                .delete(compliance::delete_assignment),
+        )
+        .route(
+            "/api/v1/compliance/assignments/:id/effective-policies",
+            get(compliance::get_assignment_effective_policies),
+        )
+        .route(
+            "/api/v1/compliance/assignments/preview",
+            post(compliance::preview_assignment),
+        )
+        .route(
+            "/api/v1/environments/:id/compliance-assignments",
+            get(compliance::list_environment_assignments),
+        )
+        .route(
+            "/api/v1/systems/:id/compliance-assignments",
+            get(compliance::list_system_assignments),
+        )
         // CF-XCCDF import/export and bundle version endpoints
         .route(
             "/api/v1/compliance/xccdf/preview",

@@ -29,6 +29,7 @@ use crate::compliance::xccdf::importer::{
     build_policy_records, check_document_class, validate_cf_native_document, validate_import_plan,
     validate_sha256_match,
 };
+use crate::compliance::resolver::ResolutionOutcome;
 use crate::compliance::xccdf::package::{ProcessingError, process_xccdf_bytes};
 use crate::compliance::xccdf::reconciliation::NativeReconcileFailure;
 use crate::compliance::xccdf::xml_writer::{XccdfWriterError, write_bundle_xccdf_export};
@@ -962,6 +963,824 @@ pub async fn create_bundle_draft(
             tracing::error!("Failed to create bundle draft: {e}");
             internal_error("Failed to create bundle draft")
         }
+    }
+}
+
+// ── Phase 2: Compliance Bundle Assignments ─────────────────────────────────
+
+/// Convert a resolver conflict into an HTTP response.
+fn conflict_response(conflicts: Vec<crate::compliance::resolver::ResolutionConflict>) -> axum::response::Response {
+    use crate::api::models::ResolutionConflictDto;
+    let dtos: Vec<ResolutionConflictDto> = conflicts
+        .into_iter()
+        .map(|c| ResolutionConflictDto { code: c.code, message: c.message })
+        .collect();
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(serde_json::json!({
+            "error": "Assignment resolution conflict",
+            "conflicts": dtos,
+        })),
+    )
+        .into_response()
+}
+
+/// Convert an EffectivePolicySet into an API response.
+fn effective_set_to_response(
+    set: crate::compliance::resolver::EffectivePolicySet,
+    assignment_id: Option<Uuid>,
+) -> crate::api::models::EffectivePolicySetResponse {
+    use crate::api::models::{EffectivePolicyDto, PolicyValueOverride};
+    use crate::compliance::resolver::{AssignmentTarget, EffectivePolicySource};
+
+    let (scope_type, scope_id) = match &set.target {
+        AssignmentTarget::Environment { environment_id } => ("environment", *environment_id),
+        AssignmentTarget::System { system_id } => ("system", *system_id),
+    };
+
+    let policies = set
+        .policies
+        .into_iter()
+        .map(|p| {
+            let source = match p.source {
+                EffectivePolicySource::Baseline => "baseline",
+                EffectivePolicySource::Addition => "addition",
+            };
+            let mode = p.effective_mode.as_str().to_string();
+            let overrides = p
+                .overrides
+                .into_iter()
+                .map(|o| PolicyValueOverride {
+                    policy_version_id: o.policy_version_id,
+                    value_path: o.value_path,
+                    value: o.value,
+                })
+                .collect();
+            EffectivePolicyDto {
+                policy_version_id: p.policy_version_id,
+                policy_lineage_id: p.policy_lineage_id,
+                policy_type: p.policy_type,
+                source: source.to_string(),
+                baseline_order: p.baseline_order,
+                addition_order: p.addition_order,
+                overrides,
+                effective_config: p.effective_config,
+                enforcement_mode: mode,
+            }
+        })
+        .collect();
+
+    crate::api::models::EffectivePolicySetResponse {
+        bundle_version_id: set.bundle_version_id,
+        assignment_id,
+        scope_type: scope_type.to_string(),
+        scope_id,
+        policies,
+        effective_set_digest: set.effective_set_digest,
+        warnings: set.warnings,
+    }
+}
+
+/// Validate and persist a new assignment.
+/// Returns (assignment_id, AssignmentResponse) on success or an HTTP error response.
+async fn persist_assignment(
+    pool: &PgPool,
+    user_id: Uuid,
+    payload: &crate::api::models::CreateAssignmentRequest,
+    assignment_id_opt: Option<Uuid>, // None = create, Some = update
+) -> Result<crate::api::models::AssignmentResponse, axum::response::Response> {
+    use crate::compliance::resolver::{
+        AssignmentMode, AssignmentTarget, EffectivePolicyResolutionInput, PolicyOverride,
+        ResolutionOutcome, resolve_effective_policy_set,
+    };
+
+    let enforcement_mode = payload
+        .enforcement_mode
+        .as_deref()
+        .unwrap_or("enforce");
+    if enforcement_mode != "enforce" && enforcement_mode != "report_only" {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "Invalid enforcement_mode",
+                "message": "Must be 'enforce' or 'report_only'",
+                "code": "ASSIGNMENT_INVALID_MODE"
+            })),
+        )
+            .into_response());
+    }
+
+    let scope_type = payload.scope_type.as_str();
+    if scope_type != "environment" && scope_type != "system" {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "Invalid scope_type",
+                "message": "Must be 'environment' or 'system'",
+                "code": "ASSIGNMENT_TARGET_INVALID"
+            })),
+        )
+            .into_response());
+    }
+
+    let target = if scope_type == "environment" {
+        AssignmentTarget::Environment {
+            environment_id: payload.scope_id,
+        }
+    } else {
+        AssignmentTarget::System {
+            system_id: payload.scope_id,
+        }
+    };
+
+    let exclusions = payload.exclusions.clone().unwrap_or_default();
+    let additions = payload.additions.clone().unwrap_or_default();
+    let overrides: Vec<PolicyOverride> = payload
+        .value_overrides
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|o| PolicyOverride {
+            policy_version_id: o.policy_version_id,
+            value_path: o.value_path,
+            value: o.value,
+        })
+        .collect();
+
+    let mode = if enforcement_mode == "report_only" {
+        AssignmentMode::ReportOnly
+    } else {
+        AssignmentMode::Enforce
+    };
+
+    let input = EffectivePolicyResolutionInput {
+        target: target.clone(),
+        bundle_version_id: payload.bundle_version_id,
+        exclusions: exclusions.clone(),
+        additions: additions.clone(),
+        overrides: overrides.clone(),
+        assignment_mode: mode.clone(),
+    };
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return Err(internal_error("Failed to start transaction")),
+    };
+
+    // Resolve to validate the assignment and compute the digest
+    let outcome = resolve_effective_policy_set(&mut tx, &input)
+        .await
+        .map_err(|_| internal_error("Resolution failed"))?;
+
+    let set = match outcome {
+        ResolutionOutcome::Resolved(s) => s,
+        ResolutionOutcome::Conflict(conflicts) => {
+            let _ = tx.rollback().await;
+            return Err(conflict_response(conflicts));
+        }
+    };
+
+    // Verify target exists
+    let target_exists: bool = if scope_type == "environment" {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM environments WHERE id = $1)",
+        )
+        .bind(payload.scope_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap_or(false)
+    } else {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM systems WHERE id = $1)",
+        )
+        .bind(payload.scope_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap_or(false)
+    };
+
+    if !target_exists {
+        let _ = tx.rollback().await;
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "Target not found",
+                "message": format!("{} {} does not exist", scope_type, payload.scope_id),
+                "code": "ASSIGNMENT_TARGET_NOT_FOUND"
+            })),
+        )
+            .into_response());
+    }
+
+    let effective_set_digest = set.effective_set_digest.clone();
+
+    let (assignment_id, env_id_opt, sys_id_opt) = if scope_type == "environment" {
+        (
+            assignment_id_opt.unwrap_or_else(Uuid::new_v4),
+            Some(payload.scope_id),
+            None,
+        )
+    } else {
+        (
+            assignment_id_opt.unwrap_or_else(Uuid::new_v4),
+            None,
+            Some(payload.scope_id),
+        )
+    };
+
+    // Insert or update the assignment row
+    if assignment_id_opt.is_none() {
+        // INSERT path
+        let insert_result = sqlx::query(
+            r#"INSERT INTO compliance_bundle_assignments
+               (id, bundle_version_id, scope_type, environment_id, system_id,
+                enforcement_mode, assignment_overlay_digest, created_by, updated_by)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+               ON CONFLICT (bundle_version_id, environment_id)
+                 WHERE environment_id IS NOT NULL
+               DO NOTHING
+               RETURNING id"#,
+        )
+        .bind(assignment_id)
+        .bind(payload.bundle_version_id)
+        .bind(scope_type)
+        .bind(env_id_opt)
+        .bind(sys_id_opt)
+        .bind(enforcement_mode)
+        .bind(&effective_set_digest)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await;
+
+        match insert_result {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                // Unique constraint conflict
+                let _ = tx.rollback().await;
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": "Assignment already exists",
+                        "message": "An assignment for this bundle version and target already exists",
+                        "code": "ASSIGNMENT_SCOPE_CONFLICT"
+                    })),
+                )
+                    .into_response());
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                tracing::error!("Failed to insert assignment: {e}");
+                return Err(internal_error("Failed to create assignment"));
+            }
+        }
+    } else {
+        // UPDATE path (replace digest and mode; exclusions/additions/overrides
+        // are replaced via DELETE + INSERT below)
+        let update_result = sqlx::query(
+            r#"UPDATE compliance_bundle_assignments
+               SET enforcement_mode = $2, assignment_overlay_digest = $3, updated_by = $4
+               WHERE id = $1"#,
+        )
+        .bind(assignment_id)
+        .bind(enforcement_mode)
+        .bind(&effective_set_digest)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await;
+
+        if let Err(e) = update_result {
+            let _ = tx.rollback().await;
+            tracing::error!("Failed to update assignment: {e}");
+            return Err(internal_error("Failed to update assignment"));
+        }
+    }
+
+    // Replace exclusions: DELETE existing, INSERT new
+    let _ = sqlx::query(
+        "DELETE FROM compliance_assignment_exclusions WHERE assignment_id = $1",
+    )
+    .bind(assignment_id)
+    .execute(&mut *tx)
+    .await;
+
+    for excl in &exclusions {
+        if let Err(e) = sqlx::query(
+            "INSERT INTO compliance_assignment_exclusions (assignment_id, policy_version_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(assignment_id)
+        .bind(excl)
+        .execute(&mut *tx)
+        .await
+        {
+            let _ = tx.rollback().await;
+            tracing::error!("Failed to insert exclusion: {e}");
+            return Err(internal_error("Failed to write exclusions"));
+        }
+    }
+
+    // Replace additions
+    let _ = sqlx::query(
+        "DELETE FROM compliance_assignment_additions WHERE assignment_id = $1",
+    )
+    .bind(assignment_id)
+    .execute(&mut *tx)
+    .await;
+
+    for add in &additions {
+        if let Err(e) = sqlx::query(
+            "INSERT INTO compliance_assignment_additions (assignment_id, policy_version_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(assignment_id)
+        .bind(add)
+        .execute(&mut *tx)
+        .await
+        {
+            let _ = tx.rollback().await;
+            tracing::error!("Failed to insert addition: {e}");
+            return Err(internal_error("Failed to write additions"));
+        }
+    }
+
+    // Replace overrides
+    let _ = sqlx::query(
+        "DELETE FROM compliance_assignment_value_overrides WHERE assignment_id = $1",
+    )
+    .bind(assignment_id)
+    .execute(&mut *tx)
+    .await;
+
+    for ovr in &overrides {
+        if let Err(e) = sqlx::query(
+            "INSERT INTO compliance_assignment_value_overrides (assignment_id, policy_version_id, value_path, value) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(assignment_id)
+        .bind(ovr.policy_version_id)
+        .bind(&ovr.value_path)
+        .bind(&ovr.value)
+        .execute(&mut *tx)
+        .await
+        {
+            let _ = tx.rollback().await;
+            tracing::error!("Failed to insert override: {e}");
+            return Err(internal_error("Failed to write overrides"));
+        }
+    }
+
+    // Commit
+    if let Err(e) = tx.commit().await {
+        tracing::error!("Failed to commit assignment: {e}");
+        return Err(internal_error("Failed to commit assignment"));
+    }
+
+    let now = chrono::Utc::now();
+    Ok(crate::api::models::AssignmentResponse {
+        id: assignment_id,
+        bundle_version_id: payload.bundle_version_id,
+        scope_type: scope_type.to_string(),
+        scope_id: payload.scope_id,
+        enforcement_mode: enforcement_mode.to_string(),
+        exclusions,
+        additions,
+        value_overrides: overrides
+            .into_iter()
+            .map(|o| crate::api::models::PolicyValueOverride {
+                policy_version_id: o.policy_version_id,
+                value_path: o.value_path,
+                value: o.value,
+            })
+            .collect(),
+        assignment_overlay_digest: effective_set_digest,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+/// `POST /api/v1/compliance/assignments`
+pub async fn create_assignment(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Json(payload): Json<crate::api::models::CreateAssignmentRequest>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !has_admin_role(&roles) {
+        return forbidden();
+    }
+
+    match persist_assignment(&pool, user_id, &payload, None).await {
+        Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+        Err(resp) => resp,
+    }
+}
+
+/// `PUT /api/v1/compliance/assignments/:id`
+pub async fn update_assignment(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(assignment_id): Path<Uuid>,
+    Json(payload): Json<crate::api::models::UpdateAssignmentRequest>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !has_admin_role(&roles) {
+        return forbidden();
+    }
+
+    // Load existing assignment to get bundle_version_id and scope
+    let existing = sqlx::query_as::<_, (Uuid, String, Option<Uuid>, Option<Uuid>, String)>(
+        "SELECT bundle_version_id, scope_type, environment_id, system_id, enforcement_mode \
+         FROM compliance_bundle_assignments WHERE id = $1",
+    )
+    .bind(assignment_id)
+    .fetch_optional(&pool)
+    .await;
+
+    let (bv_id, scope_type, env_id, sys_id, _) = match existing {
+        Ok(Some(row)) => row,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load assignment"),
+    };
+
+    let scope_id = env_id.or(sys_id).unwrap_or_default();
+
+    let create_payload = crate::api::models::CreateAssignmentRequest {
+        bundle_version_id: bv_id,
+        scope_type,
+        scope_id,
+        enforcement_mode: payload.enforcement_mode.clone(),
+        exclusions: payload.exclusions.clone(),
+        additions: payload.additions.clone(),
+        value_overrides: payload.value_overrides.clone(),
+    };
+
+    match persist_assignment(&pool, user_id, &create_payload, Some(assignment_id)).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(resp) => resp,
+    }
+}
+
+/// `GET /api/v1/compliance/assignments/:id`
+pub async fn get_assignment(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(assignment_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
+        return forbidden();
+    }
+
+    let row = sqlx::query_as::<_, (Uuid, Uuid, String, Option<Uuid>, Option<Uuid>, String, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
+        "SELECT id, bundle_version_id, scope_type, environment_id, system_id, enforcement_mode, assignment_overlay_digest, created_at, updated_at \
+         FROM compliance_bundle_assignments WHERE id = $1",
+    )
+    .bind(assignment_id)
+    .fetch_optional(&pool)
+    .await;
+
+    let (id, bv_id, scope_type, env_id, sys_id, mode, digest, created_at, updated_at) = match row {
+        Ok(Some(r)) => r,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load assignment"),
+    };
+
+    let scope_id = env_id.or(sys_id).unwrap_or_default();
+
+    let exclusions: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT policy_version_id FROM compliance_assignment_exclusions WHERE assignment_id = $1",
+    )
+    .bind(assignment_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    let additions: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_id = $1",
+    )
+    .bind(assignment_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    let overrides = sqlx::query_as::<_, (Uuid, String, serde_json::Value)>(
+        "SELECT policy_version_id, value_path, value FROM compliance_assignment_value_overrides WHERE assignment_id = $1",
+    )
+    .bind(assignment_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(pvid, path, val)| crate::api::models::PolicyValueOverride {
+        policy_version_id: pvid,
+        value_path: path,
+        value: val,
+    })
+    .collect();
+
+    let response = crate::api::models::AssignmentResponse {
+        id,
+        bundle_version_id: bv_id,
+        scope_type,
+        scope_id,
+        enforcement_mode: mode,
+        exclusions,
+        additions,
+        value_overrides: overrides,
+        assignment_overlay_digest: digest,
+        created_at,
+        updated_at,
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+/// `DELETE /api/v1/compliance/assignments/:id`
+pub async fn delete_assignment(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(assignment_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !has_admin_role(&roles) {
+        return forbidden();
+    }
+
+    let result = sqlx::query(
+        "DELETE FROM compliance_bundle_assignments WHERE id = $1",
+    )
+    .bind(assignment_id)
+    .execute(&pool)
+    .await;
+
+    match result {
+        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => not_found(),
+        Err(_) => internal_error("Failed to delete assignment"),
+    }
+}
+
+/// `GET /api/v1/environments/:id/compliance-assignments`
+pub async fn list_environment_assignments(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(environment_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
+        return forbidden();
+    }
+
+    let rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
+        "SELECT id, bundle_version_id, enforcement_mode, assignment_overlay_digest, created_at, updated_at \
+         FROM compliance_bundle_assignments \
+         WHERE scope_type = 'environment' AND environment_id = $1 \
+         ORDER BY created_at",
+    )
+    .bind(environment_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    let items: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(id, bv_id, mode, digest, created_at, updated_at)| {
+            serde_json::json!({
+                "id": id,
+                "bundle_version_id": bv_id,
+                "scope_type": "environment",
+                "scope_id": environment_id,
+                "enforcement_mode": mode,
+                "assignment_overlay_digest": digest,
+                "created_at": created_at,
+                "updated_at": updated_at,
+            })
+        })
+        .collect();
+
+    (StatusCode::OK, Json(serde_json::json!({ "assignments": items }))).into_response()
+}
+
+/// `GET /api/v1/systems/:id/compliance-assignments`
+pub async fn list_system_assignments(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
+        return forbidden();
+    }
+
+    let rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
+        "SELECT id, bundle_version_id, enforcement_mode, assignment_overlay_digest, created_at, updated_at \
+         FROM compliance_bundle_assignments \
+         WHERE scope_type = 'system' AND system_id = $1 \
+         ORDER BY created_at",
+    )
+    .bind(system_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    let items: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(id, bv_id, mode, digest, created_at, updated_at)| {
+            serde_json::json!({
+                "id": id,
+                "bundle_version_id": bv_id,
+                "scope_type": "system",
+                "scope_id": system_id,
+                "enforcement_mode": mode,
+                "assignment_overlay_digest": digest,
+                "created_at": created_at,
+                "updated_at": updated_at,
+            })
+        })
+        .collect();
+
+    (StatusCode::OK, Json(serde_json::json!({ "assignments": items }))).into_response()
+}
+
+/// `GET /api/v1/compliance/assignments/:id/effective-policies`
+pub async fn get_assignment_effective_policies(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(assignment_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
+        return forbidden();
+    }
+
+    // Load assignment
+    let row = sqlx::query_as::<_, (Uuid, String, Option<Uuid>, Option<Uuid>, String)>(
+        "SELECT bundle_version_id, scope_type, environment_id, system_id, enforcement_mode \
+         FROM compliance_bundle_assignments WHERE id = $1",
+    )
+    .bind(assignment_id)
+    .fetch_optional(&pool)
+    .await;
+
+    let (bv_id, scope_type, env_id, sys_id, mode) = match row {
+        Ok(Some(r)) => r,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load assignment"),
+    };
+
+    let exclusions: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT policy_version_id FROM compliance_assignment_exclusions WHERE assignment_id = $1",
+    )
+    .bind(assignment_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    let additions: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_id = $1",
+    )
+    .bind(assignment_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    let overrides: Vec<crate::compliance::resolver::PolicyOverride> = sqlx::query_as::<_, (Uuid, String, serde_json::Value)>(
+        "SELECT policy_version_id, value_path, value FROM compliance_assignment_value_overrides WHERE assignment_id = $1",
+    )
+    .bind(assignment_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(pvid, path, val)| crate::compliance::resolver::PolicyOverride {
+        policy_version_id: pvid,
+        value_path: path,
+        value: val,
+    })
+    .collect();
+
+    let target = if scope_type == "environment" {
+        crate::compliance::resolver::AssignmentTarget::Environment {
+            environment_id: env_id.unwrap_or_default(),
+        }
+    } else {
+        crate::compliance::resolver::AssignmentTarget::System {
+            system_id: sys_id.unwrap_or_default(),
+        }
+    };
+
+    let assignment_mode = if mode == "report_only" {
+        crate::compliance::resolver::AssignmentMode::ReportOnly
+    } else {
+        crate::compliance::resolver::AssignmentMode::Enforce
+    };
+
+    let input = crate::compliance::resolver::EffectivePolicyResolutionInput {
+        target: target.clone(),
+        bundle_version_id: bv_id,
+        exclusions,
+        additions,
+        overrides,
+        assignment_mode: assignment_mode,
+    };
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return internal_error("Failed to start transaction"),
+    };
+
+    let outcome = crate::compliance::resolver::resolve_effective_policy_set(&mut tx, &input).await;
+
+    let _ = tx.rollback().await; // Read-only; no commit needed
+
+    match outcome {
+        Ok(ResolutionOutcome::Resolved(set)) => {
+            let response = effective_set_to_response(set, Some(assignment_id));
+            (StatusCode::OK, Json(response)).into_response()
+        }
+        Ok(ResolutionOutcome::Conflict(conflicts)) => conflict_response(conflicts),
+        Err(_) => internal_error("Resolution failed"),
+    }
+}
+
+/// `POST /api/v1/compliance/assignments/preview`
+pub async fn preview_assignment(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Json(payload): Json<crate::api::models::PreviewAssignmentRequest>,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
+        return forbidden();
+    }
+
+    let scope_type = payload.scope_type.as_str();
+    let target = if scope_type == "environment" {
+        crate::compliance::resolver::AssignmentTarget::Environment {
+            environment_id: payload.scope_id,
+        }
+    } else {
+        crate::compliance::resolver::AssignmentTarget::System {
+            system_id: payload.scope_id,
+        }
+    };
+
+    let mode = if payload.enforcement_mode.as_deref() == Some("report_only") {
+        crate::compliance::resolver::AssignmentMode::ReportOnly
+    } else {
+        crate::compliance::resolver::AssignmentMode::Enforce
+    };
+
+    let overrides: Vec<crate::compliance::resolver::PolicyOverride> = payload
+        .value_overrides
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|o| crate::compliance::resolver::PolicyOverride {
+            policy_version_id: o.policy_version_id,
+            value_path: o.value_path,
+            value: o.value,
+        })
+        .collect();
+
+    let input = crate::compliance::resolver::EffectivePolicyResolutionInput {
+        target,
+        bundle_version_id: payload.bundle_version_id,
+        exclusions: payload.exclusions.clone().unwrap_or_default(),
+        additions: payload.additions.clone().unwrap_or_default(),
+        overrides,
+        assignment_mode: mode,
+    };
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return internal_error("Failed to start transaction"),
+    };
+
+    let outcome = crate::compliance::resolver::resolve_effective_policy_set(&mut tx, &input).await;
+
+    let _ = tx.rollback().await;
+
+    match outcome {
+        Ok(ResolutionOutcome::Resolved(set)) => {
+            let response = effective_set_to_response(set, None);
+            (StatusCode::OK, Json(response)).into_response()
+        }
+        Ok(ResolutionOutcome::Conflict(conflicts)) => conflict_response(conflicts),
+        Err(_) => internal_error("Resolution failed"),
     }
 }
 
