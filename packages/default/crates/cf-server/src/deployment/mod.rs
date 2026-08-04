@@ -1,4 +1,5 @@
 use crate::config::CrystalForgeConfig;
+use crate::compliance::resolver::{AssignmentMode, ResolutionOutcome, resolve_system_effective_policies};
 use crate::models::deployment_policies::{
     ApprovalConfig, CanaryConfig, CveThresholdConfig, DeploymentPolicyRecord, TimeWindowConfig,
 };
@@ -6,7 +7,6 @@ use crate::models::systems::DeploymentPolicy;
 use crate::queries::deployment::{get_systems_with_auto_latest_policy, update_desired_target};
 use crate::queries::deployment_policies::get_deployment_policy_by_id;
 use crate::queries::derivations::get_latest_deployable_targets_for_flake_hosts;
-use crate::queries::environments::get_system_effective_policy_ids;
 use crate::server::load_cve_policies;
 use crate::services::approval_policy::{self, DeploymentContext};
 use crate::services::canary_rollout::{self, RolloutContext};
@@ -215,8 +215,29 @@ impl DeploymentPolicyManager {
         let mut all_policy_ids: HashSet<uuid::Uuid> = HashSet::new();
         let mut failed_policy_lookup_systems: HashSet<uuid::Uuid> = HashSet::new();
         for system in &systems {
-            let policy_ids = match get_system_effective_policy_ids(&self.pool, system.id).await {
-                Ok(ids) => ids,
+            let policy_ids = match resolve_system_effective_policies(&self.pool, system.id).await {
+                Ok(ResolutionOutcome::Resolved(set)) => set
+                    .policies
+                    .into_iter()
+                    // Report-only policies are evaluated by compliance paths but
+                    // must never block or alter deployment configuration.
+                    .filter(|policy| matches!(policy.effective_mode, AssignmentMode::Enforce))
+                    .map(|policy| policy.policy_lineage_id)
+                    .collect::<Vec<uuid::Uuid>>(),
+                Ok(ResolutionOutcome::Conflict(conflicts)) => {
+                    warn!(
+                        "Effective policy conflict for {} ({}): {}; skipping deployment update",
+                        system.hostname,
+                        system.id,
+                        conflicts
+                            .iter()
+                            .map(|conflict| format!("{}: {}", conflict.code, conflict.message))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    );
+                    failed_policy_lookup_systems.insert(system.id);
+                    continue;
+                }
                 Err(err) => {
                     warn!(
                         "Failed to load effective deployment policies for {} ({}): {:#}; skipping deployment update",
