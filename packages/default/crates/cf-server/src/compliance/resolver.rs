@@ -564,11 +564,33 @@ fn validate_typed_override(
         serde_json::Value::String(_) => value.is_string(),
         serde_json::Value::Array(_) => value.is_array(),
         serde_json::Value::Object(_) => value.is_object(),
-        serde_json::Value::Null => value.is_null() || !value.is_null(),
+        serde_json::Value::Null => value.is_null(),
     };
     if !valid_type {
         return Err(format!(
             "Override value for '{}' has invalid JSON type",
+            path
+        ));
+    }
+
+    let integer_fields = matches!(
+        path,
+        "max_critical"
+            | "max_high"
+            | "count"
+            | "expires_after_hours"
+            | "percentage"
+            | "observe_duration_minutes"
+            | "health_check.fail_threshold"
+    );
+    if integer_fields
+        && !value.is_null()
+        && value
+            .as_u64()
+            .is_none_or(|number| number > u64::from(u32::MAX))
+    {
+        return Err(format!(
+            "Override value for '{}' must be a non-negative 32-bit integer",
             path
         ));
     }
@@ -1263,6 +1285,18 @@ mod tests {
             &config,
             "percentage",
             &serde_json::json!(101),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn typed_override_rejects_fractional_integer() {
+        let config = serde_json::json!({"max_critical": 0});
+        let result = validate_typed_override(
+            "require_cve_check",
+            &config,
+            "max_critical",
+            &serde_json::json!(1.5),
         );
         assert!(result.is_err());
     }
