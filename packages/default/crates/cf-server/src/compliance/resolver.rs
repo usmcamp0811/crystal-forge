@@ -240,10 +240,7 @@ pub async fn resolve_effective_policy_set(
         None => {
             return Ok(ResolutionOutcome::Conflict(vec![ResolutionConflict {
                 code: "ASSIGNMENT_BUNDLE_NOT_FOUND".to_string(),
-                message: format!(
-                    "Bundle version {} does not exist",
-                    input.bundle_version_id
-                ),
+                message: format!("Bundle version {} does not exist", input.bundle_version_id),
             }]));
         }
     };
@@ -269,8 +266,9 @@ pub async fn resolve_effective_policy_set(
     }
 
     // Load ordered baseline membership with policy lineage info
-    let baseline_rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, String, serde_json::Value)>(
-        r#"SELECT cbvp.policy_version_id,
+    let baseline_rows =
+        sqlx::query_as::<_, (Uuid, Uuid, String, String, String, serde_json::Value)>(
+            r#"SELECT cbvp.policy_version_id,
                   pv.policy_id,
                   pv.policy_type,
                   pv.publication_state,
@@ -280,11 +278,11 @@ pub async fn resolve_effective_policy_set(
            JOIN deployment_policy_versions pv ON pv.id = cbvp.policy_version_id
            WHERE cbvp.bundle_version_id = $1
            ORDER BY cbvp.policy_order"#,
-    )
-    .bind(input.bundle_version_id)
-    .fetch_all(&mut **tx)
-    .await
-    .context("load baseline membership")?;
+        )
+        .bind(input.bundle_version_id)
+        .fetch_all(&mut **tx)
+        .await
+        .context("load baseline membership")?;
 
     // Validate every baseline policy is accepted
     for (pv_id, _, _, pv_state, _, _) in &baseline_rows {
@@ -300,8 +298,10 @@ pub async fn resolve_effective_policy_set(
     }
 
     // ── Step 2: Validate exclusions ───────────────────────────────────────────
-    let baseline_version_ids: std::collections::HashSet<Uuid> =
-        baseline_rows.iter().map(|(id, _, _, _, _, _)| *id).collect();
+    let baseline_version_ids: std::collections::HashSet<Uuid> = baseline_rows
+        .iter()
+        .map(|(id, _, _, _, _, _)| *id)
+        .collect();
 
     for excl in &input.exclusions {
         if !baseline_version_ids.contains(excl) {
@@ -323,18 +323,20 @@ pub async fn resolve_effective_policy_set(
         .iter()
         .enumerate()
         .filter(|(_, (pv_id, _, _, _, _, _))| !exclusions_set.contains(pv_id))
-        .map(|(idx, (pv_id, lin_id, ptype, _, _, config))| EffectivePolicy {
-            policy_version_id: *pv_id,
-            policy_lineage_id: *lin_id,
-            policy_type: ptype.clone(),
-            source: EffectivePolicySource::Baseline,
-            baseline_order: Some(idx as i32),
-            addition_order: None,
-            overrides: Vec::new(),
-            effective_config: config.clone(),
-            assignment_mode: input.assignment_mode.clone(),
-            effective_mode: input.assignment_mode.clone(),
-        })
+        .map(
+            |(idx, (pv_id, lin_id, ptype, _, _, config))| EffectivePolicy {
+                policy_version_id: *pv_id,
+                policy_lineage_id: *lin_id,
+                policy_type: ptype.clone(),
+                source: EffectivePolicySource::Baseline,
+                baseline_order: Some(idx as i32),
+                addition_order: None,
+                overrides: Vec::new(),
+                effective_config: config.clone(),
+                assignment_mode: input.assignment_mode.clone(),
+                effective_mode: input.assignment_mode.clone(),
+            },
+        )
         .collect();
 
     // ── Step 4: Validate additions and append ─────────────────────────────────
@@ -450,13 +452,22 @@ pub async fn resolve_effective_policy_set(
         // Apply the override to the matching effective policy's config
         for pol in effective.iter_mut() {
             if pol.policy_version_id == ovr.policy_version_id {
-                pol.overrides.push(ovr.clone());
-                // Apply the override to the effective config
-                if let Err(e) = apply_json_path_override(
-                    &mut pol.effective_config,
+                if let Err(error) = validate_typed_override(
+                    &pol.policy_type,
+                    &pol.effective_config,
                     &ovr.value_path,
                     &ovr.value,
                 ) {
+                    return Ok(ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                        code: "ASSIGNMENT_OVERRIDE_FIELD_INVALID".to_string(),
+                        message: error,
+                    }]));
+                }
+                pol.overrides.push(ovr.clone());
+                // Apply the override to the effective config
+                if let Err(e) =
+                    apply_json_path_override(&mut pol.effective_config, &ovr.value_path, &ovr.value)
+                {
                     return Ok(ResolutionOutcome::Conflict(vec![ResolutionConflict {
                         code: "ASSIGNMENT_OVERRIDE_VALUE_INVALID".to_string(),
                         message: format!(
@@ -492,6 +503,113 @@ pub async fn resolve_effective_policy_set(
         effective_set_digest,
         warnings: Vec::new(),
     }))
+}
+
+/// Validate the small, explicit set of runtime fields that assignments may
+/// override. Identity, publication, trust, implementation, and source fields
+/// are not part of a policy config and therefore cannot be overridden here.
+fn validate_typed_override(
+    policy_type: &str,
+    config: &serde_json::Value,
+    path: &str,
+    value: &serde_json::Value,
+) -> std::result::Result<(), String> {
+    let allowed = match policy_type {
+        "require_cve_check" => matches!(
+            path,
+            "max_critical" | "max_high" | "require_high_justification" | "strict" | "when_no_scan"
+        ),
+        "time_window" => matches!(
+            path,
+            "days" | "start_time" | "end_time" | "timezone" | "action"
+        ),
+        "require_approvals" => {
+            matches!(path, "count" | "role" | "distinct" | "expires_after_hours")
+        }
+        "canary_rollout" => matches!(
+            path,
+            "percentage"
+                | "observe_duration_minutes"
+                | "selection_strategy"
+                | "health_check.type"
+                | "health_check.fail_threshold"
+        ),
+        "cve_threshold" => {
+            path == "no_scan_behavior"
+                || path == "allow_justifications"
+                || path == "require_acknowledgment"
+                || path.starts_with("thresholds.")
+                    && (path.ends_with(".max") || path.ends_with(".action"))
+        }
+        // Native agent/package/custom-check configs do not expose assignment
+        // overrides in this phase; their executable semantics remain immutable.
+        _ => false,
+    };
+
+    if !allowed {
+        return Err(format!(
+            "Override field '{}' is not supported for policy type '{}'",
+            path, policy_type
+        ));
+    }
+
+    // Require that the path already exists in the canonical config. This also
+    // prevents callers from using overrides to add arbitrary new config keys.
+    let existing = lookup_json_path(config, path)
+        .ok_or_else(|| format!("Override field '{}' does not exist in policy config", path))?;
+
+    let valid_type = match existing {
+        serde_json::Value::Bool(_) => value.is_boolean(),
+        serde_json::Value::Number(_) => value.is_number(),
+        serde_json::Value::String(_) => value.is_string(),
+        serde_json::Value::Array(_) => value.is_array(),
+        serde_json::Value::Object(_) => value.is_object(),
+        serde_json::Value::Null => value.is_null() || !value.is_null(),
+    };
+    if !valid_type {
+        return Err(format!(
+            "Override value for '{}' has invalid JSON type",
+            path
+        ));
+    }
+
+    // Validate enum-like fields and policy-specific ranges.
+    if matches!(path, "when_no_scan" | "action" | "no_scan_behavior")
+        && value.as_str().is_some_and(|v| !match path {
+            "when_no_scan" => matches!(v, "block" | "skip"),
+            "action" => matches!(v, "block" | "warn"),
+            "no_scan_behavior" => matches!(v, "block" | "skip" | "warn"),
+            _ => true,
+        })
+    {
+        return Err(format!(
+            "Override value for '{}' is not a supported enum value",
+            path
+        ));
+    }
+    if path == "percentage" && value.as_u64().is_none_or(|v| v > 100) {
+        return Err("Canary percentage override must be between 0 and 100".to_string());
+    }
+
+    Ok(())
+}
+
+fn lookup_json_path<'a>(
+    config: &'a serde_json::Value,
+    path: &str,
+) -> Option<&'a serde_json::Value> {
+    let mut current = config;
+    for segment in path.split('.') {
+        current = match current {
+            serde_json::Value::Object(map) => map.get(segment)?,
+            serde_json::Value::Array(values) => values.get(segment.parse::<usize>().ok()?)?,
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => return None,
+        };
+    }
+    Some(current)
 }
 
 /// Apply a JSON-path override to a config value.
@@ -572,13 +690,12 @@ pub async fn resolve_system_effective_policies(
     system_id: Uuid,
 ) -> Result<ResolutionOutcome> {
     // Load the system's environment
-    let env_id: Option<Option<Uuid>> = sqlx::query_scalar(
-        "SELECT environment_id FROM systems WHERE id = $1",
-    )
-    .bind(system_id)
-    .fetch_optional(pool)
-    .await
-    .context("load system environment")?;
+    let env_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT environment_id FROM systems WHERE id = $1")
+            .bind(system_id)
+            .fetch_optional(pool)
+            .await
+            .context("load system environment")?;
 
     let env_id = env_id.flatten();
 
@@ -588,11 +705,11 @@ pub async fn resolve_system_effective_policies(
     let assignments = sqlx::query_as::<
         _,
         (
-            Uuid,       // assignment_id
-            Uuid,       // bundle_version_id
-            String,     // scope_type
-            String,     // enforcement_mode
-            String,     // overlay_digest
+            Uuid,   // assignment_id
+            Uuid,   // bundle_version_id
+            String, // scope_type
+            String, // enforcement_mode
+            String, // overlay_digest
         ),
     >(
         r#"SELECT id, bundle_version_id, scope_type, enforcement_mode, assignment_overlay_digest
@@ -613,8 +730,7 @@ pub async fn resolve_system_effective_policies(
     }
 
     let mut all_policies: Vec<EffectivePolicy> = Vec::new();
-    let mut seen_lineages: std::collections::HashMap<Uuid, Uuid> =
-        std::collections::HashMap::new();
+    let mut seen_lineages: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
     let mut all_warnings: Vec<String> = Vec::new();
     let mut primary_bundle_version_id: Option<Uuid> = None;
 
@@ -1062,22 +1178,92 @@ mod tests {
     #[test]
     fn apply_json_path_override_rejects_scalar_parent() {
         let mut config = serde_json::json!("scalar");
-        let result = apply_json_path_override(
-            &mut config,
-            "some.path",
-            &serde_json::json!(42),
-        );
+        let result = apply_json_path_override(&mut config, "some.path", &serde_json::json!(42));
         assert!(result.is_err(), "override on scalar root must fail");
     }
 
     #[test]
     fn apply_json_path_override_rejects_out_of_bounds_array() {
         let mut config = serde_json::json!({"items": [1, 2]});
-        let result = apply_json_path_override(
-            &mut config,
-            "items.5",
-            &serde_json::json!(99),
-        );
+        let result = apply_json_path_override(&mut config, "items.5", &serde_json::json!(99));
         assert!(result.is_err(), "out-of-bounds array override must fail");
+    }
+
+    #[test]
+    fn typed_override_accepts_supported_scalar() {
+        let config = serde_json::json!({
+            "max_critical": 0,
+            "max_high": 2,
+            "require_high_justification": false,
+            "strict": true,
+            "when_no_scan": "block"
+        });
+
+        assert!(
+            validate_typed_override(
+                "require_cve_check",
+                &config,
+                "max_critical",
+                &serde_json::json!(3)
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn typed_override_rejects_unknown_and_immutable_fields() {
+        let config = serde_json::json!({"strict": true});
+
+        let unknown = validate_typed_override(
+            "require_cve_check",
+            &config,
+            "unknown",
+            &serde_json::json!(true),
+        );
+        assert!(unknown.is_err());
+
+        let identity = validate_typed_override(
+            "require_cve_check",
+            &config,
+            "policy_type",
+            &serde_json::json!("require_approvals"),
+        );
+        assert!(identity.is_err());
+    }
+
+    #[test]
+    fn typed_override_rejects_wrong_type_and_invalid_enum() {
+        let config = serde_json::json!({
+            "strict": true,
+            "when_no_scan": "block"
+        });
+
+        let wrong_type = validate_typed_override(
+            "require_cve_check",
+            &config,
+            "strict",
+            &serde_json::json!("yes"),
+        );
+        assert!(wrong_type.is_err());
+
+        let invalid_enum = validate_typed_override(
+            "require_cve_check",
+            &config,
+            "when_no_scan",
+            &serde_json::json!("warn"),
+        );
+        assert!(invalid_enum.is_err());
+    }
+
+    #[test]
+    fn typed_override_rejects_invalid_canary_percentage() {
+        let config = serde_json::json!({"percentage": 25});
+        let result = validate_typed_override(
+            "canary_rollout",
+            &config,
+            "percentage",
+            &serde_json::json!(101),
+        );
+        assert!(result.is_err());
     }
 }
