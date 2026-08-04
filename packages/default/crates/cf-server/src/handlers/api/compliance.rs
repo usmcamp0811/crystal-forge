@@ -4035,6 +4035,28 @@ mod tests {
         (policy_id, version_id, digest)
     }
 
+    async fn make_draft_cve_policy(pool: &PgPool, name: &str) -> (Uuid, Uuid) {
+        let policy_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO deployment_policies (id, name, policy_type, enabled, config)
+               VALUES ($1, $2, 'require_cve_check', false,
+                       '{"max_critical":0,"max_high":null,"require_high_justification":false,"strict":true,"when_no_scan":"block"}')"#,
+        )
+        .bind(policy_id)
+        .bind(name)
+        .execute(pool)
+        .await
+        .expect("insert cve deployment_policy");
+        let version_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM deployment_policy_versions WHERE policy_id = $1 AND version = '0.1.0'",
+        )
+        .bind(policy_id)
+        .fetch_one(pool)
+        .await
+        .expect("fetch cve version");
+        (policy_id, version_id)
+    }
+
     /// Publish the given policy version via direct DB write (used in fixture setup).
     ///
     /// Correct trigger-safe order (see publish_policy_version handler for explanation):
@@ -6419,15 +6441,36 @@ mod tests {
             .parse()
             .unwrap();
         assert_ne!(new_version, old_version);
-        let stale = client
-            .put(format!(
-                "{base}/api/v1/compliance/assignments/{assignment_id}"
-            ))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .json(&serde_json::json!({"expected_version_id": old_version}))
-            .send()
-            .await
-            .expect("stale update");
+        let update_url = format!("{base}/api/v1/compliance/assignments/{assignment_id}");
+        let (first, second) = tokio::join!(
+            client
+                .put(&update_url)
+                .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+                .json(&serde_json::json!({
+                    "expected_version_id": new_version,
+                    "enforcement_mode": "report_only"
+                }))
+                .send(),
+            client
+                .put(&update_url)
+                .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+                .json(&serde_json::json!({
+                    "expected_version_id": new_version,
+                    "exclusions": []
+                }))
+                .send(),
+        );
+        let first = first.expect("first concurrent update");
+        let second = second.expect("second concurrent update");
+        assert_eq!(
+            first.status().is_success() as u8 + second.status().is_success() as u8,
+            1
+        );
+        let stale = if first.status().as_u16() == 409 {
+            first
+        } else {
+            second
+        };
         assert_eq!(stale.status(), 409);
         assert_eq!(
             stale.json::<serde_json::Value>().await.unwrap()["code"],
@@ -6440,7 +6483,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("version count");
-        assert_eq!(version_count, 2);
+        assert_eq!(version_count, 3);
         let old_children: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM compliance_assignment_exclusions WHERE assignment_version_id = $1",
         )
@@ -6449,5 +6492,120 @@ mod tests {
         .await
         .expect("old children");
         assert_eq!(old_children.0, 0);
+    }
+
+    #[tokio::test]
+    async fn assignment_create_failure_points_roll_back_all_rows() {
+        let pool = test_pool_from_env().await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (baseline_a, baseline_a_version) =
+            make_draft_cve_policy(&pool, &format!("rollback-a-{}", Uuid::new_v4().simple())).await;
+        let (baseline_b, baseline_b_version) =
+            make_draft_cve_policy(&pool, &format!("rollback-b-{}", Uuid::new_v4().simple())).await;
+        let (addition, addition_version, _) =
+            make_draft_policy(&pool, &format!("rollback-add-{}", Uuid::new_v4().simple())).await;
+        db_publish_policy_version(&pool, baseline_a, baseline_a_version).await;
+        db_publish_policy_version(&pool, baseline_b, baseline_b_version).await;
+        db_publish_policy_version(&pool, addition, addition_version).await;
+        let (_, bundle_version_id, bundle_digest) = make_draft_bundle(
+            &pool,
+            &format!("rollback-bundle-{}", Uuid::new_v4().simple()),
+            &[baseline_a_version, baseline_b_version],
+        )
+        .await;
+        let base = spawn_phase1_server(pool.clone()).await;
+        let publish = reqwest::Client::new()
+            .post(format!(
+                "{base}/api/v1/compliance/bundle-versions/{bundle_version_id}/publish"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({"expected_semantic_digest": bundle_digest}))
+            .send()
+            .await
+            .expect("publish bundle");
+        assert_eq!(publish.status(), 200);
+        let environment_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(environment_id)
+            .bind(format!("rollback-{}", environment_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert environment");
+        let payload = crate::api::models::CreateAssignmentRequest {
+            bundle_version_id,
+            scope_type: "environment".to_string(),
+            scope_id: environment_id,
+            enforcement_mode: None,
+            exclusions: Some(vec![baseline_b_version]),
+            additions: Some(vec![addition_version]),
+            value_overrides: Some(vec![crate::api::models::PolicyValueOverride {
+                policy_version_id: baseline_a_version,
+                value_path: "max_critical".to_string(),
+                value: serde_json::json!(1),
+            }]),
+        };
+        let points = [
+            AssignmentMutationFailurePoint::AfterLineageInsert,
+            AssignmentMutationFailurePoint::AfterVersionInsert,
+            AssignmentMutationFailurePoint::AfterExclusionInsert,
+            AssignmentMutationFailurePoint::AfterAdditionInsert,
+            AssignmentMutationFailurePoint::AfterOverrideInsert,
+            AssignmentMutationFailurePoint::BeforePointerUpdate,
+            AssignmentMutationFailurePoint::BeforeAuditInsert,
+        ];
+        for point in points {
+            assert!(
+                persist_assignment_with_failure(&pool, admin_id, &payload, point)
+                    .await
+                    .is_err(),
+                "failure point {:?} must fail",
+                point
+            );
+            let (lineages, versions, exclusions, additions, overrides, audits): (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+                r#"SELECT
+                    (SELECT COUNT(*) FROM compliance_bundle_assignments WHERE environment_id = $1),
+                    (SELECT COUNT(*) FROM compliance_bundle_assignment_versions v JOIN compliance_bundle_assignments a ON a.id = v.assignment_id WHERE a.environment_id = $1),
+                    (SELECT COUNT(*) FROM compliance_assignment_exclusions e JOIN compliance_bundle_assignments a ON a.id = e.assignment_id WHERE a.environment_id = $1),
+                    (SELECT COUNT(*) FROM compliance_assignment_additions e JOIN compliance_bundle_assignments a ON a.id = e.assignment_id WHERE a.environment_id = $1),
+                    (SELECT COUNT(*) FROM compliance_assignment_value_overrides e JOIN compliance_bundle_assignments a ON a.id = e.assignment_id WHERE a.environment_id = $1),
+                    (SELECT COUNT(*) FROM admin_audit_events WHERE target IN (SELECT id::text FROM compliance_bundle_assignments WHERE environment_id = $1))"#,
+            )
+            .bind(environment_id)
+            .fetch_one(&pool)
+            .await
+            .expect("rollback counts");
+            assert_eq!(
+                (lineages, versions, exclusions, additions, overrides, audits),
+                (0, 0, 0, 0, 0, 0)
+            );
+        }
+        assert!(
+            persist_assignment(&pool, admin_id, &payload, None, None)
+                .await
+                .is_ok()
+        );
+
+        let concurrent_environment_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(concurrent_environment_id)
+            .bind(format!("rb-con-{}", concurrent_environment_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert concurrent environment");
+        let mut concurrent_payload = payload.clone();
+        concurrent_payload.scope_id = concurrent_environment_id;
+        let (first, second) = tokio::join!(
+            persist_assignment(&pool, admin_id, &concurrent_payload, None, None),
+            persist_assignment(&pool, admin_id, &concurrent_payload, None, None),
+        );
+        assert_eq!(first.is_ok() as u8 + second.is_ok() as u8, 1);
+        let (active_count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM compliance_bundle_assignments WHERE environment_id = $1 AND active",
+        )
+        .bind(concurrent_environment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("concurrent active count");
+        assert_eq!(active_count, 1);
     }
 }
