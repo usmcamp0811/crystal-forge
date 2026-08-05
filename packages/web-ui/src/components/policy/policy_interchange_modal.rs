@@ -256,6 +256,7 @@ pub fn PolicyInterchangeModal(on_close: EventHandler<()>, on_success: EventHandl
                                 preview.set(None);
                                 result.set(None);
                                 error.set(None);
+                                diagnostics.set(Vec::new());
                                 spawn(async move {
                                     let response = preview_policy_interchange(&file.bytes, &file.filename).await;
                                     if generation() == request_generation {
@@ -291,6 +292,7 @@ pub fn PolicyInterchangeModal(on_close: EventHandler<()>, on_success: EventHandl
                                             result.set(Some(response));
                                             selected_file.set(None);
                                             preview.set(None);
+                                            diagnostics.set(Vec::new());
                                             busy.set(false);
                                             on_success.call(());
                                         }
