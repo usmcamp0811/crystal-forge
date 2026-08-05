@@ -3496,6 +3496,30 @@ pub async fn policy_interchange_import(
         Err(error) => return multipart_read_error_response(error),
     };
 
+    let actual_source_sha256 = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(&upload.bytes))
+    };
+    let expected_source_sha256 = match headers
+        .get("x-policy-source-sha256")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(value) if value.eq_ignore_ascii_case(&actual_source_sha256) => value,
+        Some(value) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "POLICY_SOURCE_DIGEST_MISMATCH",
+                    "expected": value,
+                    "actual": actual_source_sha256,
+                })),
+            )
+                .into_response();
+        }
+        None => return bad_request("X-Policy-Source-SHA256 header is required"),
+    };
+    let _ = expected_source_sha256;
+
     let policies = match parse_policy_interchange_upload(&upload) {
         Ok(policies) => policies,
         Err(message) => return bad_request(&message),
