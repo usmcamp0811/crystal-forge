@@ -15,6 +15,9 @@ pub fn PolicyCard(
     on_open: EventHandler<PolicyDefinition>,
     on_edit: EventHandler<PolicyDefinition>,
     on_delete: EventHandler<Uuid>,
+    #[props(default = false)] selection_mode: bool,
+    #[props(default = false)] selected: bool,
+    #[props(default)] on_toggle_select: EventHandler<bool>,
     #[props(default = false)] highlighted: bool,
 ) -> Element {
     let category = policy_category(&policy);
@@ -52,6 +55,16 @@ pub fn PolicyCard(
             div { class: "sys-card-head",
                 div { class: "sys-title",
                     div { class: "sys-hostname",
+                        if selection_mode {
+                            input {
+                                r#type: "checkbox",
+                                class: "focus-ring",
+                                checked: selected,
+                                aria_label: "Select {policy.name} for export",
+                                onclick: move |event| event.stop_propagation(),
+                                onchange: move |event| on_toggle_select.call(event.checked()),
+                            }
+                        }
                         svg {
                             width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
                             path { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }

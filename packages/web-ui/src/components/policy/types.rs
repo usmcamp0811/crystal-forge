@@ -13,6 +13,8 @@ pub enum PolicyFormat {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PolicyDefinition {
     pub id: Uuid,
+    /// Exact version used for interchange export, if supplied by the API.
+    pub version_id: Option<Uuid>,
     pub name: String,
     pub description: String,
     pub format: PolicyFormat,

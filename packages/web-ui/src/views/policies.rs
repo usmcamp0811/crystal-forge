@@ -1,9 +1,10 @@
 //! Policies view — global policy management for deployment rules.
 
 use dioxus::prelude::*;
+use std::collections::HashSet;
 use uuid::Uuid;
 
-use crate::api::client::delete_deployment_policy;
+use crate::api::client::{delete_deployment_policy, export_policy_versions};
 use crate::components::io_menu::{IOMenu, IOMenuItem};
 use crate::components::layout::Card;
 use crate::components::policy::{
@@ -11,6 +12,7 @@ use crate::components::policy::{
     PolicyFormat, is_core_policy, normalized_policy_type, policy_category,
 };
 use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
+use crate::state::{app_state::AppState, auth};
 use crate::theme;
 use crate::views::policies_api;
 
@@ -58,6 +60,42 @@ pub fn PoliciesView() -> Element {
     let mut focused_policy_name = use_signal(|| None::<String>);
     let mut policies_loaded = use_signal(|| false);
     let mut pending_policy_focus = use_signal(|| None::<NavigationFocus>);
+    let app_state = use_context::<Signal<AppState>>();
+    let is_admin_user = auth::is_admin(&app_state.read().auth);
+    let mut selection_mode = use_signal(|| false);
+    let mut selected_policy_ids = use_signal(HashSet::<Uuid>::new);
+    let mut export_error = use_signal(|| None::<String>);
+
+    let export_single_policy = {
+        let mut export_error = export_error;
+        move |(policy, format): (PolicyDefinition, String)| {
+            let Some(version_id) = policy.version_id else {
+                export_error.set(Some(
+                    "This policy has no portable version available to export".to_string(),
+                ));
+                return;
+            };
+            spawn(async move {
+                match export_policy_versions(&[version_id], &format).await {
+                    Ok(body) => {
+                        let filename = format!("{}.{}", sanitize_filename(&policy.name), format);
+                        if let Err(error) = crate::export::trigger_download(
+                            &filename,
+                            if format == "json" {
+                                "application/json"
+                            } else {
+                                "application/toml"
+                            },
+                            &body,
+                        ) {
+                            export_error.set(Some(error));
+                        }
+                    }
+                    Err(error) => export_error.set(Some(error.to_string())),
+                }
+            });
+        }
+    };
 
     // Track when policies finish loading, so we can retry the focus match.
     use_effect(move || {
@@ -186,6 +224,19 @@ pub fn PoliciesView() -> Element {
     let has_filters = selected_category != "all" || selected_type != "all" || !query.is_empty();
     let category_counts = category_counts(&all_policies);
     let grouped_policies = grouped_policies(&filtered_policies);
+    let mut selected_version_ids: Vec<Uuid> = selected_policy_ids
+        .read()
+        .iter()
+        .filter_map(|id| all_policies.iter().find(|policy| policy.id == *id))
+        .filter_map(|policy| policy.version_id)
+        .collect();
+    selected_version_ids.sort();
+    let mut custom_version_ids: Vec<Uuid> = all_policies
+        .iter()
+        .filter(|policy| !is_core_policy(policy))
+        .filter_map(|policy| policy.version_id)
+        .collect();
+    custom_version_ids.sort();
 
     rsx! {
         div { class: "space-y-4",
@@ -201,23 +252,75 @@ pub fn PoliciesView() -> Element {
                     IOMenu {
                         trigger_label: "Import / Export".to_string(),
                         trigger_class: "focus-ring".to_string(),
+                        id: "policies-io".to_string(),
                         items: vec![
-                            IOMenuItem::disabled(
-                                "Import policies…",
-                                "Policy import API coming in next PR",
-                            ),
+                            if is_admin_user {
+                                IOMenuItem::disabled("Import policies…", "Import preview UI coming next")
+                            } else {
+                                IOMenuItem::disabled("Import policies…", "Administrator permission required")
+                            },
                             IOMenuItem::Separator,
-                            IOMenuItem::disabled(
-                                "Export all custom policies",
-                                "Policy export API not yet wired to download",
-                            ),
-                            IOMenuItem::disabled(
-                                "Export selected policies…",
-                                "Select policies using the checkboxes first",
-                            ),
+                            if custom_version_ids.is_empty() {
+                                IOMenuItem::disabled("Export all custom policies (JSON)", "No exportable custom policies")
+                            } else {
+                                IOMenuItem::action("Export all custom policies (JSON)")
+                            },
+                            if custom_version_ids.is_empty() {
+                                IOMenuItem::disabled("Export all custom policies (TOML)", "No exportable custom policies")
+                            } else {
+                                IOMenuItem::action("Export all custom policies (TOML)")
+                            },
+                            IOMenuItem::Separator,
+                            IOMenuItem::action("Select policies to export"),
+                            if selected_version_ids.is_empty() {
+                                IOMenuItem::disabled("Export selected policies (JSON)", "Select at least one policy")
+                            } else {
+                                IOMenuItem::action("Export selected policies (JSON)")
+                            },
+                            if selected_version_ids.is_empty() {
+                                IOMenuItem::disabled("Export selected policies (TOML)", "Select at least one policy")
+                            } else {
+                                IOMenuItem::action("Export selected policies (TOML)")
+                            },
                         ],
-                        on_action: move |_idx: usize| {
-                            // All items disabled until interchange API is fully wired.
+                        on_action: move |idx: usize| {
+                            let ids = if idx == 1 || idx == 2 {
+                                custom_version_ids.clone()
+                            } else {
+                                selected_version_ids.clone()
+                            };
+                            match idx {
+                                1 | 4 => {
+                                    let mut export_error = export_error;
+                                    spawn(async move {
+                                        match export_policy_versions(&ids, "json").await {
+                                            Ok(body) => {
+                                                let filename = if ids.len() == 1 { "policy.json" } else { "policies.json" };
+                                                if let Err(error) = crate::export::trigger_download(filename, "application/json", &body) {
+                                                    export_error.set(Some(error));
+                                                }
+                                            }
+                                            Err(error) => export_error.set(Some(error.to_string())),
+                                        }
+                                    });
+                                }
+                                2 | 5 => {
+                                    let mut export_error = export_error;
+                                    spawn(async move {
+                                        match export_policy_versions(&ids, "toml").await {
+                                            Ok(body) => {
+                                                let filename = if ids.len() == 1 { "policy.toml" } else { "policies.toml" };
+                                                if let Err(error) = crate::export::trigger_download(filename, "application/toml", &body) {
+                                                    export_error.set(Some(error));
+                                                }
+                                            }
+                                            Err(error) => export_error.set(Some(error.to_string())),
+                                        }
+                                    });
+                                }
+                                3 => selection_mode.set(true),
+                                _ => {}
+                            }
                         },
                     }
                     button {
@@ -242,6 +345,12 @@ pub fn PoliciesView() -> Element {
             if let Some(ref err) = *policies_load_error.read() {
                 div { class: "sd-callout sd-callout-danger",
                     "Failed to load policies: {err}"
+                }
+            }
+            if let Some(ref err) = *export_error.read() {
+                div { class: "sd-callout sd-callout-danger", role: "alert",
+                    "Policy export failed: {err}"
+                    button { class: "btn btn-ghost xs focus-ring", onclick: move |_| export_error.set(None), "Dismiss" }
                 }
             }
 
@@ -330,6 +439,20 @@ pub fn PoliciesView() -> Element {
                 span { class: "filter-count", "{filtered_count} {filtered_label}" }
             }
 
+            if selection_mode() {
+                div { class: "sd-callout sd-callout-info", role: "status",
+                    span { "Export selection mode: {selected_policy_ids.read().len()} selected" }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        onclick: move |_| {
+                            selection_mode.set(false);
+                            selected_policy_ids.clear();
+                        },
+                        "Done"
+                    }
+                }
+            }
+
             if grouped_policies.is_empty() {
                 Card {
                     children: rsx! {
@@ -387,6 +510,12 @@ pub fn PoliciesView() -> Element {
                                     on_delete: move |id: Uuid| {
                                         delete_confirm.set(Some(id));
                                     },
+                                    selection_mode: selection_mode(),
+                                    selected: selected_policy_ids.read().contains(&policy.id),
+                                    on_toggle_select: move |selected: bool| {
+                                        let mut ids = selected_policy_ids.write();
+                                        if selected { ids.insert(policy.id); } else { ids.remove(&policy.id); }
+                                    },
                                 }
                             }
                         }
@@ -410,6 +539,7 @@ pub fn PoliciesView() -> Element {
                 PolicyDrawer {
                     policy,
                     on_close: move |_| drawer_policy.set(None),
+                    on_export: export_single_policy,
                     on_edit: move |policy: PolicyDefinition| {
                         drawer_policy.set(None);
                         editing_policy_id.set(Some(policy.id));
@@ -460,6 +590,7 @@ pub fn PoliciesView() -> Element {
 fn PolicyDrawer(
     policy: PolicyDefinition,
     on_close: EventHandler<MouseEvent>,
+    on_export: EventHandler<(PolicyDefinition, String)>,
     on_edit: EventHandler<PolicyDefinition>,
 ) -> Element {
     let category = policy_category(&policy);
@@ -508,6 +639,22 @@ fn PolicyDrawer(
                             onclick: move |_| on_edit.call(policy_for_edit.clone()),
                             "Edit"
                         }
+                    }
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        onclick: {
+                            let policy = policy.clone();
+                            move |_| on_export.call((policy.clone(), "json".to_string()))
+                        },
+                        "JSON"
+                    }
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        onclick: {
+                            let policy = policy.clone();
+                            move |_| on_export.call((policy.clone(), "toml".to_string()))
+                        },
+                        "TOML"
                     }
                     button {
                         class: "btn-icon focus-ring",
@@ -603,6 +750,25 @@ fn grouped_policies(policies: &[PolicyDefinition]) -> Vec<(PolicyCategory, Vec<P
             }
         })
         .collect()
+}
+
+fn sanitize_filename(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        "policy".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 #[component]

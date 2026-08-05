@@ -120,6 +120,34 @@ pub async fn fetch_scanning_deployed(
     fetch_json(&url).await
 }
 
+/// Export exact policy version IDs as canonical JSON or TOML.
+pub async fn export_policy_versions(
+    policy_version_ids: &[Uuid],
+    format: &str,
+) -> Result<String, ApiClientError> {
+    let url = format!("{}/policies/interchange/export", base_url());
+    let payload = serde_json::json!({
+        "policy_version_ids": policy_version_ids,
+        "format": format,
+    });
+    let (status, body) = send_request_with_csrf(
+        "POST",
+        &url,
+        Some(
+            &serde_json::to_string(&payload)
+                .map_err(|error| ApiClientError::Deserialize(error.to_string()))?,
+        ),
+    )
+    .await?;
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            body: decode_api_error_message(&body),
+        });
+    }
+    Ok(body)
+}
+
 pub async fn fetch_scanning_system_scans(
     system_id: &Uuid,
     limit: Option<i64>,

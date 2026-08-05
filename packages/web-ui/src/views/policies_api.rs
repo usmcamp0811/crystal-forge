@@ -76,6 +76,7 @@ fn policy_record_to_definition_with_count(
 
     PolicyDefinition {
         id: record.id,
+        version_id: record.current_version_id,
         name: record.name,
         description: record
             .description
@@ -95,6 +96,7 @@ fn mock_policies() -> Vec<PolicyDefinition> {
     vec![
         PolicyDefinition {
             id: Uuid::from_u128(1),
+            version_id: None,
             name: "Require Crystal Forge Agent".to_string(),
             description: "This policy ensures the Crystal Forge agent and client services are enabled on the target system.".to_string(),
             format: PolicyFormat::Toml,
@@ -107,6 +109,7 @@ strict = true
         },
         PolicyDefinition {
             id: Uuid::from_u128(2),
+            version_id: None,
             name: "Require Firewall".to_string(),
             description: "Ensure firewall is enabled on all systems.".to_string(),
             format: PolicyFormat::Toml,
@@ -121,6 +124,7 @@ strict = true
         },
         PolicyDefinition {
             id: Uuid::from_u128(3),
+            version_id: None,
             name: "Require SSH Key Auth".to_string(),
             description: "Require SSH key-only authentication (no passwords).".to_string(),
             format: PolicyFormat::Toml,
@@ -135,6 +139,7 @@ strict = false
         },
         PolicyDefinition {
             id: Uuid::from_u128(4),
+            version_id: None,
             name: "Require Auditd".to_string(),
             description: "Require audit daemon for security compliance.".to_string(),
             format: PolicyFormat::Toml,

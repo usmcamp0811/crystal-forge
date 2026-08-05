@@ -29,8 +29,16 @@ use crate::queries::deployment_policies;
 // =============================================================================
 
 #[derive(Debug, Serialize)]
+pub struct DeploymentPolicyListItem {
+    #[serde(flatten)]
+    pub policy: DeploymentPolicyRecord,
+    /// Exact mutable version represented by the policy-management view.
+    pub current_version_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DeploymentPoliciesListResponse {
-    pub policies: Vec<DeploymentPolicyRecord>,
+    pub policies: Vec<DeploymentPolicyListItem>,
     pub total: usize,
     pub limit: i64,
     pub offset: i64,
@@ -513,8 +521,31 @@ pub async fn list_deployment_policies(
         .map(|pc| (pc.policy_id, pc.system_count))
         .collect();
 
+    let policy_ids: Vec<Uuid> = policies.iter().map(|policy| policy.id).collect();
+    let versions: HashMap<Uuid, Uuid> = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT id, current_draft_version_id FROM deployment_policies WHERE id = ANY($1) AND current_draft_version_id IS NOT NULL",
+    )
+    .bind(&policy_ids)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to load current policy versions: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to retrieve deployment policy versions".to_string(),
+        )
+    })?
+    .into_iter()
+    .collect();
+
     Ok(Json(DeploymentPoliciesListResponse {
-        policies,
+        policies: policies
+            .into_iter()
+            .map(|policy| DeploymentPolicyListItem {
+                current_version_id: versions.get(&policy.id).copied(),
+                policy,
+            })
+            .collect(),
         total: total as usize,
         limit: params.limit,
         offset: params.offset,

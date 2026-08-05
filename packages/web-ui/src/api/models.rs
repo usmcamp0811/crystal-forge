@@ -1205,6 +1205,9 @@ pub struct DeploymentPolicyRecord {
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Exact draft version shown by the policy-management API, when available.
+    #[serde(default)]
+    pub current_version_id: Option<Uuid>,
 }
 
 /// Response for listing deployment policies with pagination.
