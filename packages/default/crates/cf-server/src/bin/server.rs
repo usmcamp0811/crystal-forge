@@ -516,6 +516,12 @@ async fn main() -> anyhow::Result<()> {
                 crystal_forge::compliance::interchange::MAX_XCCDF_MULTIPART_BYTES,
             )),
         )
+        .route(
+            "/api/v1/policies/interchange/preview",
+            post(compliance::policy_interchange_preview).layer(DefaultBodyLimit::max(
+                crystal_forge::compliance::interchange::MAX_XCCDF_MULTIPART_BYTES,
+            )),
+        )
         // Deployment policies CRUD endpoints
         .route(
             "/api/v1/deployment-policies",

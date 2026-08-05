@@ -3496,45 +3496,10 @@ pub async fn policy_interchange_import(
         Err(error) => return multipart_read_error_response(error),
     };
 
-    let format = upload
-        .filename
-        .as_deref()
-        .and_then(|name| name.rsplit('.').next())
-        .unwrap_or("json")
-        .to_ascii_lowercase();
-    let document = match format.as_str() {
-        "toml" => match std::str::from_utf8(&upload.bytes)
-            .ok()
-            .and_then(|text| toml::from_str::<toml::Value>(text).ok())
-            .and_then(|value| serde_json::to_value(value).ok())
-        {
-            Some(value) => value,
-            None => return bad_request("Policy TOML is invalid"),
-        },
-        "json" => match serde_json::from_slice::<serde_json::Value>(&upload.bytes) {
-            Ok(value) => value,
-            Err(_) => return bad_request("Policy JSON is invalid"),
-        },
-        _ => return bad_request("Policy interchange format must be JSON or TOML"),
+    let policies = match parse_policy_interchange_upload(&upload) {
+        Ok(policies) => policies,
+        Err(message) => return bad_request(&message),
     };
-
-    let raw_policies = match document.get("policies") {
-        Some(serde_json::Value::Array(policies)) => policies.clone(),
-        Some(_) => return bad_request("The policies field must be an array"),
-        None if document.get("policy_type").is_some() => vec![document],
-        None => return bad_request("Policy interchange document must contain policies"),
-    };
-    if raw_policies.is_empty() {
-        return bad_request("Policy interchange document contains no policies");
-    }
-
-    let mut policies = Vec::with_capacity(raw_policies.len());
-    for raw in raw_policies {
-        match normalize_policy_import(raw) {
-            Ok(policy) => policies.push(policy),
-            Err(message) => return bad_request(&message),
-        }
-    }
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
@@ -3590,6 +3555,7 @@ pub async fn policy_interchange_import(
                 return internal_error("Failed to import policies");
             }
         };
+        let mut new_lineage = false;
         if lineage_exists.is_none() {
             if let Err(error) = sqlx::query(
                 "INSERT INTO deployment_policies (id, name, description, policy_type, config, enabled) VALUES ($1, $2, $3, $4, $5, false)",
@@ -3605,6 +3571,48 @@ pub async fn policy_interchange_import(
                 tracing::error!(error = %error, "failed to create imported policy lineage");
                 let _ = tx.rollback().await;
                 return internal_error("Failed to import policies");
+            }
+            new_lineage = true;
+
+            // The legacy lineage INSERT trigger creates an automatic draft
+            // version. Remove that generated row so the portable version_id
+            // from the interchange document can be preserved exactly.
+            let generated_version: Option<Uuid> = match sqlx::query_scalar(
+                "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+            )
+            .bind(policy.lineage_id)
+            .fetch_one(&mut *tx)
+            .await
+            {
+                Ok(version_id) => version_id,
+                Err(error) => {
+                    tracing::error!(error = %error, "failed to inspect generated policy draft");
+                    let _ = tx.rollback().await;
+                    return internal_error("Failed to import policies");
+                }
+            };
+            if let Some(generated_version) = generated_version {
+                if let Err(error) = sqlx::query(
+                    "UPDATE deployment_policies SET current_draft_version_id = NULL WHERE id = $1",
+                )
+                .bind(policy.lineage_id)
+                .execute(&mut *tx)
+                .await
+                {
+                    tracing::error!(error = %error, "failed to replace generated policy draft");
+                    let _ = tx.rollback().await;
+                    return internal_error("Failed to import policies");
+                }
+                if let Err(error) =
+                    sqlx::query("DELETE FROM deployment_policy_versions WHERE id = $1")
+                        .bind(generated_version)
+                        .execute(&mut *tx)
+                        .await
+                {
+                    tracing::error!(error = %error, "failed to remove generated policy draft");
+                    let _ = tx.rollback().await;
+                    return internal_error("Failed to import policies");
+                }
             }
         }
 
@@ -3629,6 +3637,20 @@ pub async fn policy_interchange_import(
             let _ = tx.rollback().await;
             return internal_error("Failed to import policies");
         }
+        if new_lineage {
+            if let Err(error) = sqlx::query(
+                "UPDATE deployment_policies SET current_draft_version_id = $1 WHERE id = $2",
+            )
+            .bind(policy.version_id)
+            .bind(policy.lineage_id)
+            .execute(&mut *tx)
+            .await
+            {
+                tracing::error!(error = %error, "failed to set imported current draft pointer");
+                let _ = tx.rollback().await;
+                return internal_error("Failed to import policies");
+            }
+        }
         created += 1;
     }
 
@@ -3648,6 +3670,104 @@ pub async fn policy_interchange_import(
         })),
     )
         .into_response()
+}
+
+/// `POST /api/v1/policies/interchange/preview`
+///
+/// Parses and validates a policy interchange document without writing to the
+/// database. The returned source digest is the digest the import endpoint must
+/// be checked against by the caller.
+pub async fn policy_interchange_preview(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !has_admin_role(&roles) {
+        return forbidden();
+    }
+
+    let upload = match read_multipart_upload(&mut multipart).await {
+        Ok(upload) if !upload.bytes.is_empty() => upload,
+        Ok(_) => return bad_request("No policy interchange file was attached"),
+        Err(error) => return multipart_read_error_response(error),
+    };
+    let source_sha256 = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(&upload.bytes))
+    };
+    let policies = match parse_policy_interchange_upload(&upload) {
+        Ok(policies) => policies,
+        Err(message) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "source_sha256": source_sha256,
+                    "error": "POLICY_INTERCHANGE_INVALID",
+                    "message": message,
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "source_sha256": source_sha256,
+            "filename": upload.filename,
+            "policy_count": policies.len(),
+            "policies": policies.iter().map(|policy| serde_json::json!({
+                "lineage_id": policy.lineage_id,
+                "version_id": policy.version_id,
+                "version": policy.version,
+                "name": policy.name,
+                "policy_type": policy.policy_type,
+                "implementation_state": policy.implementation_state,
+                "semantic_digest": policy.semantic_digest,
+            })).collect::<Vec<_>>(),
+            "publication_state": "draft",
+            "enabled": false,
+            "trusted": false,
+        })),
+    )
+        .into_response()
+}
+
+fn parse_policy_interchange_upload(
+    upload: &MultipartUpload,
+) -> Result<Vec<NormalizedPolicyImport>, String> {
+    let format = upload
+        .filename
+        .as_deref()
+        .and_then(|name| name.rsplit('.').next())
+        .unwrap_or("json")
+        .to_ascii_lowercase();
+    let document = match format.as_str() {
+        "toml" => std::str::from_utf8(&upload.bytes)
+            .ok()
+            .and_then(|text| toml::from_str::<toml::Value>(text).ok())
+            .and_then(|value| serde_json::to_value(value).ok())
+            .ok_or_else(|| "Policy TOML is invalid".to_string())?,
+        "json" => serde_json::from_slice::<serde_json::Value>(&upload.bytes)
+            .map_err(|_| "Policy JSON is invalid".to_string())?,
+        _ => return Err("Policy interchange format must be JSON or TOML".to_string()),
+    };
+    let raw_policies = match document.get("policies") {
+        Some(serde_json::Value::Array(policies)) => policies.clone(),
+        Some(_) => return Err("The policies field must be an array".to_string()),
+        None if document.get("policy_type").is_some() => vec![document],
+        None => return Err("Policy interchange document must contain policies".to_string()),
+    };
+    if raw_policies.is_empty() {
+        return Err("Policy interchange document contains no policies".to_string());
+    }
+    raw_policies
+        .into_iter()
+        .map(normalize_policy_import)
+        .collect()
 }
 
 fn normalize_policy_import(raw: serde_json::Value) -> Result<NormalizedPolicyImport, String> {
@@ -8573,6 +8693,10 @@ mod tests {
                 "/api/v1/policies/interchange/import",
                 post(policy_interchange_import),
             )
+            .route(
+                "/api/v1/policies/interchange/preview",
+                post(policy_interchange_preview),
+            )
             .with_state(pool);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -8819,5 +8943,34 @@ mod tests {
         .expect_err("tampered digest must be rejected");
 
         assert!(error.contains("semantic_digest"));
+    }
+
+    #[test]
+    fn policy_interchange_parser_accepts_json_and_toml_policy_sets() {
+        let json_upload = MultipartUpload {
+            filename: Some("policies.json".to_string()),
+            bytes: br#"{"schema":"urn:crystal-forge:policy-set:1","policies":[{"name":"json-policy","policy_type":"custom_check","config":{"expression":"true"}}]}"#.to_vec(),
+        };
+        let json_policies = parse_policy_interchange_upload(&json_upload).expect("JSON parse");
+        assert_eq!(json_policies.len(), 1);
+        assert_eq!(json_policies[0].name, "json-policy");
+
+        let toml_upload = MultipartUpload {
+            filename: Some("policies.toml".to_string()),
+            bytes: br#"
+schema = "urn:crystal-forge:policy-set:1"
+
+[[policies]]
+name = "toml-policy"
+policy_type = "require_packages"
+[policies.config]
+packages = ["git"]
+"#
+            .to_vec(),
+        };
+        let toml_policies = parse_policy_interchange_upload(&toml_upload).expect("TOML parse");
+        assert_eq!(toml_policies.len(), 1);
+        assert_eq!(toml_policies[0].name, "toml-policy");
+        assert_eq!(toml_policies[0].config["packages"][0], "git");
     }
 }
