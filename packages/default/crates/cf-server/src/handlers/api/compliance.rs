@@ -2070,6 +2070,47 @@ pub async fn list_system_assignments(
         .into_response()
 }
 
+/// `GET /api/v1/systems/:id/effective-policies`
+///
+/// Returns the combined effective policy set for a system, incorporating all
+/// active environment and system bundle assignments through the authoritative
+/// resolver.  This is the same resolution used by deployment gates and
+/// compliance evaluation.
+pub async fn get_system_effective_policies(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
+        return forbidden();
+    }
+
+    // Verify the system exists.
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM systems WHERE id = $1)")
+        .bind(system_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(false);
+    if !exists {
+        return not_found();
+    }
+
+    match crate::compliance::resolver::resolve_system_effective_policies(&pool, system_id).await {
+        Ok(ResolutionOutcome::Resolved(set)) => {
+            let response = effective_set_to_response(set, None);
+            (StatusCode::OK, Json(response)).into_response()
+        }
+        Ok(ResolutionOutcome::Conflict(conflicts)) => conflict_response(conflicts),
+        Err(err) => {
+            tracing::error!("System effective policy resolution failed for {system_id}: {err:#}");
+            internal_error("Resolution failed")
+        }
+    }
+}
+
 /// `GET /api/v1/compliance/assignments/:id/effective-policies`
 pub async fn get_assignment_effective_policies(
     State(pool): State<PgPool>,
@@ -2098,8 +2139,10 @@ pub async fn get_assignment_effective_policies(
         Err(_) => return internal_error("Failed to load assignment"),
     };
 
+    // Load overlay rows scoped to the current immutable assignment version.
     let exclusions: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT policy_version_id FROM compliance_assignment_exclusions WHERE assignment_id = $1",
+        "SELECT policy_version_id FROM compliance_assignment_exclusions
+         WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)",
     )
     .bind(assignment_id)
     .fetch_all(&pool)
@@ -2107,7 +2150,8 @@ pub async fn get_assignment_effective_policies(
     .unwrap_or_default();
 
     let additions: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_id = $1",
+        "SELECT policy_version_id FROM compliance_assignment_additions
+         WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)",
     )
     .bind(assignment_id)
     .fetch_all(&pool)
@@ -2115,7 +2159,8 @@ pub async fn get_assignment_effective_policies(
     .unwrap_or_default();
 
     let overrides: Vec<crate::compliance::resolver::PolicyOverride> = sqlx::query_as::<_, (Uuid, String, serde_json::Value)>(
-        "SELECT policy_version_id, value_path, value FROM compliance_assignment_value_overrides WHERE assignment_id = $1",
+        "SELECT policy_version_id, value_path, value FROM compliance_assignment_value_overrides
+         WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)",
     )
     .bind(assignment_id)
     .fetch_all(&pool)
@@ -4061,6 +4106,10 @@ mod tests {
             .route(
                 "/api/v1/systems/:id/compliance-assignments",
                 get(list_system_assignments),
+            )
+            .route(
+                "/api/v1/systems/:id/effective-policies",
+                get(get_system_effective_policies),
             )
             .with_state(pool);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -7285,6 +7334,650 @@ mod tests {
         assert_eq!(
             create_audit_count, 1,
             "exactly one create audit event after concurrent create"
+        );
+    }
+
+    // ── Environment and system combined resolution tests ───────────────────────
+
+    /// Insert a test system optionally linked to an environment.
+    async fn make_test_system(pool: &PgPool, environment_id: Option<Uuid>) -> Uuid {
+        let system_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO systems (id, hostname, environment_id, public_key, derivation)
+               VALUES ($1, $2, $3, 'test-key', '/nix/store/test')"#,
+        )
+        .bind(system_id)
+        .bind(format!("test-host-{}", system_id.simple()))
+        .bind(environment_id)
+        .execute(pool)
+        .await
+        .expect("insert system");
+        system_id
+    }
+
+    /// Publish a bundle version through the API and return the accepted bundle_version_id.
+    async fn publish_bundle_via_api(
+        base: &str,
+        token: &str,
+        bundle_version_id: Uuid,
+        bundle_digest: &str,
+    ) {
+        let resp = reqwest::Client::new()
+            .post(format!(
+                "{base}/api/v1/compliance/bundle-versions/{bundle_version_id}/publish"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({"expected_semantic_digest": bundle_digest}))
+            .send()
+            .await
+            .expect("publish bundle");
+        assert_eq!(resp.status().as_u16(), 200, "bundle publish must succeed");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn system_resolution_environment_only_assignment() {
+        // Create environment + system + one accepted bundle on the environment.
+        // Resolve the system and verify it receives the environment assignment.
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_phase1_server(pool.clone()).await;
+
+        let (pol_id, pv_id, _) =
+            make_draft_policy(&pool, &format!("env-res-pol-{}", Uuid::new_v4().simple())).await;
+        db_publish_policy_version(&pool, pol_id, pv_id).await;
+        let (_, bv_id, bv_digest) = make_draft_bundle(
+            &pool,
+            &format!("env-res-bun-{}", Uuid::new_v4().simple()),
+            &[pv_id],
+        )
+        .await;
+        publish_bundle_via_api(&base, &token, bv_id, &bv_digest).await;
+
+        let env_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(env_id)
+            .bind(format!("env-res-{}", env_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert environment");
+        let system_id = make_test_system(&pool, Some(env_id)).await;
+
+        // Assign the bundle to the environment.
+        let client = reqwest::Client::new();
+        let asgn = client
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bv_id,
+                "scope_type": "environment",
+                "scope_id": env_id,
+            }))
+            .send()
+            .await
+            .expect("create assignment");
+        assert_eq!(asgn.status().as_u16(), 201);
+
+        // Resolve effective policies for the system.
+        let resp = client
+            .get(format!(
+                "{base}/api/v1/systems/{system_id}/effective-policies"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("resolve");
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.expect("json");
+        let policies = body["policies"].as_array().expect("policies");
+        assert_eq!(
+            policies.len(),
+            1,
+            "system must receive environment assignment"
+        );
+        assert_eq!(policies[0]["policy_version_id"], pv_id.to_string());
+        // Effective-set digest must be non-empty and not 'pending'.
+        let digest = body["effective_set_digest"].as_str().unwrap_or("");
+        assert!(!digest.is_empty() && digest != "pending");
+
+        // Verify digest stability: resolve again and compare.
+        let resp2 = client
+            .get(format!(
+                "{base}/api/v1/systems/{system_id}/effective-policies"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("resolve2");
+        let body2: serde_json::Value = resp2.json().await.expect("json2");
+        assert_eq!(
+            body2["effective_set_digest"], body["effective_set_digest"],
+            "repeated resolution must produce the same digest"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn system_resolution_system_only_assignment() {
+        // System has a direct assignment. A second system in the same env must
+        // NOT receive it.
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_phase1_server(pool.clone()).await;
+
+        let (pol_id, pv_id, _) =
+            make_draft_policy(&pool, &format!("sys-res-pol-{}", Uuid::new_v4().simple())).await;
+        db_publish_policy_version(&pool, pol_id, pv_id).await;
+        let (_, bv_id, bv_digest) = make_draft_bundle(
+            &pool,
+            &format!("sys-res-bun-{}", Uuid::new_v4().simple()),
+            &[pv_id],
+        )
+        .await;
+        publish_bundle_via_api(&base, &token, bv_id, &bv_digest).await;
+
+        let env_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(env_id)
+            .bind(format!("sys-res-env-{}", env_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert environment");
+        let target_system = make_test_system(&pool, Some(env_id)).await;
+        let other_system = make_test_system(&pool, Some(env_id)).await;
+
+        // Direct system assignment to target_system only.
+        let asgn = reqwest::Client::new()
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bv_id,
+                "scope_type": "system",
+                "scope_id": target_system,
+            }))
+            .send()
+            .await
+            .expect("create assignment");
+        assert_eq!(asgn.status().as_u16(), 201);
+
+        let client = reqwest::Client::new();
+
+        // Target system resolves to one policy.
+        let resp = client
+            .get(format!(
+                "{base}/api/v1/systems/{target_system}/effective-policies"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("resolve target");
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.expect("json");
+        assert_eq!(body["policies"].as_array().map(|a| a.len()), Some(1));
+
+        // Other system in the same env resolves to zero policies.
+        let resp2 = client
+            .get(format!(
+                "{base}/api/v1/systems/{other_system}/effective-policies"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("resolve other");
+        assert_eq!(resp2.status().as_u16(), 200);
+        let body2: serde_json::Value = resp2.json().await.expect("json2");
+        let other_policies = body2["policies"].as_array().expect("policies");
+        assert_eq!(
+            other_policies.len(),
+            0,
+            "other system must not receive the direct system assignment"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn system_resolution_combined_env_and_system_assignments() {
+        // Environment assignment for bundle A, system assignment for bundle B.
+        // Both must appear in combined resolution with deterministic order.
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_phase1_server(pool.clone()).await;
+
+        // Policy A for bundle A (environment)
+        let (pol_a, pv_a, _) =
+            make_draft_policy(&pool, &format!("combined-a-{}", Uuid::new_v4().simple())).await;
+        db_publish_policy_version(&pool, pol_a, pv_a).await;
+        let (_, bv_a, bv_a_digest) = make_draft_bundle(
+            &pool,
+            &format!("combined-ba-{}", Uuid::new_v4().simple()),
+            &[pv_a],
+        )
+        .await;
+        publish_bundle_via_api(&base, &token, bv_a, &bv_a_digest).await;
+
+        // Policy B for bundle B (system)
+        let (pol_b, pv_b, _) =
+            make_draft_policy(&pool, &format!("combined-b-{}", Uuid::new_v4().simple())).await;
+        db_publish_policy_version(&pool, pol_b, pv_b).await;
+        let (_, bv_b, bv_b_digest) = make_draft_bundle(
+            &pool,
+            &format!("combined-bb-{}", Uuid::new_v4().simple()),
+            &[pv_b],
+        )
+        .await;
+        publish_bundle_via_api(&base, &token, bv_b, &bv_b_digest).await;
+
+        let env_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(env_id)
+            .bind(format!("combined-env-{}", env_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert environment");
+        let system_id = make_test_system(&pool, Some(env_id)).await;
+
+        let client = reqwest::Client::new();
+        // Environment assignment
+        client
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bv_a,
+                "scope_type": "environment",
+                "scope_id": env_id,
+            }))
+            .send()
+            .await
+            .expect("env assignment");
+        // System assignment
+        client
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bv_b,
+                "scope_type": "system",
+                "scope_id": system_id,
+            }))
+            .send()
+            .await
+            .expect("sys assignment");
+
+        let resp = client
+            .get(format!(
+                "{base}/api/v1/systems/{system_id}/effective-policies"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("resolve combined");
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.expect("json");
+        let policies = body["policies"].as_array().expect("policies");
+        assert_eq!(
+            policies.len(),
+            2,
+            "combined resolution must include both env and sys assignment policies"
+        );
+
+        // Environment assignment comes first (ORDER BY scope_type DESC puts 'environment' before 'system')
+        let ids: Vec<&str> = policies
+            .iter()
+            .filter_map(|p| p["policy_version_id"].as_str())
+            .collect();
+        assert_eq!(ids.len(), 2);
+        // Both policy versions must appear
+        let pv_a_str = pv_a.to_string();
+        let pv_b_str = pv_b.to_string();
+        assert!(ids.contains(&pv_a_str.as_str()) && ids.contains(&pv_b_str.as_str()));
+
+        // Digest must be stable.
+        let digest1 = body["effective_set_digest"].as_str().unwrap_or("");
+        assert!(!digest1.is_empty() && digest1 != "pending");
+        let resp2 = client
+            .get(format!(
+                "{base}/api/v1/systems/{system_id}/effective-policies"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("resolve combined 2");
+        let body2: serde_json::Value = resp2.json().await.expect("json2");
+        assert_eq!(body2["effective_set_digest"], body["effective_set_digest"]);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn system_resolution_effective_policy_version_conflict() {
+        // Two separate bundle lineages both resolve to the same policy version.
+        // The combined resolution must detect the duplicate and return
+        // EFFECTIVE_POLICY_VERSION_CONFLICT.
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_phase1_server(pool.clone()).await;
+
+        // Shared policy version — appears in both bundles.
+        let (pol_id, pv_id, _) =
+            make_draft_policy(&pool, &format!("conflict-pol-{}", Uuid::new_v4().simple())).await;
+        db_publish_policy_version(&pool, pol_id, pv_id).await;
+
+        // Bundle A for environment scope.
+        let (_, bv_a, bv_a_digest) = make_draft_bundle(
+            &pool,
+            &format!("conflict-ba-{}", Uuid::new_v4().simple()),
+            &[pv_id],
+        )
+        .await;
+        publish_bundle_via_api(&base, &token, bv_a, &bv_a_digest).await;
+
+        // Bundle B for system scope — contains the SAME policy version.
+        let (_, bv_b, bv_b_digest) = make_draft_bundle(
+            &pool,
+            &format!("conflict-bb-{}", Uuid::new_v4().simple()),
+            &[pv_id],
+        )
+        .await;
+        publish_bundle_via_api(&base, &token, bv_b, &bv_b_digest).await;
+
+        let env_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(env_id)
+            .bind(format!("conflict-env-{}", env_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert env");
+        let system_id = make_test_system(&pool, Some(env_id)).await;
+
+        let client = reqwest::Client::new();
+        // Environment assignment — bundle A.
+        let a1 = client
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bv_a,
+                "scope_type": "environment",
+                "scope_id": env_id,
+            }))
+            .send()
+            .await
+            .expect("env assign A");
+        assert_eq!(a1.status().as_u16(), 201);
+
+        // System assignment — bundle B (different lineage, same policy content).
+        let a2 = client
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bv_b,
+                "scope_type": "system",
+                "scope_id": system_id,
+            }))
+            .send()
+            .await
+            .expect("sys assign B");
+        assert_eq!(a2.status().as_u16(), 201);
+
+        // Resolving must return EFFECTIVE_POLICY_VERSION_CONFLICT since both
+        // bundles include the same policy version from the same policy lineage.
+        let resp = client
+            .get(format!(
+                "{base}/api/v1/systems/{system_id}/effective-policies"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("resolve");
+        assert_eq!(resp.status().as_u16(), 422);
+        let body: serde_json::Value = resp.json().await.expect("json");
+        let empty = vec![];
+        let conflicts = body["conflicts"].as_array().unwrap_or(&empty);
+        let codes: Vec<&str> = conflicts
+            .iter()
+            .filter_map(|c| c["code"].as_str())
+            .collect();
+        assert!(
+            codes.contains(&"EFFECTIVE_POLICY_VERSION_CONFLICT"),
+            "expected EFFECTIVE_POLICY_VERSION_CONFLICT, got conflicts: {body}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn system_resolution_no_environment() {
+        // System with no environment and a direct system assignment works cleanly.
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_phase1_server(pool.clone()).await;
+
+        let (pol_id, pv_id, _) =
+            make_draft_policy(&pool, &format!("noenv-pol-{}", Uuid::new_v4().simple())).await;
+        db_publish_policy_version(&pool, pol_id, pv_id).await;
+        let (_, bv_id, bv_digest) = make_draft_bundle(
+            &pool,
+            &format!("noenv-bun-{}", Uuid::new_v4().simple()),
+            &[pv_id],
+        )
+        .await;
+        publish_bundle_via_api(&base, &token, bv_id, &bv_digest).await;
+
+        // System with no environment
+        let system_id = make_test_system(&pool, None).await;
+
+        let client = reqwest::Client::new();
+        let asgn = client
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bv_id,
+                "scope_type": "system",
+                "scope_id": system_id,
+            }))
+            .send()
+            .await
+            .expect("create assignment");
+        assert_eq!(asgn.status().as_u16(), 201);
+
+        let resp = client
+            .get(format!(
+                "{base}/api/v1/systems/{system_id}/effective-policies"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("resolve");
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.expect("json");
+        assert_eq!(body["policies"].as_array().map(|a| a.len()), Some(1));
+    }
+
+    // ── RBAC coverage ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn assignment_rbac_operator_cannot_mutate() {
+        // Operators can read assignments and resolve effective policies but must
+        // not create, update, or delete assignments.
+        let pool = test_pool_from_env().await;
+        let (_, admin_token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (_, operator_token) = session_token_for_role(&pool, AuthRole::Operator).await;
+        let base = spawn_phase1_server(pool.clone()).await;
+
+        let (pol_id, pv_id, _) =
+            make_draft_policy(&pool, &format!("rbac-pol-{}", Uuid::new_v4().simple())).await;
+        db_publish_policy_version(&pool, pol_id, pv_id).await;
+        let (_, bv_id, bv_digest) = make_draft_bundle(
+            &pool,
+            &format!("rbac-bun-{}", Uuid::new_v4().simple()),
+            &[pv_id],
+        )
+        .await;
+        publish_bundle_via_api(&base, &admin_token, bv_id, &bv_digest).await;
+
+        let env_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(env_id)
+            .bind(format!("rbac-env-{}", env_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert env");
+
+        let client = reqwest::Client::new();
+        // Operator must NOT be able to create.
+        let create_resp = client
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={operator_token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bv_id,
+                "scope_type": "environment",
+                "scope_id": env_id,
+            }))
+            .send()
+            .await
+            .expect("operator create attempt");
+        assert_eq!(
+            create_resp.status().as_u16(),
+            403,
+            "operator must not create assignments"
+        );
+
+        // Admin creates the assignment.
+        let asgn_resp = client
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={admin_token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bv_id,
+                "scope_type": "environment",
+                "scope_id": env_id,
+            }))
+            .send()
+            .await
+            .expect("admin create");
+        assert_eq!(asgn_resp.status().as_u16(), 201);
+        let asgn: serde_json::Value = asgn_resp.json().await.expect("json");
+        let assignment_id: Uuid = asgn["id"].as_str().unwrap().parse().unwrap();
+        let current_version: Uuid = asgn["current_version_id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        // Operator CAN read.
+        let read_resp = client
+            .get(format!(
+                "{base}/api/v1/compliance/assignments/{assignment_id}"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={operator_token}"))
+            .send()
+            .await
+            .expect("operator read");
+        assert_eq!(
+            read_resp.status().as_u16(),
+            200,
+            "operator must be able to read assignments"
+        );
+
+        // Operator can read effective policies.
+        let eff_resp = client
+            .get(format!(
+                "{base}/api/v1/compliance/assignments/{assignment_id}/effective-policies"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={operator_token}"))
+            .send()
+            .await
+            .expect("operator effective");
+        assert_eq!(
+            eff_resp.status().as_u16(),
+            200,
+            "operator must be able to read effective policies"
+        );
+
+        // Operator must NOT update.
+        let upd_resp = client
+            .put(format!(
+                "{base}/api/v1/compliance/assignments/{assignment_id}"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={operator_token}"))
+            .json(&serde_json::json!({"expected_version_id": current_version}))
+            .send()
+            .await
+            .expect("operator update attempt");
+        assert_eq!(
+            upd_resp.status().as_u16(),
+            403,
+            "operator must not update assignments"
+        );
+
+        // Operator must NOT delete.
+        let del_resp = client
+            .delete(format!(
+                "{base}/api/v1/compliance/assignments/{assignment_id}?expected_version_id={current_version}"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={operator_token}"))
+            .send()
+            .await
+            .expect("operator delete attempt");
+        assert_eq!(
+            del_resp.status().as_u16(),
+            403,
+            "operator must not delete assignments"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn assignment_rbac_unauthenticated_rejected() {
+        let pool = test_pool_from_env().await;
+        let (_, admin_token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_phase1_server(pool.clone()).await;
+
+        let (pol_id, pv_id, _) =
+            make_draft_policy(&pool, &format!("unauth-pol-{}", Uuid::new_v4().simple())).await;
+        db_publish_policy_version(&pool, pol_id, pv_id).await;
+        let (_, bv_id, bv_digest) = make_draft_bundle(
+            &pool,
+            &format!("unauth-bun-{}", Uuid::new_v4().simple()),
+            &[pv_id],
+        )
+        .await;
+        publish_bundle_via_api(&base, &admin_token, bv_id, &bv_digest).await;
+
+        let env_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(env_id)
+            .bind(format!("unauth-env-{}", env_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert env");
+
+        let client = reqwest::Client::new();
+        // Unauthenticated create.
+        let resp = client
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bv_id,
+                "scope_type": "environment",
+                "scope_id": env_id,
+            }))
+            .send()
+            .await
+            .expect("unauth create");
+        assert_eq!(
+            resp.status().as_u16(),
+            403,
+            "unauthenticated create must be 403"
+        );
+
+        // Unauthenticated list for environment.
+        let resp2 = client
+            .get(format!(
+                "{base}/api/v1/environments/{env_id}/compliance-assignments"
+            ))
+            .send()
+            .await
+            .expect("unauth list");
+        assert_eq!(
+            resp2.status().as_u16(),
+            403,
+            "unauthenticated list must be 403"
         );
     }
 }

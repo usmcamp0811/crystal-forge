@@ -724,23 +724,34 @@ pub async fn resolve_system_effective_policies(
     // Load all active bundle assignments for this system's scope:
     // - environment assignments where system belongs to that environment
     // - system assignments directly on this system
+    //
+    // Sort order (authoritative, documented):
+    //   1. scope_type DESC → 'environment' before 'system' (alphabetically e > s)
+    //   2. bundle_id       → stable portable bundle lineage identity
+    //   3. id              → stable assignment lineage identity as tiebreak
+    //
+    // This order determines which assignment's policies appear first in the
+    // combined effective set and is part of the canonical digest contract.
     let assignments = sqlx::query_as::<
         _,
         (
+            Uuid,   // assignment_id (lineage)
             Uuid,   // current_version_id
+            Uuid,   // bundle_id (lineage for duplicate detection)
             Uuid,   // bundle_version_id
             String, // scope_type
             String, // enforcement_mode
             String, // overlay_digest
         ),
     >(
-        r#"SELECT current_version_id, bundle_version_id, scope_type, enforcement_mode, assignment_overlay_digest
-           FROM compliance_bundle_assignments
-           WHERE active AND current_version_id IS NOT NULL
-             AND ((scope_type = 'environment' AND environment_id = $2)
-               OR (scope_type = 'system' AND system_id = $1)
+        r#"SELECT a.id, a.current_version_id, a.bundle_id, a.bundle_version_id,
+                  a.scope_type, a.enforcement_mode, a.assignment_overlay_digest
+           FROM compliance_bundle_assignments a
+           WHERE a.active AND a.current_version_id IS NOT NULL
+             AND ((a.scope_type = 'environment' AND a.environment_id = $2)
+               OR (a.scope_type = 'system' AND a.system_id = $1)
              )
-           ORDER BY id"#,
+           ORDER BY a.scope_type DESC, a.bundle_id, a.id"#,
     )
     .bind(system_id)
     .bind(env_id)
@@ -757,11 +768,48 @@ pub async fn resolve_system_effective_policies(
     let mut seen_lineages: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
     let mut all_warnings: Vec<String> = Vec::new();
     let mut primary_bundle_version_id: Option<Uuid> = None;
+    // Track assignment version IDs and bundle IDs for the combined digest and
+    // duplicate-bundle-lineage detection.
+    let mut assignment_version_ids_ordered: Vec<Uuid> = Vec::new();
+    let mut seen_bundle_lineages: std::collections::HashMap<Uuid, (String, Uuid, Uuid)> =
+        std::collections::HashMap::new(); // bundle_id → (scope_type, assignment_id, bundle_version_id)
 
     let mut tx = pool.begin().await.context("begin resolution transaction")?;
 
-    for (assignment_version_id, bundle_version_id, scope_type, enforcement_mode, _) in &assignments
+    for (
+        assignment_id,
+        assignment_version_id,
+        bundle_id,
+        bundle_version_id,
+        scope_type,
+        enforcement_mode,
+        _,
+    ) in &assignments
     {
+        // Detect duplicate bundle lineage across scopes (e.g. both env and system
+        // assign different versions of the same bundle lineage).
+        if let Some((prev_scope, prev_asgn_id, prev_bv_id)) = seen_bundle_lineages.get(bundle_id) {
+            return Ok(ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                code: "ASSIGNMENT_BUNDLE_DUPLICATE".to_string(),
+                message: format!(
+                    "Bundle lineage {} is assigned at both {} scope (assignment {}, version {}) \
+                     and {} scope (assignment {}, version {}). \
+                     Use overlapping bundle lineages only within one scope.",
+                    bundle_id,
+                    prev_scope,
+                    prev_asgn_id,
+                    prev_bv_id,
+                    scope_type,
+                    assignment_id,
+                    bundle_version_id,
+                ),
+            }]));
+        }
+        seen_bundle_lineages.insert(
+            *bundle_id,
+            (scope_type.clone(), *assignment_id, *bundle_version_id),
+        );
+        assignment_version_ids_ordered.push(*assignment_version_id);
         // Load exclusions and additions for this assignment
         let exclusions: Vec<Uuid> = sqlx::query_scalar(
              "SELECT policy_version_id FROM compliance_assignment_exclusions WHERE assignment_version_id = $1",
@@ -928,11 +976,30 @@ pub async fn resolve_system_effective_policies(
 
     tx.commit().await.context("commit resolution transaction")?;
 
-    // Compute combined digest
+    // Compute combined target digest. This covers:
+    //   - the ordered assignment version IDs (encodes which assignments and which
+    //     versions of each participated, including scope ordering)
+    //   - the ordered effective policy version IDs (encodes the final policy set)
+    //   - the per-policy enforcement mode (report_only vs enforce)
+    //   - the system target identity
+    //
+    // The digest does NOT include timestamps, user IDs, or audit metadata.
+    // Equivalent resolution always produces the same digest.
     let effective_pids: Vec<Uuid> = all_policies.iter().map(|p| p.policy_version_id).collect();
+    let enforcement_mode_summary = if all_policies
+        .iter()
+        .all(|p| matches!(p.effective_mode, AssignmentMode::ReportOnly))
+    {
+        "report_only"
+    } else {
+        "enforce"
+    };
+    // Encode assignment_version_ids into exclusions field (stable; both are
+    // ordered Vec<Uuid>). This reuses the existing canonical structure without
+    // changing its wire format.
     let canonical = AssignmentEffectiveSetCanonical {
-        enforcement_mode: "enforce".to_string(), // Combined scope; individual policies have their own mode
-        exclusions: vec![],
+        enforcement_mode: enforcement_mode_summary.to_string(),
+        exclusions: assignment_version_ids_ordered,
         additions: vec![],
         value_overrides: vec![],
         effective_policy_version_ids: effective_pids.clone(),

@@ -486,6 +486,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/systems/:id/compliance-assignments",
             get(compliance::list_system_assignments),
         )
+        .route(
+            "/api/v1/systems/:id/effective-policies",
+            get(compliance::get_system_effective_policies),
+        )
         // CF-XCCDF import/export and bundle version endpoints
         .route(
             "/api/v1/compliance/xccdf/preview",
