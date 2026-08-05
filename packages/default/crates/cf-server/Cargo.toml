@@ -62,6 +62,7 @@ tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io"] }
 dashmap = "6"
 quick-xml = { version = "0.37", default-features = false, features = ["serialize"] }
+toml = { version = "0.8", features = ["parse"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]

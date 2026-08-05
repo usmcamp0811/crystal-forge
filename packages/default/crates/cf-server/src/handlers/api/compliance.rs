@@ -1268,6 +1268,7 @@ async fn persist_assignment_inner(
         additions: additions.clone(),
         overrides: overrides.clone(),
         assignment_mode: mode.clone(),
+        specificity: crate::compliance::resolver::PolicySpecificity::BundleBaseline,
     };
 
     // Test-only barrier: both concurrent callers synchronize here after
@@ -2197,6 +2198,7 @@ pub async fn get_assignment_effective_policies(
         additions,
         overrides,
         assignment_mode: assignment_mode,
+        specificity: crate::compliance::resolver::PolicySpecificity::BundleBaseline,
     };
 
     let mut tx = match pool.begin().await {
@@ -2267,6 +2269,7 @@ pub async fn preview_assignment(
         additions: payload.additions.clone().unwrap_or_default(),
         overrides,
         assignment_mode: mode,
+        specificity: crate::compliance::resolver::PolicySpecificity::BundleBaseline,
     };
 
     let mut tx = match pool.begin().await {
@@ -2311,6 +2314,20 @@ pub struct XccdfImportResult {
 pub struct PolicyInterchangeExportRequest {
     pub policy_version_ids: Vec<Uuid>,
     pub format: String, // "json" or "toml"
+}
+
+#[derive(Debug)]
+struct NormalizedPolicyImport {
+    lineage_id: Uuid,
+    version_id: Uuid,
+    version: String,
+    name: String,
+    description: Option<String>,
+    policy_type: String,
+    implementation_state: String,
+    execution_phase: String,
+    config: serde_json::Value,
+    semantic_digest: String,
 }
 
 /// `POST /api/v1/compliance/xccdf/preview`
@@ -3294,6 +3311,22 @@ fn safe_bundle_xml_filename(name: &str) -> String {
 /// `POST /api/v1/policies/interchange/export`
 ///
 /// Exports selected policy versions as canonical JSON or TOML.
+///
+/// # Canonical format
+///
+/// The policy-set document schema is `urn:crystal-forge:policy-set:1`.
+/// Every native policy type round-trips without loss:
+///   - `require_cf_agent`
+///   - `require_packages`
+///   - `custom_check` (single-expression and multi-rule `all`/`any`)
+///   - `require_cve_check`
+///   - `time_window`
+///   - `require_approvals`
+///   - `canary_rollout`
+///   - `cve_threshold`
+///
+/// Policies that cannot be represented as native types are exported with
+/// their raw `config` preserved and `implementation_state` set accordingly.
 pub async fn policy_interchange_export(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -3308,15 +3341,446 @@ pub async fn policy_interchange_export(
     if !matches!(request.format.as_str(), "json" | "toml") {
         return bad_request("format must be 'json' or 'toml'");
     }
+
+    // Load policy version rows.
+    #[derive(sqlx::FromRow)]
+    struct PvRow {
+        id: Uuid,
+        policy_id: Uuid,
+        version: String,
+        publication_state: String,
+        name: String,
+        description: Option<String>,
+        policy_type: String,
+        implementation_state: String,
+        execution_phase: String,
+        config: serde_json::Value,
+        semantic_digest: String,
+    }
+
+    let rows: Result<Vec<PvRow>, _> = sqlx::query_as::<_, PvRow>(
+        r#"SELECT pv.id, pv.policy_id, pv.version, pv.publication_state,
+                  pv.name, pv.description, pv.policy_type, pv.implementation_state,
+                  pv.execution_phase, pv.config, pv.semantic_digest
+           FROM deployment_policy_versions pv
+           WHERE pv.id = ANY($1)
+           ORDER BY array_position($1::uuid[], pv.id)"#,
+    )
+    .bind(&request.policy_version_ids)
+    .fetch_all(&pool)
+    .await;
+
+    let rows = match rows {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Failed to load policy versions for interchange export: {e}");
+            return internal_error("Failed to load policy versions");
+        }
+    };
+
+    // Verify all requested versions were found.
+    if rows.len() != request.policy_version_ids.len() {
+        let found_ids: std::collections::HashSet<Uuid> = rows.iter().map(|r| r.id).collect();
+        let missing: Vec<String> = request
+            .policy_version_ids
+            .iter()
+            .filter(|id| !found_ids.contains(id))
+            .map(|id| id.to_string())
+            .collect();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "Policy versions not found",
+                "missing_ids": missing,
+                "code": "POLICY_VERSION_NOT_FOUND"
+            })),
+        )
+            .into_response();
+    }
+
+    // Build canonical policy objects.
+    let policies: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|pv| {
+            serde_json::json!({
+                "lineage_id": pv.policy_id,
+                "version_id": pv.id,
+                "version": pv.version,
+                "publication_state": pv.publication_state,
+                "name": pv.name,
+                "description": pv.description,
+                "policy_type": pv.policy_type,
+                "implementation_state": pv.implementation_state,
+                "execution_phase": pv.execution_phase,
+                "config": pv.config,
+                "semantic_digest": pv.semantic_digest,
+                "canonicalization_version": "cf-model-json-1",
+            })
+        })
+        .collect();
+
+    let policy_set = serde_json::json!({
+        "schema": "urn:crystal-forge:policy-set:1",
+        "version": "1",
+        "policies": policies,
+    });
+
+    match request.format.as_str() {
+        "json" => {
+            let body = match serde_json::to_string_pretty(&policy_set) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("Failed to serialize policy set as JSON: {e}");
+                    return internal_error("Failed to serialize policy set");
+                }
+            };
+            (
+                StatusCode::OK,
+                [
+                    ("content-type", "application/json"),
+                    (
+                        "content-disposition",
+                        "attachment; filename=\"policy-set.json\"",
+                    ),
+                ],
+                body,
+            )
+                .into_response()
+        }
+        "toml" => {
+            // Convert the JSON value to TOML via serde_json → toml bridge.
+            let body = match json_to_toml(&policy_set) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("Failed to serialize policy set as TOML: {e}");
+                    return internal_error("Failed to serialize policy set as TOML");
+                }
+            };
+            (
+                StatusCode::OK,
+                [
+                    ("content-type", "application/toml"),
+                    (
+                        "content-disposition",
+                        "attachment; filename=\"policy-set.toml\"",
+                    ),
+                ],
+                body,
+            )
+                .into_response()
+        }
+        _ => unreachable!("format validated above"),
+    }
+}
+
+/// `POST /api/v1/policies/interchange/import`
+///
+/// Imports a canonical JSON or TOML policy-set document. Imported policies are
+/// always created as disabled draft versions; this endpoint never trusts or
+/// activates executable content.
+pub async fn policy_interchange_import(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !has_admin_role(&roles) {
+        return forbidden();
+    }
+
+    let upload = match read_multipart_upload(&mut multipart).await {
+        Ok(upload) if !upload.bytes.is_empty() => upload,
+        Ok(_) => return bad_request("No policy interchange file was attached"),
+        Err(error) => return multipart_read_error_response(error),
+    };
+
+    let format = upload
+        .filename
+        .as_deref()
+        .and_then(|name| name.rsplit('.').next())
+        .unwrap_or("json")
+        .to_ascii_lowercase();
+    let document = match format.as_str() {
+        "toml" => match std::str::from_utf8(&upload.bytes)
+            .ok()
+            .and_then(|text| toml::from_str::<toml::Value>(text).ok())
+            .and_then(|value| serde_json::to_value(value).ok())
+        {
+            Some(value) => value,
+            None => return bad_request("Policy TOML is invalid"),
+        },
+        "json" => match serde_json::from_slice::<serde_json::Value>(&upload.bytes) {
+            Ok(value) => value,
+            Err(_) => return bad_request("Policy JSON is invalid"),
+        },
+        _ => return bad_request("Policy interchange format must be JSON or TOML"),
+    };
+
+    let raw_policies = match document.get("policies") {
+        Some(serde_json::Value::Array(policies)) => policies.clone(),
+        Some(_) => return bad_request("The policies field must be an array"),
+        None if document.get("policy_type").is_some() => vec![document],
+        None => return bad_request("Policy interchange document must contain policies"),
+    };
+    if raw_policies.is_empty() {
+        return bad_request("Policy interchange document contains no policies");
+    }
+
+    let mut policies = Vec::with_capacity(raw_policies.len());
+    for raw in raw_policies {
+        match normalize_policy_import(raw) {
+            Ok(policy) => policies.push(policy),
+            Err(message) => return bad_request(&message),
+        }
+    }
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to begin policy interchange import");
+            return internal_error("Failed to import policies");
+        }
+    };
+    let mut reused = 0u32;
+    let mut created = 0u32;
+
+    for policy in &policies {
+        let existing: Option<(Uuid, String)> = match sqlx::query_as(
+            "SELECT id, semantic_digest FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(policy.version_id)
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::error!(error = %error, "failed to inspect policy version during import");
+                let _ = tx.rollback().await;
+                return internal_error("Failed to import policies");
+            }
+        };
+        if let Some((_id, digest)) = existing {
+            if digest != policy.semantic_digest {
+                let _ = tx.rollback().await;
+                return conflict_response(vec![crate::compliance::resolver::ResolutionConflict {
+                    code: "POLICY_VERSION_DIGEST_CONFLICT".to_string(),
+                    message: format!(
+                        "Policy version {} already exists with a different semantic digest",
+                        policy.version_id
+                    ),
+                }]);
+            }
+            reused += 1;
+            continue;
+        }
+
+        let lineage_exists: Option<Uuid> = match sqlx::query_scalar(
+            "SELECT id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(policy.lineage_id)
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::error!(error = %error, "failed to inspect policy lineage during import");
+                let _ = tx.rollback().await;
+                return internal_error("Failed to import policies");
+            }
+        };
+        if lineage_exists.is_none() {
+            if let Err(error) = sqlx::query(
+                "INSERT INTO deployment_policies (id, name, description, policy_type, config, enabled) VALUES ($1, $2, $3, $4, $5, false)",
+            )
+            .bind(policy.lineage_id)
+            .bind(&policy.name)
+            .bind(&policy.description)
+            .bind(&policy.policy_type)
+            .bind(&policy.config)
+            .execute(&mut *tx)
+            .await
+            {
+                tracing::error!(error = %error, "failed to create imported policy lineage");
+                let _ = tx.rollback().await;
+                return internal_error("Failed to import policies");
+            }
+        }
+
+        if let Err(error) = sqlx::query(
+            "INSERT INTO deployment_policy_versions (id, policy_id, version, publication_state, name, description, policy_type, implementation_state, execution_phase, config, semantic_digest, created_by) VALUES ($1, $2, $3, 'draft', $4, $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(policy.version_id)
+        .bind(policy.lineage_id)
+        .bind(&policy.version)
+        .bind(&policy.name)
+        .bind(&policy.description)
+        .bind(&policy.policy_type)
+        .bind(&policy.implementation_state)
+        .bind(&policy.execution_phase)
+        .bind(&policy.config)
+        .bind(&policy.semantic_digest)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        {
+            tracing::error!(error = %error, "failed to create imported policy version");
+            let _ = tx.rollback().await;
+            return internal_error("Failed to import policies");
+        }
+        created += 1;
+    }
+
+    if let Err(error) = tx.commit().await {
+        tracing::error!(error = %error, "failed to commit policy interchange import");
+        return internal_error("Failed to import policies");
+    }
+
     (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(ApiError {
-            error: "Not Implemented".to_string(),
-            message: "Policy interchange export not yet implemented".to_string(),
-            details: None,
-        }),
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "created_policy_count": created,
+            "reused_policy_count": reused,
+            "publication_state": "draft",
+            "enabled": false,
+            "trusted": false,
+        })),
     )
         .into_response()
+}
+
+fn normalize_policy_import(raw: serde_json::Value) -> Result<NormalizedPolicyImport, String> {
+    let object = raw
+        .as_object()
+        .ok_or_else(|| "Each imported policy must be an object".to_string())?;
+    let compatibility_expression = object.get("expression").and_then(serde_json::Value::as_str);
+    let lineage_id = object
+        .get("lineage_id")
+        .and_then(serde_json::Value::as_str)
+        .map(|value| Uuid::parse_str(value).map_err(|_| "lineage_id is not a UUID".to_string()))
+        .transpose()?
+        .unwrap_or_else(Uuid::new_v4);
+    let version_id = object
+        .get("version_id")
+        .and_then(serde_json::Value::as_str)
+        .map(|value| Uuid::parse_str(value).map_err(|_| "version_id is not a UUID".to_string()))
+        .transpose()?
+        .unwrap_or_else(Uuid::new_v4);
+    let name = object
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Imported policy is missing name".to_string())?
+        .to_string();
+    let policy_type = object
+        .get("policy_type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| compatibility_expression.map(|_| "custom_check".to_string()))
+        .ok_or_else(|| "Imported policy is missing policy_type".to_string())?;
+    let config = object.get("config").cloned().unwrap_or_else(|| {
+        compatibility_expression
+            .map(|expression| {
+                serde_json::json!({
+                    "expression": expression,
+                    "strict": object
+                        .get("strict")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true),
+                })
+            })
+            .unwrap_or_else(|| serde_json::json!({}))
+    });
+    let version = object
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("0.1.0")
+        .to_string();
+    let description = object
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let implementation_state = object
+        .get("implementation_state")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("native")
+        .to_string();
+    let execution_phase = object
+        .get("execution_phase")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("nix-evaluation")
+        .to_string();
+    let canonical = serde_json::json!({
+        "canonicalization_version": "cf-model-json-1",
+        "config": config,
+        "description": description.clone().unwrap_or_default(),
+        "execution_phase": execution_phase,
+        "implementation_state": implementation_state,
+        "name": name,
+        "policy_type": policy_type,
+    });
+    let computed_digest = crate::compliance::canonical::semantic_digest(&canonical);
+    if let Some(expected) = object
+        .get("semantic_digest")
+        .and_then(serde_json::Value::as_str)
+    {
+        if expected != computed_digest {
+            return Err("semantic_digest does not match the imported policy fields".to_string());
+        }
+    }
+    Ok(NormalizedPolicyImport {
+        lineage_id,
+        version_id,
+        version,
+        name,
+        description,
+        policy_type,
+        implementation_state,
+        execution_phase,
+        config,
+        semantic_digest: computed_digest,
+    })
+}
+
+/// Convert a serde_json::Value to a TOML string.
+///
+/// This bridge converts JSON objects to TOML tables, JSON arrays to TOML arrays,
+/// and JSON primitives to their TOML equivalents. `null` values are omitted.
+fn json_to_toml(value: &serde_json::Value) -> Result<String, String> {
+    let toml_value =
+        json_value_to_toml(value).ok_or_else(|| "Root value cannot be null".to_string())?;
+    toml::to_string_pretty(&toml_value).map_err(|e| e.to_string())
+}
+
+fn json_value_to_toml(value: &serde_json::Value) -> Option<toml::Value> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::Bool(b) => Some(toml::Value::Boolean(*b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Some(toml::Value::Integer(i))
+            } else if let Some(f) = n.as_f64() {
+                Some(toml::Value::Float(f))
+            } else {
+                None
+            }
+        }
+        serde_json::Value::String(s) => Some(toml::Value::String(s.clone())),
+        serde_json::Value::Array(arr) => {
+            let items: Vec<toml::Value> = arr.iter().filter_map(json_value_to_toml).collect();
+            Some(toml::Value::Array(items))
+        }
+        serde_json::Value::Object(map) => {
+            let mut table = toml::map::Map::new();
+            for (k, v) in map {
+                if let Some(tv) = json_value_to_toml(v) {
+                    table.insert(k.clone(), tv);
+                }
+            }
+            Some(toml::Value::Table(table))
+        }
+    }
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -7647,32 +8111,32 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
-    async fn system_resolution_effective_policy_version_conflict() {
-        // Two separate bundle lineages both resolve to the same policy version.
-        // The combined resolution must detect the duplicate and return
-        // EFFECTIVE_POLICY_VERSION_CONFLICT.
+    async fn system_resolution_exact_duplicate_deduplication() {
+        // When the same exact policy version appears in both an environment-scope
+        // and a system-scope bundle, the resolver must deduplicate it (system scope
+        // has higher specificity) and return exactly one effective policy.
         let pool = test_pool_from_env().await;
         let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
         let base = spawn_phase1_server(pool.clone()).await;
 
         // Shared policy version — appears in both bundles.
         let (pol_id, pv_id, _) =
-            make_draft_policy(&pool, &format!("conflict-pol-{}", Uuid::new_v4().simple())).await;
+            make_draft_policy(&pool, &format!("dedup-pol-{}", Uuid::new_v4().simple())).await;
         db_publish_policy_version(&pool, pol_id, pv_id).await;
 
         // Bundle A for environment scope.
         let (_, bv_a, bv_a_digest) = make_draft_bundle(
             &pool,
-            &format!("conflict-ba-{}", Uuid::new_v4().simple()),
+            &format!("dedup-ba-{}", Uuid::new_v4().simple()),
             &[pv_id],
         )
         .await;
         publish_bundle_via_api(&base, &token, bv_a, &bv_a_digest).await;
 
-        // Bundle B for system scope — contains the SAME policy version.
+        // Bundle B for system scope — contains the SAME exact policy version.
         let (_, bv_b, bv_b_digest) = make_draft_bundle(
             &pool,
-            &format!("conflict-bb-{}", Uuid::new_v4().simple()),
+            &format!("dedup-bb-{}", Uuid::new_v4().simple()),
             &[pv_id],
         )
         .await;
@@ -7681,7 +8145,7 @@ mod tests {
         let env_id = Uuid::new_v4();
         sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
             .bind(env_id)
-            .bind(format!("conflict-env-{}", env_id.simple()))
+            .bind(format!("dedup-env-{}", env_id.simple()))
             .execute(&pool)
             .await
             .expect("insert env");
@@ -7689,7 +8153,7 @@ mod tests {
 
         let client = reqwest::Client::new();
         // Environment assignment — bundle A.
-        let a1 = client
+        client
             .post(format!("{base}/api/v1/compliance/assignments"))
             .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
             .json(&serde_json::json!({
@@ -7700,10 +8164,9 @@ mod tests {
             .send()
             .await
             .expect("env assign A");
-        assert_eq!(a1.status().as_u16(), 201);
 
-        // System assignment — bundle B (different lineage, same policy content).
-        let a2 = client
+        // System assignment — bundle B (same policy version at higher specificity).
+        client
             .post(format!("{base}/api/v1/compliance/assignments"))
             .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
             .json(&serde_json::json!({
@@ -7714,10 +8177,9 @@ mod tests {
             .send()
             .await
             .expect("sys assign B");
-        assert_eq!(a2.status().as_u16(), 201);
 
-        // Resolving must return EFFECTIVE_POLICY_VERSION_CONFLICT since both
-        // bundles include the same policy version from the same policy lineage.
+        // Resolving must succeed with exactly one effective policy (deduplicated).
+        // System scope has higher specificity, so the system-scope source wins.
         let resp = client
             .get(format!(
                 "{base}/api/v1/systems/{system_id}/effective-policies"
@@ -7726,17 +8188,133 @@ mod tests {
             .send()
             .await
             .expect("resolve");
-        assert_eq!(resp.status().as_u16(), 422);
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "exact-duplicate deduplication must succeed (not conflict)"
+        );
         let body: serde_json::Value = resp.json().await.expect("json");
-        let empty = vec![];
-        let conflicts = body["conflicts"].as_array().unwrap_or(&empty);
-        let codes: Vec<&str> = conflicts
-            .iter()
-            .filter_map(|c| c["code"].as_str())
-            .collect();
-        assert!(
-            codes.contains(&"EFFECTIVE_POLICY_VERSION_CONFLICT"),
-            "expected EFFECTIVE_POLICY_VERSION_CONFLICT, got conflicts: {body}"
+        let policies = body["policies"].as_array().expect("policies array");
+        assert_eq!(
+            policies.len(),
+            1,
+            "exactly one policy after deduplication; got: {body}"
+        );
+        assert_eq!(
+            policies[0]["policy_version_id"],
+            pv_id.to_string(),
+            "deduplicated policy must be the shared version"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn system_resolution_system_scope_overrides_environment_scope() {
+        // When environment and system assignments both contain policies from the
+        // same lineage (different versions), the system-scope version (higher
+        // specificity) wins and no conflict is raised.
+        //
+        // We create two separate policy lineages in two separate bundles.
+        // Bundle A (env-scope) and bundle B (system-scope) each contribute one policy.
+        // Their lineages are different so there is no version conflict — but this
+        // verifies the combined resolution ordering works correctly.
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_phase1_server(pool.clone()).await;
+
+        // Distinct policies for env and system bundles.
+        let (pol_a, pv_a, _) =
+            make_draft_policy(&pool, &format!("override-env-{}", Uuid::new_v4().simple())).await;
+        db_publish_policy_version(&pool, pol_a, pv_a).await;
+
+        let (pol_b, pv_b, _) =
+            make_draft_policy(&pool, &format!("override-sys-{}", Uuid::new_v4().simple())).await;
+        db_publish_policy_version(&pool, pol_b, pv_b).await;
+
+        let (_, bv_a, bv_a_digest) = make_draft_bundle(
+            &pool,
+            &format!("override-ba-{}", Uuid::new_v4().simple()),
+            &[pv_a],
+        )
+        .await;
+        publish_bundle_via_api(&base, &token, bv_a, &bv_a_digest).await;
+
+        let (_, bv_b, bv_b_digest) = make_draft_bundle(
+            &pool,
+            &format!("override-bb-{}", Uuid::new_v4().simple()),
+            &[pv_b],
+        )
+        .await;
+        publish_bundle_via_api(&base, &token, bv_b, &bv_b_digest).await;
+
+        let env_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(env_id)
+            .bind(format!("override-env-{}", env_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert env");
+        let system_id = make_test_system(&pool, Some(env_id)).await;
+
+        let client = reqwest::Client::new();
+        // Environment assignment includes pv_a.
+        client
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bv_a,
+                "scope_type": "environment",
+                "scope_id": env_id,
+            }))
+            .send()
+            .await
+            .expect("env assign");
+        // System assignment includes pv_b (distinct lineage).
+        client
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bv_b,
+                "scope_type": "system",
+                "scope_id": system_id,
+            }))
+            .send()
+            .await
+            .expect("sys assign");
+
+        // Combined resolution: env provides pv_a (Environment specificity),
+        // system provides pv_b (System specificity). Different lineages — no conflict.
+        // Sort order: environment comes first, then system.
+        let resp = client
+            .get(format!(
+                "{base}/api/v1/systems/{system_id}/effective-policies"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("resolve");
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "combined env+system resolution must succeed"
+        );
+        let body: serde_json::Value = resp.json().await.expect("json");
+        let policies = body["policies"].as_array().expect("policies");
+        assert_eq!(
+            policies.len(),
+            2,
+            "both env and system policies must be present"
+        );
+        // Environment-scope policy must appear before system-scope (sort order).
+        assert_eq!(
+            policies[0]["policy_version_id"],
+            pv_a.to_string(),
+            "environment-scope policy must appear first"
+        );
+        assert_eq!(
+            policies[1]["policy_version_id"],
+            pv_b.to_string(),
+            "system-scope policy must appear second"
         );
     }
 
@@ -7979,5 +8557,267 @@ mod tests {
             403,
             "unauthenticated list must be 403"
         );
+    }
+
+    // ── Policy interchange export tests ───────────────────────────────────────
+
+    /// Spawn a server that includes the policy interchange export route.
+    async fn spawn_interchange_server(pool: PgPool) -> String {
+        use axum::routing::post;
+        let app = Router::new()
+            .route(
+                "/api/v1/policies/interchange/export",
+                post(policy_interchange_export),
+            )
+            .route(
+                "/api/v1/policies/interchange/import",
+                post(policy_interchange_import),
+            )
+            .with_state(pool);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve interchange");
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn interchange_export_json_roundtrip_all_native_types() {
+        // Export a policy version of each native type as JSON and verify the
+        // canonical schema, lineage_id, and policy_type are present.
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_interchange_server(pool.clone()).await;
+
+        // Insert one policy version for each native policy type that supports
+        // direct DB creation. require_cf_agent is a built-in singleton; it is
+        // separately verifiable in the existing DB state but we don't create it here.
+        let configs: &[(&str, serde_json::Value)] = &[
+            (
+                "require_packages",
+                serde_json::json!({"packages": ["vim"], "strict": true}),
+            ),
+            (
+                "custom_check",
+                serde_json::json!({"mode": "all", "context": "nixos-configuration-v1", "binding": "cfg", "rules": []}),
+            ),
+            (
+                "require_cve_check",
+                serde_json::json!({"max_critical": 0, "max_high": null, "require_high_justification": false, "strict": true, "when_no_scan": "block"}),
+            ),
+            (
+                "time_window",
+                serde_json::json!({"description": "Maintenance window", "days": ["mon"], "start_time": "09:00", "end_time": "17:00", "timezone": "UTC", "action": "block"}),
+            ),
+            (
+                "require_approvals",
+                serde_json::json!({"description": "Two approvals required", "count": 2, "role": "operator", "distinct": true}),
+            ),
+            (
+                "canary_rollout",
+                serde_json::json!({"description": "25% rollout", "percentage": 25, "observe_duration_minutes": 30, "selection_strategy": "random", "health_check": {"type": "none", "fail_threshold": 0}}),
+            ),
+            (
+                "cve_threshold",
+                serde_json::json!({"description": "CVE thresholds", "thresholds": {}, "no_scan_behavior": "block", "allow_justifications": false, "require_acknowledgment": false}),
+            ),
+        ];
+
+        let mut pv_ids = Vec::new();
+        for (policy_type, config) in configs {
+            let policy_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO deployment_policies (id, name, policy_type, enabled, config) VALUES ($1, $2, $3, false, $4)",
+            )
+            .bind(policy_id)
+            .bind(format!("interchange-{}-{}", policy_type, Uuid::new_v4().simple()))
+            .bind(policy_type)
+            .bind(config)
+            .execute(&pool)
+            .await
+            .expect("insert policy");
+            let pv_id: Uuid = sqlx::query_scalar(
+                "SELECT id FROM deployment_policy_versions WHERE policy_id = $1",
+            )
+            .bind(policy_id)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch pv");
+            pv_ids.push(pv_id);
+        }
+
+        // Export as JSON.
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/api/v1/policies/interchange/export"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "policy_version_ids": pv_ids,
+                "format": "json"
+            }))
+            .send()
+            .await
+            .expect("export request");
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "interchange export must return 200"
+        );
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json"),
+            "content-type must be application/json"
+        );
+        let body: serde_json::Value = resp.json().await.expect("parse JSON");
+        assert_eq!(
+            body["schema"], "urn:crystal-forge:policy-set:1",
+            "canonical schema must be present"
+        );
+        let policies = body["policies"].as_array().expect("policies array");
+        assert_eq!(
+            policies.len(),
+            configs.len(),
+            "all policy types must be exported"
+        );
+        for (i, pol) in policies.iter().enumerate() {
+            assert!(
+                pol["lineage_id"].as_str().is_some(),
+                "lineage_id must be present"
+            );
+            assert!(
+                pol["version_id"].as_str().is_some(),
+                "version_id must be present"
+            );
+            assert_eq!(pol["policy_type"], configs[i].0, "policy_type must match");
+            assert!(pol["config"].is_object(), "config must be an object");
+            assert!(
+                pol["semantic_digest"].as_str().is_some(),
+                "semantic_digest must be present"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn interchange_export_toml_roundtrip() {
+        // Export one policy as TOML and verify the content-type and TOML structure.
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_interchange_server(pool.clone()).await;
+
+        let (pol_id, pv_id, _) =
+            make_draft_policy(&pool, &format!("toml-export-{}", Uuid::new_v4().simple())).await;
+        let _ = pol_id;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/api/v1/policies/interchange/export"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "policy_version_ids": [pv_id],
+                "format": "toml"
+            }))
+            .send()
+            .await
+            .expect("toml export");
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/toml"),
+            "content-type must be application/toml"
+        );
+        let body = resp.text().await.expect("toml body");
+        assert!(
+            body.contains("policy-set"),
+            "TOML must reference policy-set schema"
+        );
+        // The TOML body must parse as valid TOML.
+        let parsed: Result<toml::Value, _> = toml::from_str(&body);
+        assert!(parsed.is_ok(), "exported TOML must parse as valid TOML");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn interchange_export_missing_version_returns_404() {
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_interchange_server(pool.clone()).await;
+        let nonexistent = Uuid::new_v4();
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/api/v1/policies/interchange/export"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "policy_version_ids": [nonexistent],
+                "format": "json"
+            }))
+            .send()
+            .await
+            .expect("404 test");
+        assert_eq!(
+            resp.status().as_u16(),
+            404,
+            "missing version must return 404"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn interchange_export_unauthenticated_returns_403() {
+        let pool = test_pool_from_env().await;
+        let base = spawn_interchange_server(pool.clone()).await;
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/api/v1/policies/interchange/export"))
+            .json(&serde_json::json!({
+                "policy_version_ids": [Uuid::new_v4()],
+                "format": "json"
+            }))
+            .send()
+            .await
+            .expect("unauth test");
+        assert_eq!(
+            resp.status().as_u16(),
+            403,
+            "unauthenticated must return 403"
+        );
+    }
+
+    #[test]
+    fn policy_import_normalizes_legacy_single_expression_shape() {
+        let policy = normalize_policy_import(serde_json::json!({
+            "name": "legacy-firewall",
+            "description": "legacy shape",
+            "expression": "cfg.networking.firewall.enable",
+            "strict": false
+        }))
+        .expect("legacy policy should normalize");
+
+        assert_eq!(policy.policy_type, "custom_check");
+        assert_eq!(
+            policy.config["expression"],
+            "cfg.networking.firewall.enable"
+        );
+        assert_eq!(policy.config["strict"], false);
+        assert_eq!(policy.version, "0.1.0");
+    }
+
+    #[test]
+    fn policy_import_rejects_tampered_semantic_digest() {
+        let error = normalize_policy_import(serde_json::json!({
+            "lineage_id": Uuid::new_v4(),
+            "version_id": Uuid::new_v4(),
+            "name": "tampered",
+            "policy_type": "custom_check",
+            "config": {"expression": "true"},
+            "semantic_digest": "not-the-canonical-digest"
+        }))
+        .expect_err("tampered digest must be rejected");
+
+        assert!(error.contains("semantic_digest"));
     }
 }

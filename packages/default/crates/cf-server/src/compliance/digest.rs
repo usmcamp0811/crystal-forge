@@ -518,7 +518,6 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
                dpv.enabled_by_default AS enabled
         FROM deployment_policy_versions dpv
         WHERE dpv.semantic_digest = 'pending'
-          AND dpv.publication_state IN ('incomplete', 'draft', 'interim')
         "#,
     )
     .fetch_all(pool)
@@ -570,7 +569,6 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
                description, layer, owner
         FROM compliance_bundle_versions
         WHERE semantic_digest = 'pending'
-          AND publication_state IN ('incomplete', 'draft', 'interim')
         "#,
     )
     .fetch_all(pool)
