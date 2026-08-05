@@ -146,6 +146,8 @@ pub fn PolicyInterchangeModal(on_close: EventHandler<()>, on_success: EventHandl
                                     match import_policy_interchange(&file.bytes, &file.filename, &preview_response.source_sha256).await {
                                         Ok(response) => {
                                             result.set(Some(response));
+                                            selected_file.set(None);
+                                            preview.set(None);
                                             busy.set(false);
                                             on_success.call(());
                                         }
