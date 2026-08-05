@@ -523,7 +523,7 @@ pub async fn list_deployment_policies(
 
     let policy_ids: Vec<Uuid> = policies.iter().map(|policy| policy.id).collect();
     let versions: HashMap<Uuid, Uuid> = sqlx::query_as::<_, (Uuid, Uuid)>(
-        "SELECT id, current_draft_version_id FROM deployment_policies WHERE id = ANY($1) AND current_draft_version_id IS NOT NULL",
+        "SELECT id, COALESCE(current_draft_version_id, current_published_version_id) FROM deployment_policies WHERE id = ANY($1) AND COALESCE(current_draft_version_id, current_published_version_id) IS NOT NULL",
     )
     .bind(&policy_ids)
     .fetch_all(&state.pool)
