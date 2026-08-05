@@ -73,6 +73,8 @@ pub fn PolicyInterchangeModal(on_close: EventHandler<()>, on_success: EventHandl
                             let mut error = error;
                             let mut generation = generation;
                             generation += 1;
+                            let file_generation = generation();
+                            busy.set(false);
                             preview.set(None);
                             result.set(None);
                             error.set(None);
@@ -86,8 +88,9 @@ pub fn PolicyInterchangeModal(on_close: EventHandler<()>, on_success: EventHandl
                                 } else {
                                     spawn(async move {
                                         match file.read_bytes().await {
-                                            Ok(bytes) => selected_file.set(Some(ImportFile { bytes: bytes.to_vec(), filename })),
+                                            Ok(bytes) if generation() == file_generation => selected_file.set(Some(ImportFile { bytes: bytes.to_vec(), filename })),
                                             Err(read_error) => error.set(Some(format!("Could not read selected file: {read_error}"))),
+                                            _ => {}
                                         }
                                     });
                                 }
