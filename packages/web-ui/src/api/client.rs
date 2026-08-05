@@ -148,6 +148,121 @@ pub async fn export_policy_versions(
     Ok(body)
 }
 
+pub async fn preview_policy_interchange(
+    bytes: &[u8],
+    filename: &str,
+) -> Result<PolicyInterchangePreviewResponse, ApiClientError> {
+    let url = format!("{}/policies/interchange/preview", base_url());
+    let (status, body) = send_policy_multipart(&url, bytes, filename, None).await?;
+    parse_policy_interchange_response(status, &body)
+}
+
+pub async fn import_policy_interchange(
+    bytes: &[u8],
+    filename: &str,
+    expected_sha256: &str,
+) -> Result<PolicyInterchangeImportResponse, ApiClientError> {
+    let url = format!("{}/policies/interchange/import", base_url());
+    let (status, body) =
+        send_policy_multipart(&url, bytes, filename, Some(expected_sha256)).await?;
+    parse_policy_interchange_response(status, &body)
+}
+
+async fn send_policy_multipart(
+    url: &str,
+    bytes: &[u8],
+    filename: &str,
+    expected_sha256: Option<&str>,
+) -> Result<(u16, String), ApiClientError> {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::JsValue;
+    use wasm_bindgen_futures::JsFuture;
+
+    let form =
+        web_sys::FormData::new().map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+    let array = js_sys::Uint8Array::from(bytes);
+    let parts = js_sys::Array::new();
+    parts.push(&array);
+    let blob = web_sys::Blob::new_with_u8_array_sequence(&parts)
+        .map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+    form.append_with_blob_and_filename("file", &blob, filename)
+        .map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+
+    let window =
+        web_sys::window().ok_or_else(|| ApiClientError::Network("no global window".into()))?;
+    let opts = web_sys::RequestInit::new();
+    opts.set_method("POST");
+    opts.set_body(form.as_ref());
+    let _ = js_sys::Reflect::set(
+        opts.as_ref(),
+        &JsValue::from_str("credentials"),
+        &JsValue::from_str("include"),
+    );
+    let request = web_sys::Request::new_with_str_and_init(url, &opts)
+        .map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+    request
+        .headers()
+        .set("Accept", "application/json")
+        .map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+    if let Some(expected) = expected_sha256 {
+        request
+            .headers()
+            .set("X-Policy-Source-SHA256", expected)
+            .map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+    }
+    add_csrf_header(&request, &window)?;
+    let response = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+    let response: web_sys::Response = response
+        .dyn_into()
+        .map_err(|_| ApiClientError::Network("response is not a Response".into()))?;
+    let status = response.status() as u16;
+    let text = JsFuture::from(
+        response
+            .text()
+            .map_err(|error| ApiClientError::Network(format!("{error:?}")))?,
+    )
+    .await
+    .map_err(|error| ApiClientError::Network(format!("{error:?}")))?
+    .as_string()
+    .unwrap_or_default();
+    Ok((status, text))
+}
+
+fn add_csrf_header(
+    request: &web_sys::Request,
+    window: &web_sys::Window,
+) -> Result<(), ApiClientError> {
+    let cookie_js = js_sys::eval("document.cookie").unwrap_or(wasm_bindgen::JsValue::NULL);
+    if let Some(cookie_str) = cookie_js.as_string() {
+        for cookie in cookie_str.split(';').map(str::trim) {
+            if let Some(value) = cookie.strip_prefix("__Host-cf-csrf=") {
+                request
+                    .headers()
+                    .set("X-CSRF-Token", value)
+                    .map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+                break;
+            }
+        }
+    }
+    let _ = window;
+    Ok(())
+}
+
+fn parse_policy_interchange_response<T: serde::de::DeserializeOwned>(
+    status: u16,
+    body: &str,
+) -> Result<T, ApiClientError> {
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            body: decode_api_error_message(body),
+        });
+    }
+    serde_json::from_str(body).map_err(|error| ApiClientError::Deserialize(error.to_string()))
+}
+
 pub async fn fetch_scanning_system_scans(
     system_id: &Uuid,
     limit: Option<i64>,

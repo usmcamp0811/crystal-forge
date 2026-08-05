@@ -32,6 +32,7 @@ pub fn PoliciesView() -> Element {
     let mut policy_library: Signal<Vec<PolicyDefinition>> = use_signal(Vec::new);
     let mut policies_load_error: Signal<Option<String>> = use_signal(|| None);
     let mut show_editor = use_signal(|| false);
+    let mut show_import = use_signal(|| false);
     let mut drawer_policy = use_signal(|| None::<PolicyDefinition>);
 
     use_effect(move || {
@@ -255,7 +256,7 @@ pub fn PoliciesView() -> Element {
                         id: "policies-io".to_string(),
                         items: vec![
                             if is_admin_user {
-                                IOMenuItem::disabled("Import policies…", "Import preview UI coming next")
+                                IOMenuItem::action("Import policies…")
                             } else {
                                 IOMenuItem::disabled("Import policies…", "Administrator permission required")
                             },
@@ -290,6 +291,7 @@ pub fn PoliciesView() -> Element {
                                 selected_version_ids.clone()
                             };
                             match idx {
+                                0 => show_import.set(true),
                                 1 | 4 => {
                                     let mut export_error = export_error;
                                     spawn(async move {
@@ -532,6 +534,27 @@ pub fn PoliciesView() -> Element {
                     edit_format: edit_format.clone(),
                     policy_library: policy_library.clone(),
                     on_close: move || show_editor.set(false),
+                }
+            }
+
+            if show_import() {
+                crate::components::policy::PolicyInterchangeModal {
+                    on_close: move |_| show_import.set(false),
+                    on_success: move |_| {
+                        let mut policy_library = policy_library;
+                        let mut policies_load_error = policies_load_error;
+                        spawn(async move {
+                            match policies_api::load_policies().await {
+                                policies_api::PolicyLoadResult::Ok(policies) => {
+                                    policy_library.set(policies);
+                                    policies_load_error.set(None);
+                                }
+                                policies_api::PolicyLoadResult::Err(error) => {
+                                    policies_load_error.set(Some(format!("Import succeeded, but refresh failed: {error}")));
+                                }
+                            }
+                        });
+                    },
                 }
             }
 

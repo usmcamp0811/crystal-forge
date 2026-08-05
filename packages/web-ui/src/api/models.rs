@@ -1222,6 +1222,37 @@ pub struct DeploymentPoliciesListResponse {
     pub system_counts: HashMap<Uuid, i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyInterchangePreviewPolicy {
+    pub lineage_id: Uuid,
+    pub version_id: Uuid,
+    pub version: String,
+    pub name: String,
+    pub policy_type: String,
+    pub implementation_state: String,
+    pub semantic_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyInterchangePreviewResponse {
+    pub source_sha256: String,
+    pub filename: Option<String>,
+    pub policy_count: usize,
+    pub policies: Vec<PolicyInterchangePreviewPolicy>,
+    pub publication_state: String,
+    pub enabled: bool,
+    pub trusted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyInterchangeImportResponse {
+    pub created_policy_count: u32,
+    pub reused_policy_count: u32,
+    pub publication_state: String,
+    pub enabled: bool,
+    pub trusted: bool,
+}
+
 /// Request to create a new deployment policy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateDeploymentPolicyRequest {
