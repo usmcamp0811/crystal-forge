@@ -257,7 +257,9 @@ fn parse_policy_interchange_response<T: serde::de::DeserializeOwned>(
     if !(200..300).contains(&status) {
         return Err(ApiClientError::Status {
             code: status,
-            body: decode_api_error_message(body),
+            // Policy interchange has a small endpoint-specific error contract
+            // (including conflict details). Preserve it for the UI adapter.
+            body: body.to_string(),
         });
     }
     serde_json::from_str(body).map_err(|error| ApiClientError::Deserialize(error.to_string()))

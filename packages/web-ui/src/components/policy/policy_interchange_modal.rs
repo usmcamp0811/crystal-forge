@@ -2,10 +2,115 @@
 
 use dioxus::prelude::*;
 
-use crate::api::client::{import_policy_interchange, preview_policy_interchange};
+use crate::api::client::{import_policy_interchange, preview_policy_interchange, ApiClientError};
 use crate::api::models::{PolicyInterchangeImportResponse, PolicyInterchangePreviewResponse};
 
 const MAX_POLICY_UPLOAD_BYTES: u64 = 50 * 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq)]
+enum PolicyImportDiagnosticSeverity {
+    Error,
+    Warning,
+    Information,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PolicyImportDiagnostic {
+    severity: PolicyImportDiagnosticSeverity,
+    code: String,
+    message: String,
+    policy_index: Option<usize>,
+    policy_name: Option<String>,
+    field_path: Option<String>,
+}
+
+impl PolicyImportDiagnostic {
+    fn error(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            severity: PolicyImportDiagnosticSeverity::Error,
+            code: code.into(),
+            message: message.into(),
+            policy_index: None,
+            policy_name: None,
+            field_path: None,
+        }
+    }
+
+    fn blocks_commit(&self) -> bool {
+        self.severity == PolicyImportDiagnosticSeverity::Error
+    }
+}
+
+fn normalize_policy_import_error(error: &ApiClientError) -> Vec<PolicyImportDiagnostic> {
+    let ApiClientError::Status { code, body } = error else {
+        return vec![PolicyImportDiagnostic::error(
+            "NETWORK_ERROR",
+            error.to_string(),
+        )];
+    };
+
+    if *code >= 500 {
+        return vec![PolicyImportDiagnostic::error(
+            "SERVER_ERROR",
+            "The server could not process the policy interchange request.",
+        )];
+    }
+
+    let payload = serde_json::from_str::<serde_json::Value>(body).ok();
+    let error_code = payload
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("HTTP_{code}"));
+    let message = payload
+        .as_ref()
+        .and_then(|value| value.get("message").or_else(|| value.get("error")))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| "The policy interchange request was rejected.".to_string());
+
+    if *code == 409 && error_code == "POLICY_SOURCE_DIGEST_MISMATCH" {
+        return vec![PolicyImportDiagnostic::error(
+            error_code,
+            "The selected file changed after preview. Preview it again before importing.",
+        )];
+    }
+
+    if let Some(conflicts) = payload
+        .as_ref()
+        .and_then(|value| value.get("conflicts"))
+        .and_then(serde_json::Value::as_array)
+    {
+        let diagnostics = conflicts
+            .iter()
+            .filter_map(|conflict| {
+                let message = conflict.get("message")?.as_str()?.to_string();
+                let code = conflict
+                    .get("code")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("POLICY_IMPORT_CONFLICT")
+                    .to_string();
+                Some(PolicyImportDiagnostic::error(code, message))
+            })
+            .collect::<Vec<_>>();
+        if !diagnostics.is_empty() {
+            return diagnostics;
+        }
+    }
+
+    let (code, message) = match *code {
+        403 => (
+            "AUTHORIZATION_REQUIRED".to_string(),
+            "Administrator permission is required to import policies.".to_string(),
+        ),
+        413 => ("POLICY_FILE_TOO_LARGE".to_string(), message),
+        415 => ("POLICY_FORMAT_UNSUPPORTED".to_string(), message),
+        422 => (error_code, message),
+        _ => (error_code, message),
+    };
+    vec![PolicyImportDiagnostic::error(code, message)]
+}
 
 #[derive(Clone, Debug, PartialEq)]
 struct ImportFile {
@@ -19,6 +124,7 @@ pub fn PolicyInterchangeModal(on_close: EventHandler<()>, on_success: EventHandl
     let mut preview = use_signal(|| None::<PolicyInterchangePreviewResponse>);
     let mut result = use_signal(|| None::<PolicyInterchangeImportResponse>);
     let mut error = use_signal(|| None::<String>);
+    let mut diagnostics = use_signal(Vec::<PolicyImportDiagnostic>::new);
     let mut busy = use_signal(|| false);
     let mut generation = use_signal(|| 0u64);
 
@@ -34,7 +140,13 @@ pub fn PolicyInterchangeModal(on_close: EventHandler<()>, on_success: EventHandl
         .unwrap_or(0);
     let can_preview =
         selected_file.read().is_some() && !busy() && file_size <= MAX_POLICY_UPLOAD_BYTES;
-    let can_commit = preview.read().is_some() && !busy() && error.read().is_none();
+    let diagnostics_snapshot = diagnostics.read().clone();
+    let can_commit = preview.read().is_some()
+        && !busy()
+        && error.read().is_none()
+        && !diagnostics_snapshot
+            .iter()
+            .any(PolicyImportDiagnostic::blocks_commit);
 
     rsx! {
         div {
@@ -71,6 +183,7 @@ pub fn PolicyInterchangeModal(on_close: EventHandler<()>, on_success: EventHandl
                             let mut preview = preview;
                             let mut result = result;
                             let mut error = error;
+                            let mut diagnostics = diagnostics;
                             let mut generation = generation;
                             generation += 1;
                             let file_generation = generation();
@@ -78,6 +191,7 @@ pub fn PolicyInterchangeModal(on_close: EventHandler<()>, on_success: EventHandl
                             preview.set(None);
                             result.set(None);
                             error.set(None);
+                            diagnostics.set(Vec::new());
                             let files = event.files();
                             if let Some(file) = files.into_iter().next() {
                                 let filename = file.name();
@@ -103,6 +217,29 @@ pub fn PolicyInterchangeModal(on_close: EventHandler<()>, on_success: EventHandl
                     if let Some(ref err) = *error.read() {
                         div { class: "sd-callout sd-callout-danger", role: "alert", "{err}" }
                     }
+                    for diagnostic in diagnostics_snapshot.iter() {
+                        div {
+                            class: if diagnostic.severity == PolicyImportDiagnosticSeverity::Error {
+                                "sd-callout sd-callout-danger"
+                            } else if diagnostic.severity == PolicyImportDiagnosticSeverity::Warning {
+                                "sd-callout sd-callout-warning"
+                            } else {
+                                "sd-callout sd-callout-info"
+                            },
+                            role: if diagnostic.blocks_commit() { "alert" } else { "status" },
+                            strong { "{diagnostic.code}: " }
+                            "{diagnostic.message}"
+                            if let Some(index) = diagnostic.policy_index {
+                                " (policy {index})"
+                            }
+                            if let Some(name) = diagnostic.policy_name.as_deref() {
+                                " — {name}"
+                            }
+                            if let Some(field) = diagnostic.field_path.as_deref() {
+                                " · {field}"
+                            }
+                        }
+                    }
                     div { class: "flex gap-2",
                         button {
                             class: "btn btn-primary focus-ring",
@@ -113,6 +250,7 @@ pub fn PolicyInterchangeModal(on_close: EventHandler<()>, on_success: EventHandl
                                 let mut preview = preview;
                                 let mut result = result;
                                 let mut error = error;
+                                let mut diagnostics = diagnostics;
                                 let request_generation = generation();
                                 busy.set(true);
                                 preview.set(None);
@@ -123,7 +261,11 @@ pub fn PolicyInterchangeModal(on_close: EventHandler<()>, on_success: EventHandl
                                     if generation() == request_generation {
                                         match response {
                                             Ok(response) => preview.set(Some(response)),
-                                            Err(api_error) => error.set(Some(api_error.to_string())),
+                                            Err(api_error) => {
+                                                diagnostics.set(normalize_policy_import_error(
+                                                    &api_error,
+                                                ));
+                                            }
                                         }
                                         busy.set(false);
                                     }
@@ -140,6 +282,7 @@ pub fn PolicyInterchangeModal(on_close: EventHandler<()>, on_success: EventHandl
                                 let mut busy = busy;
                                 let mut result = result;
                                 let mut error = error;
+                                let mut diagnostics = diagnostics;
                                 busy.set(true);
                                 error.set(None);
                                 spawn(async move {
@@ -152,10 +295,13 @@ pub fn PolicyInterchangeModal(on_close: EventHandler<()>, on_success: EventHandl
                                             on_success.call(());
                                         }
                                         Err(api_error) => {
-                                            if api_error.to_string().contains("POLICY_SOURCE_DIGEST_MISMATCH") {
+                                            let next_diagnostics = normalize_policy_import_error(&api_error);
+                                            if next_diagnostics.iter().any(|diagnostic| {
+                                                diagnostic.code == "POLICY_SOURCE_DIGEST_MISMATCH"
+                                            }) {
                                                 preview.set(None);
                                             }
-                                            error.set(Some(api_error.to_string()));
+                                            diagnostics.set(next_diagnostics);
                                             busy.set(false);
                                         }
                                     }
@@ -190,5 +336,69 @@ pub fn PolicyInterchangeModal(on_close: EventHandler<()>, on_success: EventHandl
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_policy_import_error, PolicyImportDiagnosticSeverity};
+    use crate::api::client::ApiClientError;
+
+    #[test]
+    fn digest_mismatch_is_a_blocking_typed_diagnostic() {
+        let diagnostics = normalize_policy_import_error(&ApiClientError::Status {
+            code: 409,
+            body: r#"{"error":"POLICY_SOURCE_DIGEST_MISMATCH","expected":"a","actual":"b"}"#
+                .to_string(),
+        });
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "POLICY_SOURCE_DIGEST_MISMATCH");
+        assert_eq!(
+            diagnostics[0].severity,
+            PolicyImportDiagnosticSeverity::Error
+        );
+        assert!(diagnostics[0].blocks_commit());
+    }
+
+    #[test]
+    fn validation_diagnostic_preserves_available_fields_without_raw_internals() {
+        let diagnostics = normalize_policy_import_error(&ApiClientError::Status {
+            code: 422,
+            body: r#"{"error":"POLICY_INTERCHANGE_INVALID","message":"config.rules is required","details":{"internal":"secret"}}"#
+                .to_string(),
+        });
+
+        assert_eq!(diagnostics[0].code, "POLICY_INTERCHANGE_INVALID");
+        assert_eq!(diagnostics[0].message, "config.rules is required");
+        assert!(!diagnostics[0].message.contains("secret"));
+    }
+
+    #[test]
+    fn server_errors_are_generic() {
+        let diagnostics = normalize_policy_import_error(&ApiClientError::Status {
+            code: 500,
+            body: r#"{"error":"Internal Server Error","message":"sql details"}"#.to_string(),
+        });
+
+        assert_eq!(diagnostics[0].code, "SERVER_ERROR");
+        assert_eq!(
+            diagnostics[0].message,
+            "The server could not process the policy interchange request."
+        );
+        assert!(!diagnostics[0].message.contains("sql"));
+    }
+
+    #[test]
+    fn conflict_list_becomes_separate_blocking_diagnostics() {
+        let diagnostics = normalize_policy_import_error(&ApiClientError::Status {
+            code: 422,
+            body: r#"{"error":"Assignment resolution conflict","conflicts":[{"code":"POLICY_VERSION_DIGEST_CONFLICT","message":"digest differs"}]}"#
+                .to_string(),
+        });
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "POLICY_VERSION_DIGEST_CONFLICT");
+        assert!(diagnostics[0].blocks_commit());
     }
 }
