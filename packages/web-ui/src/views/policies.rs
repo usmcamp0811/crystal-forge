@@ -786,11 +786,33 @@ fn sanitize_filename(value: &str) -> String {
             }
         })
         .collect();
-    let trimmed = sanitized.trim_matches('-');
+    let mut compact = String::with_capacity(sanitized.len());
+    for character in sanitized.chars() {
+        if character == '-' && compact.ends_with('-') {
+            continue;
+        }
+        compact.push(character);
+    }
+    let trimmed = compact.trim_matches('-');
     if trimmed.is_empty() {
         "policy".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod interchange_tests {
+    use super::sanitize_filename;
+
+    #[test]
+    fn export_filename_is_stable_and_safe() {
+        assert_eq!(
+            sanitize_filename("Firewall enabled / prod"),
+            "Firewall-enabled-prod"
+        );
+        assert_eq!(sanitize_filename("  "), "policy");
+        assert_eq!(sanitize_filename("bundle.v1"), "bundle.v1");
     }
 }
 
