@@ -1769,8 +1769,8 @@ pub async fn get_assignment(
         return forbidden();
     }
 
-    let row = sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, Option<Uuid>, Option<Uuid>, String, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
-            "SELECT id, current_version_id, bundle_version_id, scope_type, environment_id, system_id, enforcement_mode, assignment_overlay_digest, created_at, updated_at \
+    let row = sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, Option<Uuid>, Option<Uuid>, String, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, bool)>(
+            "SELECT id, current_version_id, bundle_version_id, scope_type, environment_id, system_id, enforcement_mode, assignment_overlay_digest, created_at, updated_at, active \
          FROM compliance_bundle_assignments WHERE id = $1",
     )
     .bind(assignment_id)
@@ -1788,37 +1788,56 @@ pub async fn get_assignment(
         digest,
         created_at,
         updated_at,
+        active,
     ) = match row {
         Ok(Some(r)) => r,
         Ok(None) => return not_found(),
         Err(_) => return internal_error("Failed to load assignment"),
     };
 
-    let scope_id = env_id.or(sys_id).unwrap_or_default();
+    let Some(scope_id) = env_id.or(sys_id) else {
+        return internal_error("Assignment has no target scope");
+    };
 
-    let exclusions: Vec<Uuid> = sqlx::query_scalar(
+    let exclusions: Vec<Uuid> = match sqlx::query_scalar(
         "SELECT policy_version_id FROM compliance_assignment_exclusions WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)",
     )
     .bind(assignment_id)
     .fetch_all(&pool)
-    .await
-    .unwrap_or_default();
+    .await {
+        Ok(values) => values,
+        Err(error) => {
+            tracing::error!(error = %error, %assignment_id, "failed to load assignment exclusions");
+            return internal_error("Failed to load assignment exclusions");
+        }
+    };
 
-    let additions: Vec<Uuid> = sqlx::query_scalar(
+    let additions: Vec<Uuid> = match sqlx::query_scalar(
         "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)",
     )
     .bind(assignment_id)
     .fetch_all(&pool)
-    .await
-    .unwrap_or_default();
+    .await {
+        Ok(values) => values,
+        Err(error) => {
+            tracing::error!(error = %error, %assignment_id, "failed to load assignment additions");
+            return internal_error("Failed to load assignment additions");
+        }
+    };
 
     let overrides = sqlx::query_as::<_, (Uuid, String, serde_json::Value)>(
         "SELECT policy_version_id, value_path, value FROM compliance_assignment_value_overrides WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)",
     )
     .bind(assignment_id)
     .fetch_all(&pool)
-    .await
-    .unwrap_or_default()
+    .await;
+    let overrides = match overrides {
+        Ok(values) => values,
+        Err(error) => {
+            tracing::error!(error = %error, %assignment_id, "failed to load assignment overrides");
+            return internal_error("Failed to load assignment overrides");
+        }
+    }
     .into_iter()
     .map(|(pvid, path, val)| crate::api::models::PolicyValueOverride {
         policy_version_id: pvid,
@@ -1852,7 +1871,7 @@ pub async fn get_assignment(
         additions,
         value_overrides: overrides,
         assignment_overlay_digest: digest,
-        active: true,
+        active,
         created_at,
         updated_at,
     };
