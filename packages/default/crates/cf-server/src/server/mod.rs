@@ -658,12 +658,16 @@ async fn load_policies_by_configuration_for_eval(
     .context("Failed to load systems for effective policy evaluation")?;
 
     let mut map: PoliciesByConfiguration = BTreeMap::new();
-    let mut policy_ids_by_config: BTreeMap<String, BTreeSet<uuid::Uuid>> = BTreeMap::new();
+    // A configuration can be evaluated once only when the complete effective
+    // semantic set is identical. Policy IDs alone are insufficient because
+    // assignment overrides can change config, mode, provenance, or digest
+    // while retaining the same version IDs.
+    let mut effective_digest_by_config: BTreeMap<String, String> = BTreeMap::new();
 
     for (system_id, config_name) in system_rows {
         let outcome = resolve_system_effective_policies(pool, system_id).await?;
-        let effective = match outcome {
-            ResolutionOutcome::Resolved(set) => set.policies,
+        let (effective_set_digest, effective) = match outcome {
+            ResolutionOutcome::Resolved(set) => (set.effective_set_digest, set.policies),
             ResolutionOutcome::Conflict(conflicts) => anyhow::bail!(
                 "Effective policy conflict for system {}: {}",
                 system_id,
@@ -714,16 +718,15 @@ async fn load_policies_by_configuration_for_eval(
             continue;
         }
 
-        let ids = assigned.iter().map(|policy| policy.policy_id).collect();
-        if let Some(existing) = policy_ids_by_config.get(&config_name) {
-            if existing != &ids {
+        if let Some(existing_digest) = effective_digest_by_config.get(&config_name) {
+            if existing_digest != &effective_set_digest {
                 anyhow::bail!(
-                    "Configuration {:?} resolves to different effective policy sets across systems",
-                    config_name
+                    "Configuration {:?} resolves to different effective policy semantics across systems ({} vs {})",
+                    config_name, existing_digest, effective_set_digest
                 );
             }
         } else {
-            policy_ids_by_config.insert(config_name.clone(), ids);
+            effective_digest_by_config.insert(config_name.clone(), effective_set_digest);
             map.insert(config_name, assigned);
         }
     }
