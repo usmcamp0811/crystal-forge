@@ -1,5 +1,7 @@
 use crate::config::CrystalForgeConfig;
-use crate::compliance::resolver::{AssignmentMode, ResolutionOutcome, resolve_system_effective_policies};
+use crate::compliance::resolver::{
+    AssignmentMode, EffectivePolicy, ResolutionOutcome, resolve_system_effective_policies,
+};
 use crate::models::deployment_policies::{
     ApprovalConfig, CanaryConfig, CveThresholdConfig, DeploymentPolicyRecord, TimeWindowConfig,
 };
@@ -210,7 +212,7 @@ impl DeploymentPolicyManager {
             .collect();
 
         // Build effective policy map for all systems in this flake batch.
-        let mut effective_policy_ids_by_system: HashMap<uuid::Uuid, Vec<uuid::Uuid>> =
+        let mut effective_policies_by_system: HashMap<uuid::Uuid, Vec<EffectivePolicy>> =
             HashMap::new();
         let mut all_policy_version_ids: HashSet<uuid::Uuid> = HashSet::new();
         let mut failed_policy_lookup_systems: HashSet<uuid::Uuid> = HashSet::new();
@@ -222,8 +224,7 @@ impl DeploymentPolicyManager {
                     // Report-only policies are evaluated by compliance paths but
                     // must never block or alter deployment configuration.
                     .filter(|policy| matches!(policy.effective_mode, AssignmentMode::Enforce))
-                    .map(|policy| policy.policy_version_id)
-                    .collect::<Vec<uuid::Uuid>>(),
+                    .collect::<Vec<EffectivePolicy>>(),
                 Ok(ResolutionOutcome::Conflict(conflicts)) => {
                     warn!(
                         "Effective policy conflict for {} ({}): {}; skipping deployment update",
@@ -247,10 +248,10 @@ impl DeploymentPolicyManager {
                     continue;
                 }
             };
-            for policy_id in &policy_ids {
-                all_policy_version_ids.insert(*policy_id);
+            for policy in &policy_ids {
+                all_policy_version_ids.insert(policy.policy_version_id);
             }
-            effective_policy_ids_by_system.insert(system.id, policy_ids);
+            effective_policies_by_system.insert(system.id, policy_ids);
         }
 
         let mut policies_by_id: HashMap<uuid::Uuid, DeploymentPolicyRecord> = HashMap::new();
@@ -326,7 +327,7 @@ impl DeploymentPolicyManager {
                     system,
                     latest_target_for_host,
                     &systems,
-                    &effective_policy_ids_by_system,
+                    &effective_policies_by_system,
                     &policies_by_id,
                     &failed_policy_loads,
                 )
@@ -417,15 +418,16 @@ impl DeploymentPolicyManager {
         system: &crate::models::systems::System,
         target: &crate::queries::derivations::HostLatestTarget,
         all_systems_for_flake: &[crate::models::systems::System],
-        effective_policy_ids_by_system: &HashMap<uuid::Uuid, Vec<uuid::Uuid>>,
+        effective_policies_by_system: &HashMap<uuid::Uuid, Vec<EffectivePolicy>>,
         policies_by_id: &HashMap<uuid::Uuid, DeploymentPolicyRecord>,
         failed_policy_loads: &HashSet<uuid::Uuid>,
     ) -> AdvancedGateDecision {
-        let Some(policy_ids) = effective_policy_ids_by_system.get(&system.id) else {
+        let Some(effective_policies) = effective_policies_by_system.get(&system.id) else {
             return AdvancedGateDecision::Allow;
         };
 
-        for policy_id in policy_ids {
+        for effective_policy in effective_policies {
+            let policy_id = &effective_policy.policy_version_id;
             if failed_policy_loads.contains(policy_id) {
                 return AdvancedGateDecision::Block(format!(
                     "Failed to load enabled deployment policy {}",
@@ -444,10 +446,19 @@ impl DeploymentPolicyManager {
                 continue;
             }
 
+            // The resolver has already applied assignment value overrides.  The
+            // legacy record is used only for policy type/metadata and as a
+            // defensive fallback for un-overridden policies.
+            let effective_config = if effective_policy.effective_config.is_null() {
+                policy.config.clone()
+            } else {
+                effective_policy.effective_config.clone()
+            };
+
             match policy.policy_type.as_str() {
                 "time_window" => {
                     let config =
-                        match serde_json::from_value::<TimeWindowConfig>(policy.config.clone()) {
+                        match serde_json::from_value::<TimeWindowConfig>(effective_config.clone()) {
                             Ok(config) => config,
                             Err(err) => {
                                 return AdvancedGateDecision::Block(format!(
@@ -464,7 +475,7 @@ impl DeploymentPolicyManager {
                 }
                 "require_approvals" => {
                     let config =
-                        match serde_json::from_value::<ApprovalConfig>(policy.config.clone()) {
+                        match serde_json::from_value::<ApprovalConfig>(effective_config.clone()) {
                             Ok(config) => config,
                             Err(err) => {
                                 return AdvancedGateDecision::Block(format!(
@@ -497,7 +508,7 @@ impl DeploymentPolicyManager {
                     }
                 }
                 "canary_rollout" => {
-                    let config = match serde_json::from_value::<CanaryConfig>(policy.config.clone())
+                    let config = match serde_json::from_value::<CanaryConfig>(effective_config.clone())
                     {
                         Ok(config) => config,
                         Err(err) => {
@@ -511,9 +522,13 @@ impl DeploymentPolicyManager {
                     let rollout_group: Vec<uuid::Uuid> = all_systems_for_flake
                         .iter()
                         .filter(|candidate| {
-                            effective_policy_ids_by_system
+                            effective_policies_by_system
                                 .get(&candidate.id)
-                                .map(|ids| ids.contains(policy_id))
+                                .map(|policies| {
+                                    policies
+                                        .iter()
+                                        .any(|candidate| candidate.policy_version_id == *policy_id)
+                                })
                                 .unwrap_or(false)
                         })
                         .map(|s| s.id)
@@ -549,7 +564,7 @@ impl DeploymentPolicyManager {
                 }
                 "cve_threshold" => {
                     let config =
-                        match serde_json::from_value::<CveThresholdConfig>(policy.config.clone()) {
+                        match serde_json::from_value::<CveThresholdConfig>(effective_config.clone()) {
                             Ok(config) => config,
                             Err(err) => {
                                 return AdvancedGateDecision::Block(format!(
