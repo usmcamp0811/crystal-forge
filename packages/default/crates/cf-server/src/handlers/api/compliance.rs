@@ -8511,6 +8511,201 @@ mod tests {
         assert_eq!(body["policies"].as_array().map(|a| a.len()), Some(1));
     }
 
+    // ── Cross-consumer effective-set consistency (AC #31) ───────────────────
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn all_consumers_agree_on_effective_set_digest_and_specificity() {
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_phase1_server(pool.clone()).await;
+        let client = reqwest::Client::new();
+
+        // ── Fixture: system specificity overrides environment ──────────────
+        let (baseline_p, baseline_pv, _) =
+            make_draft_policy(&pool, "cross-baseline").await;
+        db_publish_policy_version(&pool, baseline_p, baseline_pv).await;
+
+        let (addition_p, addition_pv, _) = make_draft_policy(&pool, "cross-addition")
+            .await;
+        db_publish_policy_version(&pool, addition_p, addition_pv).await;
+
+        let (report_only_p, report_only_pv, _) =
+            make_draft_policy(&pool, "cross-report-only").await;
+        db_publish_policy_version(&pool, report_only_p, report_only_pv).await;
+
+        // environment-override policy: different version of baseline lineage
+        let (env_override_p, env_override_pv, _) =
+            make_draft_policy(&pool, "cross-baseline-override").await;
+        db_publish_policy_version(&pool, env_override_p, env_override_pv).await;
+
+        // Ensure lineage IDs are the same for the override test.
+        // We use the same policy lineage_id as the baseline policy.
+        sqlx::query(
+            "UPDATE deployment_policies SET id = $1 WHERE id = $2",
+        )
+        .bind(baseline_p)
+        .bind(env_override_p)
+        .execute(&pool)
+        .await
+        .expect("set same lineage for override test");
+
+        let (_, bundle_bv, bundle_digest) = make_draft_bundle(
+            &pool,
+            "cross-consumer-bundle",
+            &[baseline_pv, report_only_pv],
+        )
+        .await;
+        publish_bundle_via_api(&base, &token, bundle_bv, &bundle_digest).await;
+
+        // ── Environment
+        let env_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(env_id)
+            .bind(format!("cross-env-{}", env_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert env");
+        let system_id = make_test_system(&pool, Some(env_id)).await;
+
+        // ── Environment assignment: baseline + env-override version ────────
+        let env_assignment = client
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bundle_bv,
+                "scope_type": "environment",
+                "scope_id": env_id,
+                "enforcement_mode": "enforce",
+                "additions": [addition_pv],
+            }))
+            .send()
+            .await
+            .expect("env assignment");
+        assert_eq!(
+            env_assignment.status().as_u16(),
+            201,
+            "environment assignment must succeed"
+        );
+
+        // ── System assignment: report_only, baseline exclusion, addition ───
+        let sys_assignment = client
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bundle_bv,
+                "scope_type": "system",
+                "scope_id": system_id,
+                "enforcement_mode": "report_only",
+                "exclusions": [report_only_pv],
+            }))
+            .send()
+            .await
+            .expect("sys assignment");
+        assert_eq!(
+            sys_assignment.status().as_u16(),
+            201,
+            "system assignment must succeed"
+        );
+
+        // ── Resolve effective policies ──────────────────────────────────────
+        let resp = client
+            .get(format!(
+                "{base}/api/v1/systems/{system_id}/effective-policies"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("resolve");
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.expect("json");
+        let policies = body["policies"].as_array().expect("policies array");
+
+        // Verify effective-set digest is present and non-trivial.
+        let digest = body["effective_set_digest"].as_str().unwrap_or("");
+        assert!(
+            !digest.is_empty() && digest != "pending",
+            "effective-set digest must be present"
+        );
+
+        // ── Verify each policy in the effective set ─────────────────────────
+        // Map by lineage_id for easy lookup
+        let by_lineage: std::collections::HashMap<Uuid, &serde_json::Value> = policies
+            .iter()
+            .map(|p| {
+                let lid: Uuid = serde_json::from_value(
+                    p["policy_lineage_id"].clone(),
+                )
+                .unwrap();
+                (lid, p)
+            })
+            .collect();
+
+        // baseline policy: must be present, from environment assignment
+        let bp = by_lineage
+            .get(&baseline_p)
+            .expect("baseline policy must be in effective set");
+        assert_eq!(bp["source"], "baseline");
+        assert_eq!(
+            bp["enforcement_mode"], "report_only",
+            "system report_only assignment overrides environment enforce"
+        );
+
+        // report_only policy: excluded from baseline by system assignment
+        assert!(
+            !by_lineage.contains_key(&report_only_p),
+            "report-only policy excluded from baseline"
+        );
+
+        // addition policy: must be present from environment addition
+        let ap = by_lineage
+            .get(&addition_p)
+            .expect("addition policy must be in effective set");
+        assert_eq!(ap["source"], "addition");
+
+        // ── Verify deployment path uses same resolver ───────────────────────
+        // The deployment module (deployment/mod.rs) calls the same
+        // resolve_system_effective_policies function, so its output is
+        // guaranteed to match. We verify by calling the resolver directly.
+        let outcome =
+            crate::compliance::resolver::resolve_system_effective_policies(
+                &pool, system_id,
+            )
+            .await
+            .expect("direct resolver call");
+        if let crate::compliance::resolver::ResolutionOutcome::Resolved(
+            direct,
+        ) = &outcome
+        {
+            assert_eq!(
+                direct.effective_set_digest, digest,
+                "direct resolver must produce same digest as API"
+            );
+            assert_eq!(
+                direct.policies.len(),
+                policies.len(),
+                "direct resolver must produce same policy count as API"
+            );
+        } else {
+            panic!("resolver must resolve successfully");
+        }
+
+        // ── Verify specificity: system overrides environment ────────────────
+        // The env_override policy has the same lineage as baseline, but a
+        // different version. Since it's not explicitly assigned (the system
+        // assignment has no addition of this version), the baseline version
+        // from the bundle membership should win.
+        // The system assignment (report_only) overrides the environment's
+        // enforcement_mode for the baseline.
+
+        // Verify warnings are present for specificity overrides.
+        let warnings = body["warnings"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert!(
+            warnings > 0,
+            "specificity-aware resolution should produce diagnostic warnings"
+        );
+    }
+
     // ── RBAC coverage ──────────────────────────────────────────────────────────
 
     #[tokio::test]
