@@ -1626,14 +1626,11 @@ fn evaluate_policy(system: &SystemRow, policy: &PolicyRow) -> PolicyEval {
 }
 
 /// Translate a PolicyEval into the ComplianceControlStatus used by rollups and
-/// evidence. Disabled and unsupported controls both surface as Warn so they are
-/// visible to reviewers, but the rollup excludes them from the total count so
-/// they don't deflate scores for controls Crystal Forge can't evaluate.
+/// evidence. Disabled and unsupported controls are selected but not evaluated.
 fn policy_status(system: &SystemRow, policy: &PolicyRow) -> ComplianceControlStatus {
     match evaluate_policy(system, policy) {
         PolicyEval::Evaluated(s) => s,
-        PolicyEval::Disabled => ComplianceControlStatus::Warn,
-        PolicyEval::Unsupported => ComplianceControlStatus::Warn,
+        PolicyEval::Disabled | PolicyEval::Unsupported => ComplianceControlStatus::NotChecked,
     }
 }
 
@@ -1641,7 +1638,7 @@ fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlE
     let eval = evaluate_policy(system, &policy);
     let status = match &eval {
         PolicyEval::Evaluated(s) => s.clone(),
-        PolicyEval::Disabled | PolicyEval::Unsupported => ComplianceControlStatus::Warn,
+        PolicyEval::Disabled | PolicyEval::Unsupported => ComplianceControlStatus::NotChecked,
     };
 
     let severity = match status {
