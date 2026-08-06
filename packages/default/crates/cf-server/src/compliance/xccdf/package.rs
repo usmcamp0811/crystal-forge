@@ -364,4 +364,47 @@ mod tests {
         );
         assert!(result.is_ok(), "no extension should be accepted");
     }
+
+    #[test]
+    fn processes_disa_style_zip_with_nested_xccdf_entry() {
+        use std::io::Write;
+
+        let mut zip_bytes = Vec::new();
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_bytes));
+        let options = zip::write::FileOptions::<()>::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        writer
+            .add_directory("U_Example_STIG/", zip::write::FileOptions::<()>::default())
+            .expect("directory entry");
+        writer
+            .start_file("U_Example_STIG/STIG_unclass.xsl", options)
+            .expect("stylesheet entry");
+        writer.write_all(b"<xsl:stylesheet/>").expect("stylesheet bytes");
+        writer
+            .start_file("U_Example_STIG/benchmark-xccdf.xml", options)
+            .expect("XCCDF entry");
+        writer
+            .write_all(&minimal_xccdf_bytes())
+            .expect("XCCDF bytes");
+        writer.finish().expect("finish archive");
+
+        let result = process_xccdf_bytes(
+            zip_bytes,
+            Some("U_Example_STIG.zip".into()),
+            &InterchangeLimits::default(),
+        )
+        .expect("Disa-style package should process");
+
+        assert_eq!(result.provenance.package_kind, PackageKind::Zip);
+        assert_eq!(result.provenance.archive_file_count, Some(2));
+        assert_eq!(
+            result.provenance.selected_entry.as_deref(),
+            Some("U_Example_STIG/benchmark-xccdf.xml")
+        );
+        assert_ne!(
+            result.provenance.sha256,
+            result.provenance.selected_xml_sha256.as_deref().unwrap()
+        );
+        assert_eq!(result.parsed.rules.len(), 1);
+    }
 }
