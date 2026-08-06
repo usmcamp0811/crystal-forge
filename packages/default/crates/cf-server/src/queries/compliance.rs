@@ -1358,6 +1358,9 @@ pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> Compli
     let mut warn = 0i64;
     let mut fail = 0i64;
     let waiver = 0i64;
+    let mut not_checked = 0i64;
+    let mut not_applicable = 0i64;
+    let mut error_count = 0i64;
     // Only policies that were actually evaluated count toward total and score.
     // Disabled and unsupported policies are surfaced as warn but excluded from
     // the denominator so they don't silently deflate the score.
@@ -1382,20 +1385,12 @@ pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> Compli
             }
             // New states: not_checked, not_applicable, and error are known
             // outcomes but must not inflate the evaluated denominator.
-            PolicyEval::Evaluated(ComplianceControlStatus::NotChecked)
-            | PolicyEval::Evaluated(ComplianceControlStatus::NotApplicable) => {
-                // Count in total but not evaluated; shown separately in UI.
-            }
+            PolicyEval::Evaluated(ComplianceControlStatus::NotChecked) => not_checked += 1,
+            PolicyEval::Evaluated(ComplianceControlStatus::NotApplicable) => not_applicable += 1,
             PolicyEval::Evaluated(ComplianceControlStatus::Error) => {
-                // Evaluator error: surface as warn so the UI shows something
-                // actionable, but do not count in the evaluated denominator.
-                warn += 1;
+                error_count += 1;
             }
-            // Disabled or unsupported: count in warn for visibility, but not
-            // in evaluated_total so they don't skew the percentage score.
-            PolicyEval::Disabled | PolicyEval::Unsupported => {
-                warn += 1;
-            }
+            PolicyEval::Disabled | PolicyEval::Unsupported => not_checked += 1,
         }
     }
 
@@ -1420,6 +1415,10 @@ pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> Compli
         warn,
         fail,
         waiver,
+        not_checked,
+        not_applicable,
+        error: error_count,
+        report_only: 0,
         score,
     }
 }
@@ -1440,8 +1439,6 @@ pub(crate) fn effective_policy_rollup(
     let mut not_checked = 0i64;
     let mut not_applicable = 0i64;
     let mut error_count = 0i64;
-    let mut manual = 0i64;
-    let mut unsupported = 0i64;
     let mut report_only = 0i64;
     let mut evaluated_total = 0i64;
 
@@ -1493,26 +1490,19 @@ pub(crate) fn effective_policy_rollup(
                     pass += 1;
                 }
             }
-            // Native types that the evaluator intrinsically supports.
+            // These policies require their real evaluation pipeline evidence;
+            // system health alone is not evidence that they passed.
             "require_packages" | "custom_check" | "time_window" | "require_approvals"
             | "canary_rollout" | "cve_threshold" => {
-                // These are natively evaluated by the deployment/evaluation
-                // pipeline; for a live system, a pass is assumed when the
-                // system is healthy and the policy is active.
-                if system.health_status == "healthy" || system.health_status == "online" {
-                    evaluated_total += 1;
-                    pass += 1;
-                } else {
-                    not_checked += 1;
-                }
+                not_checked += 1;
             }
             // Manual policies: counted but not evaluated.
             "manual" | "external" => {
-                manual += 1;
+                not_checked += 1;
             }
             // Unsupported / opaque: counted but not evaluated.
             _ => {
-                unsupported += 1;
+                not_checked += 1;
             }
         }
 
@@ -1527,10 +1517,6 @@ pub(crate) fn effective_policy_rollup(
         (pass * 100) / evaluated_total
     };
 
-    // Fold manual/unsupported into warn for backward compatibility in the
-    // existing UI, but also track them separately.
-    let warn_total = warn + manual + unsupported + error_count;
-
     ComplianceSystemRollup {
         system_id: system.id,
         hostname: system.hostname.clone(),
@@ -1539,9 +1525,13 @@ pub(crate) fn effective_policy_rollup(
         total,
         evaluated_total,
         pass,
-        warn: warn_total,
+        warn,
         fail,
         waiver,
+        not_checked,
+        not_applicable,
+        error: error_count,
+        report_only,
         score,
     }
 }

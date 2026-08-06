@@ -1414,6 +1414,18 @@ pub struct ComplianceSystemRollup {
     pub warn: i64,
     pub fail: i64,
     pub waiver: i64,
+    /// Selected controls with no applicable evidence.
+    #[serde(default)]
+    pub not_checked: i64,
+    /// Selected controls that do not apply to the target.
+    #[serde(default)]
+    pub not_applicable: i64,
+    /// Controls for which evaluation failed.
+    #[serde(default)]
+    pub error: i64,
+    /// Report-only controls in the effective set.
+    #[serde(default)]
+    pub report_only: i64,
     pub score: i64,
 }
 
