@@ -11,7 +11,8 @@ use crate::api::models::{
     ComplianceBundleSummary, ComplianceBundleSystemsResponse, ComplianceEvidenceResponse,
     CreateAssignmentRequest, CreateBundleDraftRequest, CreateComplianceBundleRequest,
     DeploymentPolicySummary, EnvironmentSummary, ImportedBundlePlan, PublishBundleVersionRequest,
-    TrustBundleVersionRequest, UpdateComplianceBundleRequest, XccdfImportPlan, XccdfImportResponse,
+    PolicyValueOverride, TrustBundleVersionRequest, UpdateComplianceBundleRequest, XccdfImportPlan,
+    XccdfImportResponse,
     XccdfPreviewResponse, XccdfRuleImportAction,
 };
 use crate::components::compliance::{
@@ -832,6 +833,7 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
     let mut enforcement_mode = use_signal(|| "enforce".to_string());
     let mut exclusions = use_signal(String::new);
     let mut additions = use_signal(String::new);
+    let mut value_overrides = use_signal(String::new);
     let mut busy = use_signal(|| false);
     let mut success = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
@@ -879,6 +881,16 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
                             option { value: "enforce", "Enforce (default)" }
                             option { value: "report_only", "Report only" }
                         }
+                    }
+                }
+                div { class: "field",
+                    label { "Value overrides (JSON array)" }
+                    textarea {
+                        class: "input focus-ring mono",
+                        rows: "2",
+                        placeholder: "JSON array of policy_version_id, value_path, and value",
+                        value: "{value_overrides.read()}",
+                        oninput: move |e| value_overrides.set(e.value()),
                     }
                 }
 
@@ -951,6 +963,18 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
                             error.set(Some("Additions must be comma-separated UUIDs".to_string()));
                             return;
                         };
+                        let override_text = value_overrides.read().trim().to_string();
+                        let parsed_overrides = if override_text.is_empty() {
+                            Vec::new()
+                        } else {
+                            match serde_json::from_str::<Vec<PolicyValueOverride>>(&override_text) {
+                                Ok(value) => value,
+                                Err(_) => {
+                                    error.set(Some("Overrides must be a JSON array of typed values".to_string()));
+                                    return;
+                                }
+                            }
+                        };
                         let req = CreateAssignmentRequest {
                             bundle_version_id: props.bundle_version_id,
                             scope_type: scope_type.read().clone(),
@@ -958,7 +982,7 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
                             enforcement_mode: Some(enforcement_mode.read().clone()),
                             exclusions: (!exclusion_ids.is_empty()).then_some(exclusion_ids),
                             additions: (!addition_ids.is_empty()).then_some(addition_ids),
-                            value_overrides: None,
+                            value_overrides: (!parsed_overrides.is_empty()).then_some(parsed_overrides),
                         };
                         busy.set(true);
                         error.set(None);
@@ -1042,6 +1066,20 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                 let assignment_id = assignment.id;
                 let current_mode = assignment.enforcement_mode.clone();
                 let current_version = assignment.current_version_id;
+                let current_exclusions_text = assignment
+                    .exclusions
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let current_additions_text = assignment
+                    .additions
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let current_overrides_text = serde_json::to_string(&assignment.value_overrides)
+                    .unwrap_or_else(|_| "[]".to_string());
                 let mut deleting = use_signal(|| false);
                 let mut editing = use_signal(|| false);
                 let mut edit_mode = use_signal(|| current_mode.clone());
@@ -1061,8 +1099,13 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                         .collect::<Vec<_>>()
                         .join(", ")
                 });
+                let mut edit_overrides = use_signal(|| current_overrides_text.clone());
                 let mut edit_busy = use_signal(|| false);
                 let mut edit_error = use_signal(|| None::<String>);
+                let edits_dirty = *edit_mode.read() != current_mode
+                    || *edit_exclusions.read() != current_exclusions_text
+                    || *edit_additions.read() != current_additions_text
+                    || *edit_overrides.read() != current_overrides_text;
                 rsx! {
                     div { class: "card", style: "padding:10px 14px;display:flex;flex-direction:column;gap:6px;",
                         div { style: "display:flex;justify-content:space-between;align-items:center;",
@@ -1128,10 +1171,18 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                     value: "{edit_additions.read()}",
                                     oninput: move |e| edit_additions.set(e.value()),
                                 }
+                                textarea {
+                                    class: "input xs mono",
+                                    style: "flex:1;",
+                                    rows: "2",
+                                    placeholder: "typed overrides JSON",
+                                    value: "{edit_overrides.read()}",
+                                    oninput: move |e| edit_overrides.set(e.value()),
+                                }
                                 button {
                                     class: "btn btn-primary xs focus-ring",
                                     style: "font-size:10px;",
-                                    disabled: *edit_busy.read() || *edit_mode.read() == current_mode,
+                                    disabled: *edit_busy.read() || !edits_dirty,
                                     onclick: {
                                         let a_id = assignment_id;
                                         let cm = current_version;
@@ -1139,6 +1190,7 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                         let scope_id = props.scope_id;
                                         let exclusions_text = edit_exclusions.read().clone();
                                         let additions_text = edit_additions.read().clone();
+                                        let overrides_text = edit_overrides.read().clone();
                                         move |_| {
                                             let Ok(exclusions) = parse_uuid_list(&exclusions_text) else {
                                                 edit_error.set(Some("Exclusions must be comma-separated UUIDs".to_string()));
@@ -1148,6 +1200,10 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                                 edit_error.set(Some("Additions must be comma-separated UUIDs".to_string()));
                                                 return;
                                             };
+                                            let Ok(value_overrides) = serde_json::from_str::<Vec<PolicyValueOverride>>(&overrides_text) else {
+                                                edit_error.set(Some("Overrides must be a JSON array of typed values".to_string()));
+                                                return;
+                                            };
                                             edit_busy.set(true);
                                             edit_error.set(None);
                                             let body = serde_json::json!({
@@ -1155,6 +1211,7 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                                 "enforcement_mode": (*edit_mode.read()).clone(),
                                                 "exclusions": exclusions,
                                                 "additions": additions,
+                                                "value_overrides": value_overrides,
                                             });
                                             let st = scope_type.clone();
                                             let si = scope_id;
