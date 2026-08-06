@@ -32,8 +32,8 @@
 use std::collections::BTreeMap;
 use std::io::Cursor;
 
-use quick_xml::Writer;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
+use quick_xml::Writer;
 
 use super::super::canonical::{ImplementationState, PublicationState};
 use super::super::interchange::{
@@ -2926,7 +2926,10 @@ mod tests {
         assert_eq!(crystal_forge.multi_check, None);
         assert_eq!(crystal_forge.negate, None);
         assert_eq!(crystal_forge.body_parts.len(), 1);
-        assert!(matches!(&crystal_forge.body_parts[0], CheckBodyPart::Inline { .. }));
+        assert!(matches!(
+            &crystal_forge.body_parts[0],
+            CheckBodyPart::Inline { .. }
+        ));
     }
 
     fn full_test_snapshot() -> XccdfBundleExport {
@@ -3471,23 +3474,28 @@ mod tests {
         );
     }
 
+    /// Reference followed by inline fallback is valid per XCCDF 1.1/1.2 and must export.
     #[test]
-    fn check_with_both_inline_and_reference_is_rejected() {
+    fn check_with_reference_then_inline_exports_successfully() {
         let mut policy = test_policy("require_cf_agent", ImplementationState::External, json!({}));
         policy.compliance_metadata = json!({
             "check": {
                 "system": "http://example.com/check",
-                "content": "Inline text",
-                "content_ref_href": "some-ref.xml"
+                "content_ref_href": "some-ref.xml",
+                "content_ref_name": "M",
+                "content": "Inline fallback text"
             }
         });
         let snap = make_single_policy_snapshot(vec![policy]);
+        let xml =
+            write_bundle_xccdf_export(&snap).expect("ref+inline check must export successfully");
         assert!(
-            matches!(
-                write_bundle_xccdf_export(&snap),
-                Err(XccdfWriterError::MalformedImportedCheck { .. })
-            ),
-            "Ambiguous check body must be rejected"
+            xml.contains("some-ref.xml"),
+            "reference href must be in output"
+        );
+        assert!(
+            xml.contains("Inline fallback text"),
+            "inline fallback must be in output"
         );
     }
 

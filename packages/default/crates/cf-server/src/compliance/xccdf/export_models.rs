@@ -114,7 +114,8 @@ pub struct XccdfPolicyExport {
 pub enum ImportedCheckError {
     /// The `check` object exists but `system` is missing or not a string.
     MissingSystem,
-    /// Both inline content and a reference are present.
+    /// Multiple inline check-content elements are present (only one is allowed).
+    /// References followed by one inline fallback are valid per XCCDF 1.1/1.2.
     AmbiguousBody,
     /// A content-ref name was given without an href.
     RefNameWithoutHref,
@@ -145,8 +146,8 @@ impl std::fmt::Display for ImportedCheckError {
             ),
             Self::AmbiguousBody => write!(
                 f,
-                "compliance_metadata.check has both inline content and a content-ref; \
-                 XCCDF requires exactly one"
+                "compliance_metadata.check contains multiple inline check-content elements; \
+                 only one inline fallback is allowed (references before inline are valid)"
             ),
             Self::RefNameWithoutHref => write!(
                 f,
@@ -263,12 +264,15 @@ impl XccdfPolicyExport {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_owned();
-                        if has_reference {
-                            return Err(ImportedCheckError::AmbiguousBody);
-                        }
+                        // XCCDF allows at most one inline check-content per check.
                         if has_inline {
                             return Err(ImportedCheckError::AmbiguousBody);
                         }
+                        // A reference appearing after an inline body is invalid;
+                        // here we are reconstructing from stored metadata so if
+                        // the body was parsed correctly, inline follows references.
+                        // Just reject if we see inline before any previously pushed
+                        // reference — that means the stored data is malformed.
                         has_inline = true;
                         body_parts.push(XccdfCheckBodyPart::Inline { content });
                     }
@@ -278,10 +282,8 @@ impl XccdfPolicyExport {
                             .and_then(|v| v.as_str())
                             .ok_or(ImportedCheckError::ReferenceOnlyWithoutFallback)?
                             .to_owned();
-                        let name = part
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_owned);
+                        let name = part.get("name").and_then(|v| v.as_str()).map(str::to_owned);
+                        // A reference after inline is invalid per XCCDF sequence rules.
                         if has_inline {
                             return Err(ImportedCheckError::AmbiguousBody);
                         }
@@ -308,27 +310,51 @@ impl XccdfPolicyExport {
                 .and_then(|v| v.as_str())
                 .is_some();
 
-            if has_legacy_inline && has_legacy_href {
-                return Err(ImportedCheckError::AmbiguousBody);
-            } else if has_legacy_name && !has_legacy_href {
+            // Legacy flat shape — reconstruct ordered body parts.
+            // ref+inline is valid: references appear before inline fallback.
+            if has_legacy_name && !has_legacy_href {
                 return Err(ImportedCheckError::RefNameWithoutHref);
-            } else if has_legacy_inline {
+            }
+            if has_legacy_href {
+                let href = value
+                    .get("content_ref_href")
+                    .and_then(|v| v.as_str())
+                    .unwrap()
+                    .to_owned();
+                let name = value
+                    .get("content_ref_name")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                body_parts.push(XccdfCheckBodyPart::Reference { href, name });
+            }
+            if has_legacy_inline {
                 let content = value
                     .get("content")
                     .and_then(|v| v.as_str())
                     .unwrap()
                     .to_owned();
                 body_parts.push(XccdfCheckBodyPart::Inline { content });
-            } else if has_legacy_href {
-                // Reference-only checks are rejected for standalone XCCDF export.
-                return Err(ImportedCheckError::ReferenceOnlyWithoutFallback);
-            } else {
+            }
+            if body_parts.is_empty() {
                 return Err(ImportedCheckError::EmptyBody);
+            }
+            // Reference-only (no inline fallback) is rejected for standalone XCCDF
+            // export because the referenced external file is not included in the
+            // single-document export.  ref+inline is valid and supported.
+            if has_legacy_href && !has_legacy_inline {
+                return Err(ImportedCheckError::ReferenceOnlyWithoutFallback);
             }
         }
 
         if body_parts.is_empty() {
             return Err(ImportedCheckError::EmptyBody);
+        }
+
+        // Reference-only (no inline fallback) is rejected for standalone XCCDF
+        // export because the referenced external file is not bundled.
+        // ref+inline is valid and emitted with references before fallback text.
+        if has_reference && !has_inline {
+            return Err(ImportedCheckError::ReferenceOnlyWithoutFallback);
         }
 
         let selector = value

@@ -15,7 +15,7 @@ use std::io::Cursor;
 use uuid::Uuid;
 
 use super::super::interchange::{
-    CF_XCCDF_NAMESPACE, InterchangeLimits, XCCDF_1_1_NAMESPACE, XCCDF_NAMESPACE,
+    InterchangeLimits, CF_XCCDF_NAMESPACE, XCCDF_1_1_NAMESPACE, XCCDF_NAMESPACE,
 };
 use super::models::*;
 
@@ -531,12 +531,15 @@ impl ParserState {
                         check.body_error = true;
                         return ParseControl::Abort;
                     };
-                    // Valid: inline + any reference is ambiguous.
-                    // Valid: multiple references with no inline content (common in XCCDF 1.1/1.2).
+                    // XCCDF 1.1 §7.7.2.5 / XCCDF 1.2 §7.7.3.4:
+                    //   A <check> MAY contain zero-or-more <check-content-ref> followed by
+                    //   zero-or-one <check-content>.  References appear before any inline
+                    //   fallback.  A reference after an inline body violates the schema
+                    //   sequence and is rejected.
                     if check.has_inline {
                         self.errors.push(Diagnostic::error(
-                            "CHECK_BODY_AMBIGUOUS",
-                            "check contains inline check-content together with a check-content-ref",
+                            "CHECK_REFERENCE_AFTER_INLINE",
+                            "check-content-ref must appear before any inline check-content element",
                         ));
                         check.body_error = true;
                     }
@@ -772,13 +775,18 @@ impl ParserState {
             }
             (ElementNamespace::Xccdf, b"check-content") => {
                 if let Some(ref mut check) = self.current_check {
-                    if !check.body_parts.is_empty() || check.has_inline {
+                    if check.has_inline {
+                        // XCCDF allows at most one inline check-content per check.
                         self.errors.push(Diagnostic::error(
-                            "CHECK_BODY_AMBIGUOUS",
-                            "check contains more than one check-content or check-content and check-content-ref together",
+                            "CHECK_INLINE_DUPLICATE",
+                            "check contains more than one inline check-content element",
                         ));
                         check.body_error = true;
                     } else {
+                        // XCCDF 1.1 §7.7.2.5: zero-or-more check-content-ref followed by
+                        // zero-or-one check-content.  An inline fallback after references is
+                        // valid and is the pattern used by official DISA STIGs that reference
+                        // external OVAL/STIG data but embed a manual check procedure.
                         check.has_inline = true;
                         check.body_parts.push(CheckBodyPart::Inline {
                             content: self.current_text.clone(),
@@ -1382,12 +1390,10 @@ mod tests {
   </Rule>
 </Benchmark>"#;
         let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
-        assert!(
-            parsed
-                .errors
-                .iter()
-                .any(|error| error.code == "INVALID_XSD_BOOLEAN")
-        );
+        assert!(parsed
+            .errors
+            .iter()
+            .any(|error| error.code == "INVALID_XSD_BOOLEAN"));
     }
 
     #[test]
@@ -1399,17 +1405,16 @@ mod tests {
             &InterchangeLimits::default(),
         )
         .unwrap();
-        assert!(
-            parsed
-                .errors
-                .iter()
-                .any(|error| error.code == "CHECK_BODY_MISSING")
-        );
+        assert!(parsed
+            .errors
+            .iter()
+            .any(|error| error.code == "CHECK_BODY_MISSING"));
         assert!(parsed.rules[0].checks.is_empty());
     }
 
+    /// Reference appearing AFTER inline body is invalid per XCCDF sequence.
     #[test]
-    fn rejects_check_with_inline_and_reference_bodies() {
+    fn rejects_check_with_reference_after_inline_body() {
         let parsed = parse_xccdf(
             doc_with_body(
                 r#"<Rule id="r"><title>Rule</title><check system="s"><check-content>one</check-content><check-content-ref href="checks.xml"/></check></Rule>"#,
@@ -1422,11 +1427,13 @@ mod tests {
             parsed
                 .errors
                 .iter()
-                .any(|error| error.code == "CHECK_BODY_AMBIGUOUS")
+                .any(|error| error.code == "CHECK_REFERENCE_AFTER_INLINE"),
+            "reference after inline must produce CHECK_REFERENCE_AFTER_INLINE"
         );
         assert!(parsed.rules[0].checks.is_empty());
     }
 
+    /// Multiple inline bodies are always invalid.
     #[test]
     fn rejects_check_with_two_inline_bodies() {
         let parsed = parse_xccdf(
@@ -1441,9 +1448,87 @@ mod tests {
             parsed
                 .errors
                 .iter()
-                .any(|error| error.code == "CHECK_BODY_AMBIGUOUS")
+                .any(|error| error.code == "CHECK_INLINE_DUPLICATE"),
+            "two inline elements must produce CHECK_INLINE_DUPLICATE"
         );
         assert!(parsed.rules[0].checks.is_empty());
+    }
+
+    /// DISA STIG pattern: reference with inline fallback.
+    /// This is the canonical structure used by the Anduril NixOS V1R1 STIG —
+    /// 104 rules each contain one check-content-ref followed by check-content.
+    #[test]
+    fn accepts_check_reference_with_inline_fallback() {
+        let parsed = parse_xccdf(
+            doc_with_body(
+                r#"<Rule id="SV-test-r1_rule"><title>Test Rule</title>
+                   <check system="C-test-r1_chk">
+                     <check-content-ref href="Anduril_NixOS_STIG.xml" name="M"/>
+                     <check-content>Verify the setting is correct.</check-content>
+                   </check></Rule>"#,
+            )
+            .as_bytes(),
+            None,
+            &InterchangeLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            parsed.errors.iter().all(|e| !e.blocking),
+            "ref+inline combination must produce no blocking errors, got: {:?}",
+            parsed
+                .errors
+                .iter()
+                .filter(|e| e.blocking)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(parsed.rules.len(), 1);
+        let check = parsed.rules[0].checks.first().expect("check");
+        assert_eq!(check.body_parts.len(), 2, "must preserve both body parts");
+        assert!(
+            matches!(&check.body_parts[0], CheckBodyPart::Reference { href, name }
+                if href == "Anduril_NixOS_STIG.xml" && name.as_deref() == Some("M")),
+            "first body part must be the reference"
+        );
+        assert!(
+            matches!(&check.body_parts[1], CheckBodyPart::Inline { content } if !content.is_empty()),
+            "second body part must be the inline fallback"
+        );
+    }
+
+    /// Multiple references followed by one inline fallback — also valid.
+    #[test]
+    fn preserves_multiple_references_followed_by_inline_fallback() {
+        let parsed = parse_xccdf(
+            doc_with_body(
+                r#"<Rule id="r"><title>Rule</title>
+                   <check system="s">
+                     <check-content-ref href="a.xml" name="A"/>
+                     <check-content-ref href="b.xml"/>
+                     <check-content>Manual fallback text.</check-content>
+                   </check></Rule>"#,
+            )
+            .as_bytes(),
+            None,
+            &InterchangeLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            parsed.errors.iter().all(|e| !e.blocking),
+            "multiple refs+inline must produce no blocking errors"
+        );
+        let check = parsed.rules[0].checks.first().expect("check");
+        assert_eq!(
+            check.body_parts.len(),
+            3,
+            "must preserve all three body parts"
+        );
+        assert!(
+            matches!(&check.body_parts[0], CheckBodyPart::Reference { href, .. } if href == "a.xml")
+        );
+        assert!(
+            matches!(&check.body_parts[1], CheckBodyPart::Reference { href, .. } if href == "b.xml")
+        );
+        assert!(matches!(&check.body_parts[2], CheckBodyPart::Inline { .. }));
     }
 
     #[test]
@@ -1466,8 +1551,12 @@ mod tests {
         );
         let check = parsed.rules[0].checks.first().expect("check");
         assert_eq!(check.body_parts.len(), 2);
-        assert!(matches!(&check.body_parts[0], CheckBodyPart::Reference { href, .. } if href == "one.xml"));
-        assert!(matches!(&check.body_parts[1], CheckBodyPart::Reference { href, .. } if href == "two.xml"));
+        assert!(
+            matches!(&check.body_parts[0], CheckBodyPart::Reference { href, .. } if href == "one.xml")
+        );
+        assert!(
+            matches!(&check.body_parts[1], CheckBodyPart::Reference { href, .. } if href == "two.xml")
+        );
     }
 
     #[test]
@@ -1541,12 +1630,10 @@ mod tests {
         }
         xml.push_str("</Benchmark>");
         let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
-        assert!(
-            parsed
-                .errors
-                .iter()
-                .any(|e| e.code == "RULE_LIMIT_EXCEEDED")
-        );
+        assert!(parsed
+            .errors
+            .iter()
+            .any(|e| e.code == "RULE_LIMIT_EXCEEDED"));
         assert!(parsed.rules.len() <= 2);
     }
 
@@ -1563,12 +1650,10 @@ mod tests {
   <version>0.1</version>
 </Benchmark>"#;
         let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
-        assert!(
-            parsed
-                .errors
-                .iter()
-                .any(|e| e.code == "ATTRIBUTE_LIMIT_EXCEEDED")
-        );
+        assert!(parsed
+            .errors
+            .iter()
+            .any(|e| e.code == "ATTRIBUTE_LIMIT_EXCEEDED"));
     }
 
     #[test]
@@ -1667,12 +1752,10 @@ mod tests {
 </Benchmark>"#
         );
         let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
-        assert!(
-            parsed
-                .errors
-                .iter()
-                .any(|e| e.code == "XML_UNKNOWN_NAMESPACE_PREFIX" && e.blocking)
-        );
+        assert!(parsed
+            .errors
+            .iter()
+            .any(|e| e.code == "XML_UNKNOWN_NAMESPACE_PREFIX" && e.blocking));
         assert_eq!(parsed.class, DocumentClass::InvalidXccdf);
     }
 
@@ -1769,12 +1852,10 @@ mod tests {
 </Benchmark>"#
         );
         let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
-        assert!(
-            parsed
-                .errors
-                .iter()
-                .any(|e| e.code == "DUPLICATE_BENCHMARK_ID" && e.blocking)
-        );
+        assert!(parsed
+            .errors
+            .iter()
+            .any(|e| e.code == "DUPLICATE_BENCHMARK_ID" && e.blocking));
     }
 
     #[test]
@@ -1797,12 +1878,10 @@ mod tests {
         };
         let body = r#"<Group id="g1"/><Group id="g2"/><Group id="g3"/>"#;
         let parsed = parse_xccdf(doc_with_body(body).as_bytes(), None, &limits).unwrap();
-        assert!(
-            parsed
-                .errors
-                .iter()
-                .any(|e| e.code == "GROUP_LIMIT_EXCEEDED" && e.blocking)
-        );
+        assert!(parsed
+            .errors
+            .iter()
+            .any(|e| e.code == "GROUP_LIMIT_EXCEEDED" && e.blocking));
         assert!(parsed.groups.len() <= 1);
     }
 
@@ -1814,12 +1893,10 @@ mod tests {
         };
         let body = r#"<Value id="v1"/><Value id="v2"/><Value id="v3"/>"#;
         let parsed = parse_xccdf(doc_with_body(body).as_bytes(), None, &limits).unwrap();
-        assert!(
-            parsed
-                .errors
-                .iter()
-                .any(|e| e.code == "VALUE_LIMIT_EXCEEDED" && e.blocking)
-        );
+        assert!(parsed
+            .errors
+            .iter()
+            .any(|e| e.code == "VALUE_LIMIT_EXCEEDED" && e.blocking));
         assert!(parsed.values.len() <= 1);
     }
 
@@ -2087,6 +2164,133 @@ mod tests {
         );
         let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
         assert_eq!(parsed.xccdf_namespace_version, Some("1.2"));
+    }
+
+    /// Real artifact regression: U_Anduril_NixOS_V1R1_STIG.zip
+    /// Every one of the 104 rules contains a check with one check-content-ref
+    /// followed by one check-content (manual fallback).  This combination was
+    /// incorrectly rejected as CHECK_BODY_AMBIGUOUS before this fix.
+    ///
+    /// Run with the real artifact:
+    ///   CF_TEST_ANDURIL_STIG_ZIP=.../U_Anduril_NixOS_V1R1_STIG.zip \
+    ///   cargo test anduril_nixos_v1r1_stig -- --ignored --nocapture
+    #[test]
+    #[ignore = "reads real artifact from CF_TEST_ANDURIL_STIG_ZIP env var"]
+    fn anduril_nixos_v1r1_stig_parses_without_blocking_errors() {
+        let path = std::env::var("CF_TEST_ANDURIL_STIG_ZIP")
+            .expect("CF_TEST_ANDURIL_STIG_ZIP must be set");
+        let zip_bytes = std::fs::read(&path).expect("read zip");
+        let pkg = crate::compliance::xccdf::package::process_xccdf_bytes(
+            zip_bytes,
+            Some(
+                std::path::Path::new(&path)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            &InterchangeLimits::default(),
+        )
+        .expect("process_xccdf_bytes must succeed");
+
+        let parsed = &pkg.parsed;
+        let blocking: Vec<_> = parsed.errors.iter().filter(|e| e.blocking).collect();
+        assert!(
+            blocking.is_empty(),
+            "must have no blocking errors, got: {:?}",
+            blocking
+        );
+
+        let ambiguous: Vec<_> = parsed
+            .errors
+            .iter()
+            .filter(|e| e.code.contains("AMBIGUOUS"))
+            .collect();
+        assert!(
+            ambiguous.is_empty(),
+            "must have 0 CHECK_BODY_AMBIGUOUS errors, got {}",
+            ambiguous.len()
+        );
+
+        assert!(
+            parsed.rules.len() >= 100,
+            "expected at least 100 rules, got {}",
+            parsed.rules.len()
+        );
+
+        let ref_and_inline: usize = parsed
+            .rules
+            .iter()
+            .flat_map(|r| r.checks.iter())
+            .filter(|check| {
+                let has_ref = check
+                    .body_parts
+                    .iter()
+                    .any(|p| matches!(p, CheckBodyPart::Reference { .. }));
+                let has_inline = check
+                    .body_parts
+                    .iter()
+                    .any(|p| matches!(p, CheckBodyPart::Inline { .. }));
+                has_ref && has_inline
+            })
+            .count();
+        println!("Rules: {}", parsed.rules.len());
+        println!("Profiles: {}", parsed.profiles.len());
+        println!("Checks with ref+inline: {}", ref_and_inline);
+        assert!(
+            ref_and_inline > 0,
+            "expected checks with both ref and inline fallback"
+        );
+    }
+
+    /// Deterministic fixture that mirrors the Anduril STIG V1R1 check pattern.
+    /// Unlike the ignored real-artifact test, this always runs.
+    #[test]
+    fn anduril_stig_check_pattern_fixture() {
+        // 3 rules × check with 1 ref + 1 inline (the actual STIG pattern).
+        let body = (1..=3)
+            .map(|i| {
+                format!(
+                    r#"<Rule id="SV-{i:06}r1_rule" severity="medium">
+                     <title>Rule {i}</title>
+                     <check system="C-{i:06}r1_chk">
+                       <check-content-ref href="Anduril_NixOS_STIG.xml" name="M"/>
+                       <check-content>Verify step {i}.</check-content>
+                     </check>
+                   </Rule>"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.1"
+    id="Anduril_NixOS_STIG" xml:lang="en">
+  <status date="2024-10-25">accepted</status>
+  <title>Anduril NixOS STIG Fixture</title>
+  <version>1</version>
+  {body}
+</Benchmark>"#
+        );
+        let limits = InterchangeLimits::default();
+        let parsed = parse_xccdf(xml.as_bytes(), Some("fixture.xml"), &limits).unwrap();
+
+        let blocking: Vec<_> = parsed.errors.iter().filter(|e| e.blocking).collect();
+        assert!(
+            blocking.is_empty(),
+            "STIG check pattern must produce no blocking errors, got: {:?}",
+            blocking
+        );
+        assert_eq!(parsed.rules.len(), 3, "3 rules expected");
+        for rule in &parsed.rules {
+            let check = rule.checks.first().expect("each rule has a check");
+            assert_eq!(check.body_parts.len(), 2, "ref+inline = 2 body parts");
+            assert!(
+                matches!(&check.body_parts[0], CheckBodyPart::Reference { href, name }
+                    if href == "Anduril_NixOS_STIG.xml" && name.as_deref() == Some("M"))
+            );
+            assert!(matches!(&check.body_parts[1], CheckBodyPart::Inline { .. }));
+        }
     }
 
     #[test]
