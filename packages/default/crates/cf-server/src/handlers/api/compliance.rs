@@ -1010,6 +1010,7 @@ fn effective_set_to_response(
             let source = match p.source {
                 EffectivePolicySource::Baseline => "baseline",
                 EffectivePolicySource::Addition => "addition",
+                EffectivePolicySource::LegacyDirect => "legacy_direct",
             };
             let mode = p.effective_mode.as_str().to_string();
             let overrides = p
