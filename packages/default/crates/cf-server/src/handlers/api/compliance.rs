@@ -1043,6 +1043,7 @@ fn effective_set_to_response(
         policies,
         effective_set_digest: set.effective_set_digest,
         warnings: set.warnings,
+        rollup: None,
     }
 }
 
@@ -2089,19 +2090,24 @@ pub async fn get_system_effective_policies(
         return forbidden();
     }
 
-    // Verify the system exists.
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM systems WHERE id = $1)")
-        .bind(system_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap_or(false);
-    if !exists {
+    // Verify the system exists and load its health/environment data.
+    let system_row: Option<crate::queries::compliance::SystemRow> =
+        sqlx::query_as("SELECT id, hostname, environment, health_status, critical_cve_count, high_cve_count FROM view_system_list WHERE id = $1")
+            .bind(system_id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap_or(None);
+
+    let Some(system) = system_row else {
         return not_found();
-    }
+    };
 
     match crate::compliance::resolver::resolve_system_effective_policies(&pool, system_id).await {
         Ok(ResolutionOutcome::Resolved(set)) => {
-            let response = effective_set_to_response(set, None);
+            let rollup = crate::queries::compliance::effective_policy_rollup(&system, &set.policies);
+            let totals = Some(crate::queries::compliance::totals_for_rollups(&[rollup]));
+            let mut response = effective_set_to_response(set, None);
+            response.rollup = totals;
             (StatusCode::OK, Json(response)).into_response()
         }
         Ok(ResolutionOutcome::Conflict(conflicts)) => conflict_response(conflicts),

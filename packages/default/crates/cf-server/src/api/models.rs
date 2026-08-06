@@ -2883,6 +2883,9 @@ pub struct EffectivePolicySetResponse {
     pub policies: Vec<EffectivePolicyDto>,
     pub effective_set_digest: String,
     pub warnings: Vec<String>,
+    /// Assignment-aware rollup totals computed from the resolved effective set.
+    #[serde(default)]
+    pub rollup: Option<ComplianceRollupTotals>,
 }
 
 /// Structured resolution conflict returned as part of a 422 response.
