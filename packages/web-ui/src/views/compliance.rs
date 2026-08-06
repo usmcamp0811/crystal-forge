@@ -4,7 +4,7 @@ use crate::api::client::{
     create_bundle_draft, create_compliance_assignment, create_compliance_bundle,
     delete_compliance_bundle, fetch_compliance_bundle_systems, fetch_compliance_bundles,
     fetch_compliance_system_evidence, fetch_environments, fetch_policies,
-    fetch_system_effective_policies, import_xccdf,
+    import_xccdf, preview_compliance_assignment,
     preview_xccdf, publish_bundle_version, trust_bundle_version, update_compliance_bundle,
 };
 use crate::api::models::{
@@ -1250,24 +1250,50 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                 }
                             }
                         }
-                        if props.scope_type == "system" {
-                            button {
-                                class: "btn btn-ghost xs focus-ring",
-                                disabled: *preview_loading.read(),
-                                onclick: {
-                                    let sid = props.scope_id;
-                                    move |_| {
-                                        preview_loading.set(true);
-                                        spawn(async move {
-                                            if let Ok(value) = fetch_system_effective_policies(&sid).await {
-                                                effective_preview.set(Some(value));
-                                            }
-                                            preview_loading.set(false);
-                                        });
-                                    }
-                                },
-                                if *preview_loading.read() { "Loading effective set…" } else { "Preview effective set" }
-                            }
+                        button {
+                            class: "btn btn-ghost xs focus-ring",
+                            disabled: *preview_loading.read(),
+                            onclick: {
+                                let bundle_version_id = assignment.bundle_version_id;
+                                let scope_type = assignment.scope_type.clone();
+                                let scope_id = assignment.scope_id;
+                                let mode = edit_mode.read().clone();
+                                let exclusions_text = edit_exclusions.read().clone();
+                                let additions_text = edit_additions.read().clone();
+                                let overrides_text = edit_overrides.read().clone();
+                                move |_| {
+                                    let Ok(exclusions) = parse_uuid_list(&exclusions_text) else {
+                                        edit_error.set(Some("Exclusions must be comma-separated UUIDs".to_string()));
+                                        return;
+                                    };
+                                    let Ok(additions) = parse_uuid_list(&additions_text) else {
+                                        edit_error.set(Some("Additions must be comma-separated UUIDs".to_string()));
+                                        return;
+                                    };
+                                    let Ok(value_overrides) = serde_json::from_str::<Vec<PolicyValueOverride>>(&overrides_text) else {
+                                        edit_error.set(Some("Overrides must be a JSON array of typed values".to_string()));
+                                        return;
+                                    };
+                                    let request = CreateAssignmentRequest {
+                                        bundle_version_id,
+                                        scope_type: scope_type.clone(),
+                                        scope_id,
+                                        enforcement_mode: Some(mode.clone()),
+                                        exclusions: Some(exclusions),
+                                        additions: Some(additions),
+                                        value_overrides: Some(value_overrides),
+                                    };
+                                    preview_loading.set(true);
+                                    spawn(async move {
+                                        match preview_compliance_assignment(&request).await {
+                                            Ok(value) => effective_preview.set(Some(value)),
+                                            Err(error) => edit_error.set(Some(format!("Preview failed: {error}"))),
+                                        }
+                                        preview_loading.set(false);
+                                    });
+                                }
+                            },
+                            if *preview_loading.read() { "Previewing…" } else { "Preview unsaved effective set" }
                         }
                         if let Some(preview) = effective_preview.read().as_ref() {
                             div { class: "sd-callout sd-callout-info", style: "font-size:10px;",

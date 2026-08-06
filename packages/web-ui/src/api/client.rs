@@ -2305,6 +2305,14 @@ pub async fn create_compliance_assignment(
     send_json_with_csrf("POST", &url, Some(request)).await
 }
 
+/// Preview an assignment overlay without persisting it.
+pub async fn preview_compliance_assignment(
+    request: &CreateAssignmentRequest,
+) -> Result<EffectivePolicySetResponse, ApiClientError> {
+    let url = format!("{}/compliance/assignments/preview", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
 /// Fetch a single assignment by ID.
 pub async fn fetch_compliance_assignment(
     assignment_id: &Uuid,
