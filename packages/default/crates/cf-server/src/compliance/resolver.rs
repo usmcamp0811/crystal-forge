@@ -226,6 +226,108 @@ pub struct EffectivePolicyResolutionInput {
     pub specificity: PolicySpecificity,
 }
 
+// ── Authoritative specificity-aware merge ──────────────────────────────────────
+
+/// Result of attempting to insert one candidate into the effective set.
+#[derive(Debug)]
+enum MergeOutcome {
+    /// The candidate was added as a new entry.
+    Inserted { index: usize },
+    /// Same exact version, deduplicated — update specificity if higher.
+    Deduplicated { index: usize, specificity_updated: bool },
+    /// Higher-specificity candidate replaced the existing entry.
+    Replaced { index: usize },
+    /// A typed conflict was created (same specificity, different version).
+    Conflict(ResolutionConflict),
+}
+
+/// Merge one `EffectivePolicy` candidate into the staged effective set.
+///
+/// Enforces the authoritative precedence:
+///
+/// ```text
+/// BundleBaseline(0) < Environment(1) < System(2)
+/// ```
+///
+/// - Same exact version at any specificity: deduplicate, keep highest specificity,
+///   update source/mode/overrides to the highest-specificity winner.
+/// - Different version, higher specificity: replace entirely.
+/// - Different version, lower specificity: suppress with diagnostic.
+/// - Different version, same specificity: return typed conflict.
+fn merge_effective_policy_candidate(
+    candidate: EffectivePolicy,
+    specificity: PolicySpecificity,
+    staging: &mut Vec<EffectivePolicy>,
+    per_lineage: &mut std::collections::HashMap<Uuid, (Uuid, PolicySpecificity, usize)>,
+    warnings: &mut Vec<String>,
+) -> MergeOutcome {
+    let lineage_id = candidate.policy_lineage_id;
+    let version_id = candidate.policy_version_id;
+
+    // Look up the existing entry and remove it temporarily to avoid borrow issues.
+    let existing = per_lineage.remove(&lineage_id);
+
+    let result = if let Some((existing_ver, existing_spec, existing_idx)) = existing {
+        if existing_ver == version_id {
+            let spec_updated = specificity > existing_spec;
+            if spec_updated {
+                let entry = &mut staging[existing_idx];
+                entry.specificity = specificity;
+                entry.source = candidate.source;
+                entry.assignment_mode = candidate.assignment_mode;
+                entry.effective_mode = candidate.effective_mode;
+                entry.overrides = candidate.overrides;
+                entry.effective_config = candidate.effective_config;
+                if candidate.baseline_order.is_some() {
+                    entry.baseline_order = candidate.baseline_order;
+                }
+                if candidate.addition_order.is_some() {
+                    entry.addition_order = candidate.addition_order;
+                }
+            }
+            if spec_updated {
+                per_lineage.insert(lineage_id, (version_id, specificity, existing_idx));
+            } else {
+                per_lineage.insert(lineage_id, (version_id, existing_spec, existing_idx));
+            }
+            warnings.push(format!(
+                "Policy lineage {lineage_id}: same version {version_id} deduplicated"
+            ));
+            MergeOutcome::Deduplicated { index: existing_idx, specificity_updated: spec_updated }
+        } else if specificity > existing_spec {
+            warnings.push(format!(
+                "Policy lineage {lineage_id}: version {version_id} (spec {specificity:?}) overrides {} ({existing_spec:?})",
+                staging[existing_idx].policy_version_id,
+            ));
+            staging[existing_idx] = candidate;
+            per_lineage.insert(lineage_id, (version_id, specificity, existing_idx));
+            MergeOutcome::Replaced { index: existing_idx }
+        } else if specificity == existing_spec {
+            // Conflict: put the entry back and return conflict.
+            per_lineage.insert(lineage_id, (existing_ver, existing_spec, existing_idx));
+            MergeOutcome::Conflict(ResolutionConflict {
+                code: "EFFECTIVE_POLICY_VERSION_CONFLICT".into(),
+                message: format!(
+                    "Policy lineage {lineage_id}: different versions at same specificity {specificity:?} ({existing_ver} vs {version_id})"
+                ),
+            })
+        } else {
+            // Lower specificity - put entry back, suppress candidate.
+            per_lineage.insert(lineage_id, (existing_ver, existing_spec, existing_idx));
+            warnings.push(format!(
+                "Policy lineage {lineage_id}: version {version_id} suppressed (spec {specificity:?} < {existing_spec:?})"
+            ));
+            MergeOutcome::Deduplicated { index: existing_idx, specificity_updated: false }
+        }
+    } else {
+        let idx = staging.len();
+        staging.push(candidate);
+        per_lineage.insert(lineage_id, (version_id, specificity, idx));
+        MergeOutcome::Inserted { index: idx }
+    };
+    result
+}
+
 // ── Authoritative resolver ────────────────────────────────────────────────────
 
 /// Resolve the effective policy set for one assignment.
@@ -753,31 +855,11 @@ pub async fn resolve_system_effective_policies(
 
     let env_id = env_id.flatten();
 
-    // Load all active bundle assignments for this system's scope:
-    // - environment assignments where system belongs to that environment
-    // - system assignments directly on this system
-    //
-    // Sort order (authoritative, documented):
-    //   1. scope_type ASC → 'environment' before 'system' (alphabetically e < s)
-    //   2. bundle_id      → stable portable bundle lineage identity
-    //   3. id             → stable assignment lineage identity as tiebreak
-    //
-    // This order determines which assignment's policies appear first in the
-    // combined effective set and is part of the canonical digest contract.
-    // Environment assignments are processed first so that system assignments can
-    // override them through the specificity-aware merge.
-    let assignments = sqlx::query_as::<
-        _,
-        (
-            Uuid,   // assignment_id (lineage)
-            Uuid,   // current_version_id
-            Uuid,   // bundle_id (lineage for duplicate detection)
-            Uuid,   // bundle_version_id
-            String, // scope_type
-            String, // enforcement_mode
-            String, // overlay_digest
-        ),
-    >(
+    // ── Open one transaction for all resolver reads ────────────────────────
+    let mut tx = pool.begin().await.context("begin resolution transaction")?;
+
+    // Load all active bundle assignments with explicit semantic ordering.
+    let assignments: Vec<_> = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid, String, String, String)>(
         r#"SELECT a.id, a.current_version_id, a.bundle_id, a.bundle_version_id,
                   a.scope_type, a.enforcement_mode, a.assignment_overlay_digest
            FROM compliance_bundle_assignments a
@@ -785,46 +867,60 @@ pub async fn resolve_system_effective_policies(
              AND ((a.scope_type = 'environment' AND a.environment_id = $2)
                OR (a.scope_type = 'system' AND a.system_id = $1)
              )
-           ORDER BY a.scope_type ASC, a.bundle_id, a.id"#,
+           ORDER BY
+             CASE a.scope_type
+               WHEN 'environment' THEN 1
+               WHEN 'system' THEN 2
+               ELSE 3
+             END,
+             a.bundle_id,
+             a.id"#,
     )
     .bind(system_id)
     .bind(env_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .context("load bundle assignments for system")?;
 
-    // ── Load direct environment and system policies ─────────────────────────
-    //
-    // Direct policies (environment_policies, system_policies) always coexist
-    // with bundle assignments. They participate at the same specificity level
-    // as the corresponding assignment scope.
-    //
-    // Direct policy loading — same as resolve_legacy_system_policies but we
-    // merge them into the combined resolution instead of returning early.
-    let direct_policies: Vec<(Uuid, Uuid, String, String, serde_json::Value, PolicySpecificity)> = {
-        let mut result = Vec::new();
+    // Load direct environment policies (in-tx).
+    let mut direct_candidates: Vec<(EffectivePolicy, PolicySpecificity)> = Vec::new();
 
-        // Environment direct policies
-        if let Some(eid) = env_id {
-            let env_direct: Vec<(Uuid, Uuid, String, serde_json::Value)> = sqlx::query_as(
-                r#"SELECT pv.id, pv.policy_id, pv.policy_type, pv.config
-                   FROM environment_policies ep
-                   JOIN deployment_policies dp ON dp.id = ep.policy_id
-                   JOIN deployment_policy_versions pv ON pv.id = dp.current_published_version_id
-                   WHERE ep.environment_id = $1
-                     AND pv.publication_state = 'accepted'"#,
-            )
-            .bind(eid)
-            .fetch_all(pool)
-            .await
-            .context("load environment direct policies")?;
+    if let Some(eid) = env_id {
+        let env_direct: Vec<(Uuid, Uuid, String, serde_json::Value)> = sqlx::query_as(
+            r#"SELECT pv.id, pv.policy_id, pv.policy_type, pv.config
+               FROM environment_policies ep
+               JOIN deployment_policies dp ON dp.id = ep.policy_id
+               JOIN deployment_policy_versions pv ON pv.id = dp.current_published_version_id
+               WHERE ep.environment_id = $1
+                 AND pv.publication_state = 'accepted'"#,
+        )
+        .bind(eid)
+        .fetch_all(&mut *tx)
+        .await
+        .context("load environment direct policies")?;
 
-            for (pv_id, lin_id, ptype, config) in env_direct {
-                result.push((pv_id, lin_id, ptype, "legacy_direct".into(), config, PolicySpecificity::Environment));
-            }
+        for (pv_id, lin_id, ptype, config) in env_direct {
+            direct_candidates.push((
+                EffectivePolicy {
+                    policy_version_id: pv_id,
+                    policy_lineage_id: lin_id,
+                    policy_type: ptype,
+                    source: EffectivePolicySource::LegacyDirect,
+                    specificity: PolicySpecificity::Environment,
+                    baseline_order: None,
+                    addition_order: None,
+                    overrides: Vec::new(),
+                    effective_config: config,
+                    assignment_mode: AssignmentMode::Enforce,
+                    effective_mode: AssignmentMode::Enforce,
+                },
+                PolicySpecificity::Environment,
+            ));
         }
+    }
 
-        // System direct policies
+    // Load system direct policies (in-tx).
+    {
         let sys_direct: Vec<(Uuid, Uuid, String, serde_json::Value)> = sqlx::query_as(
             r#"SELECT pv.id, pv.policy_id, pv.policy_type, pv.config
                FROM system_policies sp
@@ -834,57 +930,40 @@ pub async fn resolve_system_effective_policies(
                  AND pv.publication_state = 'accepted'"#,
         )
         .bind(system_id)
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await
         .context("load system direct policies")?;
 
         for (pv_id, lin_id, ptype, config) in sys_direct {
-            result.push((pv_id, lin_id, ptype, "legacy_direct".into(), config, PolicySpecificity::System));
+            direct_candidates.push((
+                EffectivePolicy {
+                    policy_version_id: pv_id,
+                    policy_lineage_id: lin_id,
+                    policy_type: ptype,
+                    source: EffectivePolicySource::LegacyDirect,
+                    specificity: PolicySpecificity::System,
+                    baseline_order: None,
+                    addition_order: None,
+                    overrides: Vec::new(),
+                    effective_config: config,
+                    assignment_mode: AssignmentMode::Enforce,
+                    effective_mode: AssignmentMode::Enforce,
+                },
+                PolicySpecificity::System,
+            ));
         }
-
-        result
-    };
-
-    let has_direct = !direct_policies.is_empty();
-
-    if assignments.is_empty() && !has_direct {
-        return resolve_legacy_system_policies(pool, system_id, env_id).await;
     }
 
-    if assignments.is_empty() && has_direct {
-        // Only direct policies — no bundle assignments to resolve against.
-        // Use the legacy path which properly handles direct-only resolution.
-        return resolve_legacy_system_policies(pool, system_id, env_id).await;
-    }
+    // ── Unified resolution: bundle assignments + direct policies ────────────
 
-    // ── Combined specificity-aware resolution ─────────────────────────────────
-    //
-    // Precedence: BundleBaseline(0) < Environment(1) < System(2).
-    //
-    // For each policy lineage:
-    //   - If the same exact version appears at multiple specificity levels:
-    //     deduplicate — keep the highest-specificity source, record a warning.
-    //   - If different versions appear at different specificity levels:
-    //     the higher-specificity version wins; the lower one is suppressed
-    //     with a diagnostic warning.
-    //   - If different versions appear at the SAME specificity level:
-    //     return EFFECTIVE_POLICY_VERSION_CONFLICT.
-    //
-    // Bundle-lineage duplicate (same bundle lineage at both env and system scope)
-    // is NOT automatically a conflict — the per-policy specificity rules apply.
-
-    // per_lineage: lineage_id → (version_id, specificity, effective_policy_index_in_staging)
     let mut per_lineage: std::collections::HashMap<Uuid, (Uuid, PolicySpecificity, usize)> =
         std::collections::HashMap::new();
-    // staging: ordered list of effective policies before conflict resolution
     let mut staging: Vec<EffectivePolicy> = Vec::new();
     let mut all_warnings: Vec<String> = Vec::new();
     let mut primary_bundle_version_id: Option<Uuid> = None;
-    // Portable bundle version IDs ordered by resolution (for canonical digest).
     let mut bundle_version_ids_ordered: Vec<Uuid> = Vec::new();
 
-    let mut tx = pool.begin().await.context("begin resolution transaction")?;
-
+    // Process bundle assignments first (in scope-order).
     for (
         _assignment_id,
         assignment_version_id,
@@ -901,7 +980,6 @@ pub async fn resolve_system_effective_policies(
             PolicySpecificity::System
         };
 
-        // Load overlay rows scoped to the current immutable assignment version.
         let exclusions: Vec<Uuid> = sqlx::query_scalar(
              "SELECT policy_version_id FROM compliance_assignment_exclusions WHERE assignment_version_id = $1",
         )
@@ -967,67 +1045,16 @@ pub async fn resolve_system_effective_policies(
                 }
                 all_warnings.extend(set.warnings);
 
-                // Apply specificity-aware merge.
-                for pol in set.policies {
-                    match per_lineage.get(&pol.policy_lineage_id) {
-                        None => {
-                            // First time we see this lineage.
-                            let idx = staging.len();
-                            per_lineage.insert(
-                                pol.policy_lineage_id,
-                                (pol.policy_version_id, specificity, idx),
-                            );
-                            staging.push(pol);
+                for mut pol in set.policies {
+                    pol.specificity = specificity;
+                    match merge_effective_policy_candidate(
+                        pol, specificity, &mut staging, &mut per_lineage, &mut all_warnings,
+                    ) {
+                        MergeOutcome::Conflict(conflict) => {
+                            let _ = tx.rollback().await;
+                            return Ok(ResolutionOutcome::Conflict(vec![conflict]));
                         }
-                        Some(&(existing_vid, existing_specificity, existing_idx)) => {
-                            let pol_lin = pol.policy_lineage_id;
-                            let pol_vid = pol.policy_version_id;
-                            if existing_vid == pol_vid {
-                                // Exact duplicate version. Keep the higher-specificity source.
-                                if specificity > existing_specificity {
-                                    staging[existing_idx].specificity = specificity;
-                                    staging[existing_idx].assignment_mode =
-                                        pol.assignment_mode.clone();
-                                    staging[existing_idx].effective_mode =
-                                        pol.effective_mode.clone();
-                                    per_lineage
-                                        .insert(pol_lin, (pol_vid, specificity, existing_idx));
-                                    all_warnings.push(format!(
-                                        "Policy lineage {} version {} from {} scope supersedes \
-                                         lower-specificity source (same exact version, deduplicated)",
-                                        pol_lin, pol_vid, scope_type
-                                    ));
-                                }
-                                // else: lower or equal specificity with same version — skip silently.
-                            } else if specificity > existing_specificity {
-                                // Higher specificity overrides lower specificity.
-                                all_warnings.push(format!(
-                                    "Policy lineage {} version {} ({} scope) overrides version {} \
-                                     from lower-specificity source",
-                                    pol_lin, pol_vid, scope_type, existing_vid
-                                ));
-                                staging[existing_idx] = pol;
-                                per_lineage.insert(pol_lin, (pol_vid, specificity, existing_idx));
-                            } else if specificity < existing_specificity {
-                                // Lower specificity loses silently — record diagnostic only.
-                                all_warnings.push(format!(
-                                    "Policy lineage {} version {} ({} scope) suppressed by \
-                                     higher-specificity version {}",
-                                    pol_lin, pol_vid, scope_type, existing_vid
-                                ));
-                            } else {
-                                // Same specificity, different version → conflict.
-                                let _ = tx.rollback().await;
-                                return Ok(ResolutionOutcome::Conflict(vec![ResolutionConflict {
-                                    code: "EFFECTIVE_POLICY_VERSION_CONFLICT".to_string(),
-                                    message: format!(
-                                        "Policy lineage {} has conflicting versions at {} specificity: \
-                                         {} vs {} — resolve by excluding one or using a higher-specificity assignment",
-                                        pol_lin, scope_type, existing_vid, pol_vid,
-                                    ),
-                                }]));
-                            }
-                        }
+                        _ => {}
                     }
                 }
             }
@@ -1038,60 +1065,16 @@ pub async fn resolve_system_effective_policies(
         }
     }
 
-    // ── Inject direct environment/system policies ──────────────────────────
-    //
-    // Direct policies coexist with bundle assignments and participate in the
-    // same specificity-aware resolution. Each direct policy is treated as a
-    // standalone entry at its scope's specificity level.
-    if has_direct {
-        all_warnings.push(
-            "Direct environment/system policies resolved alongside bundle assignments".to_string(),
-        );
-        for (pv_id, lin_id, ptype, _source, config, specificity) in &direct_policies {
-            let pol = EffectivePolicy {
-                policy_version_id: *pv_id,
-                policy_lineage_id: *lin_id,
-                policy_type: ptype.clone(),
-                source: EffectivePolicySource::LegacyDirect, // direct policies
-                specificity: *specificity,
-                baseline_order: None,
-                addition_order: None,
-                overrides: Vec::new(),
-                effective_config: config.clone(),
-                assignment_mode: AssignmentMode::Enforce,
-                effective_mode: AssignmentMode::Enforce,
-            };
-            let version_id = *pv_id;
-            let lineage_id = *lin_id;
-            if let Some((existing_ver, existing_spec, existing_idx)) =
-                per_lineage.get(&lineage_id)
-            {
-                if *existing_ver == version_id {
-                    // Same exact version from different source: deduplicate.
-                    if specificity > existing_spec {
-                        staging[*existing_idx].specificity = *specificity;
-                    }
-                } else if specificity > existing_spec {
-                    // Higher specificity wins, replace.
-                    staging[*existing_idx] = pol;
-                    per_lineage.insert(lineage_id, (version_id, *specificity, *existing_idx));
-                } else if specificity == existing_spec {
-                    // Same specificity, different version → conflict.
-                    return Ok(ResolutionOutcome::Conflict(vec![
-                        ResolutionConflict {
-                            code: "EFFECTIVE_POLICY_VERSION_CONFLICT".into(),
-                            message: format!(
-                                "Direct policy lineage {lineage_id}: different versions at same specificity"
-                            ),
-                        },
-                    ]));
-                }
-                // Lower specificity → ignored.
-            } else {
-                let idx = staging.len();
-                per_lineage.insert(lineage_id, (version_id, *specificity, idx));
-                staging.push(pol);
+    // Inject direct policies (always resolved through the authoritative merge).
+    for (pol, specificity) in direct_candidates {
+        match merge_effective_policy_candidate(
+            pol, specificity, &mut staging, &mut per_lineage, &mut all_warnings,
+        ) {
+            MergeOutcome::Conflict(conflict) => {
+                let _ = tx.rollback().await;
+                return Ok(ResolutionOutcome::Conflict(vec![conflict]));
             }
+            _ => {}
         }
     }
 
