@@ -1498,6 +1498,13 @@ fn default_assignment_active() -> bool {
     true
 }
 
+/// Server returns `{ "assignments": [...] }` — use this to deserialize then
+/// extract the inner Vec.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssignmentListResponse {
+    pub assignments: Vec<AssignmentResponse>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectivePolicyDto {
     pub policy_version_id: Uuid,

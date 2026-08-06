@@ -1769,7 +1769,7 @@ pub async fn get_assignment(
         return forbidden();
     }
 
-    let row = sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, Option<Uuid>, Option<Uuid>, String, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, bool)>(
+    let row = sqlx::query_as::<_, (Uuid, Option<Uuid>, Uuid, String, Option<Uuid>, Option<Uuid>, String, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, bool)>(
             "SELECT id, current_version_id, bundle_version_id, scope_type, environment_id, system_id, enforcement_mode, assignment_overlay_digest, created_at, updated_at, active \
          FROM compliance_bundle_assignments WHERE id = $1",
     )
@@ -1779,7 +1779,7 @@ pub async fn get_assignment(
 
     let (
         id,
-        current_version_id,
+        current_version_id_opt,
         bv_id,
         scope_type,
         env_id,
@@ -1792,7 +1792,24 @@ pub async fn get_assignment(
     ) = match row {
         Ok(Some(r)) => r,
         Ok(None) => return not_found(),
-        Err(_) => return internal_error("Failed to load assignment"),
+        Err(error) => {
+            tracing::error!(error = %error, %assignment_id, "failed to fetch assignment");
+            return internal_error("Failed to load assignment");
+        }
+    };
+
+    // Deactivated assignments have current_version_id = NULL.
+    // Return a 410 Gone so the UI knows the assignment has been removed.
+    let Some(current_version_id) = current_version_id_opt else {
+        return (
+            StatusCode::GONE,
+            Json(crate::api::models::ApiError {
+                error: "ASSIGNMENT_INACTIVE".into(),
+                message: "This assignment has been deactivated".into(),
+                details: None,
+            }),
+        )
+            .into_response();
     };
 
     let Some(scope_id) = env_id.or(sys_id) else {
@@ -2030,12 +2047,19 @@ async fn list_assignments_for_scope(
     scope_type: &str,
     scope_id: Uuid,
 ) -> anyhow::Result<Vec<AssignmentResponse>> {
+    // Only return active assignments with a non-null current_version_id.
+    // Deactivated assignments have current_version_id set to NULL and must
+    // not be decoded as Uuid (which would panic). A history endpoint can
+    // expose inactive assignments separately with Option<Uuid>.
     let rows = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid, Uuid, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, bool)>(
         "SELECT id, current_version_id, bundle_id, bundle_version_id,
                 COALESCE(environment_id, system_id), enforcement_mode,
                 created_at, updated_at, active
          FROM compliance_bundle_assignments
-         WHERE scope_type = $1 AND COALESCE(environment_id, system_id) = $2
+         WHERE scope_type = $1
+           AND COALESCE(environment_id, system_id) = $2
+           AND active = true
+           AND current_version_id IS NOT NULL
          ORDER BY created_at, id",
     )
     .bind(scope_type)
@@ -4928,6 +4952,11 @@ mod tests {
             axum::serve(listener, app).await.expect("serve phase1 app");
         });
         format!("http://{addr}")
+    }
+
+    /// Alias for spawn_phase1_server — the contract test uses the phase-1 route set.
+    async fn spawn_assignment_test_server(pool: PgPool) -> String {
+        spawn_phase1_server(pool).await
     }
 
     /// Create a session token for a user with the given role.
@@ -9377,5 +9406,173 @@ packages = ["git"]
         assert_eq!(toml_policies.len(), 1);
         assert_eq!(toml_policies[0].name, "toml-policy");
         assert_eq!(toml_policies[0].config["packages"][0], "git");
+    }
+
+    /// Contract test: list endpoint response deserializes using AssignmentListResponse
+    /// wrapper, and deactivated assignments do not corrupt the list.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn assignment_list_contract_and_deactivation_safety() {
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+
+        // Create two separate bundle+policy fixtures.
+        let (p1, pv1, _) =
+            make_draft_policy(&pool, &format!("list-contract-p1-{}", Uuid::new_v4().simple())).await;
+        db_publish_policy_version(&pool, p1, pv1).await;
+        let (_, bv1, _) = make_draft_bundle(
+            &pool,
+            &format!("list-contract-b1-{}", Uuid::new_v4().simple()),
+            &[pv1],
+        ).await;
+        let (p2, pv2, _) =
+            make_draft_policy(&pool, &format!("list-contract-p2-{}", Uuid::new_v4().simple())).await;
+        db_publish_policy_version(&pool, p2, pv2).await;
+        let (_, bv2, _) = make_draft_bundle(
+            &pool,
+            &format!("list-contract-b2-{}", Uuid::new_v4().simple()),
+            &[pv2],
+        ).await;
+
+        // Publish both bundle versions via direct DB write.
+        for bv in [bv1, bv2] {
+            let mut pub_tx = pool.begin().await.expect("begin");
+            sqlx::query(
+                "UPDATE compliance_bundle_versions
+                 SET publication_state = 'accepted', published_at = now(),
+                     trust_state = 'trusted', trusted_at = now()
+                 WHERE id = $1",
+            )
+            .bind(bv)
+            .execute(&mut *pub_tx)
+            .await
+            .expect("publish bv");
+            sqlx::query(
+                "UPDATE compliance_bundles
+                 SET current_published_version_id = $1, current_draft_version_id = NULL
+                 WHERE id = (SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1)",
+            )
+            .bind(bv)
+            .execute(&mut *pub_tx)
+            .await
+            .expect("update bundle pointer");
+            pub_tx.commit().await.expect("commit pub");
+        }
+
+        let base = spawn_assignment_test_server(pool.clone()).await;
+
+        // Create a unique system UUID for this test.
+        let system_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO systems (id, hostname, environment_id, is_active, flake_id, deployment_policy)
+             VALUES ($1, $2, NULL, TRUE, NULL, 'manual')",
+        )
+        .bind(system_id)
+        .bind(format!("list-contract-sys-{}", Uuid::new_v4().simple()))
+        .execute(&pool)
+        .await
+        .expect("insert test system");
+
+        // Create assignment 1 (system scope).
+        let body1 = serde_json::json!({
+            "bundle_version_id": bv1,
+            "scope_type": "system",
+            "scope_id": system_id,
+            "enforcement_mode": "enforce",
+        });
+        let resp1 = reqwest::Client::new()
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("cf_session={token}"))
+            .json(&body1)
+            .send()
+            .await
+            .expect("create assignment 1");
+        assert_eq!(resp1.status().as_u16(), 201, "create assignment 1");
+        let a1: serde_json::Value = resp1.json().await.unwrap();
+        let a1_id: Uuid = serde_json::from_value(a1["id"].clone()).unwrap();
+        let a1_version_id: Uuid = serde_json::from_value(a1["current_version_id"].clone()).unwrap();
+        assert!(a1["bundle_id"].is_string(), "bundle_id must be present");
+        assert!(a1["exclusions"].is_array(), "exclusions must be present");
+
+        // Create assignment 2 (second bundle).
+        let body2 = serde_json::json!({
+            "bundle_version_id": bv2,
+            "scope_type": "system",
+            "scope_id": system_id,
+            "enforcement_mode": "report_only",
+        });
+        let resp2 = reqwest::Client::new()
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("cf_session={token}"))
+            .json(&body2)
+            .send()
+            .await
+            .expect("create assignment 2");
+        assert_eq!(resp2.status().as_u16(), 201, "create assignment 2");
+        let a2: serde_json::Value = resp2.json().await.unwrap();
+        let a2_id: Uuid = serde_json::from_value(a2["id"].clone()).unwrap();
+
+        // List — must return both assignments.
+        let list_resp = reqwest::Client::new()
+            .get(format!("{base}/api/v1/systems/{system_id}/compliance-assignments"))
+            .header("cookie", format!("cf_session={token}"))
+            .send()
+            .await
+            .expect("list assignments");
+        assert_eq!(list_resp.status().as_u16(), 200);
+        let list_body: serde_json::Value = list_resp.json().await.unwrap();
+        // Verify server wraps in { "assignments": [...] }.
+        let assignments_arr = list_body["assignments"].as_array().unwrap();
+        assert_eq!(assignments_arr.len(), 2, "both active assignments must be listed");
+        // All items must have current_version_id.
+        for item in assignments_arr {
+            assert!(item["current_version_id"].is_string(), "current_version_id required");
+            assert!(item["bundle_id"].is_string(), "bundle_id required");
+            assert!(item["exclusions"].is_array(), "exclusions required");
+            assert!(item["additions"].is_array(), "additions required");
+        }
+
+        // Deactivate assignment 1.
+        let deact_resp = reqwest::Client::new()
+            .delete(format!("{base}/api/v1/compliance/assignments/{a1_id}"))
+            .header("cookie", format!("cf_session={token}"))
+            .query(&[("expected_version_id", a1_version_id.to_string())])
+            .send()
+            .await
+            .expect("deactivate assignment 1");
+        assert_eq!(deact_resp.status().as_u16(), 204, "deactivation must succeed");
+
+        // List again — must return only the active assignment.
+        let list_resp2 = reqwest::Client::new()
+            .get(format!("{base}/api/v1/systems/{system_id}/compliance-assignments"))
+            .header("cookie", format!("cf_session={token}"))
+            .send()
+            .await
+            .expect("list after deactivation");
+        assert_eq!(list_resp2.status().as_u16(), 200, "list must succeed after deactivation");
+        let list_body2: serde_json::Value = list_resp2.json().await.unwrap();
+        let assignments_arr2 = list_body2["assignments"].as_array().unwrap();
+        assert_eq!(
+            assignments_arr2.len(), 1,
+            "only active assignment must appear after deactivation"
+        );
+        let remaining = &assignments_arr2[0];
+        let remaining_id: Uuid = serde_json::from_value(remaining["id"].clone()).unwrap();
+        assert_eq!(remaining_id, a2_id, "remaining assignment must be the active one");
+
+        // GET the deactivated assignment — must return 410, not 500.
+        let deact_get = reqwest::Client::new()
+            .get(format!("{base}/api/v1/compliance/assignments/{a1_id}"))
+            .header("cookie", format!("cf_session={token}"))
+            .send()
+            .await
+            .expect("get deactivated assignment");
+        assert_eq!(
+            deact_get.status().as_u16(), 410,
+            "fetching deactivated assignment must return 410 Gone, not 500"
+        );
+
+        // Cleanup.
+        sqlx::query("DELETE FROM systems WHERE id = $1").bind(system_id).execute(&pool).await.ok();
     }
 }

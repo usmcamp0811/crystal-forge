@@ -2322,6 +2322,7 @@ pub async fn fetch_compliance_assignment(
 }
 
 /// Fetch all assignments for an environment.
+/// The server returns `{ "assignments": [...] }`; this unwraps to the inner Vec.
 pub async fn fetch_environment_assignments(
     environment_id: &Uuid,
 ) -> Result<Vec<AssignmentResponse>, ApiClientError> {
@@ -2330,10 +2331,12 @@ pub async fn fetch_environment_assignments(
         base_url(),
         environment_id
     );
-    fetch_json(&url).await
+    let wrapper: AssignmentListResponse = fetch_json(&url).await?;
+    Ok(wrapper.assignments)
 }
 
 /// Fetch all assignments for a system.
+/// The server returns `{ "assignments": [...] }`; this unwraps to the inner Vec.
 pub async fn fetch_system_assignments(
     system_id: &Uuid,
 ) -> Result<Vec<AssignmentResponse>, ApiClientError> {
@@ -2342,7 +2345,8 @@ pub async fn fetch_system_assignments(
         base_url(),
         system_id
     );
-    fetch_json(&url).await
+    let wrapper: AssignmentListResponse = fetch_json(&url).await?;
+    Ok(wrapper.assignments)
 }
 
 /// Delete (deactivate) an assignment.
