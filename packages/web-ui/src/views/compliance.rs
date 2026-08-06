@@ -54,6 +54,7 @@ pub fn ComplianceView() -> Element {
     let mut show_new_bundle = use_signal(|| false);
     let mut show_edit_bundle = use_signal(|| false);
     let mut show_import_stig = use_signal(|| false);
+    let mut import_mode_stig = use_signal(|| true); // true = STIG/XCCDF, false = CF-native bundle
     let mut version_action_busy = use_signal(|| false);
     let mut version_action_error = use_signal(|| None::<String>);
     let mut policies = use_signal(Vec::<DeploymentPolicySummary>::new);
@@ -236,10 +237,10 @@ pub fn ComplianceView() -> Element {
                                     "Import STIG or XCCDF (.xml/.zip)",
                                     IconName::Download,
                                 ));
-                                // Import CF bundle: requires the full import UI.
-                                items.push(IOMenuItem::disabled(
+                                // Import CF bundle: uses the same import flow as foreign XCCDF.
+                                items.push(IOMenuItem::action_with_icon(
                                     "Import Crystal Forge bundle (.xml)",
-                                    "CF bundle import coming in a later phase",
+                                    IconName::Download,
                                 ));
                                 items.push(IOMenuItem::Separator);
                             }
@@ -285,7 +286,14 @@ pub fn ComplianceView() -> Element {
                         on_action: move |idx: usize| {
                             if is_admin {
                                 match idx {
-                                    0 => show_import_stig.set(true),
+                                    0 => {
+                                        import_mode_stig.set(true);
+                                        show_import_stig.set(true);
+                                    }
+                                    1 => {
+                                        import_mode_stig.set(false);
+                                        show_import_stig.set(true);
+                                    }
                                     2 => {
                                         // Export XCCDF: trigger a download of the selected bundle version.
                                         if let Some(vid) = *selected_export_version_id.read() {
@@ -604,6 +612,7 @@ pub fn ComplianceView() -> Element {
         if is_admin && *show_import_stig.read() {
             ImportStigModal {
                 environments: environments.read().clone(),
+                is_stig_import: *import_mode_stig.read(),
                 on_close: move |_| show_import_stig.set(false),
                 on_success: move |_| {
                     // Refresh the bundle catalog after a successful import.
@@ -932,6 +941,100 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
     }
 }
 
+/// Panel listing and managing existing assignments for the selected scope.
+#[derive(Props, Clone, PartialEq)]
+struct AssignmentListPanelProps {
+    scope_type: String,
+    scope_id: uuid::Uuid,
+}
+
+#[component]
+fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
+    use crate::api::client::{
+        delete_compliance_assignment, fetch_environment_assignments, fetch_system_assignments,
+    };
+
+    let mut assignments = use_signal(Vec::<crate::api::models::AssignmentResponse>::new);
+    let mut loading = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+    let mut fetched = use_signal(|| false);
+
+    if !*fetched.read() {
+        fetched.set(true);
+        loading.set(true);
+        let scope_type = props.scope_type.clone();
+        let scope_id = props.scope_id;
+        spawn(async move {
+            let result = if scope_type == "environment" {
+                fetch_environment_assignments(&scope_id).await
+            } else {
+                fetch_system_assignments(&scope_id).await
+            };
+            match result {
+                Ok(list) => assignments.set(list),
+                Err(err) => error.set(Some(err.to_string())),
+            }
+            loading.set(false);
+        });
+    }
+
+    if *loading.read() {
+        return rsx! { DashboardLoadingSpinner {} };
+    }
+
+    let list = assignments.read().clone();
+    if list.is_empty() {
+        return rsx! {
+            div { class: "card", style: "padding:10px 14px;",
+                div { style: "font-size:11px;color:var(--cf-text-muted);",
+                    "No assignments for this scope."
+                }
+            }
+        };
+    }
+
+    rsx! {
+        for assignment in list.iter() {
+            {
+                let assignment_id = assignment.id;
+                let mut deleting = use_signal(|| false);
+                rsx! {
+                    div { class: "card", style: "padding:10px 14px;display:flex;flex-direction:column;gap:6px;",
+                        div { style: "display:flex;justify-content:space-between;align-items:center;",
+                            div { style: "font-size:12px;font-weight:600;",
+                                "Bundle version "
+                                span { class: "mono", style: "font-size:10px;", "{assignment.bundle_version_id}" }
+                                " · {assignment.enforcement_mode}"
+                            }
+                            button {
+                                class: "btn btn-ghost xs focus-ring",
+                                style: "font-size:10px;color:var(--cf-text-muted);",
+                                disabled: *deleting.read(),
+                                onclick: {
+                                    let a_id = assignment_id;
+                                    move |_| {
+                                        deleting.set(true);
+                                        spawn(async move {
+                                            let _ = delete_compliance_assignment(&a_id).await;
+                                            // Remove from list after deactivation
+                                            assignments.with_mut(|list| list.retain(|a| a.id != a_id));
+                                        });
+                                    }
+                                },
+                                if *deleting.read() { "Deactivating…" } else { "Deactivate" }
+                            }
+                        }
+                        div { style: "font-size:10px;color:var(--cf-text-muted);",
+                            "scope: {assignment.scope_type}:{assignment.scope_id}"
+                            " · version: " span { class: "mono", "{assignment.current_version_id}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ─── Import STIG modal ────────────────────────────────────────────────────────
 //
 // Implements the 4-step design reference (upload → review → commit → done).
@@ -996,6 +1099,7 @@ struct ImportStigModalProps {
     environments: Vec<EnvironmentSummary>,
     on_close: EventHandler<()>,
     on_success: EventHandler<()>,
+    is_stig_import: bool,
 }
 
 #[component]
@@ -1071,14 +1175,18 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                             span { style: "display:inline-flex;transform:rotate(180deg);",
                                 Icon { name: IconName::Download, size: 14 }
                             }
-                            "Import STIG / XCCDF"
+                            if props.is_stig_import {
+                                "Import STIG / XCCDF"
+                            } else {
+                                "Import Crystal Forge bundle"
+                            }
                         }
                         p {
-                            "Upload a DISA XCCDF benchmark ("
-                            span { class: "mono", ".xml" }
-                            " or "
-                            span { class: "mono", ".zip" }
-                            "). Crystal Forge previews and validates the document server-side."
+                            if props.is_stig_import {
+                                "Upload a DISA XCCDF benchmark (.xml or .zip). Crystal Forge parses each rule into a policy and assembles them into a compliance bundle."
+                            } else {
+                                "Upload a Crystal Forge XCCDF bundle export (.xml). Existing policy versions are reused; new ones are created as drafts."
+                            }
                         }
                     }
                     div { class: "modal-body",
@@ -1196,6 +1304,57 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                             span { class: "mono", "{file_name.read()}" }
                             " · {bench_title.read()} · "
                             strong { "{bench_ver.read()}" }
+                        }
+                        // Preview detail: classification, digest, fidelity
+                        if let Some(ref preview) = *preview_response.read() {
+                            div { class: "card", style: "padding:10px 14px;margin-bottom:10px;display:flex;flex-wrap:wrap;gap:10px;font-size:11px;",
+                                if let Some(ref cls) = preview.document_class {
+                                    {
+                                        let label = match cls.as_str() {
+                                            "cf_native_exact" => "CF-native exact",
+                                            "cf_native" => "CF-native",
+                                            "foreign" => "Foreign XCCDF",
+                                            other => other,
+                                        };
+                                        rsx! { span { class: "chip chip-info", "{label}" } }
+                                    }
+                                }
+                                if let Some(ref fidelity) = preview.fidelity {
+                                    span { class: "chip", style: "font-size:10px;",
+                                        "fidelity: {fidelity}"
+                                    }
+                                }
+                                span { style: "color:var(--cf-text-muted);",
+                                    "{preview.rule_count} rules"
+                                }
+                                if !preview.profiles.is_empty() {
+                                    span { style: "color:var(--cf-text-muted);",
+                                        "· {preview.profile_count} profiles"
+                                    }
+                                }
+                                // Show CF bundle metadata for CF-native imports
+                                div { style: "font-size:10px;color:var(--cf-text-muted);margin-top:4px;width:100%;",
+                                    "SHA-256: "
+                                    span { class: "mono", style: "font-size:9px;word-break:break-all;", "{&preview.sha256[..preview.sha256.len().min(16)]}…" }
+                                }
+                            }
+                            // Diagnostics
+                            if !preview.errors.is_empty() {
+                                for err in &preview.errors {
+                                    div { class: "sd-callout sd-callout-danger", style: "font-size:11px;margin-bottom:4px;",
+                                        strong { "{err.code}: " }
+                                        "{err.summary}"
+                                        if err.blocking { " (blocking)" }
+                                    }
+                                }
+                            }
+                            if !preview.warnings.is_empty() {
+                                div { class: "sd-callout sd-callout-warn", style: "font-size:11px;margin-bottom:4px;",
+                                    for w in &preview.warnings {
+                                        div { "{w.code}: {w.summary}" }
+                                    }
+                                }
+                            }
                         }
                     }
                     div { class: "modal-body", style: "overflow-y:auto;",
