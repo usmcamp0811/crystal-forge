@@ -136,6 +136,20 @@ pub struct EffectivePolicy {
     /// Whether this specific policy is report-only (overrides assignment mode).
     /// Currently equals assignment_mode; reserved for future per-policy overrides.
     pub effective_mode: AssignmentMode,
+    /// All contributing sources preserved for evidence and diagnostics.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<ProvenanceEntry>,
+}
+
+/// One contributing source in the effective policy set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProvenanceEntry {
+    pub source: EffectivePolicySource,
+    pub specificity: PolicySpecificity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_type: Option<String>,
+    pub enforcement_mode: String,
+    pub authoritative: bool,
 }
 
 /// Where a policy appeared in the effective set.
@@ -257,6 +271,7 @@ enum MergeOutcome {
 fn merge_effective_policy_candidate(
     candidate: EffectivePolicy,
     specificity: PolicySpecificity,
+    provenance: ProvenanceEntry,
     staging: &mut Vec<EffectivePolicy>,
     per_lineage: &mut std::collections::HashMap<Uuid, (Uuid, PolicySpecificity, usize)>,
     warnings: &mut Vec<String>,
@@ -278,28 +293,25 @@ fn merge_effective_policy_candidate(
                 entry.effective_mode = candidate.effective_mode;
                 entry.overrides = candidate.overrides;
                 entry.effective_config = candidate.effective_config;
-                if candidate.baseline_order.is_some() {
-                    entry.baseline_order = candidate.baseline_order;
-                }
-                if candidate.addition_order.is_some() {
-                    entry.addition_order = candidate.addition_order;
-                }
+                if candidate.baseline_order.is_some() { entry.baseline_order = candidate.baseline_order; }
+                if candidate.addition_order.is_some() { entry.addition_order = candidate.addition_order; }
+                for p in &mut entry.provenance { p.authoritative = false; }
+                entry.provenance.push(ProvenanceEntry { authoritative: true, ..provenance });
+            } else {
+                staging[existing_idx].provenance.push(ProvenanceEntry { authoritative: false, ..provenance });
             }
             if spec_updated {
                 per_lineage.insert(lineage_id, (version_id, specificity, existing_idx));
             } else {
                 per_lineage.insert(lineage_id, (version_id, existing_spec, existing_idx));
             }
-            warnings.push(format!(
-                "Policy lineage {lineage_id}: same version {version_id} deduplicated"
-            ));
             MergeOutcome::Deduplicated { index: existing_idx, specificity_updated: spec_updated }
         } else if specificity > existing_spec {
-            warnings.push(format!(
-                "Policy lineage {lineage_id}: version {version_id} (spec {specificity:?}) overrides {} ({existing_spec:?})",
-                staging[existing_idx].policy_version_id,
-            ));
-            staging[existing_idx] = candidate;
+            let mut new_entry = candidate;
+            for p in &mut staging[existing_idx].provenance { p.authoritative = false; }
+            new_entry.provenance = staging[existing_idx].provenance.clone();
+            new_entry.provenance.push(ProvenanceEntry { authoritative: true, ..provenance });
+            staging[existing_idx] = new_entry;
             per_lineage.insert(lineage_id, (version_id, specificity, existing_idx));
             MergeOutcome::Replaced { index: existing_idx }
         } else if specificity == existing_spec {
@@ -312,16 +324,16 @@ fn merge_effective_policy_candidate(
                 ),
             })
         } else {
-            // Lower specificity - put entry back, suppress candidate.
+            // Lower specificity — add as non-authoritative provenance.
+            staging[existing_idx].provenance.push(ProvenanceEntry { authoritative: false, ..provenance });
             per_lineage.insert(lineage_id, (existing_ver, existing_spec, existing_idx));
-            warnings.push(format!(
-                "Policy lineage {lineage_id}: version {version_id} suppressed (spec {specificity:?} < {existing_spec:?})"
-            ));
             MergeOutcome::Deduplicated { index: existing_idx, specificity_updated: false }
         }
     } else {
         let idx = staging.len();
-        staging.push(candidate);
+        let mut pol = candidate;
+        pol.provenance.push(ProvenanceEntry { authoritative: true, ..provenance });
+        staging.push(pol);
         per_lineage.insert(lineage_id, (version_id, specificity, idx));
         MergeOutcome::Inserted { index: idx }
     };
@@ -468,6 +480,7 @@ pub async fn resolve_effective_policy_set(
                 effective_config: config.clone(),
                 assignment_mode: input.assignment_mode.clone(),
                 effective_mode: input.assignment_mode.clone(),
+                provenance: Vec::new(),
             },
         )
         .collect();
@@ -556,6 +569,7 @@ pub async fn resolve_effective_policy_set(
             effective_config: add_config,
             assignment_mode: input.assignment_mode.clone(),
             effective_mode: input.assignment_mode.clone(),
+                provenance: Vec::new(),
         });
     }
 
@@ -917,6 +931,7 @@ pub async fn resolve_system_effective_policies(
                     effective_config: config,
                     assignment_mode: AssignmentMode::Enforce,
                     effective_mode: AssignmentMode::Enforce,
+                    provenance: Vec::new(),
                 },
                 PolicySpecificity::Environment,
             ));
@@ -952,6 +967,7 @@ pub async fn resolve_system_effective_policies(
                     effective_config: config,
                     assignment_mode: AssignmentMode::Enforce,
                     effective_mode: AssignmentMode::Enforce,
+                    provenance: Vec::new(),
                 },
                 PolicySpecificity::System,
             ));
@@ -1051,8 +1067,15 @@ pub async fn resolve_system_effective_policies(
 
                 for mut pol in set.policies {
                     pol.specificity = specificity;
+                    let prov = ProvenanceEntry {
+                        source: pol.source.clone(),
+                        specificity,
+                        scope_type: Some(scope_type.to_string()),
+                        enforcement_mode: enforcement_mode.to_string(),
+                        authoritative: true,
+                    };
                     match merge_effective_policy_candidate(
-                        pol, specificity, &mut staging, &mut per_lineage, &mut all_warnings,
+                        pol, specificity, prov, &mut staging, &mut per_lineage, &mut all_warnings,
                     ) {
                         MergeOutcome::Conflict(conflict) => {
                             let _ = tx.rollback().await;
@@ -1071,8 +1094,15 @@ pub async fn resolve_system_effective_policies(
 
     // Inject direct policies (always resolved through the authoritative merge).
     for (pol, specificity) in direct_candidates {
+        let prov = ProvenanceEntry {
+            source: EffectivePolicySource::LegacyDirect,
+            specificity,
+            scope_type: Some(if specificity == PolicySpecificity::Environment { "environment" } else { "system" }.to_string()),
+            enforcement_mode: "enforce".to_string(),
+            authoritative: true,
+        };
         match merge_effective_policy_candidate(
-            pol, specificity, &mut staging, &mut per_lineage, &mut all_warnings,
+            pol, specificity, prov, &mut staging, &mut per_lineage, &mut all_warnings,
         ) {
             MergeOutcome::Conflict(conflict) => {
                 let _ = tx.rollback().await;
@@ -1185,6 +1215,7 @@ async fn resolve_legacy_system_policies(
                 effective_config: config,
                 assignment_mode: AssignmentMode::Enforce,
                 effective_mode: AssignmentMode::Enforce,
+                    provenance: Vec::new(),
             });
         }
     }
@@ -1219,6 +1250,7 @@ async fn resolve_legacy_system_policies(
                     effective_config: config,
                     assignment_mode: AssignmentMode::Enforce,
                     effective_mode: AssignmentMode::Enforce,
+                    provenance: Vec::new(),
                 });
             }
             Some(&(_existing_vid, _existing_spec, existing_idx)) => {
@@ -1239,6 +1271,7 @@ async fn resolve_legacy_system_policies(
                     effective_config: config,
                     assignment_mode: AssignmentMode::Enforce,
                     effective_mode: AssignmentMode::Enforce,
+                    provenance: Vec::new(),
                 };
                 per_lineage.insert(lin_id, (pv_id, PolicySpecificity::System, existing_idx));
             }
