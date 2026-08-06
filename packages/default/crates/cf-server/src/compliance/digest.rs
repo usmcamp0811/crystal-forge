@@ -196,6 +196,59 @@ impl AssignmentEffectiveSetCanonical {
     }
 }
 
+/// Canonical digest input for a system's combined resolved set. Unlike the
+/// assignment overlay digest, this includes every bundle source and direct
+/// policy contribution that participated in resolution.
+#[derive(Debug, Clone)]
+pub struct CombinedEffectiveSetCanonical {
+    pub bundle_version_ids_ordered: Vec<Uuid>,
+    pub addition_policy_version_ids: Vec<Uuid>,
+    pub direct_policy_version_ids: Vec<Uuid>,
+    pub effective_policy_version_ids: Vec<Uuid>,
+    pub policy_modes: Vec<(Uuid, String)>,
+    pub effective_configs: Vec<(Uuid, Value)>,
+}
+
+impl CombinedEffectiveSetCanonical {
+    pub fn to_digest_value(&self) -> Value {
+        let mut additions: Vec<String> = self
+            .addition_policy_version_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        additions.sort();
+        let mut direct: Vec<String> = self
+            .direct_policy_version_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        direct.sort();
+        let modes: Vec<Value> = self
+            .policy_modes
+            .iter()
+            .map(|(id, mode)| json!({ "policy_version_id": id.to_string(), "mode": mode }))
+            .collect();
+        let configs: Vec<Value> = self
+            .effective_configs
+            .iter()
+            .map(|(id, config)| json!({ "policy_version_id": id.to_string(), "config": config }))
+            .collect();
+        json!({
+            "canonicalization_version": "cf-model-json-1",
+            "bundle_version_ids_ordered": self.bundle_version_ids_ordered,
+            "addition_policy_version_ids": additions,
+            "direct_policy_version_ids": direct,
+            "effective_policy_version_ids": self.effective_policy_version_ids,
+            "policy_modes": modes,
+            "effective_configs": configs,
+        })
+    }
+
+    pub fn compute_digest(&self) -> String {
+        semantic_digest(&self.to_digest_value())
+    }
+}
+
 // ── Transactional persist helpers ─────────────────────────────────────────────
 
 /// Write the canonical policy version digest inside the active transaction.

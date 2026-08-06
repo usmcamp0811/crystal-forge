@@ -55,7 +55,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::compliance::digest::AssignmentEffectiveSetCanonical;
+use crate::compliance::digest::{
+    AssignmentEffectiveSetCanonical, CombinedEffectiveSetCanonical,
+};
 
 // ── Typed domain models ───────────────────────────────────────────────────────
 
@@ -1119,41 +1121,32 @@ pub async fn resolve_system_effective_policies(
 
     // ── Canonical combined target digest ──────────────────────────────────────
     //
-    // Inputs (all portable — no local row IDs):
-    //   - Ordered exact bundle version IDs (reflects scope ordering contract).
-    //   - Ordered effective policy version IDs.
-    //   - Per-policy enforcement mode summary.
-    //   - Sorted per-policy overrides.
-    //
-    // Excludes: actor IDs, timestamps, audit notes, query ordering accidents.
     let effective_pids: Vec<Uuid> = all_policies.iter().map(|p| p.policy_version_id).collect();
-    let enforcement_mode_summary = if all_policies
+    let mut additions: Vec<Uuid> = all_policies
         .iter()
-        .all(|p| matches!(p.effective_mode, AssignmentMode::ReportOnly))
-    {
-        "report_only"
-    } else {
-        "enforce"
-    };
-    // Collect all per-policy overrides for the digest. Sort by (policy_version_id,
-    // value_path) for stability independent of insertion order.
-    let mut all_overrides: Vec<(Uuid, String, serde_json::Value)> = all_policies
-        .iter()
-        .flat_map(|p| {
-            p.overrides
-                .iter()
-                .map(|o| (o.policy_version_id, o.value_path.clone(), o.value.clone()))
-        })
+        .filter(|p| matches!(p.source, EffectivePolicySource::Addition))
+        .map(|p| p.policy_version_id)
         .collect();
-    all_overrides.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
-    let canonical = AssignmentEffectiveSetCanonical {
-        enforcement_mode: enforcement_mode_summary.to_string(),
-        // Use portable bundle version IDs (not local assignment row IDs).
-        exclusions: bundle_version_ids_ordered,
-        additions: vec![],
-        value_overrides: all_overrides,
+    additions.sort();
+    let mut direct: Vec<Uuid> = all_policies
+        .iter()
+        .filter(|p| matches!(p.source, EffectivePolicySource::LegacyDirect))
+        .map(|p| p.policy_version_id)
+        .collect();
+    direct.sort();
+    let canonical = CombinedEffectiveSetCanonical {
+        bundle_version_ids_ordered,
+        addition_policy_version_ids: additions,
+        direct_policy_version_ids: direct,
         effective_policy_version_ids: effective_pids,
+        policy_modes: all_policies
+            .iter()
+            .map(|p| (p.policy_version_id, p.effective_mode.as_str().to_string()))
+            .collect(),
+        effective_configs: all_policies
+            .iter()
+            .map(|p| (p.policy_version_id, p.effective_config.clone()))
+            .collect(),
     };
 
     let target = AssignmentTarget::System { system_id };
