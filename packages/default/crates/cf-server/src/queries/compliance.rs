@@ -8,6 +8,7 @@ use crate::compliance::digest::{
     BundleMembershipEntry, BundleVersionCanonical, load_bundle_membership,
     write_assignment_effective_set_digest, write_bundle_version_digest,
 };
+use crate::compliance::resolver::{ResolutionOutcome, resolve_system_effective_policies};
 
 // ─── Draft-lifecycle helpers ──────────────────────────────────────────────────
 
@@ -1128,13 +1129,35 @@ pub async fn list_system_bundles(
             .push(policy);
     }
 
-    // Compute rollups using deterministic in-memory logic
-    let result = assemble_system_compliance_bundles(
+    // Compute legacy rollups first, then replace the assigned bundle's rollup
+    // with the authoritative resolver result. This preserves visibility of
+    // other applicable bundles while ensuring exclusions, additions, direct
+    // policies, and overrides are reflected for the effective assignment.
+    let mut result = assemble_system_compliance_bundles(
         &system,
         all_bundles,
         &applicable_bundle_ids,
         &policies_by_bundle,
     );
+
+    if let ResolutionOutcome::Resolved(effective) =
+        resolve_system_effective_policies(pool, system_id).await?
+    {
+        let resolved_bundle_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(effective.bundle_version_id)
+        .fetch_optional(pool)
+        .await?;
+        if let Some(resolved_bundle_id) = resolved_bundle_id {
+            if let Some((_, rollup)) = result
+                .iter_mut()
+                .find(|(bundle, _)| bundle.id == resolved_bundle_id)
+            {
+                *rollup = effective_policy_rollup(&system, &effective.policies);
+            }
+        }
+    }
 
     Ok(Some(result))
 }
@@ -1193,7 +1216,48 @@ pub async fn get_system_evidence(
         return Ok(None);
     };
 
-    let policies = list_bundle_policies(pool, bundle_id).await?;
+    let mut policies = list_bundle_policies(pool, bundle_id).await?;
+    if let ResolutionOutcome::Resolved(effective) =
+        resolve_system_effective_policies(pool, system_id).await?
+    {
+        let resolved_bundle_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(effective.bundle_version_id)
+        .fetch_optional(pool)
+        .await?;
+        if resolved_bundle_id == Some(bundle_id) {
+            let ids: Vec<Uuid> = effective
+                .policies
+                .iter()
+                .map(|policy| policy.policy_version_id)
+                .collect();
+            let names = sqlx::query_as::<_, (Uuid, String, Option<String>, bool)>(
+                "SELECT id, name, description, enabled FROM deployment_policy_versions WHERE id = ANY($1)",
+            )
+            .bind(&ids)
+            .fetch_all(pool)
+            .await?;
+            let names: std::collections::HashMap<Uuid, (String, Option<String>, bool)> =
+                names.into_iter().map(|(id, name, description, enabled)| (id, (name, description, enabled))).collect();
+            policies = effective
+                .policies
+                .into_iter()
+                .filter_map(|policy| {
+                    let (name, description, enabled) = names.get(&policy.policy_version_id)?.clone();
+                    Some(PolicyRow {
+                        id: policy.policy_version_id,
+                        bundle_id,
+                        name,
+                        description,
+                        policy_type: policy.policy_type,
+                        config: policy.effective_config,
+                        enabled,
+                    })
+                })
+                .collect();
+        }
+    }
     let controls = policies
         .into_iter()
         .map(|policy| control_evidence(&system, policy))
