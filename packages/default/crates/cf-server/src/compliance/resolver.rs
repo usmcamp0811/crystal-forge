@@ -845,22 +845,22 @@ pub async fn resolve_system_effective_policies(
     pool: &PgPool,
     system_id: Uuid,
 ) -> Result<ResolutionOutcome> {
-    // Load the system's environment
-    let env_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT environment_id FROM systems WHERE id = $1")
-            .bind(system_id)
-            .fetch_optional(pool)
-            .await
-            .context("load system environment")?;
-
-    let env_id = env_id.flatten();
-
-    // ── Open one repeatable-read transaction for all resolver reads ────────
+    // ── Open one repeatable-read snapshot for all resolver reads ──────────
     let mut tx = pool.begin().await.context("begin resolution transaction")?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         .execute(&mut *tx)
         .await
         .context("set repeatable read")?;
+
+    // Load the system's environment inside the snapshot.
+    let env_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT environment_id FROM systems WHERE id = $1")
+            .bind(system_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("load system environment")?;
+
+    let env_id = env_id.flatten();
 
     // Load all active bundle assignments with explicit semantic ordering.
     let assignments: Vec<_> = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid, String, String, String)>(
