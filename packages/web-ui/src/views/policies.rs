@@ -561,6 +561,7 @@ pub fn PoliciesView() -> Element {
             if let Some(policy) = drawer_policy.read().clone() {
                 PolicyDrawer {
                     policy,
+                    is_admin: is_admin_user,
                     on_close: move |_| drawer_policy.set(None),
                     on_export: export_single_policy,
                     on_edit: move |policy: PolicyDefinition| {
@@ -612,6 +613,7 @@ pub fn PoliciesView() -> Element {
 #[component]
 fn PolicyDrawer(
     policy: PolicyDefinition,
+    is_admin: bool,
     on_close: EventHandler<MouseEvent>,
     on_export: EventHandler<(PolicyDefinition, String)>,
     on_edit: EventHandler<PolicyDefinition>,
@@ -620,6 +622,10 @@ fn PolicyDrawer(
     let rules = crate::components::policy::policy_rule_summaries(&policy);
     let is_core = is_core_policy(&policy);
     let policy_for_edit = policy.clone();
+    let mut busy = use_signal(|| false);
+    let mut action_status = use_signal(|| None::<String>);
+
+    let version_id = policy.version_id;
 
     rsx! {
         div {
@@ -678,6 +684,73 @@ fn PolicyDrawer(
                             move |_| on_export.call((policy.clone(), "toml".to_string()))
                         },
                         "TOML"
+                    }
+                    // ── Lifecycle controls (admin-only, requires version ID) ─
+                    if is_admin && !is_core && version_id.is_some() {
+                        {
+                            let vid = version_id.unwrap();
+                            let pid = policy.id;
+                            rsx! {
+                                if let Some(status) = action_status.read().as_ref() {
+                                    span { class: "chip chip-info", style: "font-size:10px;", "{status}" }
+                                } else if !*busy.read() {
+                                    button {
+                                        class: "btn btn-ghost focus-ring xs",
+                                        title: "Mark this policy version as trusted",
+                                        onclick: {
+                                            move |_| {
+                                                busy.set(true);
+                                                let v = vid;
+                                                spawn(async move {
+                                                    match crate::api::client::trust_policy_version(
+                                                        &v,
+                                                        &crate::api::models::TrustPolicyVersionRequest { trusted: true, review_note: None },
+                                                    ).await {
+                                                        Ok(_) => { busy.set(false); action_status.set(Some("Trusted".into())); }
+                                                        Err(e) => { busy.set(false); action_status.set(Some(format!("Error: {e}"))); }
+                                                    }
+                                                });
+                                            }
+                                        },
+                                        "Trust"
+                                    }
+                                    button {
+                                        class: "btn btn-primary focus-ring xs",
+                                        title: "Publish this draft as an immutable accepted version",
+                                        onclick: {
+                                            move |_| {
+                                                busy.set(true);
+                                                let v = vid;
+                                                spawn(async move {
+                                                    match crate::api::client::publish_policy_version(&v).await {
+                                                        Ok(_) => { busy.set(false); action_status.set(Some("Published".into())); }
+                                                        Err(e) => { busy.set(false); action_status.set(Some(format!("Error: {e}"))); }
+                                                    }
+                                                });
+                                            }
+                                        },
+                                        "Publish"
+                                    }
+                                }
+                                button {
+                                    class: "btn btn-ghost focus-ring xs",
+                                    disabled: *busy.read(),
+                                    title: "Create a new draft from this accepted version",
+                                    onclick: {
+                                        move |_| {
+                                            busy.set(true);
+                                            spawn(async move {
+                                                match crate::api::client::create_policy_draft(&pid).await {
+                                                    Ok(_) => { busy.set(false); action_status.set(Some("Draft created".into())); }
+                                                    Err(e) => { busy.set(false); action_status.set(Some(format!("Error: {e}"))); }
+                                                }
+                                            });
+                                        }
+                                    },
+                                    "New draft"
+                                }
+                            }
+                        }
                     }
                     button {
                         class: "btn-icon focus-ring",

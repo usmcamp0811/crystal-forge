@@ -2242,6 +2242,22 @@ pub async fn trust_policy_version(
     send_json_with_csrf("POST", &url, Some(request)).await
 }
 
+/// Publish a policy version (makes it immutable / accepted).
+pub async fn publish_policy_version(
+    version_id: &Uuid,
+) -> Result<serde_json::Value, ApiClientError> {
+    let url = format!("{}/policy-versions/{}/publish", base_url(), version_id);
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
+/// Create a new mutable draft from a published policy version.
+pub async fn create_policy_draft(
+    policy_id: &Uuid,
+) -> Result<serde_json::Value, ApiClientError> {
+    let url = format!("{}/policies/{}/drafts", base_url(), policy_id);
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
 /// Trust or reject a bundle version.
 pub async fn trust_bundle_version(
     version_id: &Uuid,
