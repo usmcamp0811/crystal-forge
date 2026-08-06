@@ -32,7 +32,7 @@
 //! ```
 
 use anyhow::Result;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 

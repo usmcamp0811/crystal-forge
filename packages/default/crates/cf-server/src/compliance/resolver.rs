@@ -50,14 +50,12 @@
 //!   5. Environment direct policy additions apply after bundle baselines.
 //!   6. System direct policy additions apply after everything.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::compliance::digest::{
-    AssignmentEffectiveSetCanonical, CombinedEffectiveSetCanonical,
-};
+use crate::compliance::digest::{AssignmentEffectiveSetCanonical, CombinedEffectiveSetCanonical};
 
 // ── Typed domain models ───────────────────────────────────────────────────────
 
@@ -250,7 +248,10 @@ enum MergeOutcome {
     /// The candidate was added as a new entry.
     Inserted { index: usize },
     /// Same exact version, deduplicated — update specificity if higher.
-    Deduplicated { index: usize, specificity_updated: bool },
+    Deduplicated {
+        index: usize,
+        specificity_updated: bool,
+    },
     /// Higher-specificity candidate replaced the existing entry.
     Replaced { index: usize },
     /// A typed conflict was created (same specificity, different version).
@@ -295,27 +296,49 @@ fn merge_effective_policy_candidate(
                 entry.effective_mode = candidate.effective_mode;
                 entry.overrides = candidate.overrides;
                 entry.effective_config = candidate.effective_config;
-                if candidate.baseline_order.is_some() { entry.baseline_order = candidate.baseline_order; }
-                if candidate.addition_order.is_some() { entry.addition_order = candidate.addition_order; }
-                for p in &mut entry.provenance { p.authoritative = false; }
-                entry.provenance.push(ProvenanceEntry { authoritative: true, ..provenance });
+                if candidate.baseline_order.is_some() {
+                    entry.baseline_order = candidate.baseline_order;
+                }
+                if candidate.addition_order.is_some() {
+                    entry.addition_order = candidate.addition_order;
+                }
+                for p in &mut entry.provenance {
+                    p.authoritative = false;
+                }
+                entry.provenance.push(ProvenanceEntry {
+                    authoritative: true,
+                    ..provenance
+                });
             } else {
-                staging[existing_idx].provenance.push(ProvenanceEntry { authoritative: false, ..provenance });
+                staging[existing_idx].provenance.push(ProvenanceEntry {
+                    authoritative: false,
+                    ..provenance
+                });
             }
             if spec_updated {
                 per_lineage.insert(lineage_id, (version_id, specificity, existing_idx));
             } else {
                 per_lineage.insert(lineage_id, (version_id, existing_spec, existing_idx));
             }
-            MergeOutcome::Deduplicated { index: existing_idx, specificity_updated: spec_updated }
+            MergeOutcome::Deduplicated {
+                index: existing_idx,
+                specificity_updated: spec_updated,
+            }
         } else if specificity > existing_spec {
             let mut new_entry = candidate;
-            for p in &mut staging[existing_idx].provenance { p.authoritative = false; }
+            for p in &mut staging[existing_idx].provenance {
+                p.authoritative = false;
+            }
             new_entry.provenance = staging[existing_idx].provenance.clone();
-            new_entry.provenance.push(ProvenanceEntry { authoritative: true, ..provenance });
+            new_entry.provenance.push(ProvenanceEntry {
+                authoritative: true,
+                ..provenance
+            });
             staging[existing_idx] = new_entry;
             per_lineage.insert(lineage_id, (version_id, specificity, existing_idx));
-            MergeOutcome::Replaced { index: existing_idx }
+            MergeOutcome::Replaced {
+                index: existing_idx,
+            }
         } else if specificity == existing_spec {
             // Conflict: put the entry back and return conflict.
             per_lineage.insert(lineage_id, (existing_ver, existing_spec, existing_idx));
@@ -327,14 +350,23 @@ fn merge_effective_policy_candidate(
             })
         } else {
             // Lower specificity — add as non-authoritative provenance.
-            staging[existing_idx].provenance.push(ProvenanceEntry { authoritative: false, ..provenance });
+            staging[existing_idx].provenance.push(ProvenanceEntry {
+                authoritative: false,
+                ..provenance
+            });
             per_lineage.insert(lineage_id, (existing_ver, existing_spec, existing_idx));
-            MergeOutcome::Deduplicated { index: existing_idx, specificity_updated: false }
+            MergeOutcome::Deduplicated {
+                index: existing_idx,
+                specificity_updated: false,
+            }
         }
     } else {
         let idx = staging.len();
         let mut pol = candidate;
-        pol.provenance.push(ProvenanceEntry { authoritative: true, ..provenance });
+        pol.provenance.push(ProvenanceEntry {
+            authoritative: true,
+            ..provenance
+        });
         staging.push(pol);
         per_lineage.insert(lineage_id, (version_id, specificity, idx));
         MergeOutcome::Inserted { index: idx }
@@ -571,7 +603,7 @@ pub async fn resolve_effective_policy_set(
             effective_config: add_config,
             assignment_mode: input.assignment_mode.clone(),
             effective_mode: input.assignment_mode.clone(),
-                provenance: Vec::new(),
+            provenance: Vec::new(),
         });
     }
 
@@ -879,8 +911,9 @@ pub async fn resolve_system_effective_policies(
     let env_id = env_id.flatten();
 
     // Load all active bundle assignments with explicit semantic ordering.
-    let assignments: Vec<_> = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid, String, String, String)>(
-        r#"SELECT a.id, a.current_version_id, a.bundle_id, a.bundle_version_id,
+    let assignments: Vec<_> =
+        sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid, String, String, String)>(
+            r#"SELECT a.id, a.current_version_id, a.bundle_id, a.bundle_version_id,
                   a.scope_type, a.enforcement_mode, a.assignment_overlay_digest
            FROM compliance_bundle_assignments a
            WHERE a.active AND a.current_version_id IS NOT NULL
@@ -895,12 +928,12 @@ pub async fn resolve_system_effective_policies(
              END,
              a.bundle_id,
              a.id"#,
-    )
-    .bind(system_id)
-    .bind(env_id)
-    .fetch_all(&mut *tx)
-    .await
-    .context("load bundle assignments for system")?;
+        )
+        .bind(system_id)
+        .bind(env_id)
+        .fetch_all(&mut *tx)
+        .await
+        .context("load bundle assignments for system")?;
 
     // Load direct environment policies (in-tx).
     let mut direct_candidates: Vec<(EffectivePolicy, PolicySpecificity)> = Vec::new();
@@ -1077,7 +1110,12 @@ pub async fn resolve_system_effective_policies(
                         authoritative: true,
                     };
                     match merge_effective_policy_candidate(
-                        pol, specificity, prov, &mut staging, &mut per_lineage, &mut all_warnings,
+                        pol,
+                        specificity,
+                        prov,
+                        &mut staging,
+                        &mut per_lineage,
+                        &mut all_warnings,
                     ) {
                         MergeOutcome::Conflict(conflict) => {
                             let _ = tx.rollback().await;
@@ -1099,12 +1137,24 @@ pub async fn resolve_system_effective_policies(
         let prov = ProvenanceEntry {
             source: EffectivePolicySource::LegacyDirect,
             specificity,
-            scope_type: Some(if specificity == PolicySpecificity::Environment { "environment" } else { "system" }.to_string()),
+            scope_type: Some(
+                if specificity == PolicySpecificity::Environment {
+                    "environment"
+                } else {
+                    "system"
+                }
+                .to_string(),
+            ),
             enforcement_mode: "enforce".to_string(),
             authoritative: true,
         };
         match merge_effective_policy_candidate(
-            pol, specificity, prov, &mut staging, &mut per_lineage, &mut all_warnings,
+            pol,
+            specificity,
+            prov,
+            &mut staging,
+            &mut per_lineage,
+            &mut all_warnings,
         ) {
             MergeOutcome::Conflict(conflict) => {
                 let _ = tx.rollback().await;
@@ -1208,7 +1258,7 @@ async fn resolve_legacy_system_policies(
                 effective_config: config,
                 assignment_mode: AssignmentMode::Enforce,
                 effective_mode: AssignmentMode::Enforce,
-                    provenance: Vec::new(),
+                provenance: Vec::new(),
             });
         }
     }
@@ -1475,15 +1525,13 @@ mod tests {
             "when_no_scan": "block"
         });
 
-        assert!(
-            validate_typed_override(
-                "require_cve_check",
-                &config,
-                "max_critical",
-                &serde_json::json!(3)
-            )
-            .is_ok()
-        );
+        assert!(validate_typed_override(
+            "require_cve_check",
+            &config,
+            "max_critical",
+            &serde_json::json!(3)
+        )
+        .is_ok());
     }
 
     #[test]

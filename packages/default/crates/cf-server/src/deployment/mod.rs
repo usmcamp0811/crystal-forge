@@ -1,7 +1,7 @@
-use crate::config::CrystalForgeConfig;
 use crate::compliance::resolver::{
-    AssignmentMode, EffectivePolicy, ResolutionOutcome, resolve_system_effective_policies,
+    resolve_system_effective_policies, AssignmentMode, EffectivePolicy, ResolutionOutcome,
 };
+use crate::config::CrystalForgeConfig;
 use crate::models::deployment_policies::{
     ApprovalConfig, CanaryConfig, CveThresholdConfig, DeploymentPolicyRecord, TimeWindowConfig,
 };
@@ -18,7 +18,7 @@ use crate::services::time_window_policy;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
-use tokio::time::{Instant, sleep};
+use tokio::time::{sleep, Instant};
 use tracing::{debug, error, info, warn};
 pub mod agent;
 pub use agent::*;
@@ -457,16 +457,17 @@ impl DeploymentPolicyManager {
 
             match policy.policy_type.as_str() {
                 "time_window" => {
-                    let config =
-                        match serde_json::from_value::<TimeWindowConfig>(effective_config.clone()) {
-                            Ok(config) => config,
-                            Err(err) => {
-                                return AdvancedGateDecision::Block(format!(
-                                    "Invalid time_window policy config for policy {}: {}",
-                                    policy.id, err
-                                ));
-                            }
-                        };
+                    let config = match serde_json::from_value::<TimeWindowConfig>(
+                        effective_config.clone(),
+                    ) {
+                        Ok(config) => config,
+                        Err(err) => {
+                            return AdvancedGateDecision::Block(format!(
+                                "Invalid time_window policy config for policy {}: {}",
+                                policy.id, err
+                            ));
+                        }
+                    };
                     let decision =
                         map_time_window_decision(time_window_policy::check_time_window(&config));
                     if !matches!(decision, AdvancedGateDecision::Allow) {
@@ -508,16 +509,16 @@ impl DeploymentPolicyManager {
                     }
                 }
                 "canary_rollout" => {
-                    let config = match serde_json::from_value::<CanaryConfig>(effective_config.clone())
-                    {
-                        Ok(config) => config,
-                        Err(err) => {
-                            return AdvancedGateDecision::Block(format!(
-                                "Invalid canary_rollout policy config for policy {}: {}",
-                                policy.id, err
-                            ));
-                        }
-                    };
+                    let config =
+                        match serde_json::from_value::<CanaryConfig>(effective_config.clone()) {
+                            Ok(config) => config,
+                            Err(err) => {
+                                return AdvancedGateDecision::Block(format!(
+                                    "Invalid canary_rollout policy config for policy {}: {}",
+                                    policy.id, err
+                                ));
+                            }
+                        };
 
                     let rollout_group: Vec<uuid::Uuid> = all_systems_for_flake
                         .iter()
@@ -563,16 +564,17 @@ impl DeploymentPolicyManager {
                     }
                 }
                 "cve_threshold" => {
-                    let config =
-                        match serde_json::from_value::<CveThresholdConfig>(effective_config.clone()) {
-                            Ok(config) => config,
-                            Err(err) => {
-                                return AdvancedGateDecision::Block(format!(
-                                    "Invalid cve_threshold policy config for policy {}: {}",
-                                    policy.id, err
-                                ));
-                            }
-                        };
+                    let config = match serde_json::from_value::<CveThresholdConfig>(
+                        effective_config.clone(),
+                    ) {
+                        Ok(config) => config,
+                        Err(err) => {
+                            return AdvancedGateDecision::Block(format!(
+                                "Invalid cve_threshold policy config for policy {}: {}",
+                                policy.id, err
+                            ));
+                        }
+                    };
                     match cve_threshold_policy::check_cve_thresholds(
                         &self.pool,
                         target.derivation_id,

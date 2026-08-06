@@ -2,7 +2,7 @@ pub mod jobs;
 
 use crate::builder::run_cve_scan_loop;
 use crate::compliance::resolver::{
-    AssignmentMode, ResolutionOutcome, resolve_system_effective_policies,
+    resolve_system_effective_policies, AssignmentMode, ResolutionOutcome,
 };
 use crate::config::{CrystalForgeConfig, FlakeConfig};
 use crate::deployment::spawn_deployment_policy_manager;
@@ -11,8 +11,8 @@ use crate::log::log_builder_worker_status;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::DeploymentPolicy;
 use crate::models::evaluate_with_policies::{
-    EvaluationFinalizeOutcome, FinalizedDerivation, evaluate_with_mock_eval_jobs,
-    evaluate_with_nix_eval_jobs, finalize_evaluation_attempt, update_commit_metadata_cache,
+    evaluate_with_mock_eval_jobs, evaluate_with_nix_eval_jobs, finalize_evaluation_attempt,
+    update_commit_metadata_cache, EvaluationFinalizeOutcome, FinalizedDerivation,
 };
 use crate::models::flakes::Flake;
 use crate::queue::QueueNotifier;
@@ -24,28 +24,28 @@ use sqlx::PgPool;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
 use tokio::time;
+use tokio::time::interval;
 use tokio::time::Duration;
 use tokio::time::Instant;
-use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 // ⬇️ bring in the commit-eval helpers you said you added in queries/commits.rs
 use crate::derivations::utils::count_closure_packages;
 use crate::models::deployment_policies::{AssignedPolicy, PoliciesByConfiguration};
-use crate::queries::build_jobs::{QueuedBuild, recover_orphaned_derivation_build_jobs};
+use crate::queries::build_jobs::{recover_orphaned_derivation_build_jobs, QueuedBuild};
 use crate::queries::builders::{
     cleanup_expired_build_logs, mark_stale_builders_offline,
     requeue_orphaned_building_jobs_with_reason,
 };
 use crate::queries::commits::{
-    EvalCancellationOutcome, EvalFailureOutcome, EvalStartOutcome, get_commits_pending_evaluation,
-    mark_commit_evaluation_failed, mark_commit_evaluation_started, next_evaluation_available_at,
-    reset_stuck_commit_evaluations,
+    get_commits_pending_evaluation, mark_commit_evaluation_failed, mark_commit_evaluation_started,
+    next_evaluation_available_at, reset_stuck_commit_evaluations, EvalCancellationOutcome,
+    EvalFailureOutcome, EvalStartOutcome,
 };
 use crate::queries::deployment_policies::{
-    get_deployment_policy_by_version,
-    list_enabled_deployment_policies, list_enabled_policies_for_flake,
-    list_policy_rows_by_configuration_for_flake, list_registered_configuration_names_for_flake,
+    get_deployment_policy_by_version, list_enabled_deployment_policies,
+    list_enabled_policies_for_flake, list_policy_rows_by_configuration_for_flake,
+    list_registered_configuration_names_for_flake,
 };
 use crate::queries::derivations::{
     cleanup_partial_derivations, reset_stuck_builds, set_closure_counts,

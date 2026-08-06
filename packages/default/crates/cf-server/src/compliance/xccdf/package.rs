@@ -13,7 +13,7 @@ use sha2::{Digest as _, Sha256};
 use super::super::interchange::{InterchangeLimits, MAX_XCCDF_XML_BYTES};
 use super::models::ParsedXccdf;
 use super::parser::parse_xccdf;
-use super::zip_extractor::{PackageKind, detect_package_kind, extract_xccdf_from_zip};
+use super::zip_extractor::{detect_package_kind, extract_xccdf_from_zip, PackageKind};
 
 /// Detailed package-source provenance for UI or audit display.
 #[derive(Debug, Clone)]
@@ -379,7 +379,9 @@ mod tests {
         writer
             .start_file("U_Example_STIG/STIG_unclass.xsl", options)
             .expect("stylesheet entry");
-        writer.write_all(b"<xsl:stylesheet/>").expect("stylesheet bytes");
+        writer
+            .write_all(b"<xsl:stylesheet/>")
+            .expect("stylesheet bytes");
         writer
             .start_file("U_Example_STIG/benchmark-xccdf.xml", options)
             .expect("XCCDF entry");

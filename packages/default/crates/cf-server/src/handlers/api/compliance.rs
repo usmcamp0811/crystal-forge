@@ -4,10 +4,10 @@
 //! Crystal Forge systems, environments, deployment policies, and CVE posture.
 
 use axum::{
-    Json,
     extract::{Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
+    Json,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -30,14 +30,14 @@ use crate::compliance::xccdf::importer::{
     build_policy_records, check_document_class, validate_cf_native_document, validate_import_plan,
     validate_sha256_match,
 };
-use crate::compliance::xccdf::package::{ProcessingError, process_xccdf_bytes};
+use crate::compliance::xccdf::package::{process_xccdf_bytes, ProcessingError};
 use crate::compliance::xccdf::reconciliation::NativeReconcileFailure;
-use crate::compliance::xccdf::xml_writer::{XccdfWriterError, write_bundle_xccdf_export};
+use crate::compliance::xccdf::xml_writer::{write_bundle_xccdf_export, XccdfWriterError};
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
-    BundleValidationError, create_bundle as create_bundle_row, delete_bundle as delete_bundle_row,
-    get_system_evidence, list_bundle_systems, list_bundles, list_system_bundles,
-    update_bundle as update_bundle_row,
+    create_bundle as create_bundle_row, delete_bundle as delete_bundle_row, get_system_evidence,
+    list_bundle_systems, list_bundles, list_system_bundles, update_bundle as update_bundle_row,
+    BundleValidationError,
 };
 use crate::queries::compliance_interchange;
 
@@ -1199,8 +1199,8 @@ async fn persist_assignment_inner(
     >,
 ) -> Result<crate::api::models::AssignmentResponse, axum::response::Response> {
     use crate::compliance::resolver::{
-        AssignmentMode, AssignmentTarget, EffectivePolicyResolutionInput, PolicyOverride,
-        ResolutionOutcome, resolve_effective_policy_set,
+        resolve_effective_policy_set, AssignmentMode, AssignmentTarget,
+        EffectivePolicyResolutionInput, PolicyOverride, ResolutionOutcome,
     };
 
     let enforcement_mode = payload.enforcement_mode.as_deref().unwrap_or("enforce");
@@ -2105,7 +2105,8 @@ pub async fn get_system_effective_policies(
 
     match crate::compliance::resolver::resolve_system_effective_policies(&pool, system_id).await {
         Ok(ResolutionOutcome::Resolved(set)) => {
-            let rollup = crate::queries::compliance::effective_policy_rollup(&system, &set.policies);
+            let rollup =
+                crate::queries::compliance::effective_policy_rollup(&system, &set.policies);
             let totals = Some(crate::queries::compliance::totals_for_rollups(&[rollup]));
             let mut response = effective_set_to_response(set, None);
             response.rollup = totals;
@@ -2414,8 +2415,10 @@ pub async fn xccdf_preview(
                 .checks
                 .iter()
                 .map(|c| {
-                    let body_parts: Vec<serde_json::Value> = c.body_parts.iter().map(|part| {
-                        match part {
+                    let body_parts: Vec<serde_json::Value> = c
+                        .body_parts
+                        .iter()
+                        .map(|part| match part {
                             crate::compliance::xccdf::models::CheckBodyPart::Inline { content } => {
                                 let truncated: String = content.chars().take(200).collect();
                                 serde_json::json!({
@@ -2423,15 +2426,18 @@ pub async fn xccdf_preview(
                                     "preview": truncated,
                                 })
                             }
-                            crate::compliance::xccdf::models::CheckBodyPart::Reference { href, name } => {
+                            crate::compliance::xccdf::models::CheckBodyPart::Reference {
+                                href,
+                                name,
+                            } => {
                                 serde_json::json!({
                                     "type": "reference",
                                     "href": href,
                                     "name": name,
                                 })
                             }
-                        }
-                    }).collect();
+                        })
+                        .collect();
                     serde_json::json!({
                         "system": c.system,
                         "selector": c.selector,
@@ -2456,10 +2462,12 @@ pub async fn xccdf_preview(
             let refs: Vec<serde_json::Value> = r
                 .references
                 .iter()
-                .map(|rf| serde_json::json!({
-                    "href": rf.href,
-                    "title": rf.title,
-                }))
+                .map(|rf| {
+                    serde_json::json!({
+                        "href": rf.href,
+                        "title": rf.title,
+                    })
+                })
                 .collect();
 
             serde_json::json!({
@@ -4349,26 +4357,26 @@ fn is_body_limit_error(err: &axum::extract::multipart::MultipartError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
+    use crate::auth::session::{hash_token, SESSION_COOKIE_NAME};
     use crate::compliance::canonical::{ImplementationState, PublicationState};
     use crate::compliance::interchange::{MAX_XCCDF_MULTIPART_BYTES, MAX_XCCDF_XML_BYTES};
     use crate::models::auth_identity::AuthRole;
     use crate::queries::auth_identity::{create_user_session, sync_user_role};
     use crate::queries::users::insert_user;
-    use axum::Router;
     use axum::body::Body;
     use axum::extract::DefaultBodyLimit;
     use axum::extract::FromRequest;
     use axum::http::Request;
     use axum::routing::{get, post};
+    use axum::Router;
     use chrono::Utc;
 
     const BOUNDARY: &str = "XCFTESTBOUNDARY";
 
     #[test]
     fn export_group_projection_preserves_nested_source_order() {
-        let policy = |id: Uuid, group_id: &str, parent: Option<&str>, order: i32| {
-            XccdfPolicyExport {
+        let policy =
+            |id: Uuid, group_id: &str, parent: Option<&str>, order: i32| XccdfPolicyExport {
                 policy_id: id,
                 policy_version_id: id,
                 version: "1.0.0".into(),
@@ -4393,8 +4401,7 @@ mod tests {
                 dependencies: serde_json::json!({}),
                 opaque_xml: None,
                 source_mappings: Vec::new(),
-            }
-        };
+            };
         let root_id = Uuid::new_v4();
         let child_id = Uuid::new_v4();
         let groups = build_export_groups(&[
@@ -6283,8 +6290,8 @@ mod tests {
     #[ignore = "requires live database connection"]
     async fn preview_accepts_zip_containing_single_xml() {
         use std::io::Write;
-        use zip::CompressionMethod;
         use zip::write::{FileOptions, SimpleFileOptions};
+        use zip::CompressionMethod;
 
         let pool = test_pool_from_env().await;
         let token = admin_session_token(&pool).await;
@@ -6317,8 +6324,8 @@ mod tests {
     #[ignore = "requires live database connection"]
     async fn preview_rejects_zip_with_no_xml() {
         use std::io::Write;
-        use zip::CompressionMethod;
         use zip::write::{FileOptions, SimpleFileOptions};
+        use zip::CompressionMethod;
 
         let pool = test_pool_from_env().await;
         let token = admin_session_token(&pool).await;
@@ -7967,11 +7974,9 @@ mod tests {
                 (0, 0, 0, 0, 0, 0)
             );
         }
-        assert!(
-            persist_assignment(&pool, admin_id, &payload, None, None)
-                .await
-                .is_ok()
-        );
+        assert!(persist_assignment(&pool, admin_id, &payload, None, None)
+            .await
+            .is_ok());
 
         // ── Barrier-synchronized concurrent create ────────────────────────────
         // Two creates for the same target + bundle lineage. The barrier ensures
@@ -8649,12 +8654,10 @@ mod tests {
         let client = reqwest::Client::new();
 
         // ── Fixture: system specificity overrides environment ──────────────
-        let (baseline_p, baseline_pv, _) =
-            make_draft_policy(&pool, "cross-baseline").await;
+        let (baseline_p, baseline_pv, _) = make_draft_policy(&pool, "cross-baseline").await;
         db_publish_policy_version(&pool, baseline_p, baseline_pv).await;
 
-        let (addition_p, addition_pv, _) = make_draft_policy(&pool, "cross-addition")
-            .await;
+        let (addition_p, addition_pv, _) = make_draft_policy(&pool, "cross-addition").await;
         db_publish_policy_version(&pool, addition_p, addition_pv).await;
 
         let (report_only_p, report_only_pv, _) =
@@ -8668,14 +8671,12 @@ mod tests {
 
         // Ensure lineage IDs are the same for the override test.
         // We use the same policy lineage_id as the baseline policy.
-        sqlx::query(
-            "UPDATE deployment_policies SET id = $1 WHERE id = $2",
-        )
-        .bind(baseline_p)
-        .bind(env_override_p)
-        .execute(&pool)
-        .await
-        .expect("set same lineage for override test");
+        sqlx::query("UPDATE deployment_policies SET id = $1 WHERE id = $2")
+            .bind(baseline_p)
+            .bind(env_override_p)
+            .execute(&pool)
+            .await
+            .expect("set same lineage for override test");
 
         let (_, bundle_bv, bundle_digest) = make_draft_bundle(
             &pool,
@@ -8760,10 +8761,7 @@ mod tests {
         let by_lineage: std::collections::HashMap<Uuid, &serde_json::Value> = policies
             .iter()
             .map(|p| {
-                let lid: Uuid = serde_json::from_value(
-                    p["policy_lineage_id"].clone(),
-                )
-                .unwrap();
+                let lid: Uuid = serde_json::from_value(p["policy_lineage_id"].clone()).unwrap();
                 (lid, p)
             })
             .collect();
@@ -8795,15 +8793,10 @@ mod tests {
         // resolve_system_effective_policies function, so its output is
         // guaranteed to match. We verify by calling the resolver directly.
         let outcome =
-            crate::compliance::resolver::resolve_system_effective_policies(
-                &pool, system_id,
-            )
-            .await
-            .expect("direct resolver call");
-        if let crate::compliance::resolver::ResolutionOutcome::Resolved(
-            direct,
-        ) = &outcome
-        {
+            crate::compliance::resolver::resolve_system_effective_policies(&pool, system_id)
+                .await
+                .expect("direct resolver call");
+        if let crate::compliance::resolver::ResolutionOutcome::Resolved(direct) = &outcome {
             assert_eq!(
                 direct.effective_set_digest, digest,
                 "direct resolver must produce same digest as API"

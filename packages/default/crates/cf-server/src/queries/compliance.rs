@@ -1,14 +1,14 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::compliance::digest::{
-    BundleMembershipEntry, BundleVersionCanonical, load_bundle_membership,
-    write_assignment_effective_set_digest, write_bundle_version_digest,
+    load_bundle_membership, write_assignment_effective_set_digest, write_bundle_version_digest,
+    BundleMembershipEntry, BundleVersionCanonical,
 };
-use crate::compliance::resolver::{ResolutionOutcome, resolve_system_effective_policies};
+use crate::compliance::resolver::{resolve_system_effective_policies, ResolutionOutcome};
 
 // ─── Draft-lifecycle helpers ──────────────────────────────────────────────────
 
@@ -1143,12 +1143,11 @@ pub async fn list_system_bundles(
     if let ResolutionOutcome::Resolved(effective) =
         resolve_system_effective_policies(pool, system_id).await?
     {
-        let resolved_bundle_id: Option<Uuid> = sqlx::query_scalar(
-            "SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1",
-        )
-        .bind(effective.bundle_version_id)
-        .fetch_optional(pool)
-        .await?;
+        let resolved_bundle_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1")
+                .bind(effective.bundle_version_id)
+                .fetch_optional(pool)
+                .await?;
         if let Some(resolved_bundle_id) = resolved_bundle_id {
             if let Some((_, rollup)) = result
                 .iter_mut()
@@ -1220,12 +1219,11 @@ pub async fn get_system_evidence(
     if let ResolutionOutcome::Resolved(effective) =
         resolve_system_effective_policies(pool, system_id).await?
     {
-        let resolved_bundle_id: Option<Uuid> = sqlx::query_scalar(
-            "SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1",
-        )
-        .bind(effective.bundle_version_id)
-        .fetch_optional(pool)
-        .await?;
+        let resolved_bundle_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1")
+                .bind(effective.bundle_version_id)
+                .fetch_optional(pool)
+                .await?;
         if resolved_bundle_id == Some(bundle_id) {
             let ids: Vec<Uuid> = effective
                 .policies
@@ -1238,13 +1236,16 @@ pub async fn get_system_evidence(
             .bind(&ids)
             .fetch_all(pool)
             .await?;
-            let names: std::collections::HashMap<Uuid, (String, Option<String>, bool)> =
-                names.into_iter().map(|(id, name, description, enabled)| (id, (name, description, enabled))).collect();
+            let names: std::collections::HashMap<Uuid, (String, Option<String>, bool)> = names
+                .into_iter()
+                .map(|(id, name, description, enabled)| (id, (name, description, enabled)))
+                .collect();
             policies = effective
                 .policies
                 .into_iter()
                 .filter_map(|policy| {
-                    let (name, description, enabled) = names.get(&policy.policy_version_id)?.clone();
+                    let (name, description, enabled) =
+                        names.get(&policy.policy_version_id)?.clone();
                     Some(PolicyRow {
                         id: policy.policy_version_id,
                         bundle_id,
@@ -1447,7 +1448,10 @@ pub(crate) fn effective_policy_rollup(
     let total = effective_policies.len() as i64;
 
     for ep in effective_policies {
-        let is_report_only = matches!(ep.effective_mode, crate::compliance::resolver::AssignmentMode::ReportOnly);
+        let is_report_only = matches!(
+            ep.effective_mode,
+            crate::compliance::resolver::AssignmentMode::ReportOnly
+        );
 
         // Evaluate the policy based on its type and the system health.
         // For effective policies we use the resolved effective_config.
@@ -1490,12 +1494,8 @@ pub(crate) fn effective_policy_rollup(
                 }
             }
             // Native types that the evaluator intrinsically supports.
-            "require_packages"
-            | "custom_check"
-            | "time_window"
-            | "require_approvals"
-            | "canary_rollout"
-            | "cve_threshold" => {
+            "require_packages" | "custom_check" | "time_window" | "require_approvals"
+            | "canary_rollout" | "cve_threshold" => {
                 // These are natively evaluated by the deployment/evaluation
                 // pipeline; for a live system, a pass is assumed when the
                 // system is healthy and the policy is active.
