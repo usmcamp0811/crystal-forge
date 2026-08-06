@@ -1385,12 +1385,22 @@ pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> Compli
             }
             // New states: not_checked, not_applicable, and error are known
             // outcomes but must not inflate the evaluated denominator.
-            PolicyEval::Evaluated(ComplianceControlStatus::NotChecked) => not_checked += 1,
-            PolicyEval::Evaluated(ComplianceControlStatus::NotApplicable) => not_applicable += 1,
+            PolicyEval::Evaluated(ComplianceControlStatus::NotChecked) => {
+                not_checked += 1;
+                warn += 1;
+            }
+            PolicyEval::Evaluated(ComplianceControlStatus::NotApplicable) => {
+                not_applicable += 1;
+            }
             PolicyEval::Evaluated(ComplianceControlStatus::Error) => {
                 error_count += 1;
             }
-            PolicyEval::Disabled | PolicyEval::Unsupported => not_checked += 1,
+            PolicyEval::Disabled | PolicyEval::Unsupported => {
+                // Preserve the legacy warning count for existing consumers,
+                // while exposing the distinct not_checked count as well.
+                not_checked += 1;
+                warn += 1;
+            }
         }
     }
 
@@ -1626,11 +1636,12 @@ fn evaluate_policy(system: &SystemRow, policy: &PolicyRow) -> PolicyEval {
 }
 
 /// Translate a PolicyEval into the ComplianceControlStatus used by rollups and
-/// evidence. Disabled and unsupported controls are selected but not evaluated.
+/// evidence. Disabled and unsupported controls retain the legacy warning
+/// surface while their not-checked state is exposed by rollup counters.
 fn policy_status(system: &SystemRow, policy: &PolicyRow) -> ComplianceControlStatus {
     match evaluate_policy(system, policy) {
         PolicyEval::Evaluated(s) => s,
-        PolicyEval::Disabled | PolicyEval::Unsupported => ComplianceControlStatus::NotChecked,
+        PolicyEval::Disabled | PolicyEval::Unsupported => ComplianceControlStatus::Warn,
     }
 }
 
@@ -1638,7 +1649,7 @@ fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlE
     let eval = evaluate_policy(system, &policy);
     let status = match &eval {
         PolicyEval::Evaluated(s) => s.clone(),
-        PolicyEval::Disabled | PolicyEval::Unsupported => ComplianceControlStatus::NotChecked,
+        PolicyEval::Disabled | PolicyEval::Unsupported => ComplianceControlStatus::Warn,
     };
 
     let severity = match status {
