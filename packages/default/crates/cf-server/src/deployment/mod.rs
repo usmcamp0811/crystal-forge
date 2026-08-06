@@ -5,7 +5,7 @@ use crate::models::deployment_policies::{
 };
 use crate::models::systems::DeploymentPolicy;
 use crate::queries::deployment::{get_systems_with_auto_latest_policy, update_desired_target};
-use crate::queries::deployment_policies::get_deployment_policy_by_id;
+use crate::queries::deployment_policies::get_deployment_policy_by_version;
 use crate::queries::derivations::get_latest_deployable_targets_for_flake_hosts;
 use crate::server::load_cve_policies;
 use crate::services::approval_policy::{self, DeploymentContext};
@@ -212,7 +212,7 @@ impl DeploymentPolicyManager {
         // Build effective policy map for all systems in this flake batch.
         let mut effective_policy_ids_by_system: HashMap<uuid::Uuid, Vec<uuid::Uuid>> =
             HashMap::new();
-        let mut all_policy_ids: HashSet<uuid::Uuid> = HashSet::new();
+        let mut all_policy_version_ids: HashSet<uuid::Uuid> = HashSet::new();
         let mut failed_policy_lookup_systems: HashSet<uuid::Uuid> = HashSet::new();
         for system in &systems {
             let policy_ids = match resolve_system_effective_policies(&self.pool, system.id).await {
@@ -222,7 +222,7 @@ impl DeploymentPolicyManager {
                     // Report-only policies are evaluated by compliance paths but
                     // must never block or alter deployment configuration.
                     .filter(|policy| matches!(policy.effective_mode, AssignmentMode::Enforce))
-                    .map(|policy| policy.policy_lineage_id)
+                    .map(|policy| policy.policy_version_id)
                     .collect::<Vec<uuid::Uuid>>(),
                 Ok(ResolutionOutcome::Conflict(conflicts)) => {
                     warn!(
@@ -248,24 +248,25 @@ impl DeploymentPolicyManager {
                 }
             };
             for policy_id in &policy_ids {
-                all_policy_ids.insert(*policy_id);
+                all_policy_version_ids.insert(*policy_id);
             }
             effective_policy_ids_by_system.insert(system.id, policy_ids);
         }
 
         let mut policies_by_id: HashMap<uuid::Uuid, DeploymentPolicyRecord> = HashMap::new();
         let mut failed_policy_loads: HashSet<uuid::Uuid> = HashSet::new();
-        for policy_id in all_policy_ids {
-            match get_deployment_policy_by_id(&self.pool, &policy_id).await {
+
+        for policy_version_id in all_policy_version_ids {
+            match get_deployment_policy_by_version(&self.pool, &policy_version_id).await {
                 Ok(Some(policy)) => {
                     policies_by_id.insert(policy.id, policy);
                 }
                 Ok(None) => {
-                    failed_policy_loads.insert(policy_id);
+                    failed_policy_loads.insert(policy_version_id);
                 }
                 Err(err) => {
-                    warn!("Failed to load deployment policy {}: {:#}", policy_id, err);
-                    failed_policy_loads.insert(policy_id);
+                    warn!("Failed to load deployment policy {}: {:#}", policy_version_id, err);
+                    failed_policy_loads.insert(policy_version_id);
                 }
             }
         }

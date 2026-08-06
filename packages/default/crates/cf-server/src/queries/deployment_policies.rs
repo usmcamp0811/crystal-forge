@@ -269,6 +269,29 @@ pub async fn get_deployment_policy_by_id(
     Ok(policy)
 }
 
+/// Fetch a deployment policy record resolved to an exact version.
+pub async fn get_deployment_policy_by_version(
+    pool: &PgPool,
+    policy_version_id: &Uuid,
+) -> Result<Option<DeploymentPolicyRecord>> {
+    let row = sqlx::query_as::<_, DeploymentPolicyRecord>(
+        r#"
+        SELECT dp.id, dp.name, dp.description, dp.policy_type,
+               COALESCE(pv.config, dp.config) AS config,
+               dp.enabled, dp.created_at, dp.updated_at
+          FROM deployment_policy_versions pv
+          JOIN deployment_policies dp ON dp.id = pv.policy_id
+         WHERE pv.id = $1
+        "#,
+    )
+    .bind(policy_version_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to fetch deployment policy by version ID")?;
+
+    Ok(row)
+}
+
 /// Create a new deployment policy.
 ///
 /// Runs entirely within a transaction. The SQL trigger creates the draft
