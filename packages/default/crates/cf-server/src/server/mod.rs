@@ -1,6 +1,9 @@
 pub mod jobs;
 
 use crate::builder::run_cve_scan_loop;
+use crate::compliance::resolver::{
+    AssignmentMode, ResolutionOutcome, resolve_system_effective_policies,
+};
 use crate::config::{CrystalForgeConfig, FlakeConfig};
 use crate::deployment::spawn_deployment_policy_manager;
 use crate::flake::commits::sync_all_watched_flakes_commits_with_ids;
@@ -40,6 +43,7 @@ use crate::queries::commits::{
     reset_stuck_commit_evaluations,
 };
 use crate::queries::deployment_policies::{
+    get_deployment_policy_by_version,
     list_enabled_deployment_policies, list_enabled_policies_for_flake,
     list_policy_rows_by_configuration_for_flake, list_registered_configuration_names_for_flake,
 };
@@ -635,6 +639,112 @@ async fn load_deployment_policies_for_eval(pool: &PgPool, flake_id: i32) -> Vec<
 /// Systems with zero assigned policies produce *no entry* in the returned map.
 /// Use `policies_for_config(map, name)` to safely get an empty slice for those.
 async fn load_policies_by_configuration_for_eval(
+    pool: &PgPool,
+    flake_id: i32,
+) -> anyhow::Result<PoliciesByConfiguration> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let system_rows = sqlx::query_as::<_, (uuid::Uuid, String)>(
+        r#"
+        SELECT s.id, COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
+        FROM systems s
+        WHERE s.flake_id = $1 AND s.is_active = TRUE
+        ORDER BY 2, 1
+        "#,
+    )
+    .bind(flake_id)
+    .fetch_all(pool)
+    .await
+    .context("Failed to load systems for effective policy evaluation")?;
+
+    let mut map: PoliciesByConfiguration = BTreeMap::new();
+    let mut policy_ids_by_config: BTreeMap<String, BTreeSet<uuid::Uuid>> = BTreeMap::new();
+
+    for (system_id, config_name) in system_rows {
+        let outcome = resolve_system_effective_policies(pool, system_id).await?;
+        let effective = match outcome {
+            ResolutionOutcome::Resolved(set) => set.policies,
+            ResolutionOutcome::Conflict(conflicts) => anyhow::bail!(
+                "Effective policy conflict for system {}: {}",
+                system_id,
+                conflicts
+                    .iter()
+                    .map(|conflict| format!("{}: {}", conflict.code, conflict.message))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        };
+
+        let mut assigned = Vec::new();
+        for effective_policy in effective
+            .into_iter()
+            .filter(|policy| matches!(policy.effective_mode, AssignmentMode::Enforce))
+        {
+            let Some(mut record) =
+                get_deployment_policy_by_version(pool, &effective_policy.policy_version_id).await?
+            else {
+                anyhow::bail!(
+                    "Effective policy version {} was not found",
+                    effective_policy.policy_version_id
+                );
+            };
+
+            if !record.enabled {
+                continue;
+            }
+
+            if !effective_policy.effective_config.is_null() {
+                record.config = effective_policy.effective_config;
+            }
+
+            if let Some(policy) = parse_deployment_policy_record(&record) {
+                if policy.is_nix_evaluated()
+                    && !matches!(policy, DeploymentPolicy::RequireCrystalForgeAgent { .. })
+                {
+                    assigned.push(AssignedPolicy {
+                        policy_id: effective_policy.policy_version_id,
+                        policy_name: record.name,
+                        policy,
+                    });
+                }
+            }
+        }
+
+        if assigned.is_empty() {
+            continue;
+        }
+
+        let ids = assigned.iter().map(|policy| policy.policy_id).collect();
+        if let Some(existing) = policy_ids_by_config.get(&config_name) {
+            if existing != &ids {
+                anyhow::bail!(
+                    "Configuration {:?} resolves to different effective policy sets across systems",
+                    config_name
+                );
+            }
+        } else {
+            policy_ids_by_config.insert(config_name.clone(), ids);
+            map.insert(config_name, assigned);
+        }
+    }
+
+    info!(
+        flake_id,
+        unique_policies = map
+            .values()
+            .flat_map(|policies| policies.iter())
+            .map(|policy| policy.policy_id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        registered_configurations_with_policies = map.len(),
+        "effective_policies_by_configuration_loaded"
+    );
+
+    return Ok(map);
+}
+
+#[allow(dead_code)]
+async fn load_policies_by_configuration_for_eval_legacy(
     pool: &PgPool,
     flake_id: i32,
 ) -> anyhow::Result<PoliciesByConfiguration> {
