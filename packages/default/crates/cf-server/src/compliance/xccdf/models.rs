@@ -112,26 +112,34 @@ pub struct ParsedRule {
 
 // ── Check / Fix ───────────────────────────────────────────────────────────────
 
-/// The body of an XCCDF check — exactly one form is valid.
+/// A single body part within a check element.
 ///
-/// XCCDF 1.2 defines `<check-content-ref>` and `<check-content>` as exclusive
-/// alternatives within a `<check>`. Both cannot coexist.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CheckBody {
-    /// Inline check content. Contains the check text directly.
-    Inline { content: String },
+/// XCCDF 1.2 allows zero or more `<check-content-ref>` elements OR
+/// at most one `<check-content>` element, but not both forms in the same
+/// `<check>`.  Multiple `check-content-ref` elements are valid and must be
+/// preserved in source order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CheckBodyPart {
     /// External reference. `href` is required; `name` is optional.
     Reference { href: String, name: Option<String> },
+    /// Inline check content.
+    Inline { content: String },
 }
 
 /// A validated XCCDF check element.
 ///
 /// Preserves every XCCDF 1.2 `<check>` attribute that affects evaluation
 /// semantics: `system`, `selector`, `multi-check`, and `negate`.
+///
+/// Body parts are preserved in document order. Multiple references are
+/// valid (e.g. a STIG benchmark that references separate OVAL definitions
+/// for each architecture).  The combination of inline content with any
+/// reference remains invalid per the XCCDF 1.2 schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckContent {
     pub system: String,
-    pub body: CheckBody,
+    /// Ordered body parts from the source document.
+    pub body_parts: Vec<CheckBodyPart>,
     pub selector: Option<String>,
     /// XCCDF 1.2 `multi-check` attribute: when true, the check may
     /// produce multiple results (one per selector or target).

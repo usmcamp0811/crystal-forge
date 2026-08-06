@@ -2408,33 +2408,35 @@ pub async fn xccdf_preview(
                 })
                 .collect();
 
-            // Check summaries (system + body type)
+            // Check summaries (system + body parts)
             let check_summaries: Vec<serde_json::Value> = r
                 .checks
                 .iter()
                 .map(|c| {
-                    let body_summary = match &c.body {
-                        crate::compliance::xccdf::models::CheckBody::Inline { content } => {
-                            let truncated: String = content.chars().take(200).collect();
-                            serde_json::json!({
-                                "type": "inline",
-                                "preview": truncated,
-                            })
+                    let body_parts: Vec<serde_json::Value> = c.body_parts.iter().map(|part| {
+                        match part {
+                            crate::compliance::xccdf::models::CheckBodyPart::Inline { content } => {
+                                let truncated: String = content.chars().take(200).collect();
+                                serde_json::json!({
+                                    "type": "inline",
+                                    "preview": truncated,
+                                })
+                            }
+                            crate::compliance::xccdf::models::CheckBodyPart::Reference { href, name } => {
+                                serde_json::json!({
+                                    "type": "reference",
+                                    "href": href,
+                                    "name": name,
+                                })
+                            }
                         }
-                        crate::compliance::xccdf::models::CheckBody::Reference { href, name } => {
-                            serde_json::json!({
-                                "type": "reference",
-                                "href": href,
-                                "name": name,
-                            })
-                        }
-                    };
+                    }).collect();
                     serde_json::json!({
                         "system": c.system,
                         "selector": c.selector,
                         "multi_check": c.multi_check,
                         "negate": c.negate,
-                        "body": body_summary,
+                        "body_parts": body_parts,
                     })
                 })
                 .collect();

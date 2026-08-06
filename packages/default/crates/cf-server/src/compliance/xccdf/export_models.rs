@@ -9,9 +9,9 @@ use uuid::Uuid;
 
 use super::super::canonical::{ImplementationState, PublicationState};
 
-/// Backwards-compatible export-model name for the canonical parser check body.
-/// The parser, preview, and writer therefore share one body representation.
-pub type XccdfCheckBody = super::models::CheckBody;
+/// Re-export the canonical parser check body-part type so the writer and
+/// export models share one representation.
+pub type XccdfCheckBodyPart = super::models::CheckBodyPart;
 
 /// Valid XCCDF 1.2 `<fix>` complexity enumeration values.
 pub(crate) const VALID_FIX_COMPLEXITY: &[&str] = &["unknown", "low", "medium", "high"];
@@ -67,13 +67,10 @@ pub struct XccdfSourceMapping {
 #[derive(Debug, Clone)]
 pub struct XccdfStandardCheck {
     pub system: String,
-    pub body: XccdfCheckBody,
+    /// Ordered body parts preserved from the source check element.
+    pub body_parts: Vec<XccdfCheckBodyPart>,
     pub selector: Option<String>,
-    /// XCCDF 1.2 `multi-check` attribute: when true, the check may
-    /// produce multiple results (one per selector or target).
     pub multi_check: Option<bool>,
-    /// XCCDF 1.2 `negate` attribute: when true, the check result is
-    /// inverted (pass becomes fail and vice versa).
     pub negate: Option<bool>,
 }
 
@@ -250,42 +247,89 @@ impl XccdfPolicyExport {
             .ok_or(ImportedCheckError::MissingSystem)?
             .to_owned();
 
-        let has_inline = value
-            .get("content")
-            .and_then(|v| v.as_str())
-            .map(|s| !s.is_empty())
-            .unwrap_or(false);
-        let has_href = value
-            .get("content_ref_href")
-            .and_then(|v| v.as_str())
-            .map(|s| !s.is_empty())
-            .unwrap_or(false);
-        let has_name = value
-            .get("content_ref_name")
-            .and_then(|v| v.as_str())
-            .is_some();
+        // Collect body parts from the compliance metadata.
+        // The metadata stores body_parts as an array of objects with a "type" field.
+        let mut body_parts: Vec<XccdfCheckBodyPart> = Vec::new();
+        let mut has_inline = false;
+        let mut has_reference = false;
 
-        let body = if has_inline && has_href {
-            return Err(ImportedCheckError::AmbiguousBody);
-        } else if has_name && !has_href {
-            return Err(ImportedCheckError::RefNameWithoutHref);
-        } else if has_inline {
-            let content = value
+        if let Some(parts) = value.get("body_parts").and_then(|v| v.as_array()) {
+            for part in parts {
+                let part_type = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match part_type {
+                    "inline" => {
+                        let content = part
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_owned();
+                        if has_reference {
+                            return Err(ImportedCheckError::AmbiguousBody);
+                        }
+                        if has_inline {
+                            return Err(ImportedCheckError::AmbiguousBody);
+                        }
+                        has_inline = true;
+                        body_parts.push(XccdfCheckBodyPart::Inline { content });
+                    }
+                    "reference" => {
+                        let href = part
+                            .get("href")
+                            .and_then(|v| v.as_str())
+                            .ok_or(ImportedCheckError::ReferenceOnlyWithoutFallback)?
+                            .to_owned();
+                        let name = part
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned);
+                        if has_inline {
+                            return Err(ImportedCheckError::AmbiguousBody);
+                        }
+                        has_reference = true;
+                        body_parts.push(XccdfCheckBodyPart::Reference { href, name });
+                    }
+                    _ => {} // unknown body part type — skip
+                }
+            }
+        } else {
+            // Legacy backward-compat: single body with "content" / "content_ref_href".
+            let has_legacy_inline = value
                 .get("content")
                 .and_then(|v| v.as_str())
-                .unwrap()
-                .to_owned();
-            XccdfCheckBody::Inline { content }
-        } else if has_href {
-            // Reference-only checks are always rejected. A standalone XCCDF
-            // XML export must not contain an unresolved external reference.
-            // The opaque_xml field is a Crystal Forge extension element, not
-            // a usable inline check body — it does not satisfy the XCCDF
-            // requirement for self-contained check content.
-            return Err(ImportedCheckError::ReferenceOnlyWithoutFallback);
-        } else {
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            let has_legacy_href = value
+                .get("content_ref_href")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            let has_legacy_name = value
+                .get("content_ref_name")
+                .and_then(|v| v.as_str())
+                .is_some();
+
+            if has_legacy_inline && has_legacy_href {
+                return Err(ImportedCheckError::AmbiguousBody);
+            } else if has_legacy_name && !has_legacy_href {
+                return Err(ImportedCheckError::RefNameWithoutHref);
+            } else if has_legacy_inline {
+                let content = value
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap()
+                    .to_owned();
+                body_parts.push(XccdfCheckBodyPart::Inline { content });
+            } else if has_legacy_href {
+                // Reference-only checks are rejected for standalone XCCDF export.
+                return Err(ImportedCheckError::ReferenceOnlyWithoutFallback);
+            } else {
+                return Err(ImportedCheckError::EmptyBody);
+            }
+        }
+
+        if body_parts.is_empty() {
             return Err(ImportedCheckError::EmptyBody);
-        };
+        }
 
         let selector = value
             .get("selector")
@@ -302,15 +346,12 @@ impl XccdfPolicyExport {
             None => None,
         };
 
-        // Reject any unknown attributes. Unknown check attributes must not
-        // be silently dropped — they may affect evaluation semantics. The
-        // export is rejected with a typed validation error identifying the
-        // affected attributes.
         let known_keys: &[&str] = &[
             "system",
             "content",
             "content_ref_href",
             "content_ref_name",
+            "body_parts",
             "selector",
             "multi-check",
             "negate",
@@ -331,7 +372,7 @@ impl XccdfPolicyExport {
 
         Ok(Some(XccdfStandardCheck {
             system,
-            body,
+            body_parts,
             selector,
             multi_check,
             negate,

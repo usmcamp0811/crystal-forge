@@ -41,7 +41,7 @@ use super::super::interchange::{
     DIGEST_ALGORITHM, XCCDF_1_2_NAMESPACE,
 };
 use super::export_models::{
-    XccdfBundleExport, XccdfCheckBody, XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
+    XccdfBundleExport, XccdfCheckBodyPart, XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
     XccdfStandardCheck,
 };
 
@@ -1073,19 +1073,21 @@ fn write_single_standard_check(
         check.push_attribute(("negate", if negate { "true" } else { "false" }));
     }
     writer.write_event(Event::Start(check))?;
-    match &std_check.body {
-        XccdfCheckBody::Inline { content } => {
-            writer.write_event(Event::Start(BytesStart::new("check-content")))?;
-            writer.write_event(Event::Text(BytesText::new(content)))?;
-            writer.write_event(Event::End(BytesEnd::new("check-content")))?;
-        }
-        XccdfCheckBody::Reference { href, name } => {
-            let mut content_ref = BytesStart::new("check-content-ref");
-            content_ref.push_attribute(("href", href.as_str()));
-            if let Some(name) = name.as_deref() {
-                content_ref.push_attribute(("name", name));
+    for part in &std_check.body_parts {
+        match part {
+            XccdfCheckBodyPart::Inline { content } => {
+                writer.write_event(Event::Start(BytesStart::new("check-content")))?;
+                writer.write_event(Event::Text(BytesText::new(content)))?;
+                writer.write_event(Event::End(BytesEnd::new("check-content")))?;
             }
-            writer.write_event(Event::Empty(content_ref))?;
+            XccdfCheckBodyPart::Reference { href, name } => {
+                let mut content_ref = BytesStart::new("check-content-ref");
+                content_ref.push_attribute(("href", href.as_str()));
+                if let Some(name) = name.as_deref() {
+                    content_ref.push_attribute(("name", name));
+                }
+                writer.write_event(Event::Empty(content_ref))?;
+            }
         }
     }
     writer.write_event(Event::End(BytesEnd::new("check")))?;
@@ -2868,7 +2870,7 @@ mod tests {
 
     // ── Round-trip tests ───────────────────────────────────────────────────────
 
-    use super::super::models::CheckBody;
+    use super::super::models::CheckBodyPart;
     use super::super::models::DocumentClass;
     use super::super::parser::parse_xccdf;
     use crate::compliance::interchange::InterchangeLimits;
@@ -2912,17 +2914,19 @@ mod tests {
         assert_eq!(imported.multi_check, Some(true));
         assert_eq!(imported.negate, Some(false));
         assert!(matches!(
-            &imported.body,
-            CheckBody::Inline { content }
+            imported.body_parts.first(),
+            Some(CheckBodyPart::Inline { content })
                 if content == "Evaluate the imported standards check."
         ));
+        assert_eq!(imported.body_parts.len(), 1);
 
         let crystal_forge = &checks[1];
         assert_eq!(crystal_forge.system, CF_POLICY_CHECK_SYSTEM);
         assert_eq!(crystal_forge.selector, None);
         assert_eq!(crystal_forge.multi_check, None);
         assert_eq!(crystal_forge.negate, None);
-        assert!(matches!(&crystal_forge.body, CheckBody::Inline { .. }));
+        assert_eq!(crystal_forge.body_parts.len(), 1);
+        assert!(matches!(&crystal_forge.body_parts[0], CheckBodyPart::Inline { .. }));
     }
 
     fn full_test_snapshot() -> XccdfBundleExport {

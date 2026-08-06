@@ -406,7 +406,8 @@ struct PendingCheck {
     selector: Option<String>,
     multi_check: Option<bool>,
     negate: Option<bool>,
-    body: Option<CheckBody>,
+    body_parts: Vec<CheckBodyPart>,
+    has_inline: bool,
     body_error: bool,
 }
 
@@ -530,18 +531,19 @@ impl ParserState {
                         check.body_error = true;
                         return ParseControl::Abort;
                     };
-                    if check.body.is_some() {
+                    // Valid: inline + any reference is ambiguous.
+                    // Valid: multiple references with no inline content (common in XCCDF 1.1/1.2).
+                    if check.has_inline {
                         self.errors.push(Diagnostic::error(
                             "CHECK_BODY_AMBIGUOUS",
-                            "check contains more than one check-content or check-content-ref body",
+                            "check contains inline check-content together with a check-content-ref",
                         ));
                         check.body_error = true;
-                    } else {
-                        check.body = Some(CheckBody::Reference {
-                            href: href.to_owned(),
-                            name: attr(&attrs, b"name").map(str::to_owned),
-                        });
                     }
+                    check.body_parts.push(CheckBodyPart::Reference {
+                        href: href.to_owned(),
+                        name: attr(&attrs, b"name").map(str::to_owned),
+                    });
                 }
                 ParseControl::Continue
             }
@@ -752,34 +754,33 @@ impl ParserState {
                     if check.body_error {
                         // A diagnostic was already emitted for the invalid
                         // body combination; do not construct a lossy check.
-                    } else if let Some(body) = check.body {
-                        if let Some(ref mut rule) = self.current_rule {
-                            rule.checks.push(CheckContent {
-                                system: check.system,
-                                body,
-                                selector: check.selector,
-                                multi_check: check.multi_check,
-                                negate: check.negate,
-                            });
-                        }
-                    } else {
+                    } else if check.body_parts.is_empty() {
                         self.errors.push(Diagnostic::error(
                             "CHECK_BODY_MISSING",
-                            "check must contain exactly one check-content or check-content-ref body",
+                            "check must contain at least one check-content-ref or check-content body",
                         ));
+                    } else if let Some(ref mut rule) = self.current_rule {
+                        rule.checks.push(CheckContent {
+                            system: check.system,
+                            body_parts: check.body_parts,
+                            selector: check.selector,
+                            multi_check: check.multi_check,
+                            negate: check.negate,
+                        });
                     }
                 }
             }
             (ElementNamespace::Xccdf, b"check-content") => {
                 if let Some(ref mut check) = self.current_check {
-                    if check.body.is_some() {
+                    if !check.body_parts.is_empty() || check.has_inline {
                         self.errors.push(Diagnostic::error(
                             "CHECK_BODY_AMBIGUOUS",
-                            "check contains more than one check-content or check-content-ref body",
+                            "check contains more than one check-content or check-content and check-content-ref together",
                         ));
                         check.body_error = true;
                     } else {
-                        check.body = Some(CheckBody::Inline {
+                        check.has_inline = true;
+                        check.body_parts.push(CheckBodyPart::Inline {
                             content: self.current_text.clone(),
                         });
                     }
@@ -1151,7 +1152,8 @@ impl ParserState {
             selector,
             multi_check,
             negate,
-            body: None,
+            body_parts: Vec::new(),
+            has_inline: false,
             body_error: false,
         });
     }
@@ -1341,9 +1343,10 @@ mod tests {
         assert_eq!(check.multi_check, Some(true));
         assert_eq!(check.negate, Some(false));
         assert!(matches!(
-            &check.body,
-            CheckBody::Inline { content } if content == "Verify it"
+            check.body_parts.first(),
+            Some(CheckBodyPart::Inline { content }) if content == "Verify it"
         ));
+        assert_eq!(check.body_parts.len(), 1);
         let fix = rule.fix.as_ref().expect("fix");
         assert_eq!(fix.id.as_deref(), Some("fix-1"));
         assert_eq!(fix.system.as_deref(), Some("urn:example:fix"));
@@ -1363,10 +1366,11 @@ mod tests {
         let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
         let check = parsed.rules[0].checks.first().expect("check");
         assert!(matches!(
-            &check.body,
-            CheckBody::Reference { href, name }
+            check.body_parts.first(),
+            Some(CheckBodyPart::Reference { href, name })
                 if href == "checks.xml" && name.as_deref() == Some("check-1")
         ));
+        assert_eq!(check.body_parts.len(), 1);
     }
 
     #[test]
@@ -1443,7 +1447,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_check_with_two_reference_bodies() {
+    fn accepts_check_with_multiple_reference_bodies() {
         let parsed = parse_xccdf(
             doc_with_body(
                 r#"<Rule id="r"><title>Rule</title><check system="s"><check-content-ref href="one.xml"/><check-content-ref href="two.xml"/></check></Rule>"#,
@@ -1452,13 +1456,18 @@ mod tests {
             &InterchangeLimits::default(),
         )
         .unwrap();
+        // Multiple check-content-ref elements are valid in XCCDF 1.2.
         assert!(
-            parsed
+            !parsed
                 .errors
                 .iter()
-                .any(|error| error.code == "CHECK_BODY_AMBIGUOUS")
+                .any(|error| error.code == "CHECK_BODY_AMBIGUOUS"),
+            "multiple references must not produce CHECK_BODY_AMBIGUOUS"
         );
-        assert!(parsed.rules[0].checks.is_empty());
+        let check = parsed.rules[0].checks.first().expect("check");
+        assert_eq!(check.body_parts.len(), 2);
+        assert!(matches!(&check.body_parts[0], CheckBodyPart::Reference { href, .. } if href == "one.xml"));
+        assert!(matches!(&check.body_parts[1], CheckBodyPart::Reference { href, .. } if href == "two.xml"));
     }
 
     #[test]

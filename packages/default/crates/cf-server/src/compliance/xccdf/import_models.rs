@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::compliance::xccdf::models::{CheckBody, CheckContent, FixContent, ParsedRule};
+use crate::compliance::xccdf::models::{CheckContent, FixContent, ParsedRule};
 
 // ── Import plan (inbound from caller) ─────────────────────────────────────────
 
@@ -344,23 +344,23 @@ impl ImportedPolicyRecord {
 }
 
 fn check_content_to_json(c: &CheckContent) -> serde_json::Value {
-    let body = match &c.body {
-        CheckBody::Inline { content } => serde_json::json!({
-            "kind": "inline",
+    let body_parts: Vec<serde_json::Value> = c.body_parts.iter().map(|part| match part {
+        crate::compliance::xccdf::models::CheckBodyPart::Inline { content } => serde_json::json!({
+            "type": "inline",
             "content": content,
         }),
-        CheckBody::Reference { href, name } => serde_json::json!({
-            "kind": "reference",
+        crate::compliance::xccdf::models::CheckBodyPart::Reference { href, name } => serde_json::json!({
+            "type": "reference",
             "href": href,
             "name": name,
         }),
-    };
+    }).collect();
     serde_json::json!({
         "system": c.system,
         "selector": c.selector,
         "multi_check": c.multi_check,
         "negate": c.negate,
-        "body": body,
+        "body_parts": body_parts,
     })
 }
 
