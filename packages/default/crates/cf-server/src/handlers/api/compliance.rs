@@ -4350,6 +4350,7 @@ fn is_body_limit_error(err: &axum::extract::multipart::MultipartError) -> bool {
 mod tests {
     use super::*;
     use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
+    use crate::compliance::canonical::{ImplementationState, PublicationState};
     use crate::compliance::interchange::{MAX_XCCDF_MULTIPART_BYTES, MAX_XCCDF_XML_BYTES};
     use crate::models::auth_identity::AuthRole;
     use crate::queries::auth_identity::{create_user_session, sync_user_role};
@@ -4363,6 +4364,52 @@ mod tests {
     use chrono::Utc;
 
     const BOUNDARY: &str = "XCFTESTBOUNDARY";
+
+    #[test]
+    fn export_group_projection_preserves_nested_source_order() {
+        let policy = |id: Uuid, group_id: &str, parent: Option<&str>, order: i32| {
+            XccdfPolicyExport {
+                policy_id: id,
+                policy_version_id: id,
+                version: "1.0.0".into(),
+                publication_state: PublicationState::Draft,
+                semantic_digest: "digest".into(),
+                digest_algorithm: "sha-256".into(),
+                canonicalization_version: "cf-model-json-1".into(),
+                name: id.to_string(),
+                description: None,
+                policy_type: "custom_check".into(),
+                execution_phase: "nix-evaluation".into(),
+                implementation_state: ImplementationState::Native,
+                enabled_default: true,
+                selected: true,
+                policy_order: order,
+                config: serde_json::json!({}),
+                compliance_metadata: serde_json::json!({
+                    "group_id": group_id,
+                    "parent_group_id": parent,
+                    "group_order": order,
+                }),
+                dependencies: serde_json::json!({}),
+                opaque_xml: None,
+                source_mappings: Vec::new(),
+            }
+        };
+        let root_id = Uuid::new_v4();
+        let child_id = Uuid::new_v4();
+        let groups = build_export_groups(&[
+            policy(root_id, "root", None, 0),
+            policy(child_id, "child", Some("root"), 1),
+        ])
+        .expect("nested groups should project");
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].source_id.as_deref(), Some("root"));
+        assert_eq!(groups[0].policies, vec![root_id]);
+        assert_eq!(groups[0].children.len(), 1);
+        assert_eq!(groups[0].children[0].source_id.as_deref(), Some("child"));
+        assert_eq!(groups[0].children[0].policies, vec![child_id]);
+    }
 
     fn minimal_xccdf() -> &'static str {
         r#"<?xml version="1.0" encoding="UTF-8"?>
