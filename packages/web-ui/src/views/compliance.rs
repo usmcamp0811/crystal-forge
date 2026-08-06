@@ -3,7 +3,8 @@ use dioxus::prelude::*;
 use crate::api::client::{
     create_bundle_draft, create_compliance_assignment, create_compliance_bundle,
     delete_compliance_bundle, fetch_compliance_bundle_systems, fetch_compliance_bundles,
-    fetch_compliance_system_evidence, fetch_environments, fetch_policies, import_xccdf,
+    fetch_compliance_system_evidence, fetch_environments, fetch_policies,
+    fetch_system_effective_policies, import_xccdf,
     preview_xccdf, publish_bundle_version, trust_bundle_version, update_compliance_bundle,
 };
 use crate::api::models::{
@@ -807,6 +808,15 @@ fn EmptyComplianceState(props: EmptyComplianceStateProps) -> Element {
 
 // ─── Assignment creation panel ───────────────────────────────────────────────
 
+fn parse_uuid_list(value: &str) -> Result<Vec<uuid::Uuid>, ()> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| uuid::Uuid::parse_str(item).map_err(|_| ()))
+        .collect()
+}
+
 /// Compact panel for creating a bundle assignment for a specific published version.
 #[derive(Props, Clone, PartialEq)]
 struct AssignmentCreatePanelProps {
@@ -820,6 +830,8 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
     let mut scope_type = use_signal(|| "environment".to_string());
     let mut scope_id = use_signal(|| String::new());
     let mut enforcement_mode = use_signal(|| "enforce".to_string());
+    let mut exclusions = use_signal(String::new);
+    let mut additions = use_signal(String::new);
     let mut busy = use_signal(|| false);
     let mut success = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
@@ -870,6 +882,27 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
                     }
                 }
 
+                div { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px;",
+                    div { class: "field",
+                        label { "Exclude baseline policy versions (comma-separated UUIDs)" }
+                        input {
+                            class: "input focus-ring mono",
+                            placeholder: "optional",
+                            value: "{exclusions.read()}",
+                            oninput: move |e| exclusions.set(e.value()),
+                        }
+                    }
+                    div { class: "field",
+                        label { "Add policy versions (comma-separated UUIDs)" }
+                        input {
+                            class: "input focus-ring mono",
+                            placeholder: "optional",
+                            value: "{additions.read()}",
+                            oninput: move |e| additions.set(e.value()),
+                        }
+                    }
+                }
+
                 // Environment picker (when scope is environment)
                 if *scope_type.read() == "environment" && !props.environments.is_empty() {
                     div { class: "field",
@@ -910,13 +943,21 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
                         if !can_submit { return; }
                         let sid_str = scope_id.read().trim().to_string();
                         let Ok(sid) = uuid::Uuid::parse_str(&sid_str) else { return; };
+                        let Ok(exclusion_ids) = parse_uuid_list(&exclusions.read()) else {
+                            error.set(Some("Exclusions must be comma-separated UUIDs".to_string()));
+                            return;
+                        };
+                        let Ok(addition_ids) = parse_uuid_list(&additions.read()) else {
+                            error.set(Some("Additions must be comma-separated UUIDs".to_string()));
+                            return;
+                        };
                         let req = CreateAssignmentRequest {
                             bundle_version_id: props.bundle_version_id,
                             scope_type: scope_type.read().clone(),
                             scope_id: sid,
                             enforcement_mode: Some(enforcement_mode.read().clone()),
-                            exclusions: None,
-                            additions: None,
+                            exclusions: (!exclusion_ids.is_empty()).then_some(exclusion_ids),
+                            additions: (!addition_ids.is_empty()).then_some(addition_ids),
                             value_overrides: None,
                         };
                         busy.set(true);
@@ -958,6 +999,8 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
     let mut loading = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
     let mut fetched = use_signal(|| false);
+    let mut effective_preview = use_signal(|| None::<crate::api::models::EffectivePolicySetResponse>);
+    let mut preview_loading = use_signal(|| false);
 
     if !*fetched.read() {
         fetched.set(true);
@@ -1002,6 +1045,22 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                 let mut deleting = use_signal(|| false);
                 let mut editing = use_signal(|| false);
                 let mut edit_mode = use_signal(|| current_mode.clone());
+                let mut edit_exclusions = use_signal(|| {
+                    assignment
+                        .exclusions
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                });
+                let mut edit_additions = use_signal(|| {
+                    assignment
+                        .additions
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                });
                 let mut edit_busy = use_signal(|| false);
                 let mut edit_error = use_signal(|| None::<String>);
                 rsx! {
@@ -1055,6 +1114,20 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                     option { value: "enforce", "Enforce" }
                                     option { value: "report_only", "Report only" }
                                 }
+                                input {
+                                    class: "input xs mono",
+                                    style: "flex:1;",
+                                    placeholder: "excluded version UUIDs",
+                                    value: "{edit_exclusions.read()}",
+                                    oninput: move |e| edit_exclusions.set(e.value()),
+                                }
+                                input {
+                                    class: "input xs mono",
+                                    style: "flex:1;",
+                                    placeholder: "added version UUIDs",
+                                    value: "{edit_additions.read()}",
+                                    oninput: move |e| edit_additions.set(e.value()),
+                                }
                                 button {
                                     class: "btn btn-primary xs focus-ring",
                                     style: "font-size:10px;",
@@ -1064,12 +1137,24 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                         let cm = current_version;
                                         let scope_type = props.scope_type.clone();
                                         let scope_id = props.scope_id;
+                                        let exclusions_text = edit_exclusions.read().clone();
+                                        let additions_text = edit_additions.read().clone();
                                         move |_| {
+                                            let Ok(exclusions) = parse_uuid_list(&exclusions_text) else {
+                                                edit_error.set(Some("Exclusions must be comma-separated UUIDs".to_string()));
+                                                return;
+                                            };
+                                            let Ok(additions) = parse_uuid_list(&additions_text) else {
+                                                edit_error.set(Some("Additions must be comma-separated UUIDs".to_string()));
+                                                return;
+                                            };
                                             edit_busy.set(true);
                                             edit_error.set(None);
                                             let body = serde_json::json!({
                                                 "expected_version_id": cm,
                                                 "enforcement_mode": (*edit_mode.read()).clone(),
+                                                "exclusions": exclusions,
+                                                "additions": additions,
                                             });
                                             let st = scope_type.clone();
                                             let si = scope_id;
@@ -1105,6 +1190,34 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                     disabled: *edit_busy.read(),
                                     onclick: move |_| editing.set(false),
                                     "Cancel"
+                                }
+                            }
+                        }
+                        if props.scope_type == "system" {
+                            button {
+                                class: "btn btn-ghost xs focus-ring",
+                                disabled: *preview_loading.read(),
+                                onclick: {
+                                    let sid = props.scope_id;
+                                    move |_| {
+                                        preview_loading.set(true);
+                                        spawn(async move {
+                                            if let Ok(value) = fetch_system_effective_policies(&sid).await {
+                                                effective_preview.set(Some(value));
+                                            }
+                                            preview_loading.set(false);
+                                        });
+                                    }
+                                },
+                                if *preview_loading.read() { "Loading effective set…" } else { "Preview effective set" }
+                            }
+                        }
+                        if let Some(preview) = effective_preview.read().as_ref() {
+                            div { class: "sd-callout sd-callout-info", style: "font-size:10px;",
+                                "Effective set: {preview.policies.len()} policies · digest "
+                                span { class: "mono", "{preview.effective_set_digest}" }
+                                if !preview.warnings.is_empty() {
+                                    div { "Warnings: {preview.warnings.join(\"; \" )}" }
                                 }
                             }
                         }
