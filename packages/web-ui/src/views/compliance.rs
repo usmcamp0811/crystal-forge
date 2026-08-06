@@ -1,17 +1,17 @@
 use dioxus::prelude::*;
 
 use crate::api::client::{
-    create_bundle_draft, create_compliance_bundle, delete_compliance_bundle,
-    fetch_compliance_bundle_systems, fetch_compliance_bundles, fetch_compliance_system_evidence,
-    fetch_environments, fetch_policies, import_xccdf, preview_xccdf, publish_bundle_version,
-    trust_bundle_version, update_compliance_bundle,
+    create_bundle_draft, create_compliance_assignment, create_compliance_bundle,
+    delete_compliance_bundle, fetch_compliance_bundle_systems, fetch_compliance_bundles,
+    fetch_compliance_system_evidence, fetch_environments, fetch_policies, import_xccdf,
+    preview_xccdf, publish_bundle_version, trust_bundle_version, update_compliance_bundle,
 };
 use crate::api::models::{
     ComplianceBundleSummary, ComplianceBundleSystemsResponse, ComplianceEvidenceResponse,
-    CreateBundleDraftRequest, CreateComplianceBundleRequest, DeploymentPolicySummary,
-    EnvironmentSummary, ImportedBundlePlan, PublishBundleVersionRequest, TrustBundleVersionRequest,
-    UpdateComplianceBundleRequest, XccdfImportPlan, XccdfImportResponse, XccdfPreviewResponse,
-    XccdfRuleImportAction,
+    CreateAssignmentRequest, CreateBundleDraftRequest, CreateComplianceBundleRequest,
+    DeploymentPolicySummary, EnvironmentSummary, ImportedBundlePlan, PublishBundleVersionRequest,
+    TrustBundleVersionRequest, UpdateComplianceBundleRequest, XccdfImportPlan, XccdfImportResponse,
+    XccdfPreviewResponse, XccdfRuleImportAction,
 };
 use crate::components::compliance::{
     BundleCatalog, BundleHeader, EvidenceDrawer, ScoreStrip, SystemsMatrix,
@@ -436,6 +436,18 @@ pub fn ComplianceView() -> Element {
                                      },
                                  }
                              }
+                             // ── Assignment panel (admin-only, published versions) ─
+                             if is_admin {
+                                 if let Some(vid) = *selected_export_version_id.read() {
+                                     if bundle.current_published_version_id == Some(vid) {
+                                         AssignmentCreatePanel {
+                                             bundle: bundle.clone(),
+                                             bundle_version_id: vid,
+                                             environments: environments.read().clone(),
+                                         }
+                                     }
+                                 }
+                             }
                              if let Some(err) = systems_error.read().as_ref() {
                                 div { class: "sd-callout sd-callout-danger",
                                     Icon { name: IconName::X, size: 13 }
@@ -778,6 +790,142 @@ fn EmptyComplianceState(props: EmptyComplianceStateProps) -> Element {
             } else {
                 div {
                     "No compliance bundles have been configured. Contact an administrator to set up compliance bundles."
+                }
+            }
+        }
+    }
+}
+
+// ─── Assignment creation panel ───────────────────────────────────────────────
+
+/// Compact panel for creating a bundle assignment for a specific published version.
+#[derive(Props, Clone, PartialEq)]
+struct AssignmentCreatePanelProps {
+    bundle: ComplianceBundleSummary,
+    bundle_version_id: uuid::Uuid,
+    environments: Vec<EnvironmentSummary>,
+}
+
+#[component]
+fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
+    let mut scope_type = use_signal(|| "environment".to_string());
+    let mut scope_id = use_signal(|| String::new());
+    let mut enforcement_mode = use_signal(|| "enforce".to_string());
+    let mut busy = use_signal(|| false);
+    let mut success = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+
+    let can_submit = !scope_id.read().trim().is_empty()
+        && uuid::Uuid::parse_str(scope_id.read().trim()).is_ok()
+        && !*busy.read();
+
+    rsx! {
+        div { class: "card", style: "padding:14px 16px;display:flex;flex-direction:column;gap:12px;",
+            div { style: "font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);",
+                "Assign bundle to environment or system"
+            }
+
+            if *success.read() {
+                div { class: "sd-callout sd-callout-success", style: "font-size:12px;",
+                    Icon { name: IconName::Check, size: 13 }
+                    "Assignment created. The effective policy set is now active for the selected scope."
+                }
+            } else {
+                if let Some(err) = error.read().as_ref() {
+                    div { class: "sd-callout sd-callout-danger", style: "font-size:12px;", "{err}" }
+                }
+
+                div { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px;",
+                    // Scope type
+                    div { class: "field",
+                        label { "Scope type" }
+                        select {
+                            class: "input focus-ring",
+                            value: "{scope_type.read()}",
+                            onchange: move |e| scope_type.set(e.value()),
+                            option { value: "environment", "Environment" }
+                            option { value: "system", "System" }
+                        }
+                    }
+
+                    // Enforcement mode
+                    div { class: "field",
+                        label { "Enforcement mode" }
+                        select {
+                            class: "input focus-ring",
+                            value: "{enforcement_mode.read()}",
+                            onchange: move |e| enforcement_mode.set(e.value()),
+                            option { value: "enforce", "Enforce (default)" }
+                            option { value: "report_only", "Report only" }
+                        }
+                    }
+                }
+
+                // Environment picker (when scope is environment)
+                if *scope_type.read() == "environment" && !props.environments.is_empty() {
+                    div { class: "field",
+                        label { "Environment" }
+                        select {
+                            class: "input focus-ring",
+                            onchange: move |e| scope_id.set(e.value()),
+                            option { value: "", "Select an environment…" }
+                            for env in &props.environments {
+                                option { value: "{env.id}", "{env.name}" }
+                            }
+                        }
+                    }
+                } else {
+                    // Manual UUID entry (systems or when no environments loaded)
+                    div { class: "field",
+                        label {
+                            if *scope_type.read() == "system" {
+                                "System UUID"
+                            } else {
+                                "Environment UUID"
+                            }
+                        }
+                        input {
+                            class: "input focus-ring mono",
+                            placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+                            value: "{scope_id.read()}",
+                            oninput: move |e| scope_id.set(e.value()),
+                        }
+                    }
+                }
+
+                button {
+                    class: "btn btn-primary focus-ring xs",
+                    disabled: !can_submit,
+                    style: if !can_submit { "opacity:0.5;cursor:not-allowed;" } else { "" },
+                    onclick: move |_| {
+                        if !can_submit { return; }
+                        let sid_str = scope_id.read().trim().to_string();
+                        let Ok(sid) = uuid::Uuid::parse_str(&sid_str) else { return; };
+                        let req = CreateAssignmentRequest {
+                            bundle_version_id: props.bundle_version_id,
+                            scope_type: scope_type.read().clone(),
+                            scope_id: sid,
+                            enforcement_mode: Some(enforcement_mode.read().clone()),
+                            exclusions: None,
+                            additions: None,
+                            value_overrides: None,
+                        };
+                        busy.set(true);
+                        error.set(None);
+                        spawn(async move {
+                            match create_compliance_assignment(&req).await {
+                                Ok(_) => {
+                                    busy.set(false);
+                                    success.set(true);
+                                }
+                                Err(err) => {
+                                    busy.set(false);
+                                    error.set(Some(format!("Assignment failed: {err}")));
+                                }
+                            }
+                        });
+                    },
+                    if *busy.read() { "Creating…" } else { "Create assignment" }
                 }
             }
         }
