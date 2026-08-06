@@ -256,17 +256,17 @@ impl DeploymentPolicyManager {
         let mut policies_by_id: HashMap<uuid::Uuid, DeploymentPolicyRecord> = HashMap::new();
         let mut failed_policy_loads: HashSet<uuid::Uuid> = HashSet::new();
 
-        for policy_version_id in all_policy_version_ids {
-            match get_deployment_policy_by_version(&self.pool, &policy_version_id).await {
+        for version_id in all_policy_version_ids {
+            match get_deployment_policy_by_version(&self.pool, &version_id).await {
                 Ok(Some(policy)) => {
-                    policies_by_id.insert(policy.id, policy);
+                    policies_by_id.insert(version_id, policy);
                 }
                 Ok(None) => {
-                    failed_policy_loads.insert(policy_version_id);
+                    failed_policy_loads.insert(version_id);
                 }
                 Err(err) => {
-                    warn!("Failed to load deployment policy {}: {:#}", policy_version_id, err);
-                    failed_policy_loads.insert(policy_version_id);
+                    warn!("Failed to load deployment policy {}: {:#}", version_id, err);
+                    failed_policy_loads.insert(version_id);
                 }
             }
         }

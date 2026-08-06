@@ -855,8 +855,12 @@ pub async fn resolve_system_effective_policies(
 
     let env_id = env_id.flatten();
 
-    // ── Open one transaction for all resolver reads ────────────────────────
+    // ── Open one repeatable-read transaction for all resolver reads ────────
     let mut tx = pool.begin().await.context("begin resolution transaction")?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await
+        .context("set repeatable read")?;
 
     // Load all active bundle assignments with explicit semantic ordering.
     let assignments: Vec<_> = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid, String, String, String)>(
