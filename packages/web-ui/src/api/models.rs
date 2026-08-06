@@ -1476,6 +1476,7 @@ pub struct CreateAssignmentRequest {
 pub struct AssignmentResponse {
     pub id: Uuid,
     pub current_version_id: Uuid,
+    pub bundle_id: Uuid,
     pub bundle_version_id: Uuid,
     pub scope_type: String,
     pub scope_id: Uuid,
@@ -1487,8 +1488,14 @@ pub struct AssignmentResponse {
     #[serde(default)]
     pub value_overrides: Vec<PolicyValueOverride>,
     pub assignment_overlay_digest: String,
+    #[serde(default = "default_assignment_active")]
+    pub active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+fn default_assignment_active() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

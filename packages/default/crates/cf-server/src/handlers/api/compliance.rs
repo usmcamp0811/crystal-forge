@@ -14,9 +14,11 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::api::models::{
-    ApiError, CreateBundleDraftRequest, CreateComplianceBundleRequest, CreatePolicyDraftRequest,
+    ApiError, AssignmentResponse, CreateBundleDraftRequest, CreateComplianceBundleRequest,
+    CreatePolicyDraftRequest,
     PublishBundleVersionRequest, PublishPolicyVersionRequest, SystemComplianceBundle,
     SystemComplianceBundlesResponse, TrustBundleVersionRequest, TrustPolicyVersionRequest,
+    PolicyValueOverride,
     UpdateComplianceBundleRequest,
 };
 use crate::compliance::interchange::{InterchangeLimits, MAX_XCCDF_UPLOAD_BYTES};
@@ -1648,9 +1650,17 @@ async fn persist_assignment_inner(
     }
 
     let now = chrono::Utc::now();
+    let bundle_id: Uuid = sqlx::query_scalar(
+        "SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1",
+    )
+    .bind(payload.bundle_version_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| internal_error("Failed to load assignment bundle lineage"))?;
     Ok(crate::api::models::AssignmentResponse {
         id: assignment_id,
         current_version_id: assignment_version_id,
+        bundle_id,
         bundle_version_id: payload.bundle_version_id,
         scope_type: scope_type.to_string(),
         scope_id: payload.scope_id,
@@ -1666,6 +1676,7 @@ async fn persist_assignment_inner(
             })
             .collect(),
         assignment_overlay_digest: effective_set_digest,
+        active: true,
         created_at: now,
         updated_at: now,
     })
@@ -1816,9 +1827,23 @@ pub async fn get_assignment(
     })
     .collect();
 
+    let bundle_id: Uuid = match sqlx::query_scalar(
+        "SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1",
+    )
+    .bind(bv_id)
+    .fetch_one(&pool)
+    .await
+    {
+        Ok(bundle_id) => bundle_id,
+        Err(error) => {
+            tracing::error!(error = %error, %assignment_id, "failed to load assignment bundle lineage");
+            return internal_error("Failed to load assignment bundle lineage");
+        }
+    };
     let response = crate::api::models::AssignmentResponse {
         id,
         current_version_id,
+        bundle_id,
         bundle_version_id: bv_id,
         scope_type,
         scope_id,
@@ -1827,6 +1852,7 @@ pub async fn get_assignment(
         additions,
         value_overrides: overrides,
         assignment_overlay_digest: digest,
+        active: true,
         created_at,
         updated_at,
     };
@@ -1980,6 +2006,77 @@ pub async fn delete_assignment(
 }
 
 /// `GET /api/v1/environments/:id/compliance-assignments`
+async fn list_assignments_for_scope(
+    pool: &PgPool,
+    scope_type: &str,
+    scope_id: Uuid,
+) -> anyhow::Result<Vec<AssignmentResponse>> {
+    let rows = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid, Uuid, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, bool)>(
+        "SELECT id, current_version_id, bundle_id, bundle_version_id,
+                COALESCE(environment_id, system_id), enforcement_mode,
+                created_at, updated_at, active
+         FROM compliance_bundle_assignments
+         WHERE scope_type = $1 AND COALESCE(environment_id, system_id) = $2
+         ORDER BY created_at, id",
+    )
+    .bind(scope_type)
+    .bind(scope_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut assignments = Vec::with_capacity(rows.len());
+    for (id, current_version_id, bundle_id, bundle_version_id, scope_id, enforcement_mode, created_at, updated_at, active) in rows {
+        let exclusions: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT policy_version_id FROM compliance_assignment_exclusions WHERE assignment_version_id = $1 ORDER BY policy_version_id",
+        )
+        .bind(current_version_id)
+        .fetch_all(pool)
+        .await?;
+        let additions: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_version_id = $1 ORDER BY policy_version_id",
+        )
+        .bind(current_version_id)
+        .fetch_all(pool)
+        .await?;
+        let value_overrides = sqlx::query_as::<_, (Uuid, String, serde_json::Value)>(
+            "SELECT policy_version_id, value_path, value FROM compliance_assignment_value_overrides WHERE assignment_version_id = $1 ORDER BY policy_version_id, value_path",
+        )
+        .bind(current_version_id)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|(policy_version_id, value_path, value)| PolicyValueOverride {
+            policy_version_id,
+            value_path,
+            value,
+        })
+        .collect();
+        let assignment_overlay_digest: String = sqlx::query_scalar(
+            "SELECT assignment_overlay_digest FROM compliance_bundle_assignments WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await?;
+        assignments.push(AssignmentResponse {
+            id,
+            current_version_id,
+            bundle_id,
+            bundle_version_id,
+            scope_type: scope_type.to_string(),
+            scope_id,
+            enforcement_mode,
+            exclusions,
+            additions,
+            value_overrides,
+            assignment_overlay_digest,
+            active,
+            created_at,
+            updated_at,
+        });
+    }
+    Ok(assignments)
+}
+
 pub async fn list_environment_assignments(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -1992,38 +2089,13 @@ pub async fn list_environment_assignments(
         return forbidden();
     }
 
-    let rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
-        "SELECT id, bundle_version_id, enforcement_mode, assignment_overlay_digest, created_at, updated_at \
-         FROM compliance_bundle_assignments \
-         WHERE scope_type = 'environment' AND environment_id = $1 \
-         ORDER BY created_at",
-    )
-    .bind(environment_id)
-    .fetch_all(&pool)
-    .await
-    .unwrap_or_default();
-
-    let items: Vec<serde_json::Value> = rows
-        .into_iter()
-        .map(|(id, bv_id, mode, digest, created_at, updated_at)| {
-            serde_json::json!({
-                "id": id,
-                "bundle_version_id": bv_id,
-                "scope_type": "environment",
-                "scope_id": environment_id,
-                "enforcement_mode": mode,
-                "assignment_overlay_digest": digest,
-                "created_at": created_at,
-                "updated_at": updated_at,
-            })
-        })
-        .collect();
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({ "assignments": items })),
-    )
-        .into_response()
+    match list_assignments_for_scope(&pool, "environment", environment_id).await {
+        Ok(assignments) => (StatusCode::OK, Json(serde_json::json!({ "assignments": assignments }))).into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, %environment_id, "failed to list environment assignments");
+            internal_error("Failed to list environment assignments")
+        }
+    }
 }
 
 /// `GET /api/v1/systems/:id/compliance-assignments`
@@ -2039,38 +2111,13 @@ pub async fn list_system_assignments(
         return forbidden();
     }
 
-    let rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
-        "SELECT id, bundle_version_id, enforcement_mode, assignment_overlay_digest, created_at, updated_at \
-         FROM compliance_bundle_assignments \
-         WHERE scope_type = 'system' AND system_id = $1 \
-         ORDER BY created_at",
-    )
-    .bind(system_id)
-    .fetch_all(&pool)
-    .await
-    .unwrap_or_default();
-
-    let items: Vec<serde_json::Value> = rows
-        .into_iter()
-        .map(|(id, bv_id, mode, digest, created_at, updated_at)| {
-            serde_json::json!({
-                "id": id,
-                "bundle_version_id": bv_id,
-                "scope_type": "system",
-                "scope_id": system_id,
-                "enforcement_mode": mode,
-                "assignment_overlay_digest": digest,
-                "created_at": created_at,
-                "updated_at": updated_at,
-            })
-        })
-        .collect();
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({ "assignments": items })),
-    )
-        .into_response()
+    match list_assignments_for_scope(&pool, "system", system_id).await {
+        Ok(assignments) => (StatusCode::OK, Json(serde_json::json!({ "assignments": assignments }))).into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, %system_id, "failed to list system assignments");
+            internal_error("Failed to list system assignments")
+        }
+    }
 }
 
 /// `GET /api/v1/systems/:id/effective-policies`
