@@ -2343,6 +2343,15 @@ pub async fn delete_compliance_assignment(assignment_id: &Uuid) -> Result<(), Ap
     send_empty("DELETE", &url).await
 }
 
+/// Update an assignment (creates a new immutable version).
+pub async fn update_compliance_assignment(
+    assignment_id: &Uuid,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, ApiClientError> {
+    let url = format!("{}/compliance/assignments/{}", base_url(), assignment_id);
+    send_json_with_csrf("PUT", &url, Some(request)).await
+}
+
 /// Fetch the resolved effective policy set for a system.
 pub async fn fetch_system_effective_policies(
     system_id: &Uuid,

@@ -997,7 +997,13 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
         for assignment in list.iter() {
             {
                 let assignment_id = assignment.id;
+                let current_mode = assignment.enforcement_mode.clone();
+                let current_version = assignment.current_version_id;
                 let mut deleting = use_signal(|| false);
+                let mut editing = use_signal(|| false);
+                let mut edit_mode = use_signal(|| current_mode.clone());
+                let mut edit_busy = use_signal(|| false);
+                let mut edit_error = use_signal(|| None::<String>);
                 rsx! {
                     div { class: "card", style: "padding:10px 14px;display:flex;flex-direction:column;gap:6px;",
                         div { style: "display:flex;justify-content:space-between;align-items:center;",
@@ -1006,27 +1012,101 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                 span { class: "mono", style: "font-size:10px;", "{assignment.bundle_version_id}" }
                                 " · {assignment.enforcement_mode}"
                             }
-                            button {
-                                class: "btn btn-ghost xs focus-ring",
-                                style: "font-size:10px;color:var(--cf-text-muted);",
-                                disabled: *deleting.read(),
-                                onclick: {
-                                    let a_id = assignment_id;
-                                    move |_| {
-                                        deleting.set(true);
-                                        spawn(async move {
-                                            let _ = delete_compliance_assignment(&a_id).await;
-                                            // Remove from list after deactivation
-                                            assignments.with_mut(|list| list.retain(|a| a.id != a_id));
-                                        });
-                                    }
-                                },
-                                if *deleting.read() { "Deactivating…" } else { "Deactivate" }
+                            div { style: "display:flex;gap:4px;",
+                                button {
+                                    class: "btn btn-ghost xs focus-ring",
+                                    style: "font-size:10px;",
+                                    disabled: *deleting.read() || *editing.read(),
+                                    onclick: move |_| editing.set(true),
+                                    "Edit mode"
+                                }
+                                button {
+                                    class: "btn btn-ghost xs focus-ring",
+                                    style: "font-size:10px;color:var(--cf-text-muted);",
+                                    disabled: *deleting.read(),
+                                    onclick: {
+                                        let a_id = assignment_id;
+                                        move |_| {
+                                            deleting.set(true);
+                                            spawn(async move {
+                                                let _ = delete_compliance_assignment(&a_id).await;
+                                                assignments.with_mut(|list| list.retain(|a| a.id != a_id));
+                                            });
+                                        }
+                                    },
+                                    if *deleting.read() { "Deactivating…" } else { "Deactivate" }
+                                }
                             }
                         }
                         div { style: "font-size:10px;color:var(--cf-text-muted);",
                             "scope: {assignment.scope_type}:{assignment.scope_id}"
                             " · version: " span { class: "mono", "{assignment.current_version_id}" }
+                        }
+                        if *editing.read() {
+                            if let Some(err) = edit_error.read().as_ref() {
+                                div { class: "sd-callout sd-callout-danger", style: "font-size:11px;", "{err}" }
+                            }
+                            div { style: "display:flex;gap:6px;align-items:center;",
+                                select {
+                                    class: "input xs",
+                                    style: "flex:1;",
+                                    value: "{edit_mode.read()}",
+                                    onchange: move |e| edit_mode.set(e.value()),
+                                    option { value: "enforce", "Enforce" }
+                                    option { value: "report_only", "Report only" }
+                                }
+                                button {
+                                    class: "btn btn-primary xs focus-ring",
+                                    style: "font-size:10px;",
+                                    disabled: *edit_busy.read() || *edit_mode.read() == current_mode,
+                                    onclick: {
+                                        let a_id = assignment_id;
+                                        let cm = current_version;
+                                        let scope_type = props.scope_type.clone();
+                                        let scope_id = props.scope_id;
+                                        move |_| {
+                                            edit_busy.set(true);
+                                            edit_error.set(None);
+                                            let body = serde_json::json!({
+                                                "expected_version_id": cm,
+                                                "enforcement_mode": (*edit_mode.read()).clone(),
+                                            });
+                                            let st = scope_type.clone();
+                                            let si = scope_id;
+                                            spawn(async move {
+                                                match crate::api::client::update_compliance_assignment(&a_id, &body).await {
+                                                    Ok(_) => {
+                                                        edit_busy.set(false);
+                                                        editing.set(false);
+                                                        spawn(async move {
+                                                            let result = if st == "environment" {
+                                                                fetch_environment_assignments(&si).await
+                                                            } else {
+                                                                fetch_system_assignments(&si).await
+                                                            };
+                                                            if let Ok(list) = result {
+                                                                assignments.set(list);
+                                                            }
+                                                        });
+                                                    }
+                                                    Err(e) => {
+                                                        edit_busy.set(false);
+                                                        edit_error.set(Some(format!("Update failed: {e}")));
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    },
+                                    if *edit_busy.read() { "Saving…" } else { "Save" }
+                                }
+                                button {
+                                    class: "btn btn-ghost xs focus-ring",
+                                    style: "font-size:10px;",
+                                    disabled: *edit_busy.read(),
+                                    onclick: move |_| editing.set(false),
+                                    "Cancel"
+                                }
+                            }
                         }
                     }
                 }
