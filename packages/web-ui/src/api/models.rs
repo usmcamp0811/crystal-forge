@@ -1061,6 +1061,12 @@ pub struct ComplianceRollupTotals {
     pub total_controls: i64,
     #[serde(default)]
     pub evaluated_controls: i64,
+    #[serde(default)]
+    pub not_checked: i64,
+    #[serde(default)]
+    pub not_applicable: i64,
+    #[serde(default)]
+    pub error: i64,
     pub overall_score: i64,
 }
 
@@ -1087,6 +1093,9 @@ pub enum ComplianceControlStatus {
     Warn,
     Fail,
     Waiver,
+    NotChecked,
+    NotApplicable,
+    Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1251,6 +1260,245 @@ pub struct PolicyInterchangeImportResponse {
     pub publication_state: String,
     pub enabled: bool,
     pub trusted: bool,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// XCCDF Preview / Import DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single diagnostic (error or warning) from the XCCDF parser.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct XccdfDiagnostic {
+    pub code: String,
+    pub summary: String,
+    pub blocking: bool,
+}
+
+/// Parsed benchmark identity returned by the XCCDF preview endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct XccdfBenchmarkInfo {
+    pub id: String,
+    pub title: Option<String>,
+    pub version: Option<String>,
+    pub status: Option<String>,
+    pub platforms: Vec<String>,
+}
+
+/// Parsed profile returned by the XCCDF preview endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct XccdfProfileInfo {
+    pub id: String,
+    pub title: Option<String>,
+    pub rule_count: usize,
+}
+
+/// Parsed rule summary returned by the XCCDF preview endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct XccdfRuleInfo {
+    pub id: String,
+    pub title: Option<String>,
+    pub severity: Option<String>,
+    pub is_native: bool,
+}
+
+/// Response body from `POST /api/v1/compliance/xccdf/preview`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct XccdfPreviewResponse {
+    pub sha256: String,
+    #[serde(default)]
+    pub filename: Option<String>,
+    #[serde(default)]
+    pub document_class: Option<String>,
+    #[serde(default)]
+    pub fidelity: Option<String>,
+    #[serde(default)]
+    pub fidelity_losses: Vec<String>,
+    #[serde(default)]
+    pub xccdf_version: Option<String>,
+    pub benchmark: Option<XccdfBenchmarkInfo>,
+    #[serde(default)]
+    pub profiles: Vec<XccdfProfileInfo>,
+    #[serde(default)]
+    pub rules: Vec<XccdfRuleInfo>,
+    pub rule_count: usize,
+    pub profile_count: usize,
+    #[serde(default)]
+    pub errors: Vec<XccdfDiagnostic>,
+    #[serde(default)]
+    pub warnings: Vec<XccdfDiagnostic>,
+}
+
+/// Single rule action in an XCCDF import plan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum XccdfRuleImportAction {
+    CreateManual { rule_id: String },
+    CreateUnbound { rule_id: String },
+    PreserveOpaque { rule_id: String },
+    Exclude { rule_id: String },
+}
+
+/// Bundle metadata included in the XCCDF import plan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportedBundlePlan {
+    pub name: String,
+    pub framework: String,
+    pub version: String,
+    pub layer: Option<String>,
+    pub owner: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Import plan submitted to `POST /api/v1/compliance/xccdf/import`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct XccdfImportPlan {
+    pub expected_sha256: String,
+    pub selected_profile_id: Option<String>,
+    pub selected_rule_ids: Vec<String>,
+    pub rule_actions: Vec<XccdfRuleImportAction>,
+    pub bundle: ImportedBundlePlan,
+}
+
+/// Response body from `POST /api/v1/compliance/xccdf/import`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct XccdfImportResponse {
+    #[serde(default)]
+    pub bundle_version_id: Option<Uuid>,
+    pub created_policy_count: u32,
+    pub reused_policy_count: u32,
+    #[serde(default)]
+    pub errors: Vec<String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trust / Publication DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrustPolicyVersionRequest {
+    pub trusted: bool,
+    pub review_note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrustPolicyVersionResponse {
+    pub version_id: Uuid,
+    pub publication_state: String,
+    pub trust_state: String,
+    pub trusted_by: Option<Uuid>,
+    pub trusted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrustBundleVersionRequest {
+    pub trusted: bool,
+    pub review_note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrustBundleVersionResponse {
+    pub version_id: Uuid,
+    pub publication_state: String,
+    pub trust_state: String,
+    pub trusted_by: Option<Uuid>,
+    pub trusted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublishBundleVersionRequest {
+    pub auto_publish_draft_policies: Option<bool>,
+    pub expected_semantic_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublishBundleVersionResponse {
+    pub version_id: Uuid,
+    pub publication_state: String,
+    pub published_at: DateTime<Utc>,
+    pub semantic_digest: String,
+    pub published_policy_count: i32,
+    pub auto_published_policy_count: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateBundleDraftRequest {
+    pub new_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateBundleDraftResponse {
+    pub version_id: Uuid,
+    pub version: String,
+    pub publication_state: String,
+    pub derived_from_version_id: Uuid,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Assignment DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyValueOverride {
+    pub policy_version_id: Uuid,
+    pub value_path: String,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateAssignmentRequest {
+    pub bundle_version_id: Uuid,
+    /// "environment" or "system"
+    pub scope_type: String,
+    pub scope_id: Uuid,
+    pub enforcement_mode: Option<String>,
+    pub exclusions: Option<Vec<Uuid>>,
+    pub additions: Option<Vec<Uuid>>,
+    pub value_overrides: Option<Vec<PolicyValueOverride>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssignmentResponse {
+    pub id: Uuid,
+    pub current_version_id: Uuid,
+    pub bundle_version_id: Uuid,
+    pub scope_type: String,
+    pub scope_id: Uuid,
+    pub enforcement_mode: String,
+    #[serde(default)]
+    pub exclusions: Vec<Uuid>,
+    #[serde(default)]
+    pub additions: Vec<Uuid>,
+    #[serde(default)]
+    pub value_overrides: Vec<PolicyValueOverride>,
+    pub assignment_overlay_digest: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectivePolicyDto {
+    pub policy_version_id: Uuid,
+    pub policy_lineage_id: Uuid,
+    pub policy_type: String,
+    pub source: String,
+    pub baseline_order: Option<i32>,
+    pub addition_order: Option<i32>,
+    #[serde(default)]
+    pub overrides: Vec<PolicyValueOverride>,
+    pub effective_config: serde_json::Value,
+    pub enforcement_mode: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectivePolicySetResponse {
+    pub bundle_version_id: Uuid,
+    pub assignment_id: Option<Uuid>,
+    pub scope_type: String,
+    pub scope_id: Uuid,
+    pub policies: Vec<EffectivePolicyDto>,
+    pub effective_set_digest: String,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Request to create a new deployment policy.

@@ -20,7 +20,7 @@ use crate::api::models::{
     ComplianceBundleSummary, ComplianceControlEvidence, ComplianceControlStatus,
     ComplianceEvidenceResponse, ComplianceRollupTotals, ComplianceSystemRollup,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use uuid::Uuid;
 
 // ─── Trigger browser download ─────────────────────────────────────────────────
@@ -106,7 +106,7 @@ impl<'a> ExportPayload<'a> {
 /// Crystal Forge native JSON — full fidelity, re-ingestable.
 pub fn build_cf_json(p: &ExportPayload<'_>) -> String {
     // We lean on serde_json directly since all types derive Serialize.
-    use serde_json::{Map, Value, json};
+    use serde_json::{json, Map, Value};
 
     let systems_arr: Vec<Value> = p
         .scoped_systems()
@@ -296,7 +296,7 @@ fn csv_row(out: &mut String, fields: &[&str]) {
 /// SARIF 2.1.0 — one `run` per bundle, one `result` per (system × control).
 /// Maps: tool=Crystal Forge, rules=controls, results=findings.
 pub fn build_sarif(p: &ExportPayload<'_>) -> String {
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
 
     let scoped_ev = p.scoped_evidence();
 
@@ -374,6 +374,9 @@ pub fn build_sarif(p: &ExportPayload<'_>) -> String {
                     ComplianceControlStatus::Warn => ("review", "warning"),
                     ComplianceControlStatus::Fail => ("fail", "error"),
                     ComplianceControlStatus::Waiver => ("fail", "warning"),
+                    ComplianceControlStatus::NotChecked => ("open", "none"),
+                    ComplianceControlStatus::NotApplicable => ("notApplicable", "none"),
+                    ComplianceControlStatus::Error => ("open", "error"),
                 };
 
                 // Stable fingerprint: bundle:system:policy — allows consumers
@@ -476,7 +479,7 @@ pub fn build_sarif(p: &ExportPayload<'_>) -> String {
 /// OSCAL 1.1.2 Assessment Results (JSON).
 /// Produces a minimal but valid AR document from the rollup + evidence data.
 pub fn build_oscal(p: &ExportPayload<'_>) -> String {
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
 
     let now = js_sys::Date::new_0()
         .to_iso_string()
@@ -648,6 +651,9 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                 ComplianceControlStatus::Warn => ("not-satisfied", "other"),
                 ComplianceControlStatus::Fail => ("not-satisfied", "fail-adjusted"),
                 ComplianceControlStatus::Waiver => ("not-satisfied", "accept-risk"),
+                ComplianceControlStatus::NotChecked => ("not-satisficed", "not-checked"),
+                ComplianceControlStatus::NotApplicable => ("not-applicable", "not-applicable"),
+                ComplianceControlStatus::Error => ("not-satisfied", "error"),
             };
 
             // Collect evidence items as relevant evidence
@@ -915,6 +921,9 @@ fn build_print_html(p: &ExportPayload<'_>) -> String {
                 ComplianceControlStatus::Warn => " class=\"warn-row\"",
                 ComplianceControlStatus::Pass => " class=\"pass-row\"",
                 ComplianceControlStatus::Waiver => "",
+                ComplianceControlStatus::NotChecked => " class=\"muted-row\"",
+                ComplianceControlStatus::NotApplicable => " class=\"muted-row\"",
+                ComplianceControlStatus::Error => " class=\"fail-row\"",
             };
             body.push_str(&format!(
                 "<tr{}><td class=\"mono\">{}</td><td><b>{}</b></td><td>{}</td><td class=\"mono\">{}</td><td>{}</td></tr>\n",
@@ -989,6 +998,9 @@ fn status_label(s: &ComplianceControlStatus) -> &'static str {
         ComplianceControlStatus::Warn => "warn",
         ComplianceControlStatus::Fail => "fail",
         ComplianceControlStatus::Waiver => "waiver",
+        ComplianceControlStatus::NotChecked => "not checked",
+        ComplianceControlStatus::NotApplicable => "not applicable",
+        ComplianceControlStatus::Error => "error",
     }
 }
 

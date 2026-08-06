@@ -1,14 +1,17 @@
 use dioxus::prelude::*;
 
 use crate::api::client::{
-    create_compliance_bundle, delete_compliance_bundle, fetch_compliance_bundle_systems,
-    fetch_compliance_bundles, fetch_compliance_system_evidence, fetch_environments, fetch_policies,
-    update_compliance_bundle,
+    create_bundle_draft, create_compliance_bundle, delete_compliance_bundle,
+    fetch_compliance_bundle_systems, fetch_compliance_bundles, fetch_compliance_system_evidence,
+    fetch_environments, fetch_policies, import_xccdf, preview_xccdf, publish_bundle_version,
+    trust_bundle_version, update_compliance_bundle,
 };
 use crate::api::models::{
     ComplianceBundleSummary, ComplianceBundleSystemsResponse, ComplianceEvidenceResponse,
-    CreateComplianceBundleRequest, DeploymentPolicySummary, EnvironmentSummary,
-    UpdateComplianceBundleRequest,
+    CreateBundleDraftRequest, CreateComplianceBundleRequest, DeploymentPolicySummary,
+    EnvironmentSummary, ImportedBundlePlan, PublishBundleVersionRequest, TrustBundleVersionRequest,
+    UpdateComplianceBundleRequest, XccdfImportPlan, XccdfImportResponse, XccdfPreviewResponse,
+    XccdfRuleImportAction,
 };
 use crate::components::compliance::{
     BundleCatalog, BundleHeader, EvidenceDrawer, ScoreStrip, SystemsMatrix,
@@ -17,8 +20,8 @@ use crate::components::icon::{Icon, IconName};
 use crate::components::io_menu::{IOMenu, IOMenuItem};
 use crate::components::loading::DashboardLoadingSpinner;
 use crate::export::{
-    ExportPayload, build_cf_json, build_csv, build_oscal, build_sarif, download_print_html,
-    trigger_download,
+    build_cf_json, build_csv, build_oscal, build_sarif, download_print_html, trigger_download,
+    ExportPayload,
 };
 use crate::state::{app_state::AppState, auth};
 
@@ -51,12 +54,13 @@ pub fn ComplianceView() -> Element {
     let mut show_new_bundle = use_signal(|| false);
     let mut show_edit_bundle = use_signal(|| false);
     let mut show_import_stig = use_signal(|| false);
+    let mut version_action_busy = use_signal(|| false);
+    let mut version_action_error = use_signal(|| None::<String>);
     let mut policies = use_signal(Vec::<DeploymentPolicySummary>::new);
     let mut environments = use_signal(Vec::<EnvironmentSummary>::new);
     let mut sys_filter = use_signal(|| "all".to_string());
     let mut selected_export_version_id = use_signal(|| None::<uuid::Uuid>);
-    let mut export_version_pointers =
-        use_signal(|| (None::<uuid::Uuid>, None::<uuid::Uuid>));
+    let mut export_version_pointers = use_signal(|| (None::<uuid::Uuid>, None::<uuid::Uuid>));
 
     // Generation counters guard against stale async responses overwriting the
     // state of a subsequently-selected bundle or system.  Each spawn captures
@@ -356,6 +360,82 @@ pub fn ComplianceView() -> Element {
                                  selected_version_id: *selected_export_version_id.read(),
                                  on_select: move |version_id| selected_export_version_id.set(version_id),
                              }
+                             // ── Version lifecycle actions (admin-only) ─
+                             if is_admin {
+                                 BundleVersionActions {
+                                     bundle: bundle.clone(),
+                                     selected_version_id: *selected_export_version_id.read(),
+                                     busy: *version_action_busy.read(),
+                                     error: version_action_error.read().clone(),
+                                     on_trust: move |version_id: uuid::Uuid| {
+                                         version_action_busy.set(true);
+                                         version_action_error.set(None);
+                                         spawn(async move {
+                                             match trust_bundle_version(
+                                                 &version_id,
+                                                 &TrustBundleVersionRequest { trusted: true, review_note: None },
+                                             ).await {
+                                                 Ok(_) => {
+                                                     version_action_busy.set(false);
+                                                     if let Ok(items) = fetch_compliance_bundles().await {
+                                                         bundles.set(items);
+                                                     }
+                                                 }
+                                                 Err(err) => {
+                                                     version_action_busy.set(false);
+                                                     version_action_error.set(Some(format!("Trust failed: {err}")));
+                                                 }
+                                             }
+                                         });
+                                     },
+                                     on_publish: move |version_id: uuid::Uuid| {
+                                         version_action_busy.set(true);
+                                         version_action_error.set(None);
+                                         spawn(async move {
+                                             match publish_bundle_version(
+                                                 &version_id,
+                                                 &PublishBundleVersionRequest {
+                                                     auto_publish_draft_policies: Some(true),
+                                                     expected_semantic_digest: None,
+                                                 },
+                                             ).await {
+                                                 Ok(_) => {
+                                                     version_action_busy.set(false);
+                                                     if let Ok(items) = fetch_compliance_bundles().await {
+                                                         bundles.set(items);
+                                                     }
+                                                 }
+                                                 Err(err) => {
+                                                     version_action_busy.set(false);
+                                                     version_action_error.set(Some(format!("Publish failed: {err}")));
+                                                 }
+                                             }
+                                         });
+                                     },
+                                     on_create_draft: move |bundle_id: uuid::Uuid| {
+                                         version_action_busy.set(true);
+                                         version_action_error.set(None);
+                                         spawn(async move {
+                                             match create_bundle_draft(
+                                                 &bundle_id,
+                                                 &CreateBundleDraftRequest { new_version: None },
+                                             ).await {
+                                                 Ok(draft) => {
+                                                     version_action_busy.set(false);
+                                                     selected_export_version_id.set(Some(draft.version_id));
+                                                     if let Ok(items) = fetch_compliance_bundles().await {
+                                                         bundles.set(items);
+                                                     }
+                                                 }
+                                                 Err(err) => {
+                                                     version_action_busy.set(false);
+                                                     version_action_error.set(Some(format!("Draft creation failed: {err}")));
+                                                 }
+                                             }
+                                         });
+                                     },
+                                 }
+                             }
                              if let Some(err) = systems_error.read().as_ref() {
                                 div { class: "sd-callout sd-callout-danger",
                                     Icon { name: IconName::X, size: 13 }
@@ -513,6 +593,18 @@ pub fn ComplianceView() -> Element {
             ImportStigModal {
                 environments: environments.read().clone(),
                 on_close: move |_| show_import_stig.set(false),
+                on_success: move |_| {
+                    // Refresh the bundle catalog after a successful import.
+                    spawn(async move {
+                        if let Ok(items) = fetch_compliance_bundles().await {
+                            let first_id = items.first().map(|b| b.id);
+                            bundles.set(items);
+                            if let Some(id) = first_id {
+                                selected_bundle_id.set(Some(id));
+                            }
+                        }
+                    });
+                },
             }
         }
     }
@@ -529,8 +621,8 @@ struct XccdfVersionSelectorProps {
 fn XccdfVersionSelector(props: XccdfVersionSelectorProps) -> Element {
     let bundle = &props.bundle;
     let selected = props.selected_version_id;
-    let has_version = bundle.current_published_version_id.is_some()
-        || bundle.current_draft_version_id.is_some();
+    let has_version =
+        bundle.current_published_version_id.is_some() || bundle.current_draft_version_id.is_some();
 
     rsx! {
         if has_version {
@@ -571,6 +663,94 @@ fn XccdfVersionSelector(props: XccdfVersionSelectorProps) -> Element {
     }
 }
 
+// ─── Bundle version lifecycle actions (trust / publish / draft) ─────────────
+
+#[derive(Props, Clone, PartialEq)]
+struct BundleVersionActionsProps {
+    bundle: ComplianceBundleSummary,
+    selected_version_id: Option<uuid::Uuid>,
+    busy: bool,
+    error: Option<String>,
+    on_trust: EventHandler<uuid::Uuid>,
+    on_publish: EventHandler<uuid::Uuid>,
+    on_create_draft: EventHandler<uuid::Uuid>,
+}
+
+#[component]
+fn BundleVersionActions(props: BundleVersionActionsProps) -> Element {
+    let bundle = &props.bundle;
+    let vid = props.selected_version_id;
+
+    // Determine the publication state of the selected version.
+    let is_draft_selected = vid == bundle.current_draft_version_id;
+    let is_published_selected = vid == bundle.current_published_version_id;
+
+    if vid.is_none() {
+        return rsx! {};
+    }
+
+    rsx! {
+        div { class: "card", style: "padding:14px 16px;display:flex;flex-direction:column;gap:12px;",
+            div { style: "font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);",
+                "Version actions"
+            }
+
+            if let Some(err) = &props.error {
+                div { class: "sd-callout sd-callout-danger", style: "font-size:12px;", "{err}" }
+            }
+
+            div { style: "display:flex;flex-wrap:wrap;gap:8px;",
+                // ── Trust / untrust (draft versions only) ──────────────
+                if is_draft_selected {
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        disabled: props.busy,
+                        onclick: {
+                            let vid = vid.unwrap();
+                            move |_| props.on_trust.call(vid)
+                        },
+                        Icon { name: IconName::Check, size: 12 }
+                        " Mark trusted"
+                    }
+                }
+
+                // ── Publish (draft → accepted) ─────────────────────────
+                if is_draft_selected {
+                    button {
+                        class: "btn btn-primary focus-ring xs",
+                        disabled: props.busy,
+                        title: "Publish this draft as an immutable accepted version",
+                        onclick: {
+                            let vid = vid.unwrap();
+                            move |_| props.on_publish.call(vid)
+                        },
+                        if props.busy { "Publishing…" } else { "Publish version" }
+                    }
+                }
+
+                // ── Create draft (from accepted version) ───────────────
+                if is_published_selected {
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        disabled: props.busy,
+                        title: "Create a new mutable draft derived from this accepted version",
+                        onclick: {
+                            let bid = bundle.id;
+                            move |_| props.on_create_draft.call(bid)
+                        },
+                        if props.busy { "Creating…" } else { "Create draft" }
+                    }
+
+                    div { class: "sd-callout sd-callout-info", style: "font-size:12px;width:100%;",
+                        Icon { name: IconName::Shield, size: 12 }
+                        "This is an accepted (immutable) version. Edit by creating a new draft."
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ─── Empty state ─────────────────────────────────────────────────────────────
 
 #[derive(Props, Clone, PartialEq)]
@@ -606,12 +786,10 @@ fn EmptyComplianceState(props: EmptyComplianceStateProps) -> Element {
 
 // ─── Import STIG modal ────────────────────────────────────────────────────────
 //
-// Implements the 4-step design reference (upload → review → refine → done).
-// The backend wiring (XCCDF parse + policy/bundle creation) is tracked in
-// TASK-365; for now the modal is fully interactive using sample data when
-// "Try with a sample RHEL 9 STIG" is clicked.  File upload advances to review
-// using the sample data (real XCCDF parsing requires TASK-365).
+// Implements the 4-step design reference (upload → review → commit → done).
+// Uses the real /api/v1/compliance/xccdf/preview and /xccdf/import endpoints.
 
+/// Local rule selection state derived from the XCCDF preview response.
 #[derive(Clone, PartialEq)]
 struct StigRule {
     rule_id: String,
@@ -622,131 +800,25 @@ struct StigRule {
     check: String,
     srg: String,
     selected: bool,
+    is_native: bool,
 }
 
-fn sample_stig_rules() -> Vec<StigRule> {
-    vec![
-        StigRule {
-            rule_id: "RHEL-09-255040".into(),
-            stig_id: "RHEL-09-255040".into(),
-            severity: "high".into(),
-            title: "RHEL 9 must disable SSH root login.".into(),
-            fixtext: "Set PermitRootLogin no in /etc/ssh/sshd_config.d/.".into(),
-            check: "Verify sshd -T | grep permitrootlogin returns no.".into(),
-            srg: "SRG-OS-000109".into(),
+fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
+    preview
+        .rules
+        .iter()
+        .map(|r| StigRule {
+            rule_id: r.id.clone(),
+            stig_id: r.id.clone(),
+            severity: r.severity.as_deref().unwrap_or("low").to_string(),
+            title: r.title.as_deref().unwrap_or(&r.id).to_string(),
+            fixtext: String::new(),
+            check: String::new(),
+            srg: String::new(),
             selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-255095".into(),
-            stig_id: "RHEL-09-255095".into(),
-            severity: "medium".into(),
-            title: "RHEL 9 SSH must use FIPS-validated MACs.".into(),
-            fixtext: "Configure approved MACs (hmac-sha2-512, hmac-sha2-256).".into(),
-            check: "Verify MACs in sshd config.".into(),
-            srg: "SRG-OS-000250".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-211010".into(),
-            stig_id: "RHEL-09-211010".into(),
-            severity: "high".into(),
-            title: "RHEL 9 must enable FIPS mode.".into(),
-            fixtext: "Boot kernel with fips=1 and install dracut-fips.".into(),
-            check: "cat /proc/sys/crypto/fips_enabled returns 1.".into(),
-            srg: "SRG-OS-000478".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-654010".into(),
-            stig_id: "RHEL-09-654010".into(),
-            severity: "medium".into(),
-            title: "RHEL 9 must enable auditd.".into(),
-            fixtext: "systemctl enable --now auditd.".into(),
-            check: "systemctl is-active auditd returns active.".into(),
-            srg: "SRG-OS-000062".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-654155".into(),
-            stig_id: "RHEL-09-654155".into(),
-            severity: "medium".into(),
-            title: "RHEL 9 must audit execution of privileged functions.".into(),
-            fixtext: "Add execve audit rules for b32/b64.".into(),
-            check: "auditctl -l shows execve rules.".into(),
-            srg: "SRG-OS-000326".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-271010".into(),
-            stig_id: "RHEL-09-271010".into(),
-            severity: "medium".into(),
-            title: "RHEL 9 must display the Standard Mandatory DoD banner.".into(),
-            fixtext: "Set /etc/issue to the DoD consent banner.".into(),
-            check: "Verify /etc/issue contents.".into(),
-            srg: "SRG-OS-000023".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-251010".into(),
-            stig_id: "RHEL-09-251010".into(),
-            severity: "high".into(),
-            title: "RHEL 9 must enable the firewalld default-deny policy.".into(),
-            fixtext: "Set firewalld default zone to drop.".into(),
-            check: "firewall-cmd --get-default-zone returns drop.".into(),
-            srg: "SRG-OS-000480".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-411015".into(),
-            stig_id: "RHEL-09-411015".into(),
-            severity: "medium".into(),
-            title: "RHEL 9 must lock accounts after 3 failed logon attempts.".into(),
-            fixtext: "Configure pam_faillock deny=3.".into(),
-            check: "Verify faillock config.".into(),
-            srg: "SRG-OS-000021".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-412035".into(),
-            stig_id: "RHEL-09-412035".into(),
-            severity: "low".into(),
-            title: "RHEL 9 must set an idle session timeout.".into(),
-            fixtext: "Set TMOUT=600 in /etc/profile.d/.".into(),
-            check: "Verify TMOUT export.".into(),
-            srg: "SRG-OS-000163".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-672010".into(),
-            stig_id: "RHEL-09-672010".into(),
-            severity: "low".into(),
-            title: "RHEL 9 must synchronize time with an authoritative source.".into(),
-            fixtext: "Configure chrony with authorized servers.".into(),
-            check: "chronyc sources shows server.".into(),
-            srg: "SRG-OS-000355".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-231010".into(),
-            stig_id: "RHEL-09-231010".into(),
-            severity: "medium".into(),
-            title: "RHEL 9 must encrypt all non-boot partitions (LUKS).".into(),
-            fixtext: "Provision LUKS on data partitions.".into(),
-            check: "lsblk shows crypt devices.".into(),
-            srg: "SRG-OS-000405".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-215015".into(),
-            stig_id: "RHEL-09-215015".into(),
-            severity: "low".into(),
-            title: "RHEL 9 must remove unauthorized package repositories.".into(),
-            fixtext: "Remove unapproved .repo files.".into(),
-            check: "dnf repolist matches baseline.".into(),
-            srg: "SRG-OS-000366".into(),
-            selected: true,
-        },
-    ]
+            is_native: r.is_native,
+        })
+        .collect()
 }
 
 fn sev_color(sev: &str) -> &'static str {
@@ -775,11 +847,12 @@ fn sev_label(sev: &str) -> &'static str {
 struct ImportStigModalProps {
     environments: Vec<EnvironmentSummary>,
     on_close: EventHandler<()>,
+    on_success: EventHandler<()>,
 }
 
 #[component]
 fn ImportStigModal(props: ImportStigModalProps) -> Element {
-    // step: "upload" | "review" | "refine" | "done"
+    // step: "upload" | "review" | "refine" | "committing" | "done"
     let mut step = use_signal(|| "upload".to_string());
     let mut rules = use_signal(|| Vec::<StigRule>::new());
     let mut bundle_name = use_signal(String::new);
@@ -792,26 +865,15 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
     // done-step summary
     let mut done_total = use_signal(|| 0usize);
 
-    let all_env_names: Vec<String> = props.environments.iter().map(|e| e.name.clone()).collect();
+    // Real API state
+    let mut file_bytes = use_signal(|| Vec::<u8>::new());
+    let mut preview_response = use_signal(|| None::<XccdfPreviewResponse>);
+    let mut import_result = use_signal(|| None::<XccdfImportResponse>);
+    let mut previewing = use_signal(|| false);
+    let mut committing = use_signal(|| false);
+    let mut import_error = use_signal(|| None::<String>);
 
-    let load_sample = {
-        let all_env_names = all_env_names.clone();
-        move |_| {
-            let sample = sample_stig_rules();
-            let title = "Red Hat Enterprise Linux 9 STIG".to_string();
-            let ver = "V1R5".to_string();
-            bundle_name.set(title.clone());
-            bench_title.set(title);
-            bench_ver.set(ver);
-            file_name.set("RHEL_9_STIG_V1R5.xml (sample)".to_string());
-            rules.set(sample);
-            parse_error.set(None);
-            // Pre-select all available environments so the flow works immediately,
-            // matching the design reference which defaults to ["production"].
-            selected_envs.set(all_env_names.clone());
-            step.set("review".to_string());
-        }
-    };
+    let all_env_names: Vec<String> = props.environments.iter().map(|e| e.name.clone()).collect();
 
     // Derived counts
     let selected_rules: Vec<StigRule> = rules
@@ -861,59 +923,107 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                             span { style: "display:inline-flex;transform:rotate(180deg);",
                                 Icon { name: IconName::Download, size: 14 }
                             }
-                            "Import STIG"
+                            "Import STIG / XCCDF"
                         }
                         p {
                             "Upload a DISA XCCDF benchmark ("
                             span { class: "mono", ".xml" }
-                            "). Crystal Forge parses each rule into a policy and assembles them into a compliance bundle."
+                            " or "
+                            span { class: "mono", ".zip" }
+                            "). Crystal Forge previews and validates the document server-side."
                         }
                     }
                     div { class: "modal-body",
-                        // ── Not-yet-implemented notice ─────────────────
-                        div { class: "sd-callout sd-callout-warn", style: "margin-bottom:16px;",
-                            Icon { name: IconName::Warn, size: 14 }
-                            div { style: "font-size:12px;",
-                                strong { "File upload is not yet wired." }
-                                " XCCDF parsing and backend bundle creation are tracked in "
-                                span { class: "mono", style: "font-weight:600;", "TASK-365" }
-                                ". Use the sample below to preview the full import flow."
+                        if *previewing.read() {
+                            div { style: "text-align:center;padding:32px 0;",
+                                DashboardLoadingSpinner {}
+                                div { style: "font-size:13px;color:var(--cf-text-muted);margin-top:12px;",
+                                    "Parsing XCCDF document…"
+                                }
                             }
-                        }
+                        } else {
+                            // ── File input ────────────────────────────────
+                            label {
+                                class: "focus-ring",
+                                style: "display:block;border:2px dashed var(--cf-divider);background:var(--cf-card-bg);\
+                                        border-radius:12px;padding:38px 20px;text-align:center;cursor:pointer;",
+                                input {
+                                    r#type: "file",
+                                    accept: ".xml,.zip",
+                                    style: "display:none;",
+                                    onchange: move |event| {
+                                        let mut parse_error = parse_error;
+                                        let mut file_bytes = file_bytes;
+                                        let mut file_name = file_name;
+                                        let mut preview_response = preview_response;
+                                        let mut rules = rules;
+                                        let mut bundle_name = bundle_name;
+                                        let mut bench_title = bench_title;
+                                        let mut bench_ver = bench_ver;
+                                        let mut selected_envs = selected_envs;
+                                        let mut previewing = previewing;
+                                        let mut step = step;
+                                        let all_env_names = all_env_names.clone();
 
-                        // ── Drop zone (preview — file input disabled) ──
-                        div {
-                            class: "focus-ring",
-                            style: "border:2px dashed var(--cf-divider);background:var(--cf-card-bg);\
-                                    border-radius:12px;padding:38px 20px;text-align:center;\
-                                    opacity:0.55;cursor:not-allowed;",
-                            div { style: "font-size:30px;margin-bottom:8px;", "📄" }
-                            div { style: "font-size:14px;font-weight:600;",
-                                "Drop an XCCDF .xml here, or click to browse"
+                                        parse_error.set(None);
+                                        let files = event.files();
+                                        if let Some(file) = files.into_iter().next() {
+                                            let fname = file.name();
+                                            previewing.set(true);
+                                            spawn(async move {
+                                                match file.read_bytes().await {
+                                                    Ok(bytes) => {
+                                                        let bytes_vec = bytes.to_vec();
+                                                        match preview_xccdf(&bytes_vec, &fname).await {
+                                                            Ok(resp) => {
+                                                                let bm_title = resp.benchmark.as_ref()
+                                                                    .and_then(|b| b.title.clone())
+                                                                    .unwrap_or_else(|| fname.clone());
+                                                                let bm_ver = resp.benchmark.as_ref()
+                                                                    .and_then(|b| b.version.clone())
+                                                                    .unwrap_or_default();
+                                                                let parsed_rules = rules_from_preview(&resp);
+                                                                bundle_name.set(bm_title.clone());
+                                                                bench_title.set(bm_title);
+                                                                bench_ver.set(bm_ver);
+                                                                file_name.set(fname.clone());
+                                                                file_bytes.set(bytes_vec);
+                                                                rules.set(parsed_rules);
+                                                                preview_response.set(Some(resp));
+                                                                selected_envs.set(all_env_names.clone());
+                                                                previewing.set(false);
+                                                                step.set("review".to_string());
+                                                            }
+                                                            Err(err) => {
+                                                                previewing.set(false);
+                                                                parse_error.set(Some(format!("Preview failed: {err}")));
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(err) => {
+                                                        previewing.set(false);
+                                                        parse_error.set(Some(format!("Could not read file: {err}")));
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    },
+                                }
+                                div { style: "font-size:30px;margin-bottom:8px;", "📄" }
+                                div { style: "font-size:14px;font-weight:600;",
+                                    "Click to browse for an XCCDF .xml or .zip"
+                                }
+                                div { style: "font-size:12px;color:var(--cf-text-muted);margin-top:4px;",
+                                    "DISA STIG / SCAP benchmark"
+                                }
                             }
-                            div { style: "font-size:12px;color:var(--cf-text-muted);margin-top:4px;",
-                                "DISA STIG / SCAP benchmark · file parsing coming in TASK-365"
-                            }
-                        }
 
-                        if let Some(err) = parse_error.read().as_ref() {
-                            div { class: "sd-callout sd-callout-danger", style: "margin-top:12px;",
-                                Icon { name: IconName::Warn, size: 13 }
-                                div { style: "font-size:12px;", "{err}" }
+                            if let Some(err) = parse_error.read().as_ref() {
+                                div { class: "sd-callout sd-callout-danger", style: "margin-top:12px;",
+                                    Icon { name: IconName::Warn, size: 13 }
+                                    div { style: "font-size:12px;", "{err}" }
+                                }
                             }
-                        }
-
-                        div { style: "display:flex;align-items:center;gap:10px;margin:16px 0 4px;",
-                            div { style: "flex:1;height:1px;background:var(--cf-divider);" }
-                            span { style: "font-size:11px;color:var(--cf-text-muted);", "or" }
-                            div { style: "flex:1;height:1px;background:var(--cf-divider);" }
-                        }
-                        button {
-                            class: "btn btn-ghost focus-ring",
-                            style: "width:100%;",
-                            onclick: load_sample,
-                            Icon { name: IconName::Shield, size: 13 }
-                            " Try with a sample RHEL 9 STIG"
                         }
                     }
                     div { class: "modal-foot",
@@ -1098,10 +1208,17 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         div { class: "sd-callout sd-callout-info",
                             Icon { name: IconName::Check, size: 13 }
                             div { style: "font-size:12px;",
-                                "Creates "
+                                "Will create "
                                 strong { "{sel_count}" }
-                                if sel_count == 1 { " security policy" } else { " security policies" }
-                                " and one bundle. Each control maps to a policy with its check + fix as evidence requirements. Existing policies with the same ID are reused, not duplicated."
+                                if sel_count == 1 { " draft policy" } else { " draft policies" }
+                                " (unbound) and one draft bundle. Policies are untrusted, disabled, and unassigned. You can review and trust them after import."
+                            }
+                        }
+
+                        if let Some(err) = import_error.read().as_ref() {
+                            div { class: "sd-callout sd-callout-danger", style: "margin-top:10px;",
+                                Icon { name: IconName::Warn, size: 13 }
+                                div { style: "font-size:12px;", "{err}" }
                             }
                         }
                     }
@@ -1112,37 +1229,82 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 step.set("upload".to_string());
                                 rules.set(Vec::new());
                                 parse_error.set(None);
+                                preview_response.set(None);
                             },
                             Icon { name: IconName::ArrowLeft, size: 13 }
                             " Back"
                         }
                         div { style: "display:flex;gap:8px;",
                             button {
-                                class: "btn btn-ghost focus-ring",
-                                disabled: !can_advance,
-                                style: if !can_advance { "opacity:0.5;cursor:not-allowed;" } else { "" },
-                                title: "Create all selected policies as-is, skipping per-control review",
-                                onclick: move |_| {
-                                    if can_advance {
-                                        done_total.set(sel_count);
-                                        step.set("done".to_string());
-                                    }
-                                },
-                                "Skip & create all"
-                            }
-                            button {
                                 class: "btn btn-primary focus-ring",
-                                disabled: !can_advance,
-                                style: if !can_advance { "opacity:0.5;cursor:not-allowed;" } else { "" },
+                                disabled: !can_advance || *committing.read(),
+                                style: if !can_advance || *committing.read() { "opacity:0.5;cursor:not-allowed;" } else { "" },
                                 onclick: move |_| {
-                                    if can_advance {
-                                        cursor.set(0);
-                                        step.set("refine".to_string());
-                                    }
+                                    if !can_advance || *committing.read() { return; }
+                                    let selected_rule_ids: Vec<String> = rules
+                                        .read()
+                                        .iter()
+                                        .filter(|r| r.selected)
+                                        .map(|r| r.rule_id.clone())
+                                        .collect();
+                                    let rule_actions: Vec<XccdfRuleImportAction> = rules
+                                        .read()
+                                        .iter()
+                                        .filter(|r| r.selected)
+                                        .map(|r| XccdfRuleImportAction::CreateUnbound {
+                                            rule_id: r.rule_id.clone(),
+                                        })
+                                        .collect();
+                                    let sha256 = preview_response
+                                        .read()
+                                        .as_ref()
+                                        .map(|p| p.sha256.clone())
+                                        .unwrap_or_default();
+                                    let plan = XccdfImportPlan {
+                                        expected_sha256: sha256,
+                                        selected_profile_id: None,
+                                        selected_rule_ids,
+                                        rule_actions,
+                                        bundle: ImportedBundlePlan {
+                                            name: bundle_name.read().trim().to_string(),
+                                            framework: "xccdf".to_string(),
+                                            version: bench_ver.read().clone(),
+                                            layer: None,
+                                            owner: None,
+                                            description: None,
+                                        },
+                                    };
+                                    let bytes = file_bytes.read().clone();
+                                    let fname = file_name.read().clone();
+                                    let mut committing = committing;
+                                    let mut import_error = import_error;
+                                    let mut import_result = import_result;
+                                    let mut done_total = done_total;
+                                    let mut step = step;
+                                    let on_success = props.on_success;
+                                    committing.set(true);
+                                    import_error.set(None);
+                                    spawn(async move {
+                                        match import_xccdf(&bytes, &fname, &plan).await {
+                                            Ok(result) => {
+                                                let total = result.created_policy_count + result.reused_policy_count;
+                                                done_total.set(total as usize);
+                                                import_result.set(Some(result));
+                                                committing.set(false);
+                                                step.set("done".to_string());
+                                                on_success.call(());
+                                            }
+                                            Err(err) => {
+                                                committing.set(false);
+                                                import_error.set(Some(format!("Import failed: {err}")));
+                                            }
+                                        }
+                                    });
                                 },
-                                "Refine {sel_count} "
-                                if sel_count == 1 { "policy" } else { "policies" }
-                                Icon { name: IconName::ChevronRight, size: 13 }
+                                if *committing.read() { "Importing…" } else {
+                                    "Import {sel_count} "
+                                    if sel_count == 1 { "policy" } else { "policies" }
+                                }
                             }
                         }
                     }
@@ -1394,50 +1556,36 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                             span { style: "color:#34d399;display:inline-flex;",
                                 Icon { name: IconName::Check, size: 16 }
                             }
-                            "Bundle created"
+                            "Import complete"
                         }
                         p {
                             span { class: "mono", style: "font-weight:600;", "{bundle_name.read()}" }
-                            " is ready."
+                            " was created as a draft bundle."
                         }
                     }
                     div { class: "modal-body",
-                        // Stats grid — controls / new policies / reused
-                        div { style: "display:grid;grid-template-columns:repeat(3,1fr);gap:10px;",
-                            for (n, label) in [
-                                (*done_total.read(), "controls"),
-                                (*done_total.read(), "new policies"),
-                                (0usize, "reused"),
-                            ] {
-                                div { class: "card", style: "padding:14px 12px;text-align:center;",
-                                    div { style: "font-size:24px;font-weight:700;", "{n}" }
-                                    div { style: "font-size:11px;color:var(--cf-text-muted);", "{label}" }
+                        // Stats grid — created / reused / total
+                        {
+                            let created = import_result.read().as_ref().map(|r| r.created_policy_count).unwrap_or(0);
+                            let reused = import_result.read().as_ref().map(|r| r.reused_policy_count).unwrap_or(0);
+                            let total = created + reused;
+                            rsx! {
+                                div { style: "display:grid;grid-template-columns:repeat(3,1fr);gap:10px;",
+                                    for (n, label) in [(total, "total controls"), (created, "new policies"), (reused, "reused")] {
+                                        div { class: "card", style: "padding:14px 12px;text-align:center;",
+                                            div { style: "font-size:24px;font-weight:700;", "{n}" }
+                                            div { style: "font-size:11px;color:var(--cf-text-muted);", "{label}" }
+                                        }
+                                    }
                                 }
                             }
                         }
                         div { class: "sd-callout sd-callout-info", style: "margin-top:12px;",
                             Icon { name: IconName::Shield, size: 13 }
                             div { style: "font-size:12px;",
-                                "New policies appear in the "
-                                strong { "Policies" }
-                                " view under "
-                                strong { "Security & hardening" }
-                                ". The bundle now gates the environments you selected"
-                                if !selected_envs.read().is_empty() {
-                                    ": "
-                                    strong { { selected_envs.read().join(", ") } }
-                                }
-                                "."
-                            }
-                        }
-                        // Honest note: backend wiring is TASK-365
-                        div { class: "sd-callout sd-callout-warn", style: "margin-top:10px;",
-                            Icon { name: IconName::Warn, size: 13 }
-                            div { style: "font-size:12px;",
-                                strong { "Preview only — bundle not yet saved." }
-                                " Backend persistence is tracked in "
-                                span { class: "mono", style: "font-weight:600;", "TASK-365" }
-                                ". The policies and bundle you reviewed will be used as the starting point when that work lands."
+                                "Imported policies are "
+                                strong { "draft, disabled, and untrusted" }
+                                ". Review and trust them in the Policies view before enabling enforcement."
                             }
                         }
                     }
@@ -1445,7 +1593,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         button {
                             class: "btn btn-primary focus-ring",
                             onclick: move |_| props.on_close.call(()),
-                            "View bundle"
+                            "Close"
                         }
                     }
                 }

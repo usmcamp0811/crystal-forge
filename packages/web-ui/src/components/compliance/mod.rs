@@ -66,7 +66,11 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
 }
 
 fn env_count_suffix(n: i64) -> &'static str {
-    if n == 1 { "" } else { "s" }
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 // ─── Bundle header card ──────────────────────────────────────────────────────
@@ -179,10 +183,19 @@ pub fn ScoreStrip(props: ScoreStripProps) -> Element {
                     "{props.totals.fully_compliant_count} of {props.totals.system_count} hosts fully compliant"
                 }
             }
-            ScoreStat { label: "Pass",   value: props.totals.pass,   color: "#34d399" }
-            ScoreStat { label: "Warn",   value: props.totals.warn,   color: "#fbbf24" }
-            ScoreStat { label: "Fail",   value: props.totals.fail,   color: "#f87171" }
-            ScoreStat { label: "Waiver", value: props.totals.waiver, color: "#a78bfa" }
+            ScoreStat { label: "Pass",          value: props.totals.pass,          color: "#34d399" }
+            ScoreStat { label: "Warn",          value: props.totals.warn,          color: "#fbbf24" }
+            ScoreStat { label: "Fail",          value: props.totals.fail,          color: "#f87171" }
+            ScoreStat { label: "Waiver",        value: props.totals.waiver,        color: "#a78bfa" }
+            if props.totals.not_checked > 0 {
+                ScoreStat { label: "Not checked",   value: props.totals.not_checked,   color: "#94a3b8" }
+            }
+            if props.totals.not_applicable > 0 {
+                ScoreStat { label: "N/A",           value: props.totals.not_applicable, color: "#64748b" }
+            }
+            if props.totals.error > 0 {
+                ScoreStat { label: "Error",         value: props.totals.error,          color: "#f43f5e" }
+            }
         }
     }
 }
@@ -468,6 +481,9 @@ fn control_status_color(status: &ComplianceControlStatus) -> &'static str {
         ComplianceControlStatus::Warn => "#fbbf24",
         ComplianceControlStatus::Fail => "#f87171",
         ComplianceControlStatus::Waiver => "#a78bfa",
+        ComplianceControlStatus::NotChecked => "#94a3b8",
+        ComplianceControlStatus::NotApplicable => "#64748b",
+        ComplianceControlStatus::Error => "#f43f5e",
     }
 }
 
@@ -491,6 +507,9 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
         ComplianceControlStatus::Warn => "warn",
         ComplianceControlStatus::Fail => "fail",
         ComplianceControlStatus::Waiver => "waiver",
+        ComplianceControlStatus::NotChecked => "not checked",
+        ComplianceControlStatus::NotApplicable => "not applicable",
+        ComplianceControlStatus::Error => "error",
     };
     let policy_name = props.control.policy_name.clone();
     let summary = props.control.summary.clone();
@@ -551,6 +570,32 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
                 }
             },
             ComplianceControlStatus::Pass => rsx! {},
+            ComplianceControlStatus::NotChecked => rsx! {
+                div { class: "sd-callout",
+                    style: "background:rgba(148,163,184,0.08);border-color:rgba(148,163,184,0.25);",
+                    div { style: "font-size:12px;color:var(--cf-text-muted);",
+                        strong { "Not checked. " }
+                        "No applicable evaluation or evidence exists for this control."
+                    }
+                }
+            },
+            ComplianceControlStatus::NotApplicable => rsx! {
+                div { class: "sd-callout",
+                    style: "background:rgba(100,116,139,0.08);border-color:rgba(100,116,139,0.25);",
+                    div { style: "font-size:12px;color:var(--cf-text-muted);",
+                        strong { "Not applicable. " }
+                        "This control does not apply to the current system configuration."
+                    }
+                }
+            },
+            ComplianceControlStatus::Error => rsx! {
+                div { class: "sd-callout sd-callout-danger",
+                    div { style: "font-size:12px;",
+                        strong { "Evaluator error. " }
+                        "The control could not be evaluated. Check system logs for details."
+                    }
+                }
+            },
         }
 
         // Evidence items
