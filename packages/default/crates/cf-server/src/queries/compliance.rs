@@ -1383,11 +1383,11 @@ pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> Compli
             PolicyEval::Evaluated(ComplianceControlStatus::Waiver) => {
                 evaluated_total += 1;
             }
-            // New states: not_checked, not_applicable, and error are known
-            // outcomes but must not inflate the evaluated denominator.
+            // Canonical evidence states: each control maps to exactly one
+            // bucket. warn + not_checked + not_applicable + error + pass +
+            // fail + waiver == total. No double-counting.
             PolicyEval::Evaluated(ComplianceControlStatus::NotChecked) => {
                 not_checked += 1;
-                warn += 1;
             }
             PolicyEval::Evaluated(ComplianceControlStatus::NotApplicable) => {
                 not_applicable += 1;
@@ -1395,11 +1395,10 @@ pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> Compli
             PolicyEval::Evaluated(ComplianceControlStatus::Error) => {
                 error_count += 1;
             }
+            // Disabled or unsupported controls are selected but not evaluated.
+            // They surface as not_checked, not warn, preserving mutual exclusivity.
             PolicyEval::Disabled | PolicyEval::Unsupported => {
-                // Preserve the legacy warning count for existing consumers,
-                // while exposing the distinct not_checked count as well.
                 not_checked += 1;
-                warn += 1;
             }
         }
     }
@@ -1554,13 +1553,9 @@ pub(crate) fn totals_for_rollups(rollups: &[ComplianceSystemRollup]) -> Complian
 
     for rollup in rollups {
         // A host is "fully compliant" when every evaluated control passed —
-        // i.e. no failures and no evaluated warnings.  Disabled/unsupported
-        // policies surface in rollup.warn but should not prevent a host that
-        // has no real failures from counting as compliant.
-        let evaluated_warns = rollup
-            .warn
-            .saturating_sub(rollup.total - rollup.evaluated_total);
-        if rollup.fail == 0 && evaluated_warns == 0 && rollup.evaluated_total > 0 {
+        // i.e. no failures and no genuine evaluation warnings.
+        // not_checked/not_applicable are unevaluated and must not block compliance.
+        if rollup.fail == 0 && rollup.warn == 0 && rollup.error == 0 && rollup.evaluated_total > 0 {
             totals.fully_compliant_count += 1;
         }
         totals.pass += rollup.pass;
@@ -1636,12 +1631,12 @@ fn evaluate_policy(system: &SystemRow, policy: &PolicyRow) -> PolicyEval {
 }
 
 /// Translate a PolicyEval into the ComplianceControlStatus used by rollups and
-/// evidence. Disabled and unsupported controls retain the legacy warning
-/// surface while their not-checked state is exposed by rollup counters.
+/// evidence. Disabled and unsupported controls map to `NotChecked`.
+/// Use `attention_count()` on the rollup for legacy UI summary badges.
 fn policy_status(system: &SystemRow, policy: &PolicyRow) -> ComplianceControlStatus {
     match evaluate_policy(system, policy) {
         PolicyEval::Evaluated(s) => s,
-        PolicyEval::Disabled | PolicyEval::Unsupported => ComplianceControlStatus::Warn,
+        PolicyEval::Disabled | PolicyEval::Unsupported => ComplianceControlStatus::NotChecked,
     }
 }
 
@@ -1649,7 +1644,7 @@ fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlE
     let eval = evaluate_policy(system, &policy);
     let status = match &eval {
         PolicyEval::Evaluated(s) => s.clone(),
-        PolicyEval::Disabled | PolicyEval::Unsupported => ComplianceControlStatus::Warn,
+        PolicyEval::Disabled | PolicyEval::Unsupported => ComplianceControlStatus::NotChecked,
     };
 
     let severity = match status {
@@ -1907,13 +1902,21 @@ mod tests {
 
     // ── disabled policies ─────────────────────────────────────────────────────
 
+    // ── disabled policies ─────────────────────────────────────────────────────
+    // Disabled and unsupported controls are `not_checked`, not `warn`.
+    // Canonical categories are mutually exclusive:
+    //   pass + warn + fail + waiver + not_checked + not_applicable + error == total
+
     #[test]
-    fn disabled_policy_surfaces_as_warn_not_pass() {
+    fn disabled_policy_returns_not_checked_not_warn() {
         let status = policy_status(
             &system("healthy", 0, 0),
             &policy("require_cf_agent", serde_json::json!({}), false),
         );
-        assert!(matches!(status, ComplianceControlStatus::Warn));
+        assert!(
+            matches!(status, ComplianceControlStatus::NotChecked),
+            "disabled policy must be NotChecked, not Warn"
+        );
     }
 
     #[test]
@@ -1923,7 +1926,8 @@ mod tests {
             sys,
             &[policy("require_cf_agent", serde_json::json!({}), false)],
         );
-        assert_eq!(rollup.warn, 1, "disabled policy should surface as warn");
+        assert_eq!(rollup.not_checked, 1, "disabled policy increments not_checked");
+        assert_eq!(rollup.warn, 0, "disabled policy must not increment warn");
         assert_eq!(
             rollup.score, 0,
             "score with only disabled policies should be 0"
@@ -1933,17 +1937,26 @@ mod tests {
             rollup.evaluated_total, 0,
             "disabled policy must not count as evaluated"
         );
+        // Attention count = warn + not_checked + error — same total as before.
+        assert_eq!(
+            rollup.warn + rollup.not_checked + rollup.error,
+            1,
+            "attention_count must still be 1"
+        );
     }
 
     // ── unsupported policy types ──────────────────────────────────────────────
 
     #[test]
-    fn unknown_policy_warns_not_fabricating_pass() {
+    fn unsupported_policy_returns_not_checked_not_warn() {
         let status = policy_status(
             &system("healthy", 0, 0),
             &policy("custom_check", serde_json::json!({}), true),
         );
-        assert!(matches!(status, ComplianceControlStatus::Warn));
+        assert!(
+            matches!(status, ComplianceControlStatus::NotChecked),
+            "unsupported policy must be NotChecked, not Warn"
+        );
     }
 
     #[test]
@@ -1957,7 +1970,8 @@ mod tests {
                 true,
             )],
         );
-        assert_eq!(rollup.warn, 1, "unsupported policy should surface as warn");
+        assert_eq!(rollup.not_checked, 1, "unsupported policy increments not_checked");
+        assert_eq!(rollup.warn, 0, "unsupported policy must not increment warn");
         assert_eq!(
             rollup.score, 0,
             "score with only unsupported policies should be 0"
@@ -1966,7 +1980,7 @@ mod tests {
     }
 
     // ── mixed: evaluated pass + disabled ─────────────────────────────────────
-    // This is the key regression test from the re-review finding.
+    // Canonical categories are mutually exclusive; disabled maps to not_checked.
 
     #[test]
     fn mixed_passing_and_disabled_scores_100_percent() {
@@ -1974,13 +1988,14 @@ mod tests {
         let policies = vec![
             // evaluated → pass
             policy("require_cf_agent", serde_json::json!({}), true),
-            // not evaluated → warn (excluded from denominator)
+            // not evaluated → not_checked (excluded from denominator)
             policy("require_cf_agent", serde_json::json!({}), false),
         ];
         let rollup = system_rollup(sys, &policies);
 
         assert_eq!(rollup.pass, 1, "one passing control");
-        assert_eq!(rollup.warn, 1, "one disabled (surfaces as warn)");
+        assert_eq!(rollup.not_checked, 1, "one disabled increments not_checked");
+        assert_eq!(rollup.warn, 0, "no warn for disabled controls");
         assert_eq!(rollup.fail, 0);
         assert_eq!(rollup.evaluated_total, 1, "only one control was evaluated");
         assert_eq!(
@@ -1990,11 +2005,29 @@ mod tests {
     }
 
     #[test]
+    fn canonical_categories_are_mutually_exclusive() {
+        let sys = system("healthy", 0, 0);
+        let policies = vec![
+            policy("require_cf_agent", serde_json::json!({}), true),   // pass
+            policy("require_cf_agent", serde_json::json!({}), false),  // not_checked
+            policy("custom_check", serde_json::json!({}), true),       // not_checked (unsupported)
+        ];
+        let rollup = system_rollup(sys, &policies);
+        let canonical_total =
+            rollup.pass + rollup.warn + rollup.fail + rollup.waiver
+            + rollup.not_checked + rollup.not_applicable + rollup.error;
+        assert_eq!(
+            canonical_total, rollup.total,
+            "canonical categories must exactly sum to total"
+        );
+    }
+
+    #[test]
     fn aggregate_score_uses_evaluated_controls_not_total() {
         let sys = system("healthy", 0, 0);
         let policies = vec![
             policy("require_cf_agent", serde_json::json!({}), true), // pass
-            policy("require_cf_agent", serde_json::json!({}), false), // disabled → warn
+            policy("require_cf_agent", serde_json::json!({}), false), // disabled → not_checked
         ];
         let rollup = system_rollup(sys, &policies);
         let totals = totals_for_rollups(&[rollup]);
@@ -2013,18 +2046,19 @@ mod tests {
         let sys = system("healthy", 0, 0);
         let policies = vec![
             policy("require_cf_agent", serde_json::json!({}), true), // pass
-            policy("require_cf_agent", serde_json::json!({}), false), // disabled → warn
+            policy("require_cf_agent", serde_json::json!({}), false), // disabled → not_checked
         ];
         let rollup = system_rollup(sys, &policies);
-        // warn = 1 (from disabled), but all *evaluated* controls pass,
-        // so the host must count as fully compliant.
-        assert_eq!(rollup.warn, 1);
+        // not_checked = 1 (from disabled), warn = 0.
+        // All *evaluated* controls pass, so the host must count as fully compliant.
+        assert_eq!(rollup.not_checked, 1, "disabled maps to not_checked");
+        assert_eq!(rollup.warn, 0, "no warn for disabled");
         assert_eq!(rollup.pass, 1);
         let totals = totals_for_rollups(&[rollup]);
         assert_eq!(
             totals.fully_compliant_count, 1,
             "host with all evaluated controls passing must count as fully compliant \
-             even when disabled policies surface as warn"
+             even when disabled policies are not_checked"
         );
     }
 
