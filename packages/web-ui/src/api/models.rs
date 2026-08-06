@@ -1299,6 +1299,22 @@ pub struct XccdfRuleInfo {
     pub title: Option<String>,
     pub severity: Option<String>,
     pub is_native: bool,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub group_id: Option<String>,
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    #[serde(default)]
+    pub identifiers: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub checks: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub fix: Option<serde_json::Value>,
+    #[serde(default)]
+    pub references: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub has_opaque_xml: bool,
 }
 
 /// Response body from `POST /api/v1/compliance/xccdf/preview`.

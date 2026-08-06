@@ -1138,16 +1138,53 @@ fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
     preview
         .rules
         .iter()
-        .map(|r| StigRule {
-            rule_id: r.id.clone(),
-            stig_id: r.id.clone(),
-            severity: r.severity.as_deref().unwrap_or("low").to_string(),
-            title: r.title.as_deref().unwrap_or(&r.id).to_string(),
-            fixtext: String::new(),
-            check: String::new(),
-            srg: String::new(),
-            selected: true,
-            is_native: r.is_native,
+        .map(|r| {
+            // Build a summary of identifiers for display
+            let stig_id = r.identifiers.iter()
+                .find_map(|i| {
+                    let sys = i.get("system").and_then(|v| v.as_str()).unwrap_or("");
+                    let val = i.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                    if sys.contains("disa.stig") || sys.contains("nist") {
+                        Some(val.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| r.id.clone());
+
+            let srg = r.identifiers.iter()
+                .find_map(|i| {
+                    let sys = i.get("system").and_then(|v| v.as_str()).unwrap_or("");
+                    if sys.contains("srg") {
+                        let val = i.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                        Some(val.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+
+            let check_summary = r.checks.first().map(|c| {
+                let sys = c.get("system").and_then(|v| v.as_str()).unwrap_or("");
+                format!("check: {sys}")
+            }).unwrap_or_default();
+
+            let fix_text = r.fix.as_ref()
+                .and_then(|f| f.get("preview").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .to_string();
+
+            StigRule {
+                rule_id: r.id.clone(),
+                stig_id,
+                severity: r.severity.as_deref().unwrap_or("medium").to_string(),
+                title: r.title.as_deref().unwrap_or(&r.id).to_string(),
+                fixtext: fix_text,
+                check: check_summary,
+                srg,
+                selected: true,
+                is_native: r.is_native,
+            }
         })
         .collect()
 }

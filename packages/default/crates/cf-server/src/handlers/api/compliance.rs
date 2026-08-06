@@ -2396,11 +2396,82 @@ pub async fn xccdf_preview(
         .rules
         .iter()
         .map(|r| {
+            // Extract identifier summaries
+            let idents: Vec<serde_json::Value> = r
+                .identifiers
+                .iter()
+                .map(|i| {
+                    serde_json::json!({
+                        "system": i.system,
+                        "value": i.value,
+                    })
+                })
+                .collect();
+
+            // Check summaries (system + body type)
+            let check_summaries: Vec<serde_json::Value> = r
+                .checks
+                .iter()
+                .map(|c| {
+                    let body_summary = match &c.body {
+                        crate::compliance::xccdf::models::CheckBody::Inline { content } => {
+                            let truncated: String = content.chars().take(200).collect();
+                            serde_json::json!({
+                                "type": "inline",
+                                "preview": truncated,
+                            })
+                        }
+                        crate::compliance::xccdf::models::CheckBody::Reference { href, name } => {
+                            serde_json::json!({
+                                "type": "reference",
+                                "href": href,
+                                "name": name,
+                            })
+                        }
+                    };
+                    serde_json::json!({
+                        "system": c.system,
+                        "selector": c.selector,
+                        "multi_check": c.multi_check,
+                        "negate": c.negate,
+                        "body": body_summary,
+                    })
+                })
+                .collect();
+
+            let fix_summary = r.fix.as_ref().map(|f| {
+                let truncated: String = f.content.chars().take(200).collect();
+                serde_json::json!({
+                    "id": f.id,
+                    "system": f.system,
+                    "complexity": f.complexity,
+                    "disruption": f.disruption,
+                    "preview": truncated,
+                })
+            });
+
+            let refs: Vec<serde_json::Value> = r
+                .references
+                .iter()
+                .map(|rf| serde_json::json!({
+                    "href": rf.href,
+                    "title": rf.title,
+                }))
+                .collect();
+
             serde_json::json!({
                 "id": r.id,
                 "title": r.title,
                 "severity": r.severity,
+                "version": r.version,
                 "is_native": r.cf_policy_meta.is_some(),
+                "group_id": r.group_id,
+                "platforms": r.platforms,
+                "identifiers": idents,
+                "checks": check_summaries,
+                "fix": fix_summary,
+                "references": refs,
+                "has_opaque_xml": r.preserved_xml.is_some(),
             })
         })
         .collect();
