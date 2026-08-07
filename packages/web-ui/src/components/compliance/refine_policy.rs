@@ -94,7 +94,7 @@ pub fn action_to_import(rule: &RefinedStigRule) -> XccdfRuleImportAction {
 }
 
 #[derive(Props, Clone, PartialEq)]
-pub struct RefinePolicyStepProps { pub rules: Signal<Vec<RefinedStigRule>>, pub cursor: Signal<usize>, pub on_back: EventHandler<()>, pub on_review: EventHandler<()> }
+pub struct RefinePolicyStepProps { pub rules: Signal<Vec<RefinedStigRule>>, pub cursor: Signal<usize>, pub existing_policies: Vec<(uuid::Uuid, String)>, pub on_back: EventHandler<()>, pub on_review: EventHandler<()> }
 
 #[component]
 pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
@@ -111,7 +111,7 @@ pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
             SourceStigCard { rule: rule.source.clone() }
             div { style: "display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:end;", div { class: "field", label { "Policy name" }, input { class: "input focus-ring mono", value: "{rule.draft.local_name}", oninput: move |e| { props.rules.write()[index].draft.local_name = e.value(); } } }, div { class: "field", label { "Severity" }, div { class: "seg", for (value, label) in [("high","CAT I"),("medium","CAT II"),("low","CAT III")] { button { class: if rule.draft.local_severity == value { "active" } else { "" }, onclick: move |_| { props.rules.write()[index].draft.local_severity = value.into(); }, "{label}" } } } } }
             details { style: "margin:12px 0;", summary { style: "font-size:11px;color:var(--cf-text-muted);", "Additional policy details" }, div { style: "display:grid;gap:8px;margin-top:8px;", textarea { class: "input focus-ring", rows: 2, placeholder: "Description", value: "{rule.draft.local_description}", oninput: move |e| { props.rules.write()[index].draft.local_description = e.value(); } }, textarea { class: "input focus-ring", rows: 2, placeholder: "Rationale", value: "{rule.draft.local_rationale}", oninput: move |e| { props.rules.write()[index].draft.local_rationale = e.value(); } }, textarea { class: "input focus-ring", rows: 2, placeholder: "Implementation note", value: "{rule.draft.implementation_note}", oninput: move |e| { props.rules.write()[index].draft.implementation_note = e.value(); } } } }
-            ImplementationChoice { rules: props.rules, index }
+             ImplementationChoice { rules: props.rules, index, existing_policies: props.existing_policies.clone() }
             if matches!(rule.draft.action, RefinedRuleAction::Native) { AssertionSection { rules: props.rules, index } }
             if matches!(rule.draft.action, RefinedRuleAction::Native | RefinedRuleAction::Manual) { EvidenceSection { rules: props.rules, index } }
             if matches!(rule.draft.action, RefinedRuleAction::Unbound) { div { class: "sd-callout sd-callout-info", "This requirement will be imported without a Crystal Forge implementation." } }
@@ -161,10 +161,15 @@ fn SourceStigCard(rule: SourceStigRule) -> Element {
 }
 
 #[component]
-fn ImplementationChoice(rules: Signal<Vec<RefinedStigRule>>, index: usize) -> Element {
+fn ImplementationChoice(rules: Signal<Vec<RefinedStigRule>>, index: usize, existing_policies: Vec<(uuid::Uuid, String)>) -> Element {
     let current = action_key(&rules.read()[index].draft.action);
-    rsx! { div { style: "margin:14px 0;", label { style: "font-size:11px;font-weight:650;", "Implementation" }, div { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;", for (key, label) in [("native","Native assertion"),("manual","Manual evidence"),("unbound","Unbound"),("opaque","Opaque"),("existing","Existing")] { button { class: if current == key { "btn btn-primary" } else { "btn btn-ghost" }, onclick: move |_| { set_action(&mut rules.write()[index].draft.action, key); }, "{label}" } } } } }
+    rsx! { div { style: "margin:14px 0;", label { style: "font-size:11px;font-weight:650;", "Implementation" }, div { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;", for (key, label) in [("native","Native assertion"),("manual","Manual evidence"),("unbound","Unbound"),("opaque","Opaque"),("existing","Existing")] { button { class: if current == key { "btn btn-primary" } else { "btn btn-ghost" }, onclick: move |_| { set_action(&mut rules.write()[index].draft.action, key); }, "{label}" } } }
+        if current == "existing" {
+            select { class: "input focus-ring", value: "{existing_policy_value(&rules.read()[index].draft.action)}", onchange: move |event| { let selected = uuid::Uuid::parse_str(&event.value()).ok(); rules.write()[index].draft.action = RefinedRuleAction::Existing(selected); }, option { value: "", "Select an existing policy version…" }, for (id, name) in existing_policies.iter() { option { value: "{id}", "{name}" } } }
+        }
+    } }
 }
+fn existing_policy_value(action: &RefinedRuleAction) -> String { match action { RefinedRuleAction::Existing(Some(id)) => id.to_string(), _ => String::new() } }
 fn action_key(action: &RefinedRuleAction) -> &'static str { match action { RefinedRuleAction::Native => "native", RefinedRuleAction::Manual => "manual", RefinedRuleAction::Unbound => "unbound", RefinedRuleAction::Opaque => "opaque", RefinedRuleAction::Existing(_) => "existing" } }
 fn set_action(action: &mut RefinedRuleAction, key: &str) { *action = match key { "native" => RefinedRuleAction::Native, "manual" => RefinedRuleAction::Manual, "opaque" => RefinedRuleAction::Opaque, "existing" => RefinedRuleAction::Existing(None), _ => RefinedRuleAction::Unbound }; }
 

@@ -574,6 +574,7 @@ pub async fn update_environment_metadata(
 #[derive(Debug, FromRow)]
 pub struct PolicyRow {
     pub id: Uuid,
+    pub version_id: Option<Uuid>,
     pub name: String,
     pub description: Option<String>,
     pub policy_type: String,
@@ -584,7 +585,7 @@ pub struct PolicyRow {
 /// Get all available deployment policies.
 pub async fn list_deployment_policies(pool: &PgPool) -> Result<Vec<DeploymentPolicySummary>> {
     let rows = sqlx::query_as::<_, PolicyRow>(
-        "SELECT id, name, description, policy_type, config, enabled FROM deployment_policies ORDER BY name",
+        "SELECT id, COALESCE(current_draft_version_id, current_published_version_id) AS version_id, name, description, policy_type, config, enabled FROM deployment_policies ORDER BY name",
     )
     .fetch_all(pool)
     .await?;
@@ -593,6 +594,7 @@ pub async fn list_deployment_policies(pool: &PgPool) -> Result<Vec<DeploymentPol
         .into_iter()
         .map(|r| DeploymentPolicySummary {
             id: r.id,
+            version_id: r.version_id,
             name: r.name,
             description: r.description,
             policy_type: r.policy_type,

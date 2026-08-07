@@ -617,6 +617,7 @@ pub fn ComplianceView() -> Element {
         if is_admin && *show_import_stig.read() {
             ImportStigModal {
                 environments: environments.read().clone(),
+                existing_policies: policies.read().iter().filter_map(|policy| policy.version_id.map(|version_id| (version_id, policy.name.clone()))).collect(),
                 is_stig_import: *import_mode_stig.read(),
                 on_close: move |_| show_import_stig.set(false),
                 on_success: move |_| {
@@ -1503,6 +1504,7 @@ fn refined_rules_from_rules(rules: &[StigRule]) -> Vec<RefinedStigRule> {
 #[derive(Props, Clone, PartialEq)]
 struct ImportStigModalProps {
     environments: Vec<EnvironmentSummary>,
+    existing_policies: Vec<(uuid::Uuid, String)>,
     on_close: EventHandler<()>,
     on_success: EventHandler<()>,
     is_stig_import: bool,
@@ -2048,6 +2050,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         RefinePolicyStep {
                             rules: refined_rules_signal,
                             cursor: cursor_signal,
+                            existing_policies: props.existing_policies.clone(),
                             on_back: move |_| step.set("review".to_string()),
                             on_review: move |_| step.set("final-review".to_string()),
                         }

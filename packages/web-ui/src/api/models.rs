@@ -1192,6 +1192,8 @@ pub struct UpdateEnvironmentPoliciesRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentPolicySummary {
     pub id: Uuid,
+    #[serde(default)]
+    pub version_id: Option<Uuid>,
     pub name: String,
     pub description: Option<String>,
     pub policy_type: String,
