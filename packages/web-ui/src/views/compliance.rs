@@ -2098,9 +2098,8 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                     }
                 }
 
-                // Legacy block retained temporarily while the structured step is
-                // exercised; it is unreachable and will be removed once the
-                // final-review transition is wired to the new component.
+                /* Legacy inline Refine implementation superseded by the structured
+                   RefinePolicyStep and ImportReview components above.
                 if false && *step.read() == "refine" {
                     {
                         let sel: Vec<StigRule> = rules.read().iter().filter(|r| r.selected).cloned().collect();
@@ -2475,6 +2474,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         } else { rsx! {} }
                     }
                 }
+                */
 
                 // ══════════════════════════════════════════════════════
                 // STEP: done
