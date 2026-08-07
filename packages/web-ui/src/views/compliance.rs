@@ -17,7 +17,9 @@ use crate::api::models::{
     ImportedCustomCheck, ImportedCustomCheckRule, ImportedEvidenceRequirement,
 };
 use crate::components::compliance::{
-    BundleCatalog, BundleHeader, EvidenceDrawer, ScoreStrip, SystemsMatrix,
+    action_to_import, BundleCatalog, BundleHeader, EvidenceDrawer, RefinedPolicyDraft,
+    RefinedRuleAction, RefinedStigRule, ScoreStrip, SourceCheck, SourceStigRule, SystemsMatrix,
+    RefinePolicyStep,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::components::io_menu::{IOMenu, IOMenuItem};
@@ -1466,6 +1468,37 @@ fn import_action_from_rule(rule: &StigRule) -> XccdfRuleImportAction {
     }
 }
 
+fn refined_rules_from_rules(rules: &[StigRule]) -> Vec<RefinedStigRule> {
+    rules.iter().map(|rule| RefinedStigRule {
+        source: SourceStigRule {
+            rule_id: rule.rule_id.clone(),
+            group_id: (!rule.group_id.is_empty()).then(|| rule.group_id.clone()),
+            stig_id: (!rule.stig_id.is_empty()).then(|| rule.stig_id.clone()),
+            title: Some(rule.title.clone()),
+            description: (!rule.source_description.is_empty()).then(|| rule.source_description.clone()),
+            source_severity: Some(rule.severity.clone()),
+            fix_text: (!rule.fixtext.is_empty()).then(|| rule.fixtext.clone()),
+            checks: (!rule.check.is_empty()).then(|| vec![SourceCheck { system: String::new(), content: rule.check.clone() }]).unwrap_or_default(),
+            identifiers: Vec::new(),
+            references: Vec::new(),
+            platforms: Vec::new(),
+            rule_order: 0,
+        },
+        draft: RefinedPolicyDraft {
+            local_name: rule.local_name.clone(),
+            local_description: rule.local_description.clone(),
+            local_severity: rule.severity.clone(),
+            local_rationale: rule.fixtext.clone(),
+            implementation_note: rule.implementation_note.clone(),
+            action: match rule.action.as_str() { "native" => RefinedRuleAction::Native, "manual" => RefinedRuleAction::Manual, "opaque" => RefinedRuleAction::Opaque, _ => RefinedRuleAction::Unbound },
+            assertion_mode: rule.assertion_mode.clone(),
+            assertions: rule.assertions.iter().map(|assertion| crate::components::compliance::refine_policy::PolicyAssertionDraft::CustomExpression { field_name: assertion.field_name.clone(), expression: assertion.expression.clone(), failure_message: assertion.description.clone(), strict: assertion.strict }).collect(),
+            evidence_requirements: rule.evidence_requirements.iter().filter_map(|evidence| match evidence { ImportedEvidenceRequirement::Command { command, expected_output } => Some(crate::components::compliance::refine_policy::EvidenceRequirementDraft::Command { command: command.clone(), expected_output: expected_output.clone() }), ImportedEvidenceRequirement::Attestation { description } => Some(crate::components::compliance::refine_policy::EvidenceRequirementDraft::Attestation { description: description.clone() }), _ => None }).collect(),
+        },
+        selected: rule.selected,
+    }).collect()
+}
+
 
 #[derive(Props, Clone, PartialEq)]
 struct ImportStigModalProps {
@@ -1480,6 +1513,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
     // step: "upload" | "review" | "refine" | "committing" | "done"
     let mut step = use_signal(|| "upload".to_string());
     let mut rules = use_signal(|| Vec::<StigRule>::new());
+    let mut refined_rules = use_signal(|| Vec::<RefinedStigRule>::new());
     let mut bundle_name = use_signal(String::new);
     let mut file_name = use_signal(String::new);
     let mut bench_title = use_signal(String::new);
@@ -1616,8 +1650,9 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                 bench_title.set(bm_title);
                                                                 bench_ver.set(bm_ver);
                                                                 file_name.set(fname.clone());
-                                                                file_bytes.set(bytes_vec);
-                                                                rules.set(parsed_rules);
+                                                                 file_bytes.set(bytes_vec);
+                                                                 rules.set(parsed_rules);
+                                                                 refined_rules.set(refined_rules_from_rules(&rules.read()));
                                                                 preview_response.set(Some(resp));
                                                                 selected_envs.set(all_env_names.clone());
                                                                 previewing.set(false);
@@ -1908,6 +1943,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                             onclick: move |_| {
                                 step.set("upload".to_string());
                                 rules.set(Vec::new());
+                                refined_rules.set(Vec::new());
                                 parse_error.set(None);
                                 preview_response.set(None);
                             },
@@ -2002,9 +2038,60 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                 }
 
                 // ══════════════════════════════════════════════════════
-                // STEP: refine (per-control walkthrough)
+                // STEP: refine (structured per-control walkthrough)
                 // ══════════════════════════════════════════════════════
                 if *step.read() == "refine" {
+                    {
+                        let refined_rules_signal = refined_rules;
+                        let cursor_signal = cursor;
+                        let on_success = props.on_success;
+                        rsx! {
+                        RefinePolicyStep {
+                            rules: refined_rules_signal,
+                            cursor: cursor_signal,
+                            on_back: move |_| step.set("review".to_string()),
+                            on_finish: move |_| {
+                                if *committing.read() { return; }
+                                let selected_rule_ids = refined_rules_signal.read().iter().filter(|rule| rule.selected).map(|rule| rule.source.rule_id.clone()).collect::<Vec<_>>();
+                                let rule_actions = refined_rules_signal.read().iter().filter(|rule| rule.selected).map(action_to_import).collect::<Vec<_>>();
+                                let plan = XccdfImportPlan {
+                                    expected_sha256: preview_response.read().as_ref().map(|preview| preview.sha256.clone()).unwrap_or_default(),
+                                    selected_profile_id: None,
+                                    selected_rule_ids,
+                                    rule_actions,
+                                    bundle: ImportedBundlePlan { name: bundle_name.read().trim().to_string(), framework: "xccdf".into(), version: bench_ver.read().clone(), layer: None, owner: None, description: None },
+                                };
+                                let bytes = file_bytes.read().clone();
+                                let filename = file_name.read().clone();
+                                let mut committing = committing;
+                                let mut import_error = import_error;
+                                let mut import_result = import_result;
+                                let mut done_total = done_total;
+                                let mut step = step;
+                                committing.set(true);
+                                import_error.set(None);
+                                spawn(async move {
+                                    match import_xccdf(&bytes, &filename, &plan).await {
+                                        Ok(result) => {
+                                            done_total.set((result.created_policy_count + result.reused_policy_count) as usize);
+                                            import_result.set(Some(result));
+                                            committing.set(false);
+                                            step.set("done".into());
+                                            on_success.call(());
+                                        }
+                                        Err(error) => { committing.set(false); import_error.set(Some(format!("Import failed: {error}"))); }
+                                    }
+                                });
+                            },
+                        }
+                        }
+                    }
+                }
+
+                // Legacy block retained temporarily while the structured step is
+                // exercised; it is unreachable and will be removed once the
+                // final-review transition is wired to the new component.
+                if false && *step.read() == "refine" {
                     {
                         let sel: Vec<StigRule> = rules.read().iter().filter(|r| r.selected).cloned().collect();
                         let total = sel.len();
