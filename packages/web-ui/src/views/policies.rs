@@ -294,12 +294,16 @@ pub fn PoliciesView() -> Element {
                                 0 => show_import.set(true),
                                 1 | 4 => {
                                     let mut export_error = export_error;
+                                    let mut selected_policy_ids = selected_policy_ids;
                                     spawn(async move {
                                         match export_policy_versions(&ids, "json").await {
                                             Ok(body) => {
                                                 let filename = if ids.len() == 1 { "policy.json" } else { "policies.json" };
                                                 if let Err(error) = crate::export::trigger_download(filename, "application/json", &body) {
                                                     export_error.set(Some(error));
+                                                } else {
+                                                    selected_policy_ids.clear();
+                                                    selection_mode.set(false);
                                                 }
                                             }
                                             Err(error) => export_error.set(Some(error.to_string())),
@@ -308,12 +312,16 @@ pub fn PoliciesView() -> Element {
                                 }
                                 2 | 5 => {
                                     let mut export_error = export_error;
+                                    let mut selected_policy_ids = selected_policy_ids;
                                     spawn(async move {
                                         match export_policy_versions(&ids, "toml").await {
                                             Ok(body) => {
                                                 let filename = if ids.len() == 1 { "policy.toml" } else { "policies.toml" };
                                                 if let Err(error) = crate::export::trigger_download(filename, "application/toml", &body) {
                                                     export_error.set(Some(error));
+                                                } else {
+                                                    selected_policy_ids.clear();
+                                                    selection_mode.set(false);
                                                 }
                                             }
                                             Err(error) => export_error.set(Some(error.to_string())),
