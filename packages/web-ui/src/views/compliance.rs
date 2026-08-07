@@ -1324,7 +1324,7 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
 #[derive(Clone, PartialEq)]
 struct StigRule {
     rule_id: String,
-    stig_id: String,
+    vulnerability_id: String,
     source_description: String,
     group_id: String,
     severity: String, // "high" | "medium" | "low"
@@ -1332,6 +1332,11 @@ struct StigRule {
     fixtext: String,
     check: String,
     srg: String,
+    srg_ids: Vec<String>,
+    cci_ids: Vec<String>,
+    checks: Vec<SourceCheck>,
+    references: Vec<String>,
+    platforms: Vec<String>,
     selected: bool,
     is_native: bool,
     action: String,
@@ -1350,34 +1355,34 @@ fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
         .iter()
         .map(|r| {
             // Build a summary of identifiers for display
-            let stig_id = r.identifiers.iter()
-                .find_map(|i| {
-                    let sys = i.get("system").and_then(|v| v.as_str()).unwrap_or("");
-                    let val = i.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                    if sys.contains("disa.stig") || sys.contains("nist") {
-                        Some(val.to_string())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_else(|| r.id.clone());
-
-            let srg = r.identifiers.iter()
-                .find_map(|i| {
-                    let sys = i.get("system").and_then(|v| v.as_str()).unwrap_or("");
-                    if sys.contains("srg") {
-                        let val = i.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                        Some(val.to_string())
-                    } else {
-                        None
-                    }
-                })
+            let identifier_values = r.identifiers.iter().filter_map(|i| {
+                i.get("value").and_then(|value| value.as_str()).map(str::to_string)
+            }).collect::<Vec<_>>();
+            let vulnerability_id = identifier_values.iter()
+                .find(|value| value.starts_with("V-"))
+                .cloned()
                 .unwrap_or_default();
+            let srg_ids = identifier_values.iter()
+                .filter(|value| value.starts_with("SRG-"))
+                .cloned()
+                .collect::<Vec<_>>();
+            let cci_ids = identifier_values.iter()
+                .filter(|value| value.starts_with("CCI-"))
+                .cloned()
+                .collect::<Vec<_>>();
+            let srg = srg_ids.first().cloned().unwrap_or_default();
 
             let check_summary = r.checks.first().map(|c| {
                 let sys = c.get("system").and_then(|v| v.as_str()).unwrap_or("");
-                format!("check: {sys}")
+                sys.to_string()
             }).unwrap_or_default();
+
+            let checks = r.checks.iter().map(|check| SourceCheck {
+                system: check.get("system").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                selector: check.get("selector").and_then(|v| v.as_str()).map(str::to_string),
+                references: check.get("references").and_then(|v| v.as_array()).map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+                inline_content: check.get("inline_content").or_else(|| check.get("content")).and_then(|v| v.as_str()).map(str::to_string),
+            }).collect::<Vec<_>>();
 
             let fix_text = r.fix.as_ref()
                 .and_then(|f| f.get("preview").and_then(|v| v.as_str()))
@@ -1386,7 +1391,7 @@ fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
 
             StigRule {
                 rule_id: r.id.clone(),
-                stig_id,
+                vulnerability_id,
                 source_description: r.description.clone().unwrap_or_default(),
                 group_id: r.group_id.clone().unwrap_or_default(),
                 severity: r.severity.as_deref().unwrap_or("medium").to_string(),
@@ -1394,6 +1399,11 @@ fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
                 fixtext: fix_text,
                 check: check_summary,
                 srg,
+                srg_ids,
+                cci_ids,
+                checks,
+                references: r.references.iter().filter_map(|reference| reference.get("href").or_else(|| reference.get("value")).and_then(|v| v.as_str()).map(str::to_string)).collect(),
+                platforms: r.platforms.clone(),
                 selected: true,
                 is_native: r.is_native,
                 action: if r.is_native { "native" } else { "unbound" }.to_string(),
@@ -1428,6 +1438,25 @@ fn sev_label(sev: &str) -> &'static str {
         "high" => "High",
         "medium" => "Medium",
         _ => "Low",
+    }
+}
+
+fn human_document_class(value: Option<&str>) -> &'static str {
+    match value.unwrap_or_default() {
+        "foreign" | "foreign_xccdf" => "Foreign XCCDF",
+        "cf_native_exact" => "CF-native exact",
+        "cf_native" => "CF-native",
+        _ => "XCCDF document",
+    }
+}
+
+fn human_fidelity(value: Option<&str>) -> &'static str {
+    match value.unwrap_or_default() {
+        "preserved_opaque" => "Preserved as opaque",
+        "native_exact" => "Native exact",
+        "normalized_complete" => "Normalized complete",
+        "degraded" => "Degraded",
+        _ => "Not classified",
     }
 }
 
@@ -1474,12 +1503,12 @@ fn refined_rules_from_rules(rules: &[StigRule]) -> Vec<RefinedStigRule> {
         source: SourceStigRule {
             rule_id: rule.rule_id.clone(),
             group_id: (!rule.group_id.is_empty()).then(|| rule.group_id.clone()),
-            stig_id: (!rule.stig_id.is_empty()).then(|| rule.stig_id.clone()),
+            stig_id: (!rule.vulnerability_id.is_empty()).then(|| rule.vulnerability_id.clone()),
             title: Some(rule.title.clone()),
             description: (!rule.source_description.is_empty()).then(|| rule.source_description.clone()),
             source_severity: Some(rule.severity.clone()),
             fix_text: (!rule.fixtext.is_empty()).then(|| rule.fixtext.clone()),
-            checks: (!rule.check.is_empty()).then(|| vec![SourceCheck { system: String::new(), content: rule.check.clone() }]).unwrap_or_default(),
+            checks: (!rule.check.is_empty()).then(|| vec![SourceCheck { system: String::new(), selector: None, references: Vec::new(), inline_content: Some(rule.check.clone()) }]).unwrap_or_default(),
             identifiers: Vec::new(),
             references: Vec::new(),
             platforms: Vec::new(),
@@ -1571,7 +1600,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
             class: "modal-backdrop",
             onclick: move |_| props.on_close.call(()),
             div {
-                class: "modal",
+                 class: "modal import-workflow-modal",
                 style: "width:min(720px,97vw);max-height:92vh;display:flex;flex-direction:column;",
                 onclick: move |e| e.stop_propagation(),
 
@@ -1706,7 +1735,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                 // ══════════════════════════════════════════════════════
                 if *step.read() == "review" {
                     div { class: "modal-head",
-                        h2 { style: "display:flex;align-items:center;gap:8px;",
+                        h2 { style: "display:flex;align-items:center;gap:8px;white-space:nowrap;",
                             Icon { name: IconName::Shield, size: 14 }
                             "Review imported controls"
                         }
@@ -1715,59 +1744,14 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                             " · {bench_title.read()} · "
                             strong { "{bench_ver.read()}" }
                         }
-                        // Preview detail: classification, digest, fidelity
+                    }
+                    div { class: "modal-body",
                         if let Some(ref preview) = *preview_response.read() {
-                            div { class: "card", style: "padding:10px 14px;margin-bottom:10px;display:flex;flex-wrap:wrap;gap:10px;font-size:11px;",
-                                if let Some(ref cls) = preview.document_class {
-                                    {
-                                        let label = match cls.as_str() {
-                                            "cf_native_exact" => "CF-native exact",
-                                            "cf_native" => "CF-native",
-                                            "foreign" => "Foreign XCCDF",
-                                            other => other,
-                                        };
-                                        rsx! { span { class: "chip chip-info", "{label}" } }
-                                    }
-                                }
-                                if let Some(ref fidelity) = preview.fidelity {
-                                    span { class: "chip", style: "font-size:10px;",
-                                        "fidelity: {fidelity}"
-                                    }
-                                }
-                                span { style: "color:var(--cf-text-muted);",
-                                    "{preview.rule_count} rules"
-                                }
-                                if !preview.profiles.is_empty() {
-                                    span { style: "color:var(--cf-text-muted);",
-                                        "· {preview.profile_count} profiles"
-                                    }
-                                }
-                                // Show CF bundle metadata for CF-native imports
-                                div { style: "font-size:10px;color:var(--cf-text-muted);margin-top:4px;width:100%;",
-                                    "SHA-256: "
-                                    span { class: "mono", style: "font-size:9px;word-break:break-all;", "{&preview.sha256[..preview.sha256.len().min(16)]}…" }
-                                }
-                            }
-                            // Diagnostics
-                            if !preview.errors.is_empty() {
-                                for err in &preview.errors {
-                                    div { class: "sd-callout sd-callout-danger", style: "font-size:11px;margin-bottom:4px;",
-                                        strong { "{err.code}: " }
-                                        "{err.summary}"
-                                        if err.blocking { " (blocking)" }
-                                    }
-                                }
-                            }
-                            if !preview.warnings.is_empty() {
-                                div { class: "sd-callout sd-callout-warn", style: "font-size:11px;margin-bottom:4px;",
-                                    for w in &preview.warnings {
-                                        div { "{w.code}: {w.summary}" }
-                                    }
-                                }
+                            {
+                                let namespace = preview.xccdf_version.as_deref().unwrap_or("XCCDF 1.2");
+                                rsx! { details { class: "xccdf-source-details", summary { "Import details" }, div { class: "card", style: "padding:10px;margin-top:8px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 14px;font-size:11px;", div { "Document class" strong { "{human_document_class(preview.document_class.as_deref())}" } }, div { "Fidelity" strong { "{human_fidelity(preview.fidelity.as_deref())}" } }, div { "Namespace" strong { "{namespace}" } }, div { "Source entry" strong { "{file_name.read()}" } }, div { "Profile count" strong { "{preview.profile_count}" } }, div { "Rule count" strong { "{preview.rule_count}" } }, div { "SHA-256" span { class: "mono", style: "word-break:break-all;", "{preview.sha256}" } }, if let Some(benchmark) = preview.benchmark.as_ref() { div { "Benchmark ID" span { class: "mono", "{benchmark.id}" } } } } } }
                             }
                         }
-                    }
-                    div { class: "modal-body", style: "overflow-y:auto;",
 
                         // ── Bundle name ────────────────────────────────
                         div { class: "field",
@@ -1782,7 +1766,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         // ── Environment badges ─────────────────────────
                         div { class: "field",
                             label { "Applies to environments" }
-                            div { style: "display:flex;flex-wrap:wrap;gap:6px;",
+                            div { style: "display:flex;flex-wrap:wrap;gap:6px;align-items:center;",
                                 for env in props.environments.iter() {
                                     {
                                         let e_name  = env.name.clone();
@@ -1790,7 +1774,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         let on = selected_envs.read().contains(&e_name);
                                         rsx! {
                                             button {
-                                                class: "focus-ring",
+                                                 class: "focus-ring environment-pill",
                                                 onclick: move |_| {
                                                     let mut envs = selected_envs.write();
                                                     if envs.contains(&e_name) {
@@ -1862,14 +1846,14 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 }
                             }
 
-                            div { style: "display:flex;flex-direction:column;gap:5px;max-height:280px;overflow-y:auto;margin-top:8px;padding-right:2px;",
+                            div { class: "xccdf-controls-list", "data-testid": "xccdf-review-control-list", style: "display:flex;flex-direction:column;gap:5px;margin-top:8px;padding-right:2px;",
                                 for (i, rule) in rules.read().iter().enumerate() {
                                     {
                                         let is_sel = rule.selected;
                                         let color  = sev_color(&rule.severity);
                                         let cat    = sev_cat(&rule.severity);
                                         let title  = rule.title.clone();
-                                        let stig   = rule.stig_id.clone();
+                                        let vulnerability = if rule.vulnerability_id.is_empty() { rule.rule_id.clone() } else { rule.vulnerability_id.clone() };
                                         let srg    = rule.srg.clone();
                                         rsx! {
                                             button {
@@ -1906,11 +1890,11 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                      background:color-mix(in oklab, {color} 14%, transparent);"),
                                                     "{cat}"
                                                 }
-                                                // Title + STIG ID
+                                                    // Title + portable source identity
                                                 span { style: "min-width:0;",
                                                     span { style: "font-size:12.5px;font-weight:600;display:block;line-height:1.4;", "{title}" }
                                                     span { class: "mono", style: "font-size:10.5px;color:var(--cf-text-muted);",
-                                                        "{stig}"
+                                                         "{vulnerability}"
                                                         if !srg.is_empty() { " · {srg}" }
                                                     }
                                                 }
@@ -1922,13 +1906,13 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         }
 
                         // ── Info callout ───────────────────────────────
-                        div { class: "sd-callout sd-callout-info",
+                        div { class: "sd-callout sd-callout-info", "data-testid": "xccdf-review-summary",
                             Icon { name: IconName::Check, size: 13 }
                             div { style: "font-size:12px;",
-                                "Will create "
+                                "Creates "
                                 strong { "{sel_count}" }
                                 if sel_count == 1 { " draft policy" } else { " draft policies" }
-                                " (unbound) and one draft bundle. Policies are untrusted, disabled, and unassigned. You can review and trust them after import."
+                                " and one draft bundle. Policies begin untrusted, disabled, and unassigned. Refine policies to add native assertions, evidence requirements, manual handling, or exact-version mappings."
                             }
                         }
 
@@ -1954,7 +1938,8 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         }
                         div { style: "display:flex;gap:8px;",
                             button {
-                                class: "btn btn-ghost focus-ring",
+                                class: "btn btn-primary focus-ring",
+                                "data-testid": "xccdf-review-refine-button",
                                 disabled: !can_advance || *committing.read(),
                                 style: if !can_advance || *committing.read() { "opacity:0.5;cursor:not-allowed;" } else { "" },
                                 onclick: move |_| {
@@ -1968,7 +1953,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 Icon { name: IconName::ChevronRight, size: 13 }
                             }
                             button {
-                                class: "btn btn-primary focus-ring",
+                                class: "btn btn-ghost focus-ring",
                                 disabled: !can_advance || *committing.read(),
                                 style: if !can_advance || *committing.read() { "opacity:0.5;cursor:not-allowed;" } else { "" },
                                 onclick: move |_| {

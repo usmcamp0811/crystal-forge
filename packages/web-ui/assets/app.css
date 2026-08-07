@@ -5436,3 +5436,93 @@ tr.attention-flash {
   font-size: 10px;
   border-top: 1px solid color-mix(in oklab, var(--cf-red, #ef4444) 18%, transparent);
 }
+/* XCCDF import workflow: fixed chrome, independently scrolling content. */
+.import-workflow-modal {
+  width: min(720px, calc(100vw - 32px));
+  max-height: min(780px, calc(100vh - 32px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.import-workflow-modal > .modal-head,
+.import-workflow-modal > .modal-foot {
+  flex: 0 0 auto;
+}
+
+.import-workflow-modal > .modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.xccdf-controls-list {
+  flex: 1 1 auto;
+  min-height: 180px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.refine-progress {
+  height: 4px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--cf-divider);
+  margin-top: 10px;
+}
+
+.refine-progress__value {
+  height: 100%;
+  background: var(--cf-brand-purple);
+  transition: width 160ms ease;
+}
+
+.refine-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.refine-source-id {
+  flex-shrink: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--cf-text-muted);
+  font-size: 11px;
+}
+
+.refine-basics {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: end;
+}
+
+.environment-pill {
+  min-height: 29px;
+  box-sizing: border-box;
+}
+
+.xccdf-source-details {
+  margin: 12px 0;
+}
+
+.xccdf-source-details > summary {
+  cursor: pointer;
+  color: var(--cf-text-muted);
+  font-size: 11px;
+}
+
+@media (max-width: 640px) {
+  .import-workflow-modal {
+    width: calc(100vw - 20px);
+    max-height: calc(100vh - 20px);
+  }
+
+  .refine-basics {
+    grid-template-columns: 1fr;
+  }
+}

@@ -5,9 +5,15 @@ use crate::api::models::{
     ImportedPolicyCustomization, XccdfRuleImportAction,
 };
 use crate::components::icon::{Icon, IconName};
+use crate::components::compliance::ImportWorkflowModal;
 
 #[derive(Clone, PartialEq, Debug)]
-pub struct SourceCheck { pub system: String, pub content: String }
+pub struct SourceCheck {
+    pub system: String,
+    pub selector: Option<String>,
+    pub references: Vec<String>,
+    pub inline_content: Option<String>,
+}
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct SourceStigRule {
@@ -102,23 +108,32 @@ pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
     let position = (*props.cursor.read()).min(selected.len().saturating_sub(1));
     let Some(index) = selected.get(position).copied() else { return rsx! { div {} }; };
     let rule = props.rules.read()[index].clone();
-    let source_id = rule.source.stig_id.clone().unwrap_or_else(|| rule.source.rule_id.clone());
+    let source_id = source_identity(&rule.source);
     let percent = ((position + 1) as f32 / selected.len().max(1) as f32 * 100.0).round();
     rsx! {
-        div { class: "modal-head", style: "flex:0 0 auto;", div { style: "display:flex;justify-content:space-between;align-items:center;", h2 { style: "display:flex;gap:8px;align-items:center;", Icon { name: IconName::Shield, size: 15 }, "Refine policy {position + 1} of {selected.len()}" }, span { class: "mono", "{source_id}" } }, div { style: "height:4px;background:var(--cf-divider);margin-top:9px;", div { style: "height:100%;width:{percent}%;background:var(--cf-brand-purple);" } } }
-        div { class: "modal-body", style: "overflow:auto;flex:1 1 auto;min-height:0;", 
+        ImportWorkflowModal {
+        div { class: "modal-head",
+            div { class: "refine-header", h2 { style: "display:flex;gap:8px;align-items:center;min-width:0;white-space:nowrap;", Icon { name: IconName::Shield, size: 15 }, "Refine policy {position + 1} of {selected.len()}" }, span { class: "mono refine-source-id", title: "{source_id}", "{source_id}" } }
+            div { class: "refine-progress", "data-testid": "xccdf-refine-progress", div { class: "refine-progress__value", style: "width:{percent}%;" } }
+        }
+        div { class: "modal-body",
             div { style: "display:flex;gap:8px;align-items:center;margin-bottom:12px;", span { class: "chip chip-info", "Security & hardening" }, if let Some(group) = rule.source.group_id.as_ref() { span { class: "mono", "{group}" } }, div { style: "flex:1;" }, span { class: "mono", style: "font-size:10px;", "policy id: {slugify(&source_id)}" } }
-            SourceStigCard { rule: rule.source.clone() }
-            div { style: "display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:end;", div { class: "field", label { "Policy name" }, input { class: "input focus-ring mono", value: "{rule.draft.local_name}", oninput: move |e| { props.rules.write()[index].draft.local_name = e.value(); } } }, div { class: "field", label { "Severity" }, div { class: "seg", for (value, label) in [("high","CAT I"),("medium","CAT II"),("low","CAT III")] { button { class: if rule.draft.local_severity == value { "active" } else { "" }, onclick: move |_| { props.rules.write()[index].draft.local_severity = value.into(); }, "{label}" } } } } }
+            details { class: "xccdf-source-details", "data-testid": "xccdf-source-details", summary { "View source STIG details" }, SourceStigCard { rule: rule.source.clone() } }
+            div { class: "refine-basics", div { class: "field", label { "Policy name" }, input { class: "input focus-ring", "data-testid": "xccdf-policy-name", value: "{rule.draft.local_name}", oninput: move |e| { props.rules.write()[index].draft.local_name = e.value(); } } }, div { class: "field", label { "Severity" }, div { class: "seg", for (value, label) in [("high","CAT I"),("medium","CAT II"),("low","CAT III")] { button { class: if rule.draft.local_severity == value { "active" } else { "" }, onclick: move |_| { props.rules.write()[index].draft.local_severity = value.into(); }, "{label}" } } } } }
             details { style: "margin:12px 0;", summary { style: "font-size:11px;color:var(--cf-text-muted);", "Additional policy details" }, div { style: "display:grid;gap:8px;margin-top:8px;", textarea { class: "input focus-ring", rows: 2, placeholder: "Description", value: "{rule.draft.local_description}", oninput: move |e| { props.rules.write()[index].draft.local_description = e.value(); } }, textarea { class: "input focus-ring", rows: 2, placeholder: "Rationale", value: "{rule.draft.local_rationale}", oninput: move |e| { props.rules.write()[index].draft.local_rationale = e.value(); } }, textarea { class: "input focus-ring", rows: 2, placeholder: "Implementation note", value: "{rule.draft.implementation_note}", oninput: move |e| { props.rules.write()[index].draft.implementation_note = e.value(); } } } }
-             ImplementationChoice { rules: props.rules, index, existing_policies: props.existing_policies.clone() }
+            ImplementationChoice { rules: props.rules, index, existing_policies: props.existing_policies.clone() }
             if matches!(rule.draft.action, RefinedRuleAction::Native) { AssertionSection { rules: props.rules, index } }
             if matches!(rule.draft.action, RefinedRuleAction::Native | RefinedRuleAction::Manual) { EvidenceSection { rules: props.rules, index } }
             if matches!(rule.draft.action, RefinedRuleAction::Unbound) { div { class: "sd-callout sd-callout-info", "This requirement will be imported without a Crystal Forge implementation." } }
             if matches!(rule.draft.action, RefinedRuleAction::Opaque) { div { class: "sd-callout sd-callout-info", "The original XCCDF rule and check content will be preserved without execution." } }
         }
-         div { class: "modal-foot", style: "flex:0 0 auto;justify-content:space-between;", button { class: "btn btn-ghost", onclick: move |_| props.on_back.call(()), Icon { name: IconName::ArrowLeft, size: 13 }, " Previous" }, div { style: "display:flex;gap:8px;", button { class: "btn btn-ghost", style: "color:#f87171;", onclick: move |_| { props.rules.write()[index].selected = false; }, "Exclude" }, if position + 1 < selected.len() { button { class: "btn btn-primary", onclick: move |_| props.cursor.set(position + 1), "Next" } } else { button { class: "btn btn-primary", disabled: !props.rules.read().iter().filter(|r| r.selected).all(RefinedStigRule::is_valid), onclick: move |_| props.on_review.call(()), "Review import" } } } }
+        div { class: "modal-foot", style: "justify-content:space-between;", div { style: "display:flex;gap:8px;", button { class: "btn btn-ghost", "data-testid": "xccdf-refine-back", onclick: move |_| if position == 0 { props.on_back.call(()) } else { props.cursor.set(position - 1) }, Icon { name: IconName::ArrowLeft, size: 13 }, if position == 0 { " Back to list" } else { " Previous" } }, button { class: "btn btn-ghost", style: "color:#f87171;", "data-testid": "xccdf-refine-exclude", onclick: move |_| { let mut remaining = selected.len().saturating_sub(1); props.rules.write()[index].selected = false; if remaining == 0 { props.on_back.call(()); } else { if position >= remaining { remaining = remaining.saturating_sub(1); } props.cursor.set(position.min(remaining)); } }, "Exclude" } }, div { style: "display:flex;gap:8px;align-items:center;", span { class: "mono", "data-testid": "xccdf-refine-position", "{position + 1} / {selected.len()}" }, if position + 1 < selected.len() { button { class: "btn btn-primary", "data-testid": "xccdf-refine-next", onclick: move |_| props.cursor.set(position + 1), "Next ", Icon { name: IconName::ChevronRight, size: 13 } } } else { button { class: "btn btn-primary", disabled: !props.rules.read().iter().filter(|r| r.selected).all(RefinedStigRule::is_valid), onclick: move |_| props.on_review.call(()), "Review import ", Icon { name: IconName::ChevronRight, size: 13 } } } } }
+        }
     }
+}
+
+fn source_identity(source: &SourceStigRule) -> String {
+    source.stig_id.clone().filter(|id| id.starts_with("V-")).unwrap_or_else(|| source.rule_id.clone())
 }
 
 #[derive(Props, Clone, PartialEq)]
@@ -135,13 +150,15 @@ pub fn ImportReview(props: ImportReviewProps) -> Element {
     let manual = selected.iter().filter(|rule| matches!(rule.draft.action, RefinedRuleAction::Manual)).count();
     let unresolved = selected.iter().filter(|rule| matches!(rule.draft.action, RefinedRuleAction::Unbound | RefinedRuleAction::Opaque)).count();
     rsx! {
-        div { class: "modal-head", h2 { "Review import" }, p { class: "page-subtitle", "Confirm the selected policy mappings before creating the draft bundle." } }
-        div { class: "modal-body", style: "overflow:auto;flex:1 1 auto;min-height:0;",
+        ImportWorkflowModal {
+        div { class: "modal-head", h2 { "Review policy choices" }, p { class: "page-subtitle", "Confirm the selected policy mappings before creating the draft bundle." } }
+        div { class: "modal-body",
             div { class: "stat-strip", div { class: "stat", div { class: "stat-label", "Selected" } div { class: "stat-value", "{selected.len()}" } } div { class: "stat", div { class: "stat-label", "Native" } div { class: "stat-value", "{native}" } } div { class: "stat", div { class: "stat-label", "Manual" } div { class: "stat-value", "{manual}" } } div { class: "stat", div { class: "stat-label", "Unresolved" } div { class: "stat-value", "{unresolved}" } } }
             if unresolved > 0 { div { class: "sd-callout sd-callout-warn", "Unbound and opaque controls will remain visible but will not be executable." } }
             div { style: "display:grid;gap:6px;margin-top:12px;", for rule in selected.iter() { div { class: "card", style: "padding:9px 11px;display:flex;gap:10px;align-items:center;", span { class: "mono", style: "font-size:10px;", "{rule.source.stig_id.clone().unwrap_or_else(|| rule.source.rule_id.clone())}" } div { style: "flex:1;min-width:0;", strong { "{rule.draft.local_name}" } div { class: "text-xs text-gray-500", "{action_label(&rule.draft.action)}" } } } } }
         }
         div { class: "modal-foot", style: "justify-content:space-between;", button { class: "btn btn-ghost", onclick: move |_| props.on_back.call(()), "Back to refine" } button { class: "btn btn-primary", disabled: selected.is_empty(), onclick: move |_| props.on_confirm.call(()), "Create draft bundle" } }
+        }
     }
 }
 
@@ -156,14 +173,14 @@ fn SourceStigCard(rule: SourceStigRule) -> Element {
     let stig_id = rule.stig_id.clone().unwrap_or_else(|| rule.rule_id.clone());
     let title = rule.title.clone().unwrap_or_else(|| rule.rule_id.clone());
     let fix_text = rule.fix_text.clone();
-    let check_text = rule.checks.first().map(|check| check.content.clone());
-    rsx! { div { class: "card", style: "padding:0;margin:14px 0;border-radius:10px;overflow:hidden;", div { style: "display:flex;gap:8px;padding:9px 12px;background:var(--cf-subtle-bg);border-bottom:1px solid var(--cf-divider);font-size:10px;font-weight:700;letter-spacing:.08em;", Icon { name: IconName::Shield, size: 12 }, "FROM THE STIG", div { style: "flex:1;" }, span { class: "chip chip-unknown", "{cat}" } }, div { style: "padding:12px;", div { class: "mono", style: "font-size:10px;color:var(--cf-text-muted);", "{stig_id}" }, div { style: "font-weight:650;", "{title}" }, if let Some(fix) = fix_text { div { style: "margin-top:10px;font-size:11px;white-space:pre-wrap;", strong { "Official fix" }, p { "{fix}" } } }, if let Some(check) = check_text { div { style: "margin-top:10px;font-size:11px;white-space:pre-wrap;", strong { "Official check" }, p { "{check}" } } } } } }
+    let references = rule.references.join(", ");
+    rsx! { div { class: "card", style: "padding:10px 12px;margin-top:8px;", div { style: "display:flex;gap:8px;align-items:center;font-size:10px;font-weight:700;letter-spacing:.08em;", Icon { name: IconName::Shield, size: 12 }, "SOURCE STIG", div { style: "flex:1;" }, span { class: "chip chip-unknown", "{cat}" } }, div { class: "mono", style: "font-size:10px;color:var(--cf-text-muted);margin-top:8px;", "{stig_id}" }, div { style: "font-weight:650;margin-top:3px;", "{title}" }, if let Some(description) = rule.description { p { style: "font-size:11px;color:var(--cf-text-secondary);white-space:pre-wrap;", "{description}" } }, if !rule.checks.is_empty() { for check in rule.checks.iter() { div { style: "margin-top:10px;font-size:11px;", strong { "Check system" }, div { class: "mono", style: "color:var(--cf-text-muted);", "{check.system}" }, if let Some(selector) = check.selector.as_ref() { div { style: "margin-top:4px;", strong { "External check reference" }, div { class: "mono", "{selector}" } } }, if let Some(content) = check.inline_content.as_ref() { div { style: "margin-top:4px;white-space:pre-wrap;", strong { "Manual fallback" }, p { "{content}" } } } } } }, if let Some(fix) = fix_text { div { style: "margin-top:10px;font-size:11px;white-space:pre-wrap;", strong { "Official fix" }, p { "{fix}" } } }, if !references.is_empty() { div { style: "margin-top:10px;font-size:10px;color:var(--cf-text-muted);", "References: {references}" } } } }
 }
 
 #[component]
 fn ImplementationChoice(rules: Signal<Vec<RefinedStigRule>>, index: usize, existing_policies: Vec<(uuid::Uuid, String)>) -> Element {
     let current = action_key(&rules.read()[index].draft.action);
-    rsx! { div { style: "margin:14px 0;", label { style: "font-size:11px;font-weight:650;", "Implementation" }, div { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;", for (key, label) in [("native","Native assertion"),("manual","Manual evidence"),("unbound","Unbound"),("opaque","Opaque"),("existing","Existing")] { button { class: if current == key { "btn btn-primary" } else { "btn btn-ghost" }, onclick: move |_| { set_action(&mut rules.write()[index].draft.action, key); }, "{label}" } } }
+    rsx! { div { style: "margin:14px 0;", label { style: "font-size:11px;font-weight:650;", "Implementation" }, select { class: "input focus-ring", "data-testid": "xccdf-implementation-selector", value: current, onchange: move |event| { set_action(&mut rules.write()[index].draft.action, event.value().as_str()); }, option { value: "unbound", "Unbound" }, option { value: "native", "Native assertion" }, option { value: "manual", "Manual evidence" }, option { value: "opaque", "Opaque" }, option { value: "existing", "Existing policy version" } }
         if current == "existing" {
             select { class: "input focus-ring", value: "{existing_policy_value(&rules.read()[index].draft.action)}", onchange: move |event| { let selected = uuid::Uuid::parse_str(&event.value()).ok(); rules.write()[index].draft.action = RefinedRuleAction::Existing(selected); }, option { value: "", "Select an existing policy version…" }, for (id, name) in existing_policies.iter() { option { value: "{id}", "{name}" } } }
         }
