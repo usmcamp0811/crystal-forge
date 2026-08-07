@@ -357,18 +357,25 @@ impl DeploymentPolicy {
                     .to_string(),
             ),
             DeploymentPolicy::RequirePackages { packages, .. } => {
+                if packages.is_empty() {
+                    return (
+                        format!("hasRequiredPackages_{index}"),
+                        "false".to_string(),
+                    );
+                }
                 let package_list = packages
                     .iter()
-                    .map(|p| format!("\"{}\"", p.replace('"', "\\\"")))
+                    .map(|p| nix_string(p))
                     .collect::<Vec<_>>()
                     .join(" ");
                 (
                     format!("hasRequiredPackages_{index}"),
                     format!(
-                        "let pkgNames = builtins.map (p: p.pname or p.name or \"\") \
-                         cfg.config.environment.systemPackages; \
-                         required = [ {} ]; \
-                         in builtins.all (pkg: builtins.elem pkg pkgNames) required",
+                        "builtins.all \
+                         (required: builtins.any \
+                           (pkg: (pkg.pname or (pkg.name or \"\")) == required) \
+                           cfg.config.environment.systemPackages) \
+                         [ {} ]",
                         package_list
                     ),
                 )
@@ -1974,6 +1981,43 @@ in {{
             Some(true),
             "custom firewall check must evaluate to true; got {parsed}"
         );
+    }
+
+    #[test]
+    #[ignore = "requires Nix evaluator in PATH"]
+    fn required_packages_expression_evaluates_each_requested_package() {
+        let (_, expression) = DeploymentPolicy::RequirePackages {
+            packages: vec!["openssh".into(), "auditd".into(), "aide".into()],
+            strict: true,
+        }
+        .to_nix_expression_with_index(0);
+
+        for (installed, expected) in [
+            (vec!["openssh", "auditd", "aide"], true),
+            (vec!["openssh", "auditd"], false),
+            (Vec::new(), false),
+        ] {
+            let packages = installed
+                .iter()
+                .map(|name| format!("{{ pname = \"{name}\"; name = \"{name}\"; }}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let nix_expression = format!(
+                "let cfg = {{ config.environment.systemPackages = [ {packages} ]; }}; in {expression}"
+            );
+            let output = std::process::Command::new("nix")
+                .args(["eval", "--json", "--expr", &nix_expression])
+                .output()
+                .expect("failed to spawn nix eval");
+            assert!(
+                output.status.success(),
+                "nix eval failed:\n{}\nExpression:\n{}",
+                String::from_utf8_lossy(&output.stderr),
+                nix_expression
+            );
+            let actual: bool = serde_json::from_slice(&output.stdout).expect("boolean JSON result");
+            assert_eq!(actual, expected, "installed packages: {installed:?}");
+        }
     }
 
     #[test]

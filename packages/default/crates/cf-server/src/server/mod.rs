@@ -1,8 +1,9 @@
 pub mod jobs;
 
 use crate::builder::run_cve_scan_loop;
+use crate::compliance::canonical::semantic_digest;
 use crate::compliance::resolver::{
-    resolve_system_effective_policies, AssignmentMode, ResolutionOutcome,
+    AssignmentMode, ResolutionOutcome, resolve_system_effective_policies_for_evaluation,
 };
 use crate::config::{CrystalForgeConfig, FlakeConfig};
 use crate::deployment::spawn_deployment_policy_manager;
@@ -658,16 +659,17 @@ async fn load_policies_by_configuration_for_eval(
     .context("Failed to load systems for effective policy evaluation")?;
 
     let mut map: PoliciesByConfiguration = BTreeMap::new();
-    // A configuration can be evaluated once only when the complete effective
-    // semantic set is identical. Policy IDs alone are insufficient because
-    // assignment overrides can change config, mode, provenance, or digest
-    // while retaining the same version IDs.
-    let mut effective_digest_by_config: BTreeMap<String, String> = BTreeMap::new();
+    // A configuration can be evaluated once only when the Nix-evaluation
+    // policy set is identical. The resolver's complete effective-set digest
+    // intentionally includes report-only and operational policies, which do
+    // not affect nix-eval-jobs and therefore must not block this map.
+    let mut evaluation_digest_by_config: BTreeMap<String, String> = BTreeMap::new();
 
     for (system_id, config_name) in system_rows {
-        let outcome = resolve_system_effective_policies(pool, system_id).await?;
-        let (effective_set_digest, effective) = match outcome {
-            ResolutionOutcome::Resolved(set) => (set.effective_set_digest, set.policies),
+        let outcome =
+            resolve_system_effective_policies_for_evaluation(pool, system_id).await?;
+        let effective = match outcome {
+            ResolutionOutcome::Resolved(set) => set.policies,
             ResolutionOutcome::Conflict(conflicts) => anyhow::bail!(
                 "Effective policy conflict for system {}: {}",
                 system_id,
@@ -714,20 +716,29 @@ async fn load_policies_by_configuration_for_eval(
             }
         }
 
-        if assigned.is_empty() {
-            continue;
-        }
+        // Sort the actual evaluator input by portable version identity so the
+        // generated per-policy fields and its digest are canonical. Keep an
+        // empty set in the comparison map: a shared configuration with one
+        // system having no Nix gates and another having Nix gates is a real
+        // semantic conflict, not permission to apply the latter's gates to
+        // both systems.
+        assigned.sort_by_key(|policy| policy.policy_id);
+        let evaluation_digest = evaluation_policy_digest(&assigned);
 
-        if let Some(existing_digest) = effective_digest_by_config.get(&config_name) {
-            if existing_digest != &effective_set_digest {
+        if let Some(existing_digest) = evaluation_digest_by_config.get(&config_name) {
+            if existing_digest != &evaluation_digest {
                 anyhow::bail!(
-                    "Configuration {:?} resolves to different effective policy semantics across systems ({} vs {})",
-                    config_name, existing_digest, effective_set_digest
+                    "Configuration {:?} resolves to different Nix evaluation policy semantics across systems ({} vs {})",
+                    config_name,
+                    existing_digest,
+                    evaluation_digest
                 );
             }
         } else {
-            effective_digest_by_config.insert(config_name.clone(), effective_set_digest);
-            map.insert(config_name, assigned);
+            evaluation_digest_by_config.insert(config_name.clone(), evaluation_digest);
+            if !assigned.is_empty() {
+                map.insert(config_name, assigned);
+            }
         }
     }
 
@@ -744,6 +755,35 @@ async fn load_policies_by_configuration_for_eval(
     );
 
     return Ok(map);
+}
+
+/// Hash only the policies that can affect the Nix evaluation for one
+/// configuration. This is deliberately distinct from the resolver's complete
+/// effective-set digest, which is used by compliance and deployment consumers.
+fn evaluation_policy_digest(assigned: &[AssignedPolicy]) -> String {
+    let policies = assigned
+        .iter()
+        .map(|policy| {
+            serde_json::json!({
+                "policy_version_id": policy.policy_id,
+                "policy": policy.policy,
+            })
+        })
+        .collect::<Vec<_>>();
+    semantic_digest(&serde_json::Value::Array(policies))
+}
+
+fn resolver_failure_class(
+    error: &anyhow::Error,
+) -> crate::models::retry_policy::RetryFailureClass {
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<sqlx::Error>().is_some())
+    {
+        crate::models::retry_policy::RetryFailureClass::Transient
+    } else {
+        crate::models::retry_policy::RetryFailureClass::Deterministic
+    }
 }
 
 #[allow(dead_code)]
@@ -1453,7 +1493,7 @@ async fn process_pending_commits(
                         commit.id,
                         &e.to_string(),
                         attempt,
-                        crate::models::retry_policy::RetryFailureClass::Deterministic,
+                        resolver_failure_class(&e),
                     )
                     .await;
                     return Ok(());
@@ -1746,10 +1786,13 @@ fn select_next_pending_commit_id_for_cycle(
 #[cfg(test)]
 mod tests {
     use super::{
-        builder_stale_timeout_secs, evaluation_due_delay, normalize_custom_policy_expression,
-        parse_deployment_policy_record, select_next_pending_commit_id_for_cycle,
+        builder_stale_timeout_secs, evaluation_due_delay, evaluation_policy_digest,
+        normalize_custom_policy_expression, parse_deployment_policy_record,
+        select_next_pending_commit_id_for_cycle,
     };
-    use crate::models::deployment_policies::{DeploymentPolicy, DeploymentPolicyRecord};
+    use crate::models::deployment_policies::{
+        AssignedPolicy, DeploymentPolicy, DeploymentPolicyRecord, PolicyRule, RuleMode,
+    };
     use chrono::Utc;
     use serde_json::json;
     use uuid::Uuid;
@@ -1854,6 +1897,51 @@ mod tests {
             }
             _ => panic!("expected CustomCheck variant"),
         }
+    }
+
+    #[test]
+    fn evaluation_policy_digest_is_real_for_an_empty_set() {
+        assert_eq!(evaluation_policy_digest(&[]), evaluation_policy_digest(&[]));
+        assert_ne!(evaluation_policy_digest(&[]), evaluation_policy_digest(&[
+            AssignedPolicy {
+                policy_id: Uuid::from_u128(1),
+                policy_name: "firewall".to_string(),
+                policy: DeploymentPolicy::CustomCheck {
+                    expression: "cfg.config.networking.firewall.enable".to_string(),
+                    description: "firewall enabled".to_string(),
+                    field_name: "firewallEnabled".to_string(),
+                    strict: true,
+                    rules: Vec::new(),
+                    mode: RuleMode::All,
+                },
+            },
+        ]));
+    }
+
+    #[test]
+    fn evaluation_policy_digest_changes_when_a_nix_expression_changes() {
+        let make_policy = |expression: &str| AssignedPolicy {
+            policy_id: Uuid::from_u128(1),
+            policy_name: "firewall".to_string(),
+            policy: DeploymentPolicy::CustomCheck {
+                expression: String::new(),
+                description: "firewall".to_string(),
+                field_name: String::new(),
+                strict: true,
+                rules: vec![PolicyRule {
+                    expression: expression.to_string(),
+                    description: "firewall enabled".to_string(),
+                    field_name: "firewallEnabled".to_string(),
+                    strict: true,
+                }],
+                mode: RuleMode::All,
+            },
+        };
+
+        assert_ne!(
+            evaluation_policy_digest(&[make_policy("cfg.config.networking.firewall.enable")]),
+            evaluation_policy_digest(&[make_policy("cfg.config.networking.firewall.allowedTCPPorts != []")]),
+        );
     }
 
     #[test]

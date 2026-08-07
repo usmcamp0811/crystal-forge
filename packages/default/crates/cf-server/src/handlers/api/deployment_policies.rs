@@ -64,6 +64,32 @@ fn default_limit() -> i64 {
     100
 }
 
+fn normalize_required_packages(packages: &[Value]) -> Result<Vec<String>, (StatusCode, String)> {
+    let mut normalized = packages
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or((
+                    StatusCode::BAD_REQUEST,
+                    "config.packages must contain only non-empty strings".to_string(),
+                ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    normalized.sort();
+    normalized.dedup();
+    if normalized.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "require_packages policy requires at least one package".to_string(),
+        ));
+    }
+    Ok(normalized)
+}
+
 /// Validate and normalize a Nix expression for custom policy checks.
 ///
 /// This function ensures expressions use the correct variable scope by:
@@ -170,17 +196,12 @@ fn validate_policy_config(
                 ));
             }
 
-            let all_valid = packages.iter().all(|entry| {
-                entry
-                    .as_str()
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false)
-            });
-            if !all_valid {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "config.packages must contain only non-empty strings".to_string(),
-                ));
+            let normalized_packages = normalize_required_packages(packages)?;
+            if let Some(config_obj) = validated_config.as_object_mut() {
+                config_obj.insert(
+                    "packages".to_string(),
+                    Value::Array(normalized_packages.into_iter().map(Value::String).collect()),
+                );
             }
         }
         "custom_check" => {

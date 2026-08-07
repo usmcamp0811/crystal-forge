@@ -278,6 +278,7 @@ fn merge_effective_policy_candidate(
     staging: &mut Vec<EffectivePolicy>,
     per_lineage: &mut std::collections::HashMap<Uuid, (Uuid, PolicySpecificity, usize)>,
     warnings: &mut Vec<String>,
+    ignore_non_evaluation_conflicts: bool,
 ) -> MergeOutcome {
     let lineage_id = candidate.policy_lineage_id;
     let version_id = candidate.policy_version_id;
@@ -342,12 +343,26 @@ fn merge_effective_policy_candidate(
         } else if specificity == existing_spec {
             // Conflict: put the entry back and return conflict.
             per_lineage.insert(lineage_id, (existing_ver, existing_spec, existing_idx));
-            MergeOutcome::Conflict(ResolutionConflict {
-                code: "EFFECTIVE_POLICY_VERSION_CONFLICT".into(),
-                message: format!(
-                    "Policy lineage {lineage_id}: different versions at same specificity {specificity:?} ({existing_ver} vs {version_id})"
-                ),
-            })
+            let existing_type = &staging[existing_idx].policy_type;
+            if ignore_non_evaluation_conflicts
+                && !is_nix_evaluation_policy_type(existing_type)
+                && !is_nix_evaluation_policy_type(&candidate.policy_type)
+            {
+                warnings.push(format!(
+                    "Ignored non-Nix policy version conflict for lineage {lineage_id} ({existing_ver} vs {version_id})"
+                ));
+                MergeOutcome::Deduplicated {
+                    index: existing_idx,
+                    specificity_updated: false,
+                }
+            } else {
+                MergeOutcome::Conflict(ResolutionConflict {
+                    code: "EFFECTIVE_POLICY_VERSION_CONFLICT".into(),
+                    message: format!(
+                        "Policy lineage {lineage_id}: different versions at same specificity {specificity:?} ({existing_ver} vs {version_id})"
+                    ),
+                })
+            }
         } else {
             // Lower specificity — add as non-authoritative provenance.
             staging[existing_idx].provenance.push(ProvenanceEntry {
@@ -372,6 +387,10 @@ fn merge_effective_policy_candidate(
         MergeOutcome::Inserted { index: idx }
     };
     result
+}
+
+fn is_nix_evaluation_policy_type(policy_type: &str) -> bool {
+    matches!(policy_type, "require_packages" | "custom_check")
 }
 
 // ── Authoritative resolver ────────────────────────────────────────────────────
@@ -399,6 +418,13 @@ fn merge_effective_policy_candidate(
 /// Returns `Err` for database failures. Returns `Ok(ResolutionOutcome::Conflict)`
 /// for semantic conflicts (duplicate lineage, invalid bundle state, etc.).
 pub async fn resolve_effective_policy_set(
+    tx: &mut Transaction<'_, Postgres>,
+    input: &EffectivePolicyResolutionInput,
+) -> Result<ResolutionOutcome> {
+    resolve_effective_policy_set_with_options(tx, input).await
+}
+
+async fn resolve_effective_policy_set_with_options(
     tx: &mut Transaction<'_, Postgres>,
     input: &EffectivePolicyResolutionInput,
 ) -> Result<ResolutionOutcome> {
@@ -893,6 +919,25 @@ pub async fn resolve_system_effective_policies(
     pool: &PgPool,
     system_id: Uuid,
 ) -> Result<ResolutionOutcome> {
+    resolve_system_effective_policies_with_options(pool, system_id, false).await
+}
+
+/// Resolve only the policy semantics relevant to Nix evaluation while still
+/// retaining the complete resolver for compliance and deployment consumers.
+/// Conflicts between two non-Nix policy versions at the same specificity are
+/// ignored here because they cannot affect nix-eval-jobs.
+pub async fn resolve_system_effective_policies_for_evaluation(
+    pool: &PgPool,
+    system_id: Uuid,
+) -> Result<ResolutionOutcome> {
+    resolve_system_effective_policies_with_options(pool, system_id, true).await
+}
+
+async fn resolve_system_effective_policies_with_options(
+    pool: &PgPool,
+    system_id: Uuid,
+    ignore_non_evaluation_conflicts: bool,
+) -> Result<ResolutionOutcome> {
     // ── Open one repeatable-read snapshot for all resolver reads ──────────
     let mut tx = pool.begin().await.context("begin resolution transaction")?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
@@ -1090,7 +1135,11 @@ pub async fn resolve_system_effective_policies(
             specificity,
         };
 
-        let outcome = resolve_effective_policy_set(&mut tx, &input).await?;
+        let outcome = resolve_effective_policy_set_with_options(
+            &mut tx,
+            &input,
+        )
+        .await?;
 
         match outcome {
             ResolutionOutcome::Resolved(set) => {
@@ -1116,6 +1165,7 @@ pub async fn resolve_system_effective_policies(
                         &mut staging,
                         &mut per_lineage,
                         &mut all_warnings,
+                        ignore_non_evaluation_conflicts,
                     ) {
                         MergeOutcome::Conflict(conflict) => {
                             let _ = tx.rollback().await;
@@ -1155,6 +1205,7 @@ pub async fn resolve_system_effective_policies(
             &mut staging,
             &mut per_lineage,
             &mut all_warnings,
+            ignore_non_evaluation_conflicts,
         ) {
             MergeOutcome::Conflict(conflict) => {
                 let _ = tx.rollback().await;
