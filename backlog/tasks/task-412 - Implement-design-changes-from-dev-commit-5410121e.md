@@ -1365,4 +1365,6 @@ Verification update: server and web-ui cargo checks pass; targeted resolver/dige
 2026-08-07: Fixed Policies export selection cleanup so successful JSON/TOML downloads clear selected policy IDs and exit selection mode. UI cargo check passed. Repository-wide `cargo fmt --all --check` was attempted and fails on existing formatting differences across the web-ui package; no formatting-only rewrite was applied.
 
 2026-08-07: Investigated the reported regression. `load_policies_by_configuration_for_eval` compares the complete resolver digest before filtering and skips empty filtered sets. The implementation correction is scoped to evaluation-specific projection/digest handling plus regression coverage; the resolver's complete digest remains authoritative for other consumers.
+
+2026-08-07: Implemented evaluation-specific canonical digesting in `server/mod.rs`. Active systems are filtered to enforce/enabled/Nix-evaluated/non-CF-agent policies, sorted by version ID, and compared using a dedicated digest; empty sets now participate in shared-configuration comparison. SQLx resolver failures are classified as transient for retry handling. Focused digest tests pass (2 tests). Full workspace fmt remains blocked by pre-existing formatting drift; direct rustfmt invocation without Cargo edition context is not a valid verification.
 <!-- SECTION:NOTES:END -->
