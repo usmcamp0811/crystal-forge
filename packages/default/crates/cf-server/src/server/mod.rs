@@ -664,21 +664,40 @@ async fn load_policies_by_configuration_for_eval(
     // intentionally includes report-only and operational policies, which do
     // not affect nix-eval-jobs and therefore must not block this map.
     let mut evaluation_digest_by_config: BTreeMap<String, String> = BTreeMap::new();
+    let mut invalid_configurations = BTreeSet::new();
 
     for (system_id, config_name) in system_rows {
-        let outcome =
-            resolve_system_effective_policies_for_evaluation(pool, system_id).await?;
+        if invalid_configurations.contains(&config_name) {
+            continue;
+        }
+
+        let outcome = match resolve_system_effective_policies_for_evaluation(pool, system_id).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                warn!(
+                    %system_id,
+                    %config_name,
+                    error = %error,
+                    "Compliance policy resolution failed; evaluating configuration without compliance gates"
+                );
+                invalid_configurations.insert(config_name.clone());
+                map.remove(&config_name);
+                continue;
+            }
+        };
         let effective = match outcome {
             ResolutionOutcome::Resolved(set) => set.policies,
-            ResolutionOutcome::Conflict(conflicts) => anyhow::bail!(
-                "Effective policy conflict for system {}: {}",
-                system_id,
-                conflicts
-                    .iter()
-                    .map(|conflict| format!("{}: {}", conflict.code, conflict.message))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ),
+            ResolutionOutcome::Conflict(conflicts) => {
+                warn!(
+                    %system_id,
+                    %config_name,
+                    conflicts = ?conflicts,
+                    "Compliance policy conflict; evaluating configuration without compliance gates"
+                );
+                invalid_configurations.insert(config_name.clone());
+                map.remove(&config_name);
+                continue;
+            }
         };
 
         let mut assigned = Vec::new();
@@ -771,19 +790,6 @@ fn evaluation_policy_digest(assigned: &[AssignedPolicy]) -> String {
         })
         .collect::<Vec<_>>();
     semantic_digest(&serde_json::Value::Array(policies))
-}
-
-fn resolver_failure_class(
-    error: &anyhow::Error,
-) -> crate::models::retry_policy::RetryFailureClass {
-    if error
-        .chain()
-        .any(|cause| cause.downcast_ref::<sqlx::Error>().is_some())
-    {
-        crate::models::retry_policy::RetryFailureClass::Transient
-    } else {
-        crate::models::retry_policy::RetryFailureClass::Deterministic
-    }
 }
 
 #[allow(dead_code)]
@@ -1482,21 +1488,17 @@ async fn process_pending_commits(
             match load_policies_by_configuration_for_eval(pool, flake.id).await {
                 Ok(m) => std::sync::Arc::new(m),
                 Err(e) => {
-                    // Conflict or query failure — fail the attempt so the operator can resolve it.
+                    // Compliance policy resolution is advisory for flake
+                    // evaluation. A bad assignment, missing policy version,
+                    // or database problem must not prevent nix-eval-jobs from
+                    // running. The affected configurations simply receive no
+                    // compliance gates in this evaluation.
                     let e = e.context(format!(
                         "Failed to load per-configuration policies for flake {} (commit {})",
                         flake.id, commit.git_commit_hash,
                     ));
-                    error!("{:#}", e);
-                    let _ = mark_commit_evaluation_failed(
-                        pool,
-                        commit.id,
-                        &e.to_string(),
-                        attempt,
-                        resolver_failure_class(&e),
-                    )
-                    .await;
-                    return Ok(());
+                    warn!("{:#}; continuing flake evaluation without compliance gates", e);
+                    std::sync::Arc::new(PoliciesByConfiguration::new())
                 }
             };
 
