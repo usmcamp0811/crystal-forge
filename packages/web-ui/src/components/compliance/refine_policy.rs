@@ -143,13 +143,155 @@ fn set_action(action: &mut RefinedRuleAction, key: &str) { *action = match key {
 #[component]
 fn AssertionSection(rules: Signal<Vec<RefinedStigRule>>, index: usize) -> Element {
     let count = rules.read()[index].draft.assertions.len();
-    rsx! { section { style: "border-top:1px solid var(--cf-divider);padding-top:12px;margin-top:12px;", div { style: "display:flex;align-items:center;gap:7px;", strong { "NixOS config assertions" }, span { class: "chip", style: "font-size:9px;color:var(--cf-brand-purple);", "EVAL-TIME" } }, p { style: "font-size:11px;color:var(--cf-text-muted);", "Asserted against the rendered config during Nix evaluation." }, if count == 0 { div { class: "sd-callout sd-callout-warn", style: "border-style:dashed;", "No assertion could be inferred from this STIG control. Add one below." } }, select { class: "input focus-ring", value: "", onchange: move |e| { let draft = match e.value().as_str() { "option" => PolicyAssertionDraft::NixosOption { path: String::new(), operator: ComparisonOperator::Equal, expected_value: TypedPolicyValue::String(String::new()), failure_message: "Option assertion failed".into(), strict: true }, "packages" => PolicyAssertionDraft::PackagesInstalled { packages: vec![], failure_message: "Required package is not installed".into(), strict: true }, _ => PolicyAssertionDraft::CustomExpression { field_name: format!("customAssertion{}", count + 1), expression: String::new(), failure_message: "Custom assertion failed".into(), strict: true } }; rules.write()[index].draft.assertions.push(draft); }, option { value: "", "＋ Add assertion…" }, option { value: "option", "Assert a NixOS option value" }, option { value: "packages", "Assert packages installed" }, option { value: "custom", "Custom nix expression" } } } }
+    rsx! {
+        section { style: "border-top:1px solid var(--cf-divider);padding-top:12px;margin-top:12px;",
+            div { style: "display:flex;align-items:center;gap:7px;", strong { "NixOS config assertions" }, span { class: "chip", style: "font-size:9px;color:var(--cf-brand-purple);", "EVAL-TIME" } }
+            p { style: "font-size:11px;color:var(--cf-text-muted);", "Asserted against the rendered config during Nix evaluation." }
+            if count == 0 { div { class: "sd-callout sd-callout-warn", style: "border-style:dashed;", "No assertion could be inferred from this STIG control. Add one below." } }
+            for (assertion_index, assertion) in rules.read()[index].draft.assertions.iter().cloned().enumerate() {
+                AssertionEditor { rules, index, assertion_index, assertion }
+            }
+            select {
+                class: "input focus-ring",
+                value: "",
+                onchange: move |e| {
+                    let draft = match e.value().as_str() {
+                        "option" => PolicyAssertionDraft::NixosOption { path: String::new(), operator: ComparisonOperator::Equal, expected_value: TypedPolicyValue::String(String::new()), failure_message: "Option assertion failed".into(), strict: true },
+                        "packages" => PolicyAssertionDraft::PackagesInstalled { packages: vec![], failure_message: "Required package is not installed".into(), strict: true },
+                        _ => PolicyAssertionDraft::CustomExpression { field_name: format!("customAssertion{}", count + 1), expression: String::new(), failure_message: "Custom assertion failed".into(), strict: true },
+                    };
+                    rules.write()[index].draft.assertions.push(draft);
+                },
+                option { value: "", "＋ Add assertion…" }
+                option { value: "option", "Assert a NixOS option value" }
+                option { value: "packages", "Assert packages installed" }
+                option { value: "custom", "Custom nix expression" }
+            }
+        }
+    }
 }
 
 #[component]
 fn EvidenceSection(rules: Signal<Vec<RefinedStigRule>>, index: usize) -> Element {
     let count = rules.read()[index].draft.evidence_requirements.len();
-    rsx! { section { style: "border-top:1px solid var(--cf-divider);padding-top:12px;margin-top:12px;", h3 { style: "font-size:12px;margin:0;", "Evidence for ATO · {count}" }, p { style: "font-size:11px;color:var(--cf-text-muted);", "Artifacts collected at deploy and runtime to prove the control to an assessor." }, select { class: "input focus-ring", value: "", onchange: move |e| { let item = match e.value().as_str() { "command" => EvidenceRequirementDraft::Command { command: String::new(), expected_output: String::new() }, "file" => EvidenceRequirementDraft::File { path: String::new(), expected_content: String::new() }, "unit" => EvidenceRequirementDraft::UnitState { unit: String::new(), state: "active".into() }, "log" => EvidenceRequirementDraft::Log { source: "journald".into(), unit: None, pattern: String::new() }, _ => EvidenceRequirementDraft::Attestation { description: String::new() } }; rules.write()[index].draft.evidence_requirements.push(item); }, option { value: "", "＋ Add evidence source…" }, option { value: "command", "Command output" }, option { value: "file", "File contents" }, option { value: "unit", "systemd unit state" }, option { value: "log", "Log excerpt" }, option { value: "attestation", "Store-path / signed attestation" } } } }
+    rsx! {
+        section { style: "border-top:1px solid var(--cf-divider);padding-top:12px;margin-top:12px;",
+            h3 { style: "font-size:12px;margin:0;", "Evidence for ATO · {count}" }
+            p { style: "font-size:11px;color:var(--cf-text-muted);", "Artifacts collected at deploy and runtime to prove the control to an assessor." }
+            for (evidence_index, evidence) in rules.read()[index].draft.evidence_requirements.iter().cloned().enumerate() {
+                EvidenceEditor { rules, index, evidence_index, evidence }
+            }
+            select {
+                class: "input focus-ring",
+                value: "",
+                onchange: move |e| {
+                    let item = match e.value().as_str() {
+                        "command" => EvidenceRequirementDraft::Command { command: String::new(), expected_output: String::new() },
+                        "file" => EvidenceRequirementDraft::File { path: String::new(), expected_content: String::new() },
+                        "unit" => EvidenceRequirementDraft::UnitState { unit: String::new(), state: "active".into() },
+                        "log" => EvidenceRequirementDraft::Log { source: "journald".into(), unit: None, pattern: String::new() },
+                        _ => EvidenceRequirementDraft::Attestation { description: String::new() },
+                    };
+                    rules.write()[index].draft.evidence_requirements.push(item);
+                },
+                option { value: "", "＋ Add evidence source…" }
+                option { value: "command", "Command output" }
+                option { value: "file", "File contents" }
+                option { value: "unit", "systemd unit state" }
+                option { value: "log", "Log excerpt" }
+                option { value: "attestation", "Store-path / signed attestation" }
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct AssertionEditorProps {
+    rules: Signal<Vec<RefinedStigRule>>,
+    index: usize,
+    assertion_index: usize,
+    assertion: PolicyAssertionDraft,
+}
+
+#[component]
+fn AssertionEditor(props: AssertionEditorProps) -> Element {
+    let mut rules = props.rules;
+    let index = props.index;
+    let assertion_index = props.assertion_index;
+    let remove = move |_| {
+        rules.write()[index].draft.assertions.remove(assertion_index);
+    };
+    let failure = match &props.assertion {
+        PolicyAssertionDraft::NixosOption { failure_message, .. }
+        | PolicyAssertionDraft::PackagesInstalled { failure_message, .. }
+        | PolicyAssertionDraft::CustomExpression { failure_message, .. } => failure_message.clone(),
+    };
+    rsx! {
+        div { class: "card", style: "padding:10px;margin:8px 0;display:grid;gap:7px;",
+            div { style: "display:flex;justify-content:space-between;align-items:center;",
+                strong { style: "font-size:11px;", "Assertion {assertion_index + 1}" }
+                button { class: "btn btn-ghost xs", onclick: remove, "Remove" }
+            }
+            match props.assertion.clone() {
+                PolicyAssertionDraft::NixosOption { path, operator, expected_value, .. } => rsx! {
+                    input { class: "input focus-ring mono", placeholder: "networking.firewall.enable", value: "{path}", oninput: move |e| { if let PolicyAssertionDraft::NixosOption { path, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *path = e.value(); } } }
+                    div { style: "display:grid;grid-template-columns:100px 1fr;gap:7px;",
+                        select { class: "input focus-ring", value: "{operator.as_str()}", onchange: move |e| { if let PolicyAssertionDraft::NixosOption { operator, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *operator = match e.value().as_str() { "!=" => ComparisonOperator::NotEqual, ">=" => ComparisonOperator::GreaterOrEqual, "<=" => ComparisonOperator::LessOrEqual, _ => ComparisonOperator::Equal }; } }, option { value: "==", "==" } option { value: "!=", "!=" } option { value: ">=", ">=" } option { value: "<=", "<=" } }
+                        input { class: "input focus-ring mono", placeholder: "expected value", value: "{typed_value_text(&expected_value)}", oninput: move |e| { if let PolicyAssertionDraft::NixosOption { expected_value, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expected_value = TypedPolicyValue::String(e.value()); } } }
+                    }
+                },
+                PolicyAssertionDraft::PackagesInstalled { packages, .. } => {
+                    let packages_text = packages.join(", ");
+                    rsx! {
+                        input { class: "input focus-ring mono", placeholder: "packages separated by commas", value: "{packages_text}", oninput: move |e| { if let PolicyAssertionDraft::PackagesInstalled { packages, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *packages = e.value().split(',').map(|part| part.trim().to_string()).filter(|part| !part.is_empty()).collect(); } } }
+                    }
+                },
+                PolicyAssertionDraft::CustomExpression { field_name, expression, .. } => rsx! {
+                    input { class: "input focus-ring mono", placeholder: "field name", value: "{field_name}", oninput: move |e| { if let PolicyAssertionDraft::CustomExpression { field_name, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *field_name = e.value(); } } }
+                    textarea { class: "input focus-ring mono", rows: 2, placeholder: "cfg.config...", value: "{expression}", oninput: move |e| { if let PolicyAssertionDraft::CustomExpression { expression, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expression = e.value(); } } }
+                },
+            }
+            input { class: "input focus-ring", placeholder: "Failure message", value: "{failure}", oninput: move |e| { match &mut rules.write()[index].draft.assertions[assertion_index] { PolicyAssertionDraft::NixosOption { failure_message, .. } | PolicyAssertionDraft::PackagesInstalled { failure_message, .. } | PolicyAssertionDraft::CustomExpression { failure_message, .. } => *failure_message = e.value() } } }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct EvidenceEditorProps {
+    rules: Signal<Vec<RefinedStigRule>>,
+    index: usize,
+    evidence_index: usize,
+    evidence: EvidenceRequirementDraft,
+}
+
+#[component]
+fn EvidenceEditor(props: EvidenceEditorProps) -> Element {
+    let mut rules = props.rules;
+    let index = props.index;
+    let evidence_index = props.evidence_index;
+    let remove = move |_| {
+        rules.write()[index].draft.evidence_requirements.remove(evidence_index);
+    };
+    rsx! {
+        div { class: "card", style: "padding:10px;margin:8px 0;display:grid;gap:7px;",
+            div { style: "display:flex;justify-content:space-between;align-items:center;", strong { style: "font-size:11px;", "Evidence {evidence_index + 1}" } button { class: "btn btn-ghost xs", onclick: remove, "Remove" } }
+            match props.evidence.clone() {
+                EvidenceRequirementDraft::Command { command, expected_output } => rsx! { input { class: "input focus-ring mono", placeholder: "command", value: "{command}", oninput: move |e| { if let EvidenceRequirementDraft::Command { command, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *command = e.value(); } } } input { class: "input focus-ring mono", placeholder: "expected output", value: "{expected_output}", oninput: move |e| { if let EvidenceRequirementDraft::Command { expected_output, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *expected_output = e.value(); } } } },
+                EvidenceRequirementDraft::File { path, expected_content } => rsx! { input { class: "input focus-ring mono", placeholder: "/etc/example", value: "{path}", oninput: move |e| { if let EvidenceRequirementDraft::File { path, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *path = e.value(); } } } textarea { class: "input focus-ring mono", rows: 2, placeholder: "expected content", value: "{expected_content}", oninput: move |e| { if let EvidenceRequirementDraft::File { expected_content, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *expected_content = e.value(); } } } },
+                EvidenceRequirementDraft::UnitState { unit, state } => rsx! { input { class: "input focus-ring mono", placeholder: "unit.service", value: "{unit}", oninput: move |e| { if let EvidenceRequirementDraft::UnitState { unit, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *unit = e.value(); } } } input { class: "input focus-ring", placeholder: "active", value: "{state}", oninput: move |e| { if let EvidenceRequirementDraft::UnitState { state, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *state = e.value(); } } } },
+                EvidenceRequirementDraft::Log { source, unit, pattern } => rsx! { input { class: "input focus-ring", placeholder: "journald", value: "{source}", oninput: move |e| { if let EvidenceRequirementDraft::Log { source, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *source = e.value(); } } } input { class: "input focus-ring mono", placeholder: "pattern", value: "{pattern}", oninput: move |e| { if let EvidenceRequirementDraft::Log { pattern, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *pattern = e.value(); } } } input { class: "input focus-ring mono", placeholder: "unit (optional)", value: "{unit.clone().unwrap_or_default()}", oninput: move |e| { if let EvidenceRequirementDraft::Log { unit, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *unit = (!e.value().trim().is_empty()).then(|| e.value()); } } } },
+                EvidenceRequirementDraft::Attestation { description } => rsx! { textarea { class: "input focus-ring", rows: 2, placeholder: "attestation description", value: "{description}", oninput: move |e| { if let EvidenceRequirementDraft::Attestation { description } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *description = e.value(); } } } },
+            }
+        }
+    }
+}
+
+fn typed_value_text(value: &TypedPolicyValue) -> String {
+    match value {
+        TypedPolicyValue::Boolean(value) => value.to_string(),
+        TypedPolicyValue::Integer(value) | TypedPolicyValue::String(value) | TypedPolicyValue::List(value) | TypedPolicyValue::AttributeSet(value) => value.clone(),
+        TypedPolicyValue::Null => "null".to_string(),
+    }
 }
 
 fn slugify(value: &str) -> String { let mut out = String::new(); for c in value.chars() { if c.is_ascii_alphanumeric() { out.push(c.to_ascii_lowercase()); } else if !out.ends_with('-') { out.push('-'); } } out.trim_matches('-').to_string() }
