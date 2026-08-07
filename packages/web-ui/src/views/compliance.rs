@@ -17,7 +17,7 @@ use crate::api::models::{
     ImportedCustomCheck, ImportedCustomCheckRule, ImportedEvidenceRequirement,
 };
 use crate::components::compliance::{
-    action_to_import, BundleCatalog, BundleHeader, EvidenceDrawer, RefinedPolicyDraft,
+    action_to_import, BundleCatalog, BundleHeader, EvidenceDrawer, ImportReview, RefinedPolicyDraft,
     RefinedRuleAction, RefinedStigRule, ScoreStrip, SourceCheck, SourceStigRule, SystemsMatrix,
     RefinePolicyStep,
 };
@@ -2044,16 +2044,24 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                     {
                         let refined_rules_signal = refined_rules;
                         let cursor_signal = cursor;
-                        let on_success = props.on_success;
                         rsx! {
                         RefinePolicyStep {
                             rules: refined_rules_signal,
                             cursor: cursor_signal,
                             on_back: move |_| step.set("review".to_string()),
-                            on_finish: move |_| {
+                            on_review: move |_| step.set("final-review".to_string()),
+                        }
+                    }
+                }
+
+                if *step.read() == "final-review" {
+                    ImportReview {
+                        rules: refined_rules,
+                        on_back: move |_| step.set("refine".to_string()),
+                        on_confirm: move |_| {
                                 if *committing.read() { return; }
-                                let selected_rule_ids = refined_rules_signal.read().iter().filter(|rule| rule.selected).map(|rule| rule.source.rule_id.clone()).collect::<Vec<_>>();
-                                let rule_actions = refined_rules_signal.read().iter().filter(|rule| rule.selected).map(action_to_import).collect::<Vec<_>>();
+                                let selected_rule_ids = refined_rules.read().iter().filter(|rule| rule.selected).map(|rule| rule.source.rule_id.clone()).collect::<Vec<_>>();
+                                let rule_actions = refined_rules.read().iter().filter(|rule| rule.selected).map(action_to_import).collect::<Vec<_>>();
                                 let plan = XccdfImportPlan {
                                     expected_sha256: preview_response.read().as_ref().map(|preview| preview.sha256.clone()).unwrap_or_default(),
                                     selected_profile_id: None,
@@ -2077,13 +2085,12 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                             import_result.set(Some(result));
                                             committing.set(false);
                                             step.set("done".into());
-                                            on_success.call(());
+                                             props.on_success.call(());
                                         }
                                         Err(error) => { committing.set(false); import_error.set(Some(format!("Import failed: {error}"))); }
                                     }
                                 });
                             },
-                        }
                         }
                     }
                 }

@@ -94,7 +94,7 @@ pub fn action_to_import(rule: &RefinedStigRule) -> XccdfRuleImportAction {
 }
 
 #[derive(Props, Clone, PartialEq)]
-pub struct RefinePolicyStepProps { pub rules: Signal<Vec<RefinedStigRule>>, pub cursor: Signal<usize>, pub on_back: EventHandler<()>, pub on_finish: EventHandler<()> }
+pub struct RefinePolicyStepProps { pub rules: Signal<Vec<RefinedStigRule>>, pub cursor: Signal<usize>, pub on_back: EventHandler<()>, pub on_review: EventHandler<()> }
 
 #[component]
 pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
@@ -117,8 +117,36 @@ pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
             if matches!(rule.draft.action, RefinedRuleAction::Unbound) { div { class: "sd-callout sd-callout-info", "This requirement will be imported without a Crystal Forge implementation." } }
             if matches!(rule.draft.action, RefinedRuleAction::Opaque) { div { class: "sd-callout sd-callout-info", "The original XCCDF rule and check content will be preserved without execution." } }
         }
-        div { class: "modal-foot", style: "flex:0 0 auto;justify-content:space-between;", button { class: "btn btn-ghost", onclick: move |_| props.on_back.call(()), Icon { name: IconName::ArrowLeft, size: 13 }, " Previous" }, div { style: "display:flex;gap:8px;", button { class: "btn btn-ghost", style: "color:#f87171;", onclick: move |_| { props.rules.write()[index].selected = false; }, "Exclude" }, if position + 1 < selected.len() { button { class: "btn btn-primary", onclick: move |_| props.cursor.set(position + 1), "Next" } } else { button { class: "btn btn-primary", disabled: !props.rules.read().iter().filter(|r| r.selected).all(RefinedStigRule::is_valid), onclick: move |_| props.on_finish.call(()), "Create bundle + {selected.len()} policies" } } } }
+         div { class: "modal-foot", style: "flex:0 0 auto;justify-content:space-between;", button { class: "btn btn-ghost", onclick: move |_| props.on_back.call(()), Icon { name: IconName::ArrowLeft, size: 13 }, " Previous" }, div { style: "display:flex;gap:8px;", button { class: "btn btn-ghost", style: "color:#f87171;", onclick: move |_| { props.rules.write()[index].selected = false; }, "Exclude" }, if position + 1 < selected.len() { button { class: "btn btn-primary", onclick: move |_| props.cursor.set(position + 1), "Next" } } else { button { class: "btn btn-primary", disabled: !props.rules.read().iter().filter(|r| r.selected).all(RefinedStigRule::is_valid), onclick: move |_| props.on_review.call(()), "Review import" } } } }
     }
+}
+
+#[derive(Props, Clone, PartialEq)]
+pub struct ImportReviewProps {
+    pub rules: Signal<Vec<RefinedStigRule>>,
+    pub on_back: EventHandler<()>,
+    pub on_confirm: EventHandler<()>,
+}
+
+#[component]
+pub fn ImportReview(props: ImportReviewProps) -> Element {
+    let selected = props.rules.read().iter().filter(|rule| rule.selected).cloned().collect::<Vec<_>>();
+    let native = selected.iter().filter(|rule| matches!(rule.draft.action, RefinedRuleAction::Native)).count();
+    let manual = selected.iter().filter(|rule| matches!(rule.draft.action, RefinedRuleAction::Manual)).count();
+    let unresolved = selected.iter().filter(|rule| matches!(rule.draft.action, RefinedRuleAction::Unbound | RefinedRuleAction::Opaque)).count();
+    rsx! {
+        div { class: "modal-head", h2 { "Review import" }, p { class: "page-subtitle", "Confirm the selected policy mappings before creating the draft bundle." } }
+        div { class: "modal-body", style: "overflow:auto;flex:1 1 auto;min-height:0;",
+            div { class: "stat-strip", div { class: "stat", div { class: "stat-label", "Selected" } div { class: "stat-value", "{selected.len()}" } } div { class: "stat", div { class: "stat-label", "Native" } div { class: "stat-value", "{native}" } } div { class: "stat", div { class: "stat-label", "Manual" } div { class: "stat-value", "{manual}" } } div { class: "stat", div { class: "stat-label", "Unresolved" } div { class: "stat-value", "{unresolved}" } } }
+            if unresolved > 0 { div { class: "sd-callout sd-callout-warn", "Unbound and opaque controls will remain visible but will not be executable." } }
+            div { style: "display:grid;gap:6px;margin-top:12px;", for rule in selected.iter() { div { class: "card", style: "padding:9px 11px;display:flex;gap:10px;align-items:center;", span { class: "mono", style: "font-size:10px;", "{rule.source.stig_id.clone().unwrap_or_else(|| rule.source.rule_id.clone())}" } div { style: "flex:1;min-width:0;", strong { "{rule.draft.local_name}" } div { class: "text-xs text-gray-500", "{action_label(&rule.draft.action)}" } } } } }
+        }
+        div { class: "modal-foot", style: "justify-content:space-between;", button { class: "btn btn-ghost", onclick: move |_| props.on_back.call(()), "Back to refine" } button { class: "btn btn-primary", disabled: selected.is_empty(), onclick: move |_| props.on_confirm.call(()), "Create draft bundle" } }
+    }
+}
+
+fn action_label(action: &RefinedRuleAction) -> &'static str {
+    match action { RefinedRuleAction::Native => "Native assertion", RefinedRuleAction::Manual => "Manual evidence", RefinedRuleAction::Unbound => "Unbound", RefinedRuleAction::Opaque => "Opaque", RefinedRuleAction::Existing(_) => "Mapped existing policy" }
 }
 
 #[component]
