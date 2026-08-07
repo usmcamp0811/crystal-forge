@@ -988,9 +988,20 @@ async fn resolve_system_effective_policies_with_options(
             r#"SELECT pv.id, pv.policy_id, pv.policy_type, pv.config
                FROM environment_policies ep
                JOIN deployment_policies dp ON dp.id = ep.policy_id
-               JOIN deployment_policy_versions pv ON pv.id = dp.current_published_version_id
+               JOIN deployment_policy_versions pv
+                 ON pv.id = COALESCE(
+                     dp.current_published_version_id,
+                     dp.current_draft_version_id
+                 )
                WHERE ep.environment_id = $1
-                 AND pv.publication_state = 'accepted'"#,
+                 AND dp.enabled = TRUE
+                 AND (
+                     pv.publication_state = 'accepted'
+                     OR (
+                         dp.current_published_version_id IS NULL
+                         AND pv.publication_state IN ('incomplete', 'draft', 'interim')
+                     )
+                 )"#,
         )
         .bind(eid)
         .fetch_all(&mut *tx)
@@ -1024,9 +1035,20 @@ async fn resolve_system_effective_policies_with_options(
             r#"SELECT pv.id, pv.policy_id, pv.policy_type, pv.config
                FROM system_policies sp
                JOIN deployment_policies dp ON dp.id = sp.policy_id
-               JOIN deployment_policy_versions pv ON pv.id = dp.current_published_version_id
+               JOIN deployment_policy_versions pv
+                 ON pv.id = COALESCE(
+                     dp.current_published_version_id,
+                     dp.current_draft_version_id
+                 )
                WHERE sp.system_id = $1
-                 AND pv.publication_state = 'accepted'"#,
+                 AND dp.enabled = TRUE
+                 AND (
+                     pv.publication_state = 'accepted'
+                     OR (
+                         dp.current_published_version_id IS NULL
+                         AND pv.publication_state IN ('incomplete', 'draft', 'interim')
+                     )
+                 )"#,
         )
         .bind(system_id)
         .fetch_all(&mut *tx)
@@ -1285,9 +1307,20 @@ async fn resolve_legacy_system_policies(
             r#"SELECT pv.id, pv.policy_id, pv.policy_type, pv.config
                FROM environment_policies ep
                JOIN deployment_policies dp ON dp.id = ep.policy_id
-               JOIN deployment_policy_versions pv ON pv.id = dp.current_published_version_id
+               JOIN deployment_policy_versions pv
+                 ON pv.id = COALESCE(
+                     dp.current_published_version_id,
+                     dp.current_draft_version_id
+                 )
                WHERE ep.environment_id = $1
-                 AND pv.publication_state = 'accepted'"#,
+                 AND dp.enabled = TRUE
+                 AND (
+                     pv.publication_state = 'accepted'
+                     OR (
+                         dp.current_published_version_id IS NULL
+                         AND pv.publication_state IN ('incomplete', 'draft', 'interim')
+                     )
+                 )"#,
         )
         .bind(eid)
         .fetch_all(pool)
@@ -1318,9 +1351,20 @@ async fn resolve_legacy_system_policies(
         r#"SELECT pv.id, pv.policy_id, pv.policy_type, pv.config
            FROM system_policies sp
            JOIN deployment_policies dp ON dp.id = sp.policy_id
-           JOIN deployment_policy_versions pv ON pv.id = dp.current_published_version_id
+           JOIN deployment_policy_versions pv
+             ON pv.id = COALESCE(
+                 dp.current_published_version_id,
+                 dp.current_draft_version_id
+             )
            WHERE sp.system_id = $1
-             AND pv.publication_state = 'accepted'"#,
+             AND dp.enabled = TRUE
+             AND (
+                 pv.publication_state = 'accepted'
+                 OR (
+                     dp.current_published_version_id IS NULL
+                     AND pv.publication_state IN ('incomplete', 'draft', 'interim')
+                 )
+             )"#,
     )
     .bind(system_id)
     .fetch_all(pool)

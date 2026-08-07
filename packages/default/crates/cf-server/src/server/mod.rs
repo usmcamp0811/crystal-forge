@@ -44,9 +44,8 @@ use crate::queries::commits::{
     EvalFailureOutcome, EvalStartOutcome,
 };
 use crate::queries::deployment_policies::{
-    get_deployment_policy_by_version, list_enabled_deployment_policies,
+    get_deployment_policies_by_versions, list_enabled_deployment_policies,
     list_enabled_policies_for_flake, list_policy_rows_by_configuration_for_flake,
-    list_registered_configuration_names_for_flake,
 };
 use crate::queries::derivations::{
     cleanup_partial_derivations, reset_stuck_builds, set_closure_counts,
@@ -362,15 +361,32 @@ fn parse_deployment_policy_record(
         }
         "require_packages" => {
             let strict = cfg.get("strict").and_then(|v| v.as_bool()).unwrap_or(true);
-            let packages = cfg
-                .get("packages")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let Some(raw_packages) = cfg.get("packages").and_then(|value| value.as_array()) else {
+                warn!(
+                    "Skipping require_packages policy '{}' ({}): config.packages must be a non-empty string array",
+                    record.name, record.id
+                );
+                return None;
+            };
+            let mut packages = Vec::with_capacity(raw_packages.len());
+            for (index, value) in raw_packages.iter().enumerate() {
+                let Some(package) = value.as_str().map(str::trim).filter(|value| !value.is_empty())
+                else {
+                    warn!(
+                        "Skipping require_packages policy '{}' ({}): config.packages[{}] must be a non-empty string",
+                        record.name, record.id, index
+                    );
+                    return None;
+                };
+                packages.push(package.to_string());
+            }
+            if packages.is_empty() {
+                warn!(
+                    "Skipping require_packages policy '{}' ({}): config.packages cannot be empty",
+                    record.name, record.id
+                );
+                return None;
+            }
             Some(DeploymentPolicy::RequirePackages { packages, strict })
         }
         "custom_check" => {
@@ -658,12 +674,8 @@ async fn load_policies_by_configuration_for_eval(
     .await
     .context("Failed to load systems for effective policy evaluation")?;
 
-    let mut map: PoliciesByConfiguration = BTreeMap::new();
-    // A configuration can be evaluated once only when the Nix-evaluation
-    // policy set is identical. The resolver's complete effective-set digest
-    // intentionally includes report-only and operational policies, which do
-    // not affect nix-eval-jobs and therefore must not block this map.
-    let mut evaluation_digest_by_config: BTreeMap<String, String> = BTreeMap::new();
+    let mut resolved_systems = Vec::with_capacity(system_rows.len());
+    let mut policy_version_ids = BTreeSet::new();
     let mut invalid_configurations = BTreeSet::new();
 
     for (system_id, config_name) in system_rows {
@@ -681,7 +693,7 @@ async fn load_policies_by_configuration_for_eval(
                     "Compliance policy resolution failed; evaluating configuration without compliance gates"
                 );
                 invalid_configurations.insert(config_name.clone());
-                map.remove(&config_name);
+                resolved_systems.retain(|(_, existing_config, _)| existing_config != &config_name);
                 continue;
             }
         };
@@ -695,24 +707,38 @@ async fn load_policies_by_configuration_for_eval(
                     "Compliance policy conflict; evaluating configuration without compliance gates"
                 );
                 invalid_configurations.insert(config_name.clone());
-                map.remove(&config_name);
+                resolved_systems.retain(|(_, existing_config, _)| existing_config != &config_name);
                 continue;
             }
         };
 
-        let mut assigned = Vec::new();
-        for effective_policy in effective
+        let enforced = effective
             .into_iter()
             .filter(|policy| matches!(policy.effective_mode, AssignmentMode::Enforce))
-        {
-            let Some(mut record) =
-                get_deployment_policy_by_version(pool, &effective_policy.policy_version_id).await?
-            else {
+            .collect::<Vec<_>>();
+        policy_version_ids.extend(enforced.iter().map(|policy| policy.policy_version_id));
+        resolved_systems.push((system_id, config_name, enforced));
+    }
+
+    let policy_version_ids = policy_version_ids.into_iter().collect::<Vec<_>>();
+    let policies_by_version = get_deployment_policies_by_versions(pool, &policy_version_ids).await?;
+
+    let mut map: PoliciesByConfiguration = BTreeMap::new();
+    // A configuration can be evaluated once only when the Nix-evaluation
+    // policy set is identical. The resolver's complete effective-set digest
+    // intentionally includes report-only and operational policies, which do
+    // not affect nix-eval-jobs and therefore must not block this map.
+    let mut evaluation_digest_by_config: BTreeMap<String, String> = BTreeMap::new();
+    for (_system_id, config_name, effective) in resolved_systems {
+        let mut assigned = Vec::new();
+        for effective_policy in effective {
+            let Some(record) = policies_by_version.get(&effective_policy.policy_version_id) else {
                 anyhow::bail!(
                     "Effective policy version {} was not found",
                     effective_policy.policy_version_id
                 );
             };
+            let mut record = record.clone();
 
             if !record.enabled {
                 continue;
@@ -1858,6 +1884,38 @@ mod tests {
             DeploymentPolicy::RequireCrystalForgeAgent { strict } => assert!(strict),
             _ => panic!("expected RequireCrystalForgeAgent variant"),
         }
+    }
+
+    #[test]
+    fn parse_require_packages_rejects_an_empty_package_list() {
+        let record = DeploymentPolicyRecord {
+            id: Uuid::new_v4(),
+            name: "packages".to_string(),
+            description: Some("required packages".to_string()),
+            policy_type: "require_packages".to_string(),
+            config: json!({"packages": [], "strict": true}),
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        assert!(parse_deployment_policy_record(&record).is_none());
+    }
+
+    #[test]
+    fn parse_require_packages_rejects_malformed_entries() {
+        let record = DeploymentPolicyRecord {
+            id: Uuid::new_v4(),
+            name: "packages".to_string(),
+            description: Some("required packages".to_string()),
+            policy_type: "require_packages".to_string(),
+            config: json!({"packages": ["openssh", "", 42], "strict": true}),
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        assert!(parse_deployment_policy_record(&record).is_none());
     }
 
     #[test]

@@ -7,8 +7,6 @@ use crate::api::models::{
 use crate::components::icon::{Icon, IconName};
 
 pub mod refine_policy;
-pub mod import_modal_shell;
-pub use import_modal_shell::ImportWorkflowModal;
 pub use refine_policy::{
     action_to_import, EvidenceRequirementDraft, PolicyAssertionDraft, RefinedPolicyDraft,
     ImportReview, RefinePolicyStep, RefinedRuleAction, RefinedStigRule, SourceCheck, SourceStigRule,

@@ -7,7 +7,7 @@ use crate::models::deployment_policies::{
 };
 use crate::models::systems::DeploymentPolicy;
 use crate::queries::deployment::{get_systems_with_auto_latest_policy, update_desired_target};
-use crate::queries::deployment_policies::get_deployment_policy_by_version;
+use crate::queries::deployment_policies::get_deployment_policies_by_versions;
 use crate::queries::derivations::get_latest_deployable_targets_for_flake_hosts;
 use crate::server::load_cve_policies;
 use crate::services::approval_policy::{self, DeploymentContext};
@@ -254,23 +254,17 @@ impl DeploymentPolicyManager {
             effective_policies_by_system.insert(system.id, policy_ids);
         }
 
-        let mut policies_by_id: HashMap<uuid::Uuid, DeploymentPolicyRecord> = HashMap::new();
-        let mut failed_policy_loads: HashSet<uuid::Uuid> = HashSet::new();
-
-        for version_id in all_policy_version_ids {
-            match get_deployment_policy_by_version(&self.pool, &version_id).await {
-                Ok(Some(policy)) => {
-                    policies_by_id.insert(version_id, policy);
-                }
-                Ok(None) => {
-                    failed_policy_loads.insert(version_id);
-                }
-                Err(err) => {
-                    warn!("Failed to load deployment policy {}: {:#}", version_id, err);
-                    failed_policy_loads.insert(version_id);
-                }
-            }
-        }
+        let all_policy_version_ids = all_policy_version_ids.into_iter().collect::<Vec<_>>();
+        let policies_by_id = get_deployment_policies_by_versions(
+            &self.pool,
+            &all_policy_version_ids,
+        )
+        .await
+        .context("Failed to load effective deployment policy versions")?;
+        let failed_policy_loads = all_policy_version_ids
+            .into_iter()
+            .filter(|version_id| !policies_by_id.contains_key(version_id))
+            .collect::<HashSet<_>>();
 
         let mut updated_count = 0;
 

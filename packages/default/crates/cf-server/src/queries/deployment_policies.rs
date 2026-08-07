@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::compliance::digest::{PolicyVersionCanonical, write_policy_version_digest};
@@ -290,6 +291,79 @@ pub async fn get_deployment_policy_by_version(
     .context("Failed to fetch deployment policy by version ID")?;
 
     Ok(row)
+}
+
+/// Fetch deployment policy records for exact version IDs in one query.
+///
+/// Evaluation and deployment resolve policies per system, but many systems
+/// share the same policy versions. Loading those versions as a batch avoids a
+/// policy-version query for every system/policy pair.
+pub async fn get_deployment_policies_by_versions(
+    pool: &PgPool,
+    policy_version_ids: &[Uuid],
+) -> Result<HashMap<Uuid, DeploymentPolicyRecord>> {
+    if policy_version_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            String,
+            Option<String>,
+            String,
+            serde_json::Value,
+            bool,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        ),
+    >(
+        r#"
+        SELECT pv.id, dp.id, dp.name, dp.description, dp.policy_type,
+               COALESCE(pv.config, dp.config) AS config,
+               dp.enabled, dp.created_at, dp.updated_at
+          FROM deployment_policy_versions pv
+          JOIN deployment_policies dp ON dp.id = pv.policy_id
+         WHERE pv.id = ANY($1)
+        "#,
+    )
+    .bind(policy_version_ids)
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch deployment policies by version IDs")?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                version_id,
+                id,
+                name,
+                description,
+                policy_type,
+                config,
+                enabled,
+                created_at,
+                updated_at,
+            )| {
+                (
+                    version_id,
+                    DeploymentPolicyRecord {
+                        id,
+                        name,
+                        description,
+                        policy_type,
+                        config,
+                        enabled,
+                        created_at,
+                        updated_at,
+                    },
+                )
+            },
+        )
+        .collect())
 }
 
 /// Create a new deployment policy.

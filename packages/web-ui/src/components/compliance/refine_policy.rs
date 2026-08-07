@@ -5,7 +5,6 @@ use crate::api::models::{
     ImportedPolicyCustomization, XccdfRuleImportAction,
 };
 use crate::components::icon::{Icon, IconName};
-use crate::components::compliance::ImportWorkflowModal;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct SourceCheck {
@@ -54,8 +53,8 @@ impl PolicyAssertionDraft {
         match self {
             Self::NixosOption { path, operator, expected_value, failure_message, strict } => ImportedCustomCheckRule { field_name: format!("nixosOption{index}"), expression: format!("cfg.config.{path} {} {}", operator.as_str(), expected_value.as_nix()), description: failure_message.clone(), strict: *strict },
             Self::PackagesInstalled { packages, failure_message, strict } => {
-                let checks = packages.iter().map(|p| format!("(x.pname or \"\") == \"{}\"", p.replace('"', "\\\""))).collect::<Vec<_>>().join(" || ");
-                ImportedCustomCheckRule { field_name: format!("packagesInstalled{index}"), expression: format!("builtins.all (p: builtins.any (x: {checks}) cfg.config.environment.systemPackages) [ ]"), description: failure_message.clone(), strict: *strict }
+                let required = packages.iter().map(|package| format!("\"{}\"", package.replace('"', "\\\""))).collect::<Vec<_>>().join(" ");
+                ImportedCustomCheckRule { field_name: format!("packagesInstalled{index}"), expression: format!("builtins.all (required: builtins.any (package: (package.pname or (package.name or \"\")) == required) cfg.config.environment.systemPackages) [ {required} ]"), description: failure_message.clone(), strict: *strict }
             }
             Self::CustomExpression { field_name, expression, failure_message, strict } => ImportedCustomCheckRule { field_name: field_name.clone(), expression: expression.clone(), description: failure_message.clone(), strict: *strict },
         }
@@ -109,31 +108,30 @@ pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
     let Some(index) = selected.get(position).copied() else { return rsx! { div {} }; };
     let rule = props.rules.read()[index].clone();
     let source_id = source_identity(&rule.source);
+    let source_srg = rule.source.identifiers.iter().find(|identifier| identifier.starts_with("SRG-")).cloned();
     let percent = ((position + 1) as f32 / selected.len().max(1) as f32 * 100.0).round();
     rsx! {
-        ImportWorkflowModal {
-        div { class: "modal-head",
+        div { class: "modal-head refine-modal-head",
             div { class: "refine-header", h2 { style: "display:flex;gap:8px;align-items:center;min-width:0;white-space:nowrap;", Icon { name: IconName::Shield, size: 15 }, "Refine policy {position + 1} of {selected.len()}" }, span { class: "mono refine-source-id", title: "{source_id}", "{source_id}" } }
             div { class: "refine-progress", "data-testid": "xccdf-refine-progress", div { class: "refine-progress__value", style: "width:{percent}%;" } }
         }
-        div { class: "modal-body",
-            div { style: "display:flex;gap:8px;align-items:center;margin-bottom:12px;", span { class: "chip chip-info", "Security & hardening" }, if let Some(group) = rule.source.group_id.as_ref() { span { class: "mono", "{group}" } }, div { style: "flex:1;" }, span { class: "mono", style: "font-size:10px;", "policy id: {slugify(&source_id)}" } }
-            details { class: "xccdf-source-details", "data-testid": "xccdf-source-details", summary { "View source STIG details" }, SourceStigCard { rule: rule.source.clone() } }
-            div { class: "refine-basics", div { class: "field", label { "Policy name" }, input { class: "input focus-ring", "data-testid": "xccdf-policy-name", value: "{rule.draft.local_name}", oninput: move |e| { props.rules.write()[index].draft.local_name = e.value(); } } }, div { class: "field", label { "Severity" }, div { class: "seg", for (value, label) in [("high","CAT I"),("medium","CAT II"),("low","CAT III")] { button { class: if rule.draft.local_severity == value { "active" } else { "" }, onclick: move |_| { props.rules.write()[index].draft.local_severity = value.into(); }, "{label}" } } } } }
-            details { style: "margin:12px 0;", summary { style: "font-size:11px;color:var(--cf-text-muted);", "Additional policy details" }, div { style: "display:grid;gap:8px;margin-top:8px;", textarea { class: "input focus-ring", rows: 2, placeholder: "Description", value: "{rule.draft.local_description}", oninput: move |e| { props.rules.write()[index].draft.local_description = e.value(); } }, textarea { class: "input focus-ring", rows: 2, placeholder: "Rationale", value: "{rule.draft.local_rationale}", oninput: move |e| { props.rules.write()[index].draft.local_rationale = e.value(); } }, textarea { class: "input focus-ring", rows: 2, placeholder: "Implementation note", value: "{rule.draft.implementation_note}", oninput: move |e| { props.rules.write()[index].draft.implementation_note = e.value(); } } } }
-            ImplementationChoice { rules: props.rules, index, existing_policies: props.existing_policies.clone() }
-            if matches!(rule.draft.action, RefinedRuleAction::Native) { AssertionSection { rules: props.rules, index } }
-            if matches!(rule.draft.action, RefinedRuleAction::Native | RefinedRuleAction::Manual) { EvidenceSection { rules: props.rules, index } }
-            if matches!(rule.draft.action, RefinedRuleAction::Unbound) { div { class: "sd-callout sd-callout-info", "This requirement will be imported without a Crystal Forge implementation." } }
-            if matches!(rule.draft.action, RefinedRuleAction::Opaque) { div { class: "sd-callout sd-callout-info", "The original XCCDF rule and check content will be preserved without execution." } }
+        div { class: "modal-body refine-modal-body",
+            div { class: "refine-identity-row", span { class: "chip chip-info", "Security & hardening" }, if let Some(srg) = source_srg.as_ref() { span { class: "mono refine-srg", "{srg}" } }, span { class: "refine-identity-spacer" }, span { class: "refine-policy-id", "policy id: " span { class: "mono", "stig-{slugify(&source_id)}" } } }
+            SourceStigCard { rule: rule.source.clone() }
+            div { class: "refine-basics", div { class: "field", label { "Policy name" }, input { class: "input focus-ring mono", "data-testid": "xccdf-policy-name", value: "{rule.draft.local_name}", oninput: move |e| { props.rules.write()[index].draft.local_name = e.value(); } } }, div { class: "field", label { "Severity" }, div { class: "seg refine-severity", for (value, label) in [("high","CAT I"),("medium","CAT II"),("low","CAT III")] { button { class: if rule.draft.local_severity == value { format!("active severity-{value}") } else { String::new() }, onclick: move |_| { props.rules.write()[index].draft.local_severity = value.into(); }, "{label}" } } } } }
+            if !matches!(rule.draft.action, RefinedRuleAction::Existing(_) | RefinedRuleAction::Opaque) { AssertionSection { rules: props.rules, index } EvidenceSection { rules: props.rules, index } }
+            div { class: "sd-callout sd-callout-info refine-summary", Icon { name: IconName::Check, size: 13 } div { "On import this becomes a standard CF security policy — " strong { "{rule.draft.assertions.len()} config assertions" } " and " strong { "{rule.draft.evidence_requirements.len()} evidence items" } " for ATO. Editable later from the Policies view." } }
+            details { class: "refine-advanced", summary { "Advanced import options" }, div { class: "refine-advanced-body", ImplementationChoice { rules: props.rules, index, existing_policies: props.existing_policies.clone() } if matches!(rule.draft.action, RefinedRuleAction::Unbound) { div { class: "sd-callout sd-callout-info", "This requirement will be imported without a Crystal Forge implementation unless you add an assertion or evidence source." } } if matches!(rule.draft.action, RefinedRuleAction::Opaque) { div { class: "sd-callout sd-callout-info", "The original XCCDF rule and check content will be preserved without execution." } } textarea { class: "input focus-ring", rows: 2, placeholder: "Description", value: "{rule.draft.local_description}", oninput: move |e| { props.rules.write()[index].draft.local_description = e.value(); } } textarea { class: "input focus-ring", rows: 2, placeholder: "Rationale", value: "{rule.draft.local_rationale}", oninput: move |e| { props.rules.write()[index].draft.local_rationale = e.value(); } } textarea { class: "input focus-ring", rows: 2, placeholder: "Implementation note", value: "{rule.draft.implementation_note}", oninput: move |e| { props.rules.write()[index].draft.implementation_note = e.value(); } } } }
         }
-        div { class: "modal-foot", style: "justify-content:space-between;", div { style: "display:flex;gap:8px;", button { class: "btn btn-ghost", "data-testid": "xccdf-refine-back", onclick: move |_| if position == 0 { props.on_back.call(()) } else { props.cursor.set(position - 1) }, Icon { name: IconName::ArrowLeft, size: 13 }, if position == 0 { " Back to list" } else { " Previous" } }, button { class: "btn btn-ghost", style: "color:#f87171;", "data-testid": "xccdf-refine-exclude", onclick: move |_| { let mut remaining = selected.len().saturating_sub(1); props.rules.write()[index].selected = false; if remaining == 0 { props.on_back.call(()); } else { if position >= remaining { remaining = remaining.saturating_sub(1); } props.cursor.set(position.min(remaining)); } }, "Exclude" } }, div { style: "display:flex;gap:8px;align-items:center;", span { class: "mono", "data-testid": "xccdf-refine-position", "{position + 1} / {selected.len()}" }, if position + 1 < selected.len() { button { class: "btn btn-primary", "data-testid": "xccdf-refine-next", onclick: move |_| props.cursor.set(position + 1), "Next ", Icon { name: IconName::ChevronRight, size: 13 } } } else { button { class: "btn btn-primary", disabled: !props.rules.read().iter().filter(|r| r.selected).all(RefinedStigRule::is_valid), onclick: move |_| props.on_review.call(()), "Review import ", Icon { name: IconName::ChevronRight, size: 13 } } } } }
-        }
+        div { class: "modal-foot refine-modal-foot", div { class: "refine-footer-actions", button { class: "btn btn-ghost focus-ring", "data-testid": "xccdf-refine-back", onclick: move |_| if position == 0 { props.on_back.call(()) } else { props.cursor.set(position - 1) }, Icon { name: IconName::ArrowLeft, size: 13 }, if position == 0 { " Back to list" } else { " Previous" } }, button { class: "btn btn-ghost focus-ring refine-exclude", title: "Exclude this control from the bundle", "data-testid": "xccdf-refine-exclude", onclick: move |_| { let mut remaining = selected.len().saturating_sub(1); props.rules.write()[index].selected = false; if remaining == 0 { props.on_back.call(()); } else { if position >= remaining { remaining = remaining.saturating_sub(1); } props.cursor.set(position.min(remaining)); } }, "Exclude" } }, div { class: "refine-footer-progress", span { class: "refine-position", "data-testid": "xccdf-refine-position", "{position + 1} / {selected.len()}" }, if position + 1 < selected.len() { button { class: "btn btn-primary focus-ring", "data-testid": "xccdf-refine-next", onclick: move |_| props.cursor.set(position + 1), "Next ", Icon { name: IconName::ChevronRight, size: 13 } } } else { button { class: "btn btn-primary focus-ring", disabled: !props.rules.read().iter().filter(|r| r.selected).all(RefinedStigRule::is_valid), onclick: move |_| props.on_review.call(()), "Review import ", Icon { name: IconName::ChevronRight, size: 13 } } } } }
     }
 }
 
 fn source_identity(source: &SourceStigRule) -> String {
-    source.stig_id.clone().filter(|id| id.starts_with("V-")).unwrap_or_else(|| source.rule_id.clone())
+    source.stig_id.clone().filter(|id| id.starts_with("V-"))
+        .or_else(|| source.identifiers.iter().find(|id| id.starts_with("V-")).cloned())
+        .or_else(|| source.group_id.clone().filter(|id| id.starts_with("V-")))
+        .unwrap_or_else(|| source.rule_id.clone())
 }
 
 #[derive(Props, Clone, PartialEq)]
@@ -150,13 +148,11 @@ pub fn ImportReview(props: ImportReviewProps) -> Element {
     let manual = selected.iter().filter(|rule| matches!(rule.draft.action, RefinedRuleAction::Manual)).count();
     let unresolved = selected.iter().filter(|rule| matches!(rule.draft.action, RefinedRuleAction::Unbound | RefinedRuleAction::Opaque)).count();
     rsx! {
-        ImportWorkflowModal {
         div { class: "modal-head", h2 { "Review policy choices" }, p { class: "page-subtitle", "Confirm the selected policy mappings before creating the draft bundle." } }
         div { class: "modal-body",
             div { class: "stat-strip", div { class: "stat", div { class: "stat-label", "Selected" } div { class: "stat-value", "{selected.len()}" } } div { class: "stat", div { class: "stat-label", "Native" } div { class: "stat-value", "{native}" } } div { class: "stat", div { class: "stat-label", "Manual" } div { class: "stat-value", "{manual}" } } div { class: "stat", div { class: "stat-label", "Unresolved" } div { class: "stat-value", "{unresolved}" } } }
             if unresolved > 0 { div { class: "sd-callout sd-callout-warn", "Unbound and opaque controls will remain visible but will not be executable." } }
             div { style: "display:grid;gap:6px;margin-top:12px;", for rule in selected.iter() { div { class: "card", style: "padding:9px 11px;display:flex;gap:10px;align-items:center;", span { class: "mono", style: "font-size:10px;", "{rule.source.stig_id.clone().unwrap_or_else(|| rule.source.rule_id.clone())}" } div { style: "flex:1;min-width:0;", strong { "{rule.draft.local_name}" } div { class: "text-xs text-gray-500", "{action_label(&rule.draft.action)}" } } } } }
-        }
         div { class: "modal-foot", style: "justify-content:space-between;", button { class: "btn btn-ghost", onclick: move |_| props.on_back.call(()), "Back to refine" } button { class: "btn btn-primary", disabled: selected.is_empty(), onclick: move |_| props.on_confirm.call(()), "Create draft bundle" } }
         }
     }
@@ -170,11 +166,28 @@ fn action_label(action: &RefinedRuleAction) -> &'static str {
 fn SourceStigCard(rule: SourceStigRule) -> Element {
     let severity = rule.source_severity.as_deref().unwrap_or("medium");
     let cat = match severity { "high" => "CAT I", "low" => "CAT III", _ => "CAT II" };
-    let stig_id = rule.stig_id.clone().unwrap_or_else(|| rule.rule_id.clone());
+    let stig_id = source_identity(&rule);
     let title = rule.title.clone().unwrap_or_else(|| rule.rule_id.clone());
     let fix_text = rule.fix_text.clone();
+    let check_text = rule.checks.iter().filter_map(|check| check.inline_content.clone().or_else(|| check.selector.clone()).or_else(|| (!check.system.is_empty()).then(|| check.system.clone()))).collect::<Vec<_>>().join("\n\n");
     let references = rule.references.join(", ");
-    rsx! { div { class: "card", style: "padding:10px 12px;margin-top:8px;", div { style: "display:flex;gap:8px;align-items:center;font-size:10px;font-weight:700;letter-spacing:.08em;", Icon { name: IconName::Shield, size: 12 }, "SOURCE STIG", div { style: "flex:1;" }, span { class: "chip chip-unknown", "{cat}" } }, div { class: "mono", style: "font-size:10px;color:var(--cf-text-muted);margin-top:8px;", "{stig_id}" }, div { style: "font-weight:650;margin-top:3px;", "{title}" }, if let Some(description) = rule.description { p { style: "font-size:11px;color:var(--cf-text-secondary);white-space:pre-wrap;", "{description}" } }, if !rule.checks.is_empty() { for check in rule.checks.iter() { div { style: "margin-top:10px;font-size:11px;", strong { "Check system" }, div { class: "mono", style: "color:var(--cf-text-muted);", "{check.system}" }, if let Some(selector) = check.selector.as_ref() { div { style: "margin-top:4px;", strong { "External check reference" }, div { class: "mono", "{selector}" } } }, if let Some(content) = check.inline_content.as_ref() { div { style: "margin-top:4px;white-space:pre-wrap;", strong { "Manual fallback" }, p { "{content}" } } } } } }, if let Some(fix) = fix_text { div { style: "margin-top:10px;font-size:11px;white-space:pre-wrap;", strong { "Official fix" }, p { "{fix}" } } }, if !references.is_empty() { div { style: "margin-top:10px;font-size:10px;color:var(--cf-text-muted);", "References: {references}" } } } }
+    rsx! {
+        div { class: "refine-source-card", "data-testid": "xccdf-source-details",
+            div { class: "refine-source-card__head",
+                Icon { name: IconName::Shield, size: 12 }
+                span { class: "refine-source-label", "From the STIG" }
+                span { class: "mono refine-source-card__id", "{stig_id}" }
+                span { class: "refine-identity-spacer" }
+                span { class: "refine-cat severity-{severity}", "{cat}" }
+            }
+            div { class: "refine-source-card__body",
+                div { class: "refine-source-title", "{title}" }
+                if let Some(fix) = fix_text { div { div { class: "refine-source-section-label", "Official fix" } div { class: "refine-source-copy", "{fix}" } } }
+                if !check_text.is_empty() { div { div { class: "refine-source-section-label", "Official check" } div { class: "mono refine-source-copy", "{check_text}" } } }
+                if let Some(description) = rule.description { details { class: "refine-source-more", summary { "Additional source metadata" } p { "{description}" } if !references.is_empty() { p { class: "mono", "References: {references}" } } } }
+            }
+        }
+    }
 }
 
 #[component]
@@ -194,15 +207,15 @@ fn set_action(action: &mut RefinedRuleAction, key: &str) { *action = match key {
 fn AssertionSection(rules: Signal<Vec<RefinedStigRule>>, index: usize) -> Element {
     let count = rules.read()[index].draft.assertions.len();
     rsx! {
-        section { style: "border-top:1px solid var(--cf-divider);padding-top:12px;margin-top:12px;",
-            div { style: "display:flex;align-items:center;gap:7px;", strong { "NixOS config assertions" }, span { class: "chip", style: "font-size:9px;color:var(--cf-brand-purple);", "EVAL-TIME" } }
-            p { style: "font-size:11px;color:var(--cf-text-muted);", "Asserted against the rendered config during Nix evaluation." }
-            if count == 0 { div { class: "sd-callout sd-callout-warn", style: "border-style:dashed;", "No assertion could be inferred from this STIG control. Add one below." } }
+        section { class: "refine-section",
+            div { class: "refine-section-label", "NixOS config assertions" span { class: "refine-eval-badge", "EVAL-TIME" } }
+            p { class: "refine-helper", "Asserted against the rendered config during " span { class: "mono", "nix flake check" } " — fails the build before it deploys. These become the policy's rules. " if count == 0 { "Nothing was inferred for this control — add the assertion that proves it." } else { "Inferred from the STIG; review before importing." } }
+            if count == 0 { div { class: "refine-assertion-empty", Icon { name: IconName::Warn, size: 13 } div { "No assertion could be inferred from this STIG control. Add one — assert a NixOS option value, assert a package is installed, or write a custom nix expression — or leave empty to rely on runtime evidence alone." } } }
             for (assertion_index, assertion) in rules.read()[index].draft.assertions.iter().cloned().enumerate() {
                 AssertionEditor { rules, index, assertion_index, assertion }
             }
             select {
-                class: "input focus-ring",
+                class: "input focus-ring refine-add-assertion",
                 value: "",
                 onchange: move |e| {
                     let draft = match e.value().as_str() {
@@ -210,7 +223,9 @@ fn AssertionSection(rules: Signal<Vec<RefinedStigRule>>, index: usize) -> Elemen
                         "packages" => PolicyAssertionDraft::PackagesInstalled { packages: vec![], failure_message: "Required package is not installed".into(), strict: true },
                         _ => PolicyAssertionDraft::CustomExpression { field_name: format!("customAssertion{}", count + 1), expression: String::new(), failure_message: "Custom assertion failed".into(), strict: true },
                     };
-                    rules.write()[index].draft.assertions.push(draft);
+                    let mut all_rules = rules.write();
+                    all_rules[index].draft.action = RefinedRuleAction::Native;
+                    all_rules[index].draft.assertions.push(draft);
                 },
                 option { value: "", "＋ Add assertion…" }
                 option { value: "option", "Assert a NixOS option value" }
@@ -225,34 +240,29 @@ fn AssertionSection(rules: Signal<Vec<RefinedStigRule>>, index: usize) -> Elemen
 fn EvidenceSection(rules: Signal<Vec<RefinedStigRule>>, index: usize) -> Element {
     let count = rules.read()[index].draft.evidence_requirements.len();
     rsx! {
-        section { style: "border-top:1px solid var(--cf-divider);padding-top:12px;margin-top:12px;",
-            h3 { style: "font-size:12px;margin:0;", "Evidence for ATO · {count}" }
-            p { style: "font-size:11px;color:var(--cf-text-muted);", "Artifacts collected at deploy and runtime to prove the control to an assessor." }
+        section { class: "refine-section",
+            div { class: "refine-section-label", "Evidence for ATO " span { class: "refine-count", "· {count}" } }
+            p { class: "refine-helper", "Artifacts collected at deploy and runtime to prove the control to an assessor. Seeded from the STIG check." }
             for (evidence_index, evidence) in rules.read()[index].draft.evidence_requirements.iter().cloned().enumerate() {
                 EvidenceEditor { rules, index, evidence_index, evidence }
             }
-            select {
-                class: "input focus-ring",
-                value: "",
-                onchange: move |e| {
-                    let item = match e.value().as_str() {
-                        "command" => EvidenceRequirementDraft::Command { command: String::new(), expected_output: String::new() },
-                        "file" => EvidenceRequirementDraft::File { path: String::new(), expected_content: String::new() },
-                        "unit" => EvidenceRequirementDraft::UnitState { unit: String::new(), state: "active".into() },
-                        "log" => EvidenceRequirementDraft::Log { source: "journald".into(), unit: None, pattern: String::new() },
-                        _ => EvidenceRequirementDraft::Attestation { description: String::new() },
-                    };
-                    rules.write()[index].draft.evidence_requirements.push(item);
-                },
-                option { value: "", "＋ Add evidence source…" }
-                option { value: "command", "Command output" }
-                option { value: "file", "File contents" }
-                option { value: "unit", "systemd unit state" }
-                option { value: "log", "Log excerpt" }
-                option { value: "attestation", "Store-path / signed attestation" }
+            div { class: "refine-evidence-actions",
+                button { class: "btn btn-ghost focus-ring", onclick: move |_| push_evidence(&mut rules, index, EvidenceRequirementDraft::Command { command: String::new(), expected_output: String::new() }), Icon { name: IconName::Plus, size: 10 } " Command output" }
+                button { class: "btn btn-ghost focus-ring", onclick: move |_| push_evidence(&mut rules, index, EvidenceRequirementDraft::File { path: String::new(), expected_content: String::new() }), Icon { name: IconName::Plus, size: 10 } " File contents" }
+                button { class: "btn btn-ghost focus-ring", onclick: move |_| push_evidence(&mut rules, index, EvidenceRequirementDraft::UnitState { unit: String::new(), state: "active".into() }), Icon { name: IconName::Plus, size: 10 } " systemd unit state" }
+                button { class: "btn btn-ghost focus-ring", onclick: move |_| push_evidence(&mut rules, index, EvidenceRequirementDraft::Log { source: "journald".into(), unit: None, pattern: String::new() }), Icon { name: IconName::Plus, size: 10 } " Log excerpt" }
+                button { class: "btn btn-ghost focus-ring", onclick: move |_| push_evidence(&mut rules, index, EvidenceRequirementDraft::Attestation { description: String::new() }), Icon { name: IconName::Plus, size: 10 } " Store-path attestation" }
             }
         }
     }
+}
+
+fn push_evidence(rules: &mut Signal<Vec<RefinedStigRule>>, index: usize, evidence: EvidenceRequirementDraft) {
+    let mut all_rules = rules.write();
+    if matches!(all_rules[index].draft.action, RefinedRuleAction::Unbound) {
+        all_rules[index].draft.action = RefinedRuleAction::Manual;
+    }
+    all_rules[index].draft.evidence_requirements.push(evidence);
 }
 
 #[derive(Props, Clone, PartialEq)]
@@ -277,32 +287,42 @@ fn AssertionEditor(props: AssertionEditorProps) -> Element {
         | PolicyAssertionDraft::CustomExpression { failure_message, .. } => failure_message.clone(),
     };
     rsx! {
-        div { class: "card", style: "padding:10px;margin:8px 0;display:grid;gap:7px;",
-            div { style: "display:flex;justify-content:space-between;align-items:center;",
-                strong { style: "font-size:11px;", "Assertion {assertion_index + 1}" }
-                button { class: "btn btn-ghost xs", onclick: remove, "Remove" }
-            }
-            match props.assertion.clone() {
+        div { class: "refine-assertion-card",
+            div { class: "refine-inferred-badge", "inferred · review" }
+            div { class: "refine-editor-row",
+            div { class: "refine-editor-content", match props.assertion.clone() {
                 PolicyAssertionDraft::NixosOption { path, operator, expected_value, .. } => rsx! {
-                    input { class: "input focus-ring mono", placeholder: "networking.firewall.enable", value: "{path}", oninput: move |e| { if let PolicyAssertionDraft::NixosOption { path, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *path = e.value(); } } }
-                    div { style: "display:grid;grid-template-columns:100px 1fr;gap:7px;",
-                        select { class: "input focus-ring", value: "{operator.as_str()}", onchange: move |e| { if let PolicyAssertionDraft::NixosOption { operator, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *operator = match e.value().as_str() { "!=" => ComparisonOperator::NotEqual, ">=" => ComparisonOperator::GreaterOrEqual, "<=" => ComparisonOperator::LessOrEqual, _ => ComparisonOperator::Equal }; } }, option { value: "==", "==" } option { value: "!=", "!=" } option { value: ">=", ">=" } option { value: "<=", "<=" } }
-                        input { class: "input focus-ring mono", placeholder: "expected value", value: "{typed_value_text(&expected_value)}", oninput: move |e| { if let PolicyAssertionDraft::NixosOption { expected_value, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expected_value = TypedPolicyValue::String(e.value()); } } }
-                    }
+                    div { class: "refine-editor-title", Icon { name: IconName::File, size: 11 } " Assert a NixOS option value" }
+                    div { class: "refine-option-row", input { class: "input focus-ring mono", placeholder: "services.openssh.settings.PermitRootLogin", value: "{path}", oninput: move |e| { if let PolicyAssertionDraft::NixosOption { path, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *path = e.value(); } } } select { class: "input focus-ring mono refine-operator", value: "{operator.as_str()}", onchange: move |e| { if let PolicyAssertionDraft::NixosOption { operator, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *operator = match e.value().as_str() { "!=" => ComparisonOperator::NotEqual, ">=" => ComparisonOperator::GreaterOrEqual, "<=" => ComparisonOperator::LessOrEqual, _ => ComparisonOperator::Equal }; } }, option { value: "==", "==" } option { value: "!=", "!=" } option { value: ">=", "≥" } option { value: "<=", "≤" } } input { class: "input focus-ring mono refine-expected", placeholder: "true", value: "{typed_value_text(&expected_value)}", oninput: move |e| { if let PolicyAssertionDraft::NixosOption { expected_value, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expected_value = TypedPolicyValue::String(e.value()); } } } }
+                    div { class: "mono refine-expression-hint", "→ config.{path} {operator.as_str()} {typed_value_text(&expected_value)}" }
+                    input { class: "input focus-ring refine-failure", placeholder: "Failure message shown when assertion fails", value: "{failure}", oninput: move |e| { set_assertion_failure(&mut rules, index, assertion_index, e.value()); } }
                 },
                 PolicyAssertionDraft::PackagesInstalled { packages, .. } => {
                     let packages_text = packages.join(", ");
                     rsx! {
-                        input { class: "input focus-ring mono", placeholder: "packages separated by commas", value: "{packages_text}", oninput: move |e| { if let PolicyAssertionDraft::PackagesInstalled { packages, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *packages = e.value().split(',').map(|part| part.trim().to_string()).filter(|part| !part.is_empty()).collect(); } } }
+                        div { class: "refine-editor-title", Icon { name: IconName::File, size: 11 } " Assert these packages are in the system closure" }
+                        input { class: "input focus-ring mono", placeholder: "openssh, auditd, aide", value: "{packages_text}", oninput: move |e| { if let PolicyAssertionDraft::PackagesInstalled { packages, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *packages = e.value().split(',').map(|part| part.trim().to_string()).filter(|part| !part.is_empty()).collect(); } } }
+                        div { class: "mono refine-expression-hint", "→ builtins.any (p: p.pname == \"…\") config.environment.systemPackages" }
+                        input { class: "input focus-ring refine-failure", placeholder: "Failure message shown when assertion fails", value: "{failure}", oninput: move |e| { set_assertion_failure(&mut rules, index, assertion_index, e.value()); } }
                     }
                 },
-                PolicyAssertionDraft::CustomExpression { field_name, expression, .. } => rsx! {
-                    input { class: "input focus-ring mono", placeholder: "field name", value: "{field_name}", oninput: move |e| { if let PolicyAssertionDraft::CustomExpression { field_name, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *field_name = e.value(); } } }
-                    textarea { class: "input focus-ring mono", rows: 2, placeholder: "cfg.config...", value: "{expression}", oninput: move |e| { if let PolicyAssertionDraft::CustomExpression { expression, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expression = e.value(); } } }
+                PolicyAssertionDraft::CustomExpression { expression, .. } => rsx! {
+                    div { class: "refine-editor-title", Icon { name: IconName::Terminal, size: 11 } " Custom nix expression (must evaluate to " span { class: "mono", "true" } ")" }
+                    textarea { class: "input focus-ring mono", rows: 2, placeholder: "cfg.config.networking.firewall.enable == true", value: "{expression}", oninput: move |e| { if let PolicyAssertionDraft::CustomExpression { expression, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expression = e.value(); } } }
+                    input { class: "input focus-ring refine-failure", placeholder: "Failure message shown when assertion fails", value: "{failure}", oninput: move |e| { set_assertion_failure(&mut rules, index, assertion_index, e.value()); } }
                 },
+            } }
+            button { class: "btn-icon focus-ring refine-remove", aria_label: "Remove assertion", title: "Remove", onclick: remove, Icon { name: IconName::X, size: 13 } }
             }
-            input { class: "input focus-ring", placeholder: "Failure message", value: "{failure}", oninput: move |e| { match &mut rules.write()[index].draft.assertions[assertion_index] { PolicyAssertionDraft::NixosOption { failure_message, .. } | PolicyAssertionDraft::PackagesInstalled { failure_message, .. } | PolicyAssertionDraft::CustomExpression { failure_message, .. } => *failure_message = e.value() } } }
         }
+    }
+}
+
+fn set_assertion_failure(rules: &mut Signal<Vec<RefinedStigRule>>, index: usize, assertion_index: usize, value: String) {
+    match &mut rules.write()[index].draft.assertions[assertion_index] {
+        PolicyAssertionDraft::NixosOption { failure_message, .. }
+        | PolicyAssertionDraft::PackagesInstalled { failure_message, .. }
+        | PolicyAssertionDraft::CustomExpression { failure_message, .. } => *failure_message = value,
     }
 }
 
@@ -322,15 +342,22 @@ fn EvidenceEditor(props: EvidenceEditorProps) -> Element {
     let remove = move |_| {
         rules.write()[index].draft.evidence_requirements.remove(evidence_index);
     };
+    let kind = match &props.evidence {
+        EvidenceRequirementDraft::Command { .. } => "command",
+        EvidenceRequirementDraft::File { .. } => "file",
+        EvidenceRequirementDraft::UnitState { .. } => "unit state",
+        EvidenceRequirementDraft::Log { .. } => "log",
+        EvidenceRequirementDraft::Attestation { .. } => "attestation",
+    };
     rsx! {
-        div { class: "card", style: "padding:10px;margin:8px 0;display:grid;gap:7px;",
-            div { style: "display:flex;justify-content:space-between;align-items:center;", strong { style: "font-size:11px;", "Evidence {evidence_index + 1}" } button { class: "btn btn-ghost xs", onclick: remove, "Remove" } }
+        div { class: "refine-evidence-card",
+            div { class: "refine-evidence-head", span { class: "chip chip-unknown", "{kind}" } span { class: "refine-identity-spacer" } button { class: "btn-icon focus-ring refine-remove", aria_label: "Remove evidence", title: "Remove", onclick: remove, Icon { name: IconName::X, size: 13 } } }
             match props.evidence.clone() {
-                EvidenceRequirementDraft::Command { command, expected_output } => rsx! { input { class: "input focus-ring mono", placeholder: "command", value: "{command}", oninput: move |e| { if let EvidenceRequirementDraft::Command { command, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *command = e.value(); } } } input { class: "input focus-ring mono", placeholder: "expected output", value: "{expected_output}", oninput: move |e| { if let EvidenceRequirementDraft::Command { expected_output, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *expected_output = e.value(); } } } },
-                EvidenceRequirementDraft::File { path, expected_content } => rsx! { input { class: "input focus-ring mono", placeholder: "/etc/example", value: "{path}", oninput: move |e| { if let EvidenceRequirementDraft::File { path, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *path = e.value(); } } } textarea { class: "input focus-ring mono", rows: 2, placeholder: "expected content", value: "{expected_content}", oninput: move |e| { if let EvidenceRequirementDraft::File { expected_content, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *expected_content = e.value(); } } } },
-                EvidenceRequirementDraft::UnitState { unit, state } => rsx! { input { class: "input focus-ring mono", placeholder: "unit.service", value: "{unit}", oninput: move |e| { if let EvidenceRequirementDraft::UnitState { unit, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *unit = e.value(); } } } input { class: "input focus-ring", placeholder: "active", value: "{state}", oninput: move |e| { if let EvidenceRequirementDraft::UnitState { state, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *state = e.value(); } } } },
-                EvidenceRequirementDraft::Log { source, unit, pattern } => rsx! { input { class: "input focus-ring", placeholder: "journald", value: "{source}", oninput: move |e| { if let EvidenceRequirementDraft::Log { source, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *source = e.value(); } } } input { class: "input focus-ring mono", placeholder: "pattern", value: "{pattern}", oninput: move |e| { if let EvidenceRequirementDraft::Log { pattern, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *pattern = e.value(); } } } input { class: "input focus-ring mono", placeholder: "unit (optional)", value: "{unit.clone().unwrap_or_default()}", oninput: move |e| { if let EvidenceRequirementDraft::Log { unit, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *unit = (!e.value().trim().is_empty()).then(|| e.value()); } } } },
-                EvidenceRequirementDraft::Attestation { description } => rsx! { textarea { class: "input focus-ring", rows: 2, placeholder: "attestation description", value: "{description}", oninput: move |e| { if let EvidenceRequirementDraft::Attestation { description } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *description = e.value(); } } } },
+                EvidenceRequirementDraft::Command { command, expected_output } => rsx! { label { class: "refine-evidence-label", "command" } input { class: "input focus-ring mono refine-evidence-input", placeholder: "sshd -T | grep …", value: "{command}", oninput: move |e| { if let EvidenceRequirementDraft::Command { command, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *command = e.value(); } } } label { class: "refine-evidence-label", "expected output" } input { class: "input focus-ring mono refine-evidence-input", placeholder: "compliant", value: "{expected_output}", oninput: move |e| { if let EvidenceRequirementDraft::Command { expected_output, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *expected_output = e.value(); } } } },
+                EvidenceRequirementDraft::File { path, expected_content } => rsx! { label { class: "refine-evidence-label", "path" } input { class: "input focus-ring mono refine-evidence-input", placeholder: "/etc/issue", value: "{path}", oninput: move |e| { if let EvidenceRequirementDraft::File { path, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *path = e.value(); } } } label { class: "refine-evidence-label", "must contain" } textarea { class: "input focus-ring mono refine-evidence-input", rows: 2, placeholder: "banner text", value: "{expected_content}", oninput: move |e| { if let EvidenceRequirementDraft::File { expected_content, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *expected_content = e.value(); } } } },
+                EvidenceRequirementDraft::UnitState { unit, state } => rsx! { label { class: "refine-evidence-label", "unit" } input { class: "input focus-ring mono refine-evidence-input", placeholder: "auditd.service", value: "{unit}", oninput: move |e| { if let EvidenceRequirementDraft::UnitState { unit, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *unit = e.value(); } } } label { class: "refine-evidence-label", "state" } input { class: "input focus-ring mono refine-evidence-input", placeholder: "active", value: "{state}", oninput: move |e| { if let EvidenceRequirementDraft::UnitState { state, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *state = e.value(); } } } },
+                EvidenceRequirementDraft::Log { source, unit, pattern } => rsx! { label { class: "refine-evidence-label", "unit" } input { class: "input focus-ring mono refine-evidence-input", placeholder: "auditd.service", value: "{unit.clone().unwrap_or_default()}", oninput: move |e| { if let EvidenceRequirementDraft::Log { unit, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *unit = (!e.value().trim().is_empty()).then(|| e.value()); } } } label { class: "refine-evidence-label", "log line matches" } input { class: "input focus-ring mono refine-evidence-input", placeholder: "audit: rules loaded", value: "{pattern}", oninput: move |e| { if let EvidenceRequirementDraft::Log { pattern, .. } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *pattern = e.value(); } } } input { type: "hidden", value: "{source}" } },
+                EvidenceRequirementDraft::Attestation { description } => rsx! { label { class: "refine-evidence-label", "agent reports" } textarea { class: "input focus-ring mono refine-evidence-input", rows: 2, placeholder: "booted generation / store-path hash", value: "{description}", oninput: move |e| { if let EvidenceRequirementDraft::Attestation { description } = &mut rules.write()[index].draft.evidence_requirements[evidence_index] { *description = e.value(); } } } },
             }
         }
     }
@@ -353,4 +380,16 @@ mod tests {
     fn source_and_local_fields_are_independent() { let rule = RefinedStigRule { source: SourceStigRule { rule_id: "V-1".into(), group_id: None, stig_id: Some("V-1".into()), title: Some("Official".into()), description: Some("Source".into()), source_severity: Some("high".into()), fix_text: Some("Fix".into()), checks: vec![], identifiers: vec![], references: vec![], platforms: vec![], rule_order: 0 }, draft: RefinedPolicyDraft { local_name: "Local".into(), local_description: "Local description".into(), local_severity: "low".into(), local_rationale: "Local rationale".into(), implementation_note: String::new(), action: RefinedRuleAction::Unbound, assertion_mode: "all".into(), assertions: vec![], evidence_requirements: vec![] }, selected: true }; assert_eq!(rule.source.source_severity.as_deref(), Some("high")); assert_eq!(rule.source.fix_text.as_deref(), Some("Fix")); assert_eq!(rule.source.description.as_deref(), Some("Source")); }
     #[test]
     fn slugify_normalizes_punctuation() { assert_eq!(slugify("V-268/089 (STIG)"), "v-268-089-stig"); }
+    #[test]
+    fn source_identity_prefers_vulnerability_group_over_rule_id() {
+        let source = SourceStigRule { rule_id: "SV-268089r1_rule".into(), group_id: Some("V-268089".into()), stig_id: None, title: None, description: None, source_severity: None, fix_text: None, checks: vec![], identifiers: vec![], references: vec![], platforms: vec![], rule_order: 0 };
+        assert_eq!(source_identity(&source), "V-268089");
+    }
+    #[test]
+    fn package_assertion_serializes_required_package_names() {
+        let assertion = PolicyAssertionDraft::PackagesInstalled { packages: vec!["openssh".into(), "auditd".into()], failure_message: "missing".into(), strict: true };
+        let rule = assertion.to_rule(1);
+        assert!(rule.expression.contains("[ \"openssh\" \"auditd\" ]"));
+        assert!(rule.expression.contains("builtins.all (required:"));
+    }
 }
