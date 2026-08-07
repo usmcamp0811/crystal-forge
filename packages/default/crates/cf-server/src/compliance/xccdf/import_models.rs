@@ -29,24 +29,8 @@ pub struct XccdfImportPlan {
     pub selected_rule_ids: Vec<String>,
     /// One action per selected rule.
     pub rule_actions: Vec<XccdfRuleImportAction>,
-    /// Optional local presentation changes keyed by source rule ID. Source
-    /// benchmark metadata remains preserved separately in compliance_metadata.
-    #[serde(default)]
-    pub rule_customizations: Vec<XccdfRuleCustomization>,
     /// Metadata for the draft bundle to create.
     pub bundle: ImportedBundlePlan,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct XccdfRuleCustomization {
-    pub rule_id: String,
-    pub policy_name: Option<String>,
-    pub policy_description: Option<String>,
-    pub implementation_note: Option<String>,
-    #[serde(default)]
-    pub policy_severity: Option<String>,
-    #[serde(default)]
-    pub policy_rationale: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -166,6 +150,16 @@ impl XccdfRuleImportAction {
             Self::MapExisting { .. } => Some("mapped"),
         }
     }
+
+    pub fn customization(&self) -> Option<&ImportedPolicyCustomization> {
+        match self {
+            Self::CreateNativeCustom { customization, .. }
+            | Self::CreateManual { customization, .. }
+            | Self::CreateUnbound { customization, .. }
+            | Self::PreserveOpaque { customization, .. } => Some(customization),
+            Self::MapExisting { .. } | Self::Exclude { .. } => None,
+        }
+    }
 }
 
 // ── Validated import plan ─────────────────────────────────────────────────────
@@ -178,7 +172,6 @@ pub struct ValidatedImportPlan {
     pub bundle: ImportedBundlePlan,
     /// Non-excluded rules in document order, each paired with its action.
     pub rules_to_import: Vec<(ParsedRule, XccdfRuleImportAction)>,
-    pub rule_customizations: Vec<XccdfRuleCustomization>,
 }
 
 // ── Validation errors ─────────────────────────────────────────────────────────

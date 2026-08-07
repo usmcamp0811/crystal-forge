@@ -1420,18 +1420,6 @@ pub enum ImportedEvidenceRequirement {
     Attestation { description: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct XccdfRuleCustomization {
-    pub rule_id: String,
-    pub policy_name: Option<String>,
-    pub policy_description: Option<String>,
-    pub implementation_note: Option<String>,
-    #[serde(default)]
-    pub policy_severity: Option<String>,
-    #[serde(default)]
-    pub policy_rationale: Option<String>,
-}
-
 /// Bundle metadata included in the XCCDF import plan.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImportedBundlePlan {
@@ -1450,8 +1438,6 @@ pub struct XccdfImportPlan {
     pub selected_profile_id: Option<String>,
     pub selected_rule_ids: Vec<String>,
     pub rule_actions: Vec<XccdfRuleImportAction>,
-    #[serde(default)]
-    pub rule_customizations: Vec<XccdfRuleCustomization>,
     pub bundle: ImportedBundlePlan,
 }
 

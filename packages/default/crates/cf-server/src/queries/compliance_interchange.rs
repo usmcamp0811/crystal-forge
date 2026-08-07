@@ -1117,7 +1117,6 @@ mod tests {
                     evidence_requirements: Vec::new(),
                 })
                 .collect(),
-            rule_customizations: Vec::new(),
             bundle: ImportedBundlePlan {
                 name: "Test Import Bundle".into(),
                 framework: "XCCDF-TEST".into(),
@@ -1490,7 +1489,6 @@ mod tests {
                     rule_id: "xccdf_test_rule_002".into(),
                 },
             ],
-            rule_customizations: Vec::new(),
             bundle: ImportedBundlePlan {
                 name: "Partial Import Bundle".into(),
                 framework: "XCCDF-TEST".into(),

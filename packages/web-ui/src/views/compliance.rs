@@ -15,7 +15,6 @@ use crate::api::models::{
     XccdfImportResponse,
     XccdfPreviewResponse, XccdfRuleImportAction, ImportedPolicyCustomization,
     ImportedCustomCheck, ImportedCustomCheckRule, ImportedEvidenceRequirement,
-    XccdfRuleCustomization,
 };
 use crate::components::compliance::{
     BundleCatalog, BundleHeader, EvidenceDrawer, ScoreStrip, SystemsMatrix,
@@ -1467,21 +1466,6 @@ fn import_action_from_rule(rule: &StigRule) -> XccdfRuleImportAction {
     }
 }
 
-fn import_customizations_from_rules(rules: &[StigRule]) -> Vec<XccdfRuleCustomization> {
-    rules
-        .iter()
-        .filter(|rule| rule.selected)
-        .map(|rule| XccdfRuleCustomization {
-            rule_id: rule.rule_id.clone(),
-            policy_name: Some(rule.local_name.clone()),
-            policy_description: Some(rule.local_description.clone()),
-            implementation_note: (!rule.implementation_note.trim().is_empty())
-                .then(|| rule.implementation_note.clone()),
-            policy_severity: Some(rule.severity.clone()),
-            policy_rationale: (!rule.fixtext.trim().is_empty()).then(|| rule.fixtext.clone()),
-        })
-        .collect()
-}
 
 #[derive(Props, Clone, PartialEq)]
 struct ImportStigModalProps {
@@ -1973,7 +1957,6 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         selected_profile_id: None,
                                         selected_rule_ids,
                                         rule_actions,
-                                         rule_customizations: import_customizations_from_rules(&rules.read()),
                                         bundle: ImportedBundlePlan {
                                             name: bundle_name.read().trim().to_string(),
                                             framework: "xccdf".to_string(),
@@ -2341,7 +2324,6 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                         selected_profile_id: None,
                                                         selected_rule_ids,
                                                         rule_actions,
-                                                         rule_customizations: import_customizations_from_rules(&rules.read()),
                                                         bundle: ImportedBundlePlan {
                                                             name: bundle_name.read().trim().to_string(),
                                                             framework: "xccdf".to_string(),

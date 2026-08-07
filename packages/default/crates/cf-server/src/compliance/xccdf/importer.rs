@@ -283,7 +283,6 @@ pub fn validate_cf_native_document(
             description: bundle_canonical.description,
         },
         rules_to_import: rules,
-        rule_customizations: Vec::new(),
     };
     Ok((validated, records))
 }
@@ -392,16 +391,6 @@ pub fn validate_import_plan(
         }
     }
 
-    let mut customization_by_rule_id = HashSet::new();
-    for customization in &plan.rule_customizations {
-        if !seen_selected.contains(customization.rule_id.as_str()) {
-            return Err(ImportPlanError::action_for_unselected(&customization.rule_id));
-        }
-        if !customization_by_rule_id.insert(customization.rule_id.as_str()) {
-            return Err(ImportPlanError::action_duplicate(&customization.rule_id));
-        }
-    }
-
     // ── Every selected rule must have exactly one action ───────────────────
     for rule_id in &plan.selected_rule_ids {
         if !action_by_rule_id.contains_key(rule_id.as_str()) {
@@ -452,7 +441,6 @@ pub fn validate_import_plan(
         expected_sha256: plan.expected_sha256,
         bundle: plan.bundle,
         rules_to_import,
-        rule_customizations: plan.rule_customizations,
     })
 }
 
@@ -460,8 +448,6 @@ pub fn validate_import_plan(
 
 /// Build an [`ImportedPolicyRecord`] for each non-excluded rule.
 pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPolicyRecord> {
-    let customizations: HashMap<&str, &crate::compliance::xccdf::import_models::XccdfRuleCustomization> =
-        validated.rule_customizations.iter().map(|c| (c.rule_id.as_str(), c)).collect();
     validated
         .rules_to_import
         .iter()
@@ -469,7 +455,7 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
         .filter_map(|(order_in_selected, (rule, action))| {
             let impl_state = action.implementation_state()?.to_owned(); // None = Exclude
 
-            let customization = customizations.get(rule.id.as_str()).copied();
+            let customization = action.customization();
             let name = customization
                 .and_then(|c| c.policy_name.clone())
                 .filter(|t| !t.trim().is_empty())
@@ -576,7 +562,7 @@ mod tests {
     use super::*;
     use crate::compliance::xccdf::import_models::{
         ImportedBundlePlan, ImportedCustomCheck, ImportedCustomCheckRule,
-        XccdfImportPlan, XccdfRuleCustomization, XccdfRuleImportAction,
+        ImportedPolicyCustomization, XccdfImportPlan, XccdfRuleImportAction,
     };
     use crate::compliance::xccdf::models::{DocumentClass, Fidelity, ParsedXccdf};
 
@@ -647,7 +633,6 @@ mod tests {
                     evidence_requirements: Vec::new(),
                 })
                 .collect(),
-            rule_customizations: Vec::new(),
             bundle: ImportedBundlePlan {
                 name: "Test Bundle".into(),
                 framework: "TEST".into(),
@@ -734,13 +719,16 @@ mod tests {
     fn rule_customization_overrides_local_policy_fields() {
         let parsed = minimal_foreign_parsed(&["rule-1"]);
         let mut plan = valid_plan(&["rule-1"]);
-        plan.rule_customizations = vec![XccdfRuleCustomization {
+        plan.rule_actions = vec![XccdfRuleImportAction::CreateManual {
             rule_id: "rule-1".into(),
+            customization: ImportedPolicyCustomization {
             policy_name: Some("Local firewall policy".into()),
             policy_description: Some("Local control description".into()),
             implementation_note: Some("Reviewed by platform security".into()),
             policy_severity: Some("high".into()),
             policy_rationale: Some("Apply the approved remediation".into()),
+            },
+            evidence_requirements: Vec::new(),
         }];
 
         let validated = validate_import_plan(plan, &parsed).expect("customized plan is valid");
@@ -965,7 +953,6 @@ mod tests {
                     rule_id: "r2".into(),
                 },
             ],
-            rule_customizations: Vec::new(),
             bundle: ImportedBundlePlan {
                 name: "Bundle".into(),
                 framework: "FW".into(),
