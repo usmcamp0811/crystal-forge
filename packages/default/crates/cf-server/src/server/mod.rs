@@ -3,7 +3,7 @@ pub mod jobs;
 use crate::builder::run_cve_scan_loop;
 use crate::compliance::canonical::semantic_digest;
 use crate::compliance::resolver::{
-    AssignmentMode, ResolutionOutcome, resolve_system_effective_policies_for_evaluation,
+    AssignmentMode, ResolutionOutcome, resolve_systems_effective_policies_for_evaluation_batch,
 };
 use crate::config::{CrystalForgeConfig, FlakeConfig};
 use crate::deployment::spawn_deployment_policy_manager;
@@ -678,41 +678,42 @@ async fn load_policies_by_configuration_for_eval(
     let mut policy_version_ids = BTreeSet::new();
     let mut invalid_configurations = BTreeSet::new();
 
+    // Batch-resolve all systems in one transaction (~10 queries total),
+    // replacing the previous per-system N+1 loop of full resolver invocations.
+    let system_id_vec: Vec<uuid::Uuid> = system_rows.iter().map(|(id, _)| *id).collect();
+    let batch_outcomes =
+        resolve_systems_effective_policies_for_evaluation_batch(pool, &system_id_vec)
+            .await
+            .context("Batch policy resolution for evaluation failed")?;
+
     for (system_id, config_name) in system_rows {
         if invalid_configurations.contains(&config_name) {
             continue;
         }
 
-        let outcome = match resolve_system_effective_policies_for_evaluation(pool, system_id).await {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                warn!(
-                    %system_id,
-                    %config_name,
-                    error = %error,
-                    "Compliance policy resolution failed; evaluating configuration without compliance gates"
-                );
-                invalid_configurations.insert(config_name.clone());
-                resolved_systems.retain(|(_, existing_config, _)| existing_config != &config_name);
-                continue;
-            }
-        };
-        let effective = match outcome {
-            ResolutionOutcome::Resolved(set) => set.policies,
-            ResolutionOutcome::Conflict(conflicts) => {
-                warn!(
-                    %system_id,
-                    %config_name,
-                    conflicts = ?conflicts,
-                    "Compliance policy conflict; evaluating configuration without compliance gates"
-                );
-                invalid_configurations.insert(config_name.clone());
-                resolved_systems.retain(|(_, existing_config, _)| existing_config != &config_name);
-                continue;
+        let outcome = match batch_outcomes.get(&system_id) {
+            Some(o) => match o {
+                ResolutionOutcome::Resolved(set) => set.policies.clone(),
+                ResolutionOutcome::Conflict(conflicts) => {
+                    warn!(
+                        %system_id,
+                        %config_name,
+                        conflicts = ?conflicts,
+                        "Compliance policy conflict; evaluating configuration without compliance gates"
+                    );
+                    invalid_configurations.insert(config_name.clone());
+                    resolved_systems
+                        .retain(|(_, existing_config, _)| existing_config != &config_name);
+                    continue;
+                }
+            },
+            None => {
+                // System not in batch result — no active assignments (empty policy set).
+                vec![]
             }
         };
 
-        let enforced = effective
+        let enforced = outcome
             .into_iter()
             .filter(|policy| matches!(policy.effective_mode, AssignmentMode::Enforce))
             .collect::<Vec<_>>();

@@ -7,6 +7,7 @@
 pub mod export_models;
 pub mod import_models;
 pub mod importer;
+pub mod inference;
 pub mod models;
 pub mod package;
 pub mod parser;

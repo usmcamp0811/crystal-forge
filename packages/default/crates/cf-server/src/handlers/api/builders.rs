@@ -2030,6 +2030,9 @@ pub async fn get_next_job(
         return Err(StatusCode::NOT_FOUND);
     };
 
+    // Convenience alias for the session ID used in every dispatch-failure call.
+    let session_id = verified.builder_session_id.as_ref();
+
     // Embed the derivation build payload so the remote builder needs no DB access.
     let derivation =
         match crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
@@ -2037,43 +2040,34 @@ pub async fn get_next_job(
         {
             Ok(derivation) => derivation,
             Err(e) => {
-                tracing::error!(
-                    "Failed to load derivation {} for claimed job {}: {}",
-                    job.derivation_id,
-                    job.id,
-                    e
-                );
-                requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
-                    .await
-                    .map_err(|err| {
-                        tracing::error!(
-                            job_id = %job.id,
-                            "failed to requeue job after derivation load error: {err}"
-                        );
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })?;
-                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                let status = fail_claimed_job_at_dispatch(
+                    &state.pool,
+                    &job.id,
+                    &builder_id,
+                    session_id,
+                    "derivation_load",
+                    DispatchFailureClass::Transient,
+                    &format!("failed to load derivation {}: {e}", job.derivation_id),
+                )
+                .await;
+                return Err(status);
             }
         };
 
     let mut source = match verified_source_identity_for_derivation(&state.pool, &derivation).await {
         Ok(source) => source,
         Err(e) => {
-            tracing::error!(
-                job_id = %job.id,
-                derivation_id = derivation.id,
-                "failed to assemble verified source identity; requeueing claimed job: {e}"
-            );
-            requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
-                .await
-                .map_err(|err| {
-                    tracing::error!(
-                        job_id = %job.id,
-                        "failed to requeue job after source identity assembly error: {err}"
-                    );
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?;
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            let status = fail_claimed_job_at_dispatch(
+                &state.pool,
+                &job.id,
+                &builder_id,
+                session_id,
+                "source_identity",
+                DispatchFailureClass::Transient,
+                &format!("failed to assemble verified source identity: {e}"),
+            )
+            .await;
+            return Err(status);
         }
     };
     let expected_drv_path = derivation.derivation_path.clone();
@@ -2135,19 +2129,32 @@ pub async fn get_next_job(
             // don't corrupt the shared bare mirror.
             let _mirror_guard = mirror_lock(&mirror_id).lock_owned().await;
 
-            if ensure_server_mirror_has_commit(
+            if let Err(mirror_err) = ensure_server_mirror_has_commit(
                 &mirror_path,
                 &source_mut.repo_url,
                 &source_mut.commit_hash,
                 flake_creds.as_ref(),
             )
             .await
-            .is_err()
             {
-                requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
-                    .await
-                    .ok();
-                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                // Mirror fetch failure: the commit may not yet be pushed or the
+                // remote may be temporarily unavailable. Classify as Transient so
+                // the job gets a retry with backoff rather than re-entering the
+                // front of the queue immediately.
+                let status = fail_claimed_job_at_dispatch(
+                    &state.pool,
+                    &job.id,
+                    &builder_id,
+                    session_id,
+                    "source_mirror",
+                    DispatchFailureClass::Transient,
+                    &format!(
+                        "commit {} not available in server mirror for {}: {:?}",
+                        source_mut.commit_hash, source_mut.repo_url, mirror_err
+                    ),
+                )
+                .await;
+                return Err(status);
             }
 
             match generate_source_archive(&mirror_path, &archive_path).await {
@@ -2159,43 +2166,43 @@ pub async fn get_next_job(
                     ));
                     source_mut.archive_sha256 = Some(sha256);
                 }
-                Err(status) => {
-                    requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
-                        .await
-                        .ok();
+                Err(_archive_status) => {
+                    let status = fail_claimed_job_at_dispatch(
+                        &state.pool,
+                        &job.id,
+                        &builder_id,
+                        session_id,
+                        "source_archive",
+                        DispatchFailureClass::Transient,
+                        "failed to generate source archive from server mirror",
+                    )
+                    .await;
                     return Err(status);
                 }
             }
         } else {
-            // Source is None but delivery is ServerBundledArchive — bail.
-            tracing::error!(
-                job_id = %job.id,
-                derivation_id = derivation.id,
-                "ServerBundledArchive selected but source identity is missing; requeueing"
-            );
-            requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
-                .await
-                .map_err(|e| {
-                    tracing::error!(
-                        job_id = %job.id,
-                        "failed to requeue job after source identity assembly error: {e}"
-                    );
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?;
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            // Source is None but delivery is ServerBundledArchive — this is a
+            // permanent data problem: the job was queued without source metadata.
+            let status = fail_claimed_job_at_dispatch(
+                &state.pool,
+                &job.id,
+                &builder_id,
+                session_id,
+                "source_archive",
+                DispatchFailureClass::Deterministic,
+                "ServerBundledArchive selected but source identity is missing",
+            )
+            .await;
+            return Err(status);
         }
     }
 
     if execution_strategy == RemoteBuildExecutionStrategy::SourceReEvaluateVerified
         && (source.is_none() || expected_drv_path.is_none())
     {
-        tracing::error!(
-            job_id = %job.id,
-            derivation_id = derivation.id,
-            has_source = source.is_some(),
-            has_expected_drv_path = expected_drv_path.is_some(),
-            "claimed source-verified job is missing required manifest metadata; requeueing"
-        );
+        // Permanent data invariant violation: SourceReEvaluateVerified jobs
+        // must have both source identity and derivation_path. Classify as
+        // Deterministic so the job does not endlessly cycle through the queue.
         if source_archive_generated {
             cleanup_source_archive(
                 &state.pool,
@@ -2204,27 +2211,28 @@ pub async fn get_next_job(
             )
             .await;
         }
-        requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    job_id = %job.id,
-                    "failed to requeue job after manifest assembly error: {e}"
-                );
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        let status = fail_claimed_job_at_dispatch(
+            &state.pool,
+            &job.id,
+            &builder_id,
+            session_id,
+            "manifest_validation",
+            DispatchFailureClass::Deterministic,
+            &format!(
+                "SourceReEvaluateVerified job missing required metadata: \
+                 has_source={} has_expected_drv_path={}",
+                source.is_some(),
+                expected_drv_path.is_some(),
+            ),
+        )
+        .await;
+        return Err(status);
     }
 
     let cache_push = match builder_cache_push_config_for_derivation(&state.pool, &derivation).await
     {
         Ok(cache_push) => Some(cache_push),
-        Err(status) => {
-            tracing::error!(
-                job_id = %job.id,
-                derivation_id = derivation.id,
-                "failed to assemble builder cache-push config; requeueing claimed job"
-            );
+        Err(_cache_status) => {
             if source_archive_generated {
                 cleanup_source_archive(
                     &state.pool,
@@ -2233,15 +2241,16 @@ pub async fn get_next_job(
                 )
                 .await;
             }
-            requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
-                .await
-                .map_err(|e| {
-                    tracing::error!(
-                        job_id = %job.id,
-                        "failed to requeue job after cache-push config assembly error: {e}"
-                    );
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?;
+            let status = fail_claimed_job_at_dispatch(
+                &state.pool,
+                &job.id,
+                &builder_id,
+                session_id,
+                "cache_config",
+                DispatchFailureClass::Transient,
+                "failed to assemble builder cache-push config",
+            )
+            .await;
             return Err(status);
         }
     };
@@ -2251,13 +2260,12 @@ pub async fn get_next_job(
         .is_some_and(cache_push_config_contains_credentials)
         && !builder_https_verified_by_trusted_proxy(&state.server_config, &headers)
     {
-        tracing::error!(
+        tracing::warn!(
             job_id = %job.id,
             derivation_id = derivation.id,
             builder_id = %builder_id,
             trust_forwarded = state.server_config.trust_forwarded_builder_https,
-            "refusing to send cache push credentials: server.trust_forwarded_builder_https \
-             is false or forwarded-proto header does not assert HTTPS"
+            "refusing to send cache push credentials: connection is not verified HTTPS"
         );
         if source_archive_generated {
             cleanup_source_archive(
@@ -2267,16 +2275,19 @@ pub async fn get_next_job(
             )
             .await;
         }
-        requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    job_id = %job.id,
-                    "failed to requeue job after builder credential transport rejection: {e}"
-                );
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-        return Err(StatusCode::UPGRADE_REQUIRED);
+        // This is a transient configuration mismatch (server config / TLS termination),
+        // not a data problem with the job itself.
+        let status = fail_claimed_job_at_dispatch(
+            &state.pool,
+            &job.id,
+            &builder_id,
+            session_id,
+            "cache_config",
+            DispatchFailureClass::Transient,
+            "cache push credentials refused: builder connection is not verified HTTPS",
+        )
+        .await;
+        return Err(status);
     }
 
     let payload = crate::models::builders::BuildJobDerivation {
@@ -2302,29 +2313,104 @@ pub async fn get_next_job(
     }))
 }
 
-async fn requeue_claimed_job_after_manifest_error(
+/// Classification of a post-claim dispatch failure.
+///
+/// Used to drive the retry/backoff decision in `fail_claimed_job_at_dispatch`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchFailureClass {
+    /// Infrastructure failure that may resolve on the next poll cycle.
+    /// Examples: source mirror fetch failure, temporary cache unreachable.
+    /// The job is sent through `mark_job_failed_with_retry` as `Transient`
+    /// so it re-enters the queue with the configured backoff instead of
+    /// immediately becoming claimable again.
+    Transient,
+    /// The job's stored data is permanently inconsistent with the required
+    /// dispatch contract. Examples: missing derivation_path for a
+    /// SourceReEvaluateVerified job, missing source identity metadata.
+    /// The job is marked failed with `Deterministic` class, which prevents
+    /// automatic retry under `transient_only = true` policy and triggers a
+    /// build-attention record.
+    Deterministic,
+}
+
+/// Unified post-claim dispatch failure handler.
+///
+/// Replaces the old `requeue_claimed_job_after_manifest_error` which
+/// immediately requeued the job with `available_at = NOW()` (no backoff,
+/// no retry counting, no session guard). That caused a high-priority job
+/// whose source mirror commit is missing to be re-claimed and re-failed
+/// every few seconds, stalling all builders.
+///
+/// This helper:
+/// - Calls `mark_job_failed_with_retry` with the appropriate `RetryFailureClass`.
+/// - Uses the configured automatic retry policy backoff (`available_at = NOW()
+///   + backoff_seconds`).
+/// - Clears `builder_id` / `builder_session_id` atomically on the failed row.
+/// - Opens a build-attention record when the retry budget is exhausted.
+/// - Returns `StatusCode::NOT_FOUND` so the builder's polling loop treats
+///   this iteration as "no work" and retries after its normal interval.
+async fn fail_claimed_job_at_dispatch(
     pool: &PgPool,
     job_id: &Uuid,
     builder_id: &Uuid,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"
-        UPDATE build_jobs
-        SET status = 'queued',
-            builder_id = NULL,
-            started_at = NULL,
-            updated_at = NOW()
-        WHERE id = $1
-          AND builder_id = $2
-          AND status = 'building'
-        "#,
-    )
-    .bind(job_id)
-    .bind(builder_id)
-    .execute(pool)
-    .await?;
+    builder_session_id: Option<&Uuid>,
+    stage: &str,
+    failure_class: DispatchFailureClass,
+    message: &str,
+) -> StatusCode {
+    use crate::models::retry_policy::RetryFailureClass;
 
-    Ok(())
+    let retry_class = match failure_class {
+        DispatchFailureClass::Transient => RetryFailureClass::Transient,
+        DispatchFailureClass::Deterministic => RetryFailureClass::Deterministic,
+    };
+
+    let full_message = format!("[dispatch:{stage}] {message}");
+
+    match crate::queries::builders::mark_job_failed_with_retry(
+        pool,
+        job_id,
+        builder_id,
+        builder_session_id,
+        Some(&full_message),
+        retry_class,
+    )
+    .await
+    {
+        Ok(transition) => {
+            if transition.retry_job.is_some() {
+                tracing::warn!(
+                    job_id = %job_id,
+                    builder_id = %builder_id,
+                    %stage,
+                    ?failure_class,
+                    "dispatch failure — job re-queued with backoff: {message}"
+                );
+            } else {
+                tracing::error!(
+                    job_id = %job_id,
+                    builder_id = %builder_id,
+                    %stage,
+                    ?failure_class,
+                    "dispatch failure — retry budget exhausted, job permanently failed: {message}"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::error!(
+                job_id = %job_id,
+                builder_id = %builder_id,
+                %stage,
+                "failed to record dispatch failure via mark_job_failed_with_retry: {e:#}"
+            );
+        }
+    }
+
+    // Return NOT_FOUND rather than INTERNAL_SERVER_ERROR. The builder
+    // treats 404 as "no work this cycle"; 500 is logged as an error by the
+    // builder and may trigger escalation. The dispatch failure has already
+    // been persisted server-side with full context.
+    StatusCode::NOT_FOUND
 }
 
 /// POST /api/v1/builders/:id/jobs/:job_id/progress - Build progress heartbeat

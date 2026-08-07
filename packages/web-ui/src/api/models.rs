@@ -1303,6 +1303,7 @@ pub struct XccdfProfileInfo {
 pub struct XccdfRuleInfo {
     pub id: String,
     pub title: Option<String>,
+    /// Cleaned VulnDiscussion text (XML sub-element tags stripped by the server).
     #[serde(default)]
     pub description: Option<String>,
     pub severity: Option<String>,
@@ -1317,8 +1318,14 @@ pub struct XccdfRuleInfo {
     pub identifiers: Vec<serde_json::Value>,
     #[serde(default)]
     pub checks: Vec<serde_json::Value>,
+    /// Fix/remediation.  Contains `"content"` (full text) and `"preview"` (same
+    /// as content, retained for backward compatibility), plus fix metadata.
     #[serde(default)]
     pub fix: Option<serde_json::Value>,
+    /// Conservative NixOS option assertions inferred from the fix text.
+    /// Each entry: `{ option_path, expected_value, nix_expression, description }`.
+    #[serde(default)]
+    pub inferred_assertions: Vec<serde_json::Value>,
     #[serde(default)]
     pub references: Vec<serde_json::Value>,
     #[serde(default)]

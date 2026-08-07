@@ -1349,6 +1349,34 @@ struct StigRule {
     mapped_policy_version_id: Option<uuid::Uuid>,
 }
 
+/// Extract the inline check-content text from a check JSON object.
+///
+/// The server sends checks with a `body_parts` array. Each part is either
+/// `{ "type": "inline", "content": "..." }` or `{ "type": "reference", ... }`.
+/// We extract the first inline part and also accept legacy `inline_content`/`content`
+/// keys for forward and backward compatibility.
+fn extract_check_inline_content(check: &serde_json::Value) -> Option<String> {
+    // New format: body_parts array
+    if let Some(parts) = check.get("body_parts").and_then(|v| v.as_array()) {
+        for part in parts {
+            if part.get("type").and_then(|v| v.as_str()) == Some("inline") {
+                if let Some(text) = part.get("content").and_then(|v| v.as_str()) {
+                    return Some(text.to_string());
+                }
+                // Also accept "preview" for backward compatibility
+                if let Some(text) = part.get("preview").and_then(|v| v.as_str()) {
+                    return Some(text.to_string());
+                }
+            }
+        }
+    }
+    // Legacy fallback: top-level content/inline_content fields
+    check.get("inline_content")
+        .or_else(|| check.get("content"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
 fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
     preview
         .rules
@@ -1381,13 +1409,39 @@ fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
                 system: check.get("system").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 selector: check.get("selector").and_then(|v| v.as_str()).map(str::to_string),
                 references: check.get("references").and_then(|v| v.as_array()).map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect()).unwrap_or_default(),
-                inline_content: check.get("inline_content").or_else(|| check.get("content")).and_then(|v| v.as_str()).map(str::to_string),
+                inline_content: extract_check_inline_content(check),
             }).collect::<Vec<_>>();
 
+            // Use "content" (full text) if available; fall back to "preview" for
+            // backward compatibility with server responses that only had truncated text.
             let fix_text = r.fix.as_ref()
-                .and_then(|f| f.get("preview").and_then(|v| v.as_str()))
+                .and_then(|f| f.get("content").or_else(|| f.get("preview")).and_then(|v| v.as_str()))
                 .unwrap_or("")
                 .to_string();
+
+            // Build pre-populated assertions from server-inferred NixOS options.
+            // An inferred assertion sets the action to Native automatically.
+            let inferred = &r.inferred_assertions;
+            let assertions: Vec<ImportedCustomCheckRule> = inferred.iter().filter_map(|a| {
+                let path = a.get("option_path").and_then(|v| v.as_str())?;
+                let expr = a.get("nix_expression").and_then(|v| v.as_str())?;
+                let desc = a.get("description").and_then(|v| v.as_str()).unwrap_or("Assertion failed");
+                Some(ImportedCustomCheckRule {
+                    field_name: path.replace('.', "_"),
+                    expression: expr.to_string(),
+                    description: desc.to_string(),
+                    strict: true,
+                })
+            }).collect();
+
+            // Default action: Native if assertions were inferred, Unbound otherwise.
+            let default_action = if r.is_native {
+                "native"
+            } else if !assertions.is_empty() {
+                "native"
+            } else {
+                "unbound"
+            };
 
             StigRule {
                 rule_id: r.id.clone(),
@@ -1406,12 +1460,12 @@ fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
                 platforms: r.platforms.clone(),
                 selected: true,
                 is_native: r.is_native,
-                action: if r.is_native { "native" } else { "unbound" }.to_string(),
+                action: default_action.to_string(),
                 local_name: r.title.as_deref().unwrap_or(&r.id).to_string(),
                 local_description: r.description.clone().unwrap_or_default(),
                 implementation_note: String::new(),
                 assertion_mode: "all".to_string(),
-                assertions: Vec::new(),
+                assertions,
                 evidence_requirements: Vec::new(),
                 mapped_policy_version_id: None,
             }

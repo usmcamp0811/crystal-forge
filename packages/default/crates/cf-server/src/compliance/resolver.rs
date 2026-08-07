@@ -933,6 +933,653 @@ pub async fn resolve_system_effective_policies_for_evaluation(
     resolve_system_effective_policies_with_options(pool, system_id, true).await
 }
 
+/// Batch variant of `resolve_system_effective_policies_for_evaluation`.
+///
+/// Resolves effective policies for all provided `system_ids` in a single
+/// REPEATABLE READ transaction using approximately 8–10 bulk queries,
+/// regardless of the number of systems or assignments.
+///
+/// This eliminates the `O(S × (4 + 5N + A))` round-trip pattern in
+/// `load_policies_by_configuration_for_eval`, where each system previously
+/// required its own full resolver invocation (and thus its own transaction
+/// plus per-assignment SQL loops).
+///
+/// The same merge/precedence semantics as `resolve_system_effective_policies_with_options`
+/// are used; only the data-loading phase is batched.
+///
+/// # Returns
+///
+/// A `HashMap` from `system_id` to `ResolutionOutcome`.  Systems for which
+/// resolution produced a conflict are included in the map as
+/// `ResolutionOutcome::Conflict(_)`.  System IDs not found in the DB are
+/// omitted silently (the caller should treat absence as "no assignments").
+pub async fn resolve_systems_effective_policies_for_evaluation_batch(
+    pool: &PgPool,
+    system_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, ResolutionOutcome>> {
+    if system_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    // ── Open a single REPEATABLE READ snapshot for all reads ──────────────────
+    let mut tx = pool.begin().await.context("begin batch resolution transaction")?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await
+        .context("set repeatable read (batch)")?;
+
+    // ── Q1: Load system → environment_id for all systems ─────────────────────
+    let system_envs: Vec<(Uuid, Option<Uuid>)> =
+        sqlx::query_as("SELECT id, environment_id FROM systems WHERE id = ANY($1)")
+            .bind(system_ids)
+            .fetch_all(&mut *tx)
+            .await
+            .context("batch load system environments")?;
+
+    // Build lookup maps
+    let sys_env: std::collections::HashMap<Uuid, Option<Uuid>> =
+        system_envs.into_iter().collect();
+    let all_env_ids: Vec<Uuid> = sys_env
+        .values()
+        .filter_map(|eid| *eid)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    // ── Q2: Load all active bundle assignments for all systems/environments ───
+    #[allow(clippy::type_complexity)]
+    let raw_assignments: Vec<(Uuid, Uuid, Uuid, Uuid, String, String, String, Option<Uuid>, Option<Uuid>)> =
+        sqlx::query_as(
+            r#"SELECT a.id, a.current_version_id, a.bundle_id, a.bundle_version_id,
+                      a.scope_type, a.enforcement_mode, a.assignment_overlay_digest,
+                      a.environment_id, a.system_id
+               FROM compliance_bundle_assignments a
+               WHERE a.active AND a.current_version_id IS NOT NULL
+                 AND (
+                   (a.scope_type = 'environment' AND a.environment_id = ANY($1))
+                   OR (a.scope_type = 'system' AND a.system_id = ANY($2))
+                 )
+               ORDER BY
+                 CASE a.scope_type WHEN 'environment' THEN 1 WHEN 'system' THEN 2 ELSE 3 END,
+                 a.bundle_id,
+                 a.id"#,
+        )
+        .bind(&all_env_ids)
+        .bind(system_ids)
+        .fetch_all(&mut *tx)
+        .await
+        .context("batch load bundle assignments")?;
+
+    // Collect all assignment_version_ids and bundle_version_ids
+    let all_assignment_version_ids: Vec<Uuid> =
+        raw_assignments.iter().map(|(_, av, _, _, _, _, _, _, _)| *av).collect();
+    let all_bundle_version_ids: Vec<Uuid> = raw_assignments
+        .iter()
+        .map(|(_, _, _, bv, _, _, _, _, _)| *bv)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    // ── Q3: Bulk load exclusions for all assignment versions ──────────────────
+    let raw_exclusions: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT assignment_version_id, policy_version_id
+         FROM compliance_assignment_exclusions
+         WHERE assignment_version_id = ANY($1)",
+    )
+    .bind(&all_assignment_version_ids)
+    .fetch_all(&mut *tx)
+    .await
+    .context("batch load exclusions")?;
+
+    let mut exclusions_by_av: std::collections::HashMap<Uuid, Vec<Uuid>> =
+        std::collections::HashMap::new();
+    for (av_id, pv_id) in raw_exclusions {
+        exclusions_by_av.entry(av_id).or_default().push(pv_id);
+    }
+
+    // ── Q4: Bulk load additions for all assignment versions ───────────────────
+    let raw_additions: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT assignment_version_id, policy_version_id
+         FROM compliance_assignment_additions
+         WHERE assignment_version_id = ANY($1)
+         ORDER BY assignment_version_id, policy_version_id",
+    )
+    .bind(&all_assignment_version_ids)
+    .fetch_all(&mut *tx)
+    .await
+    .context("batch load additions")?;
+
+    let mut additions_by_av: std::collections::HashMap<Uuid, Vec<Uuid>> =
+        std::collections::HashMap::new();
+    for (av_id, pv_id) in raw_additions {
+        additions_by_av.entry(av_id).or_default().push(pv_id);
+    }
+
+    // ── Q5: Bulk load overrides for all assignment versions ───────────────────
+    let raw_overrides: Vec<(Uuid, Uuid, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT assignment_version_id, policy_version_id, value_path, value
+         FROM compliance_assignment_value_overrides
+         WHERE assignment_version_id = ANY($1)",
+    )
+    .bind(&all_assignment_version_ids)
+    .fetch_all(&mut *tx)
+    .await
+    .context("batch load overrides")?;
+
+    let mut overrides_by_av: std::collections::HashMap<Uuid, Vec<PolicyOverride>> =
+        std::collections::HashMap::new();
+    for (av_id, pv_id, path, val) in raw_overrides {
+        overrides_by_av
+            .entry(av_id)
+            .or_default()
+            .push(PolicyOverride { policy_version_id: pv_id, value_path: path, value: val });
+    }
+
+    // ── Q6: Bulk load bundle version states ───────────────────────────────────
+    let raw_bundle_versions: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT id, publication_state, semantic_digest
+         FROM compliance_bundle_versions
+         WHERE id = ANY($1)",
+    )
+    .bind(&all_bundle_version_ids)
+    .fetch_all(&mut *tx)
+    .await
+    .context("batch load bundle versions")?;
+
+    let bundle_version_info: std::collections::HashMap<Uuid, (String, String)> =
+        raw_bundle_versions
+            .into_iter()
+            .map(|(id, state, digest)| (id, (state, digest)))
+            .collect();
+
+    // ── Q7: Bulk load baseline memberships for all bundle versions ────────────
+    let raw_baselines: Vec<(Uuid, Uuid, Uuid, String, i32, serde_json::Value)> =
+        sqlx::query_as(
+            r#"SELECT cbvp.bundle_version_id, cbvp.policy_version_id,
+                      pv.policy_id, pv.policy_type, cbvp.policy_order, pv.config
+               FROM compliance_bundle_version_policies cbvp
+               JOIN deployment_policy_versions pv ON pv.id = cbvp.policy_version_id
+               WHERE cbvp.bundle_version_id = ANY($1)
+               ORDER BY cbvp.bundle_version_id, cbvp.policy_order"#,
+        )
+        .bind(&all_bundle_version_ids)
+        .fetch_all(&mut *tx)
+        .await
+        .context("batch load bundle baselines")?;
+
+    // Group by bundle_version_id
+    let mut baselines_by_bv: std::collections::HashMap<Uuid, Vec<(Uuid, Uuid, String, i32, serde_json::Value)>> =
+        std::collections::HashMap::new();
+    for (bv_id, pv_id, lin_id, ptype, order, config) in raw_baselines {
+        baselines_by_bv
+            .entry(bv_id)
+            .or_default()
+            .push((pv_id, lin_id, ptype, order, config));
+    }
+
+    // ── Q8: Bulk load all addition policy versions ────────────────────────────
+    let all_addition_pv_ids: Vec<Uuid> = additions_by_av
+        .values()
+        .flatten()
+        .copied()
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let mut addition_pv_info: std::collections::HashMap<Uuid, (Uuid, String, serde_json::Value)> =
+        std::collections::HashMap::new();
+    if !all_addition_pv_ids.is_empty() {
+        let raw_addition_pvs: Vec<(Uuid, Uuid, String, serde_json::Value)> = sqlx::query_as(
+            "SELECT id, policy_id, policy_type, config
+             FROM deployment_policy_versions
+             WHERE id = ANY($1)",
+        )
+        .bind(&all_addition_pv_ids)
+        .fetch_all(&mut *tx)
+        .await
+        .context("batch load addition policy versions")?;
+
+        for (pv_id, lin_id, ptype, config) in raw_addition_pvs {
+            addition_pv_info.insert(pv_id, (lin_id, ptype, config));
+        }
+    }
+
+    // ── Q9: Bulk load legacy direct environment policies ──────────────────────
+    let mut env_direct_policies: std::collections::HashMap<Uuid, Vec<(Uuid, Uuid, String, serde_json::Value)>> =
+        std::collections::HashMap::new();
+    if !all_env_ids.is_empty() {
+        let raw_env_direct: Vec<(Uuid, Uuid, Uuid, String, serde_json::Value)> = sqlx::query_as(
+            r#"SELECT ep.environment_id, pv.id, pv.policy_id, pv.policy_type, pv.config
+               FROM environment_policies ep
+               JOIN deployment_policies dp ON dp.id = ep.policy_id
+               JOIN deployment_policy_versions pv
+                 ON pv.id = COALESCE(dp.current_published_version_id, dp.current_draft_version_id)
+               WHERE ep.environment_id = ANY($1)
+                 AND dp.enabled = TRUE
+                 AND (
+                   pv.publication_state = 'accepted'
+                   OR (dp.current_published_version_id IS NULL
+                       AND pv.publication_state IN ('incomplete', 'draft', 'interim'))
+                 )"#,
+        )
+        .bind(&all_env_ids)
+        .fetch_all(&mut *tx)
+        .await
+        .context("batch load environment direct policies")?;
+
+        for (env_id, pv_id, lin_id, ptype, config) in raw_env_direct {
+            env_direct_policies
+                .entry(env_id)
+                .or_default()
+                .push((pv_id, lin_id, ptype, config));
+        }
+    }
+
+    // ── Q10: Bulk load legacy direct system policies ──────────────────────────
+    let mut sys_direct_policies: std::collections::HashMap<Uuid, Vec<(Uuid, Uuid, String, serde_json::Value)>> =
+        std::collections::HashMap::new();
+    {
+        let raw_sys_direct: Vec<(Uuid, Uuid, Uuid, String, serde_json::Value)> = sqlx::query_as(
+            r#"SELECT sp.system_id, pv.id, pv.policy_id, pv.policy_type, pv.config
+               FROM system_policies sp
+               JOIN deployment_policies dp ON dp.id = sp.policy_id
+               JOIN deployment_policy_versions pv
+                 ON pv.id = COALESCE(dp.current_published_version_id, dp.current_draft_version_id)
+               WHERE sp.system_id = ANY($1)
+                 AND dp.enabled = TRUE
+                 AND (
+                   pv.publication_state = 'accepted'
+                   OR (dp.current_published_version_id IS NULL
+                       AND pv.publication_state IN ('incomplete', 'draft', 'interim'))
+                 )"#,
+        )
+        .bind(system_ids)
+        .fetch_all(&mut *tx)
+        .await
+        .context("batch load system direct policies")?;
+
+        for (sys_id, pv_id, lin_id, ptype, config) in raw_sys_direct {
+            sys_direct_policies
+                .entry(sys_id)
+                .or_default()
+                .push((pv_id, lin_id, ptype, config));
+        }
+    }
+
+    // Close the transaction — all reads are done.
+    tx.commit().await.context("commit batch resolution snapshot")?;
+
+    // ── Per-system merge phase (pure Rust, no DB access) ──────────────────────
+    //
+    // This phase applies exactly the same precedence/merge rules as the
+    // per-assignment resolver, now entirely in memory.
+
+    // Organise assignments per system for quick lookup.
+    // Each entry: (assignment_id, assignment_version_id, bundle_id, bundle_version_id,
+    //              scope_type, enforcement_mode, environment_id, system_id)
+    // in scope-ordered position (already sorted by the SQL ORDER BY above).
+    let mut assignments_for_system: std::collections::HashMap<Uuid, Vec<_>> =
+        std::collections::HashMap::new();
+
+    for row in &raw_assignments {
+        let (a_id, av_id, b_id, bv_id, scope_type, enforcement_mode, _digest, env_id_opt, sys_id_opt) = row;
+        // Environment-scope assignments apply to every system in that environment.
+        if scope_type == "environment" {
+            if let Some(env_id) = env_id_opt {
+                for (&sys_id, &ref sys_env_id) in &sys_env {
+                    if sys_env_id.as_ref() == Some(env_id) {
+                        assignments_for_system
+                            .entry(sys_id)
+                            .or_default()
+                            .push((*a_id, *av_id, *b_id, *bv_id, scope_type.clone(), enforcement_mode.clone(), *env_id_opt, *sys_id_opt));
+                    }
+                }
+            }
+        }
+        // System-scope assignments apply only to the targeted system.
+        if scope_type == "system" {
+            if let Some(sys_id) = sys_id_opt {
+                assignments_for_system
+                    .entry(*sys_id)
+                    .or_default()
+                    .push((*a_id, *av_id, *b_id, *bv_id, scope_type.clone(), enforcement_mode.clone(), *env_id_opt, *sys_id_opt));
+            }
+        }
+    }
+
+    let mut results = std::collections::HashMap::new();
+
+    'system: for &sys_id in system_ids {
+        let env_id = sys_env.get(&sys_id).and_then(|e| *e);
+        let sys_assignments = assignments_for_system.get(&sys_id).map(|v| v.as_slice()).unwrap_or(&[]);
+
+        let mut per_lineage: std::collections::HashMap<Uuid, (Uuid, PolicySpecificity, usize)> =
+            std::collections::HashMap::new();
+        let mut staging: Vec<EffectivePolicy> = Vec::new();
+        let mut all_warnings: Vec<String> = Vec::new();
+        let mut primary_bundle_version_id: Option<Uuid> = None;
+        let mut has_assignments = false;
+
+        // Process bundle assignments (already in scope order).
+        for (_, av_id, _, bv_id, scope_type, enforcement_mode, _, _) in sys_assignments {
+            has_assignments = true;
+
+            let specificity = if scope_type == "environment" {
+                PolicySpecificity::Environment
+            } else {
+                PolicySpecificity::System
+            };
+            let mode = if enforcement_mode == "report_only" {
+                AssignmentMode::ReportOnly
+            } else {
+                AssignmentMode::Enforce
+            };
+
+            // Validate bundle version state
+            let Some((bv_state, bv_digest)) = bundle_version_info.get(bv_id) else {
+                results.insert(sys_id, ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                    code: "ASSIGNMENT_BUNDLE_NOT_FOUND".to_string(),
+                    message: format!("Bundle version {} does not exist", bv_id),
+                }]));
+                continue 'system;
+            };
+
+            if bv_state != "accepted" {
+                results.insert(sys_id, ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                    code: "ASSIGNMENT_BUNDLE_NOT_ACCEPTED".to_string(),
+                    message: format!(
+                        "Bundle version {} is in '{}' state; only 'accepted' versions can be assigned",
+                        bv_id, bv_state
+                    ),
+                }]));
+                continue 'system;
+            }
+            if bv_digest == "pending" {
+                results.insert(sys_id, ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                    code: "ASSIGNMENT_BUNDLE_DIGEST_PENDING".to_string(),
+                    message: format!("Bundle version {} has pending digest", bv_id),
+                }]));
+                continue 'system;
+            }
+
+            let empty_baseline = vec![];
+            let baseline = baselines_by_bv.get(bv_id).unwrap_or(&empty_baseline);
+            let exclusions = exclusions_by_av.get(av_id).cloned().unwrap_or_default();
+            let additions = additions_by_av.get(av_id).cloned().unwrap_or_default();
+            let overrides_for_av = overrides_by_av.get(av_id).cloned().unwrap_or_default();
+
+            // Build exclusion set
+            let exclusions_set: std::collections::HashSet<Uuid> =
+                exclusions.iter().copied().collect();
+            let baseline_version_ids: std::collections::HashSet<Uuid> =
+                baseline.iter().map(|(pv_id, _, _, _, _)| *pv_id).collect();
+
+            // Validate exclusions
+            for excl in &exclusions {
+                if !baseline_version_ids.contains(excl) {
+                    results.insert(sys_id, ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                        code: "ASSIGNMENT_EXCLUSION_NOT_IN_BUNDLE".to_string(),
+                        message: format!(
+                            "Exclusion {} is not a member of bundle version {}",
+                            excl, bv_id
+                        ),
+                    }]));
+                    continue 'system;
+                }
+            }
+
+            // Build surviving baseline
+            let mut assignment_effective: Vec<EffectivePolicy> = baseline
+                .iter()
+                .filter(|(pv_id, _, _, _, _)| !exclusions_set.contains(pv_id))
+                .enumerate()
+                .map(|(idx, (pv_id, lin_id, ptype, _, config))| EffectivePolicy {
+                    policy_version_id: *pv_id,
+                    policy_lineage_id: *lin_id,
+                    policy_type: ptype.clone(),
+                    source: EffectivePolicySource::Baseline,
+                    specificity,
+                    baseline_order: Some(idx as i32),
+                    addition_order: None,
+                    overrides: Vec::new(),
+                    effective_config: config.clone(),
+                    assignment_mode: mode.clone(),
+                    effective_mode: mode.clone(),
+                    provenance: Vec::new(),
+                })
+                .collect();
+
+            // Validate and apply additions
+            let mut seen_lineages: std::collections::HashMap<Uuid, Uuid> = assignment_effective
+                .iter()
+                .map(|p| (p.policy_lineage_id, p.policy_version_id))
+                .collect();
+
+            for (add_order, add_pv_id) in additions.iter().enumerate() {
+                if exclusions_set.contains(add_pv_id) {
+                    results.insert(sys_id, ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                        code: "ASSIGNMENT_ADDITION_EXCLUDED".to_string(),
+                        message: format!("Policy version {} is both excluded and added", add_pv_id),
+                    }]));
+                    continue 'system;
+                }
+                if baseline_version_ids.contains(add_pv_id) {
+                    results.insert(sys_id, ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                        code: "ASSIGNMENT_ADDITION_DUPLICATE".to_string(),
+                        message: format!("Policy version {} is already in the baseline", add_pv_id),
+                    }]));
+                    continue 'system;
+                }
+
+                let Some((lin_id, ptype, config)) = addition_pv_info.get(add_pv_id) else {
+                    results.insert(sys_id, ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                        code: "ASSIGNMENT_ADDITION_NOT_FOUND".to_string(),
+                        message: format!("Addition policy version {} not found", add_pv_id),
+                    }]));
+                    continue 'system;
+                };
+
+                if let Some(existing_vid) = seen_lineages.get(lin_id) {
+                    if existing_vid != add_pv_id {
+                        results.insert(sys_id, ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                            code: "ASSIGNMENT_ADDITION_LINEAGE_CONFLICT".to_string(),
+                            message: format!(
+                                "Addition {} conflicts with existing version {} for lineage {}",
+                                add_pv_id, existing_vid, lin_id
+                            ),
+                        }]));
+                        continue 'system;
+                    }
+                } else {
+                    seen_lineages.insert(*lin_id, *add_pv_id);
+                    assignment_effective.push(EffectivePolicy {
+                        policy_version_id: *add_pv_id,
+                        policy_lineage_id: *lin_id,
+                        policy_type: ptype.clone(),
+                        source: EffectivePolicySource::Addition,
+                        specificity,
+                        baseline_order: None,
+                        addition_order: Some(add_order as i32),
+                        overrides: Vec::new(),
+                        effective_config: config.clone(),
+                        assignment_mode: mode.clone(),
+                        effective_mode: mode.clone(),
+                        provenance: Vec::new(),
+                    });
+                }
+            }
+
+            // Apply overrides
+            for o in &overrides_for_av {
+                for pol in assignment_effective.iter_mut() {
+                    if pol.policy_version_id == o.policy_version_id {
+                        if let Err(e) = apply_json_path_override(
+                            &mut pol.effective_config,
+                            &o.value_path,
+                            &o.value,
+                        ) {
+                            all_warnings.push(format!("Override warning for {}: {e}", o.policy_version_id));
+                        }
+                        if !pol.overrides.iter().any(|x| x.value_path == o.value_path) {
+                            pol.overrides.push(o.clone());
+                        }
+                    }
+                }
+            }
+
+            if primary_bundle_version_id.is_none() {
+                primary_bundle_version_id = Some(*bv_id);
+            }
+
+            // Merge assignment policies into staging using the authoritative merge
+            for mut pol in assignment_effective {
+                pol.specificity = specificity;
+                let prov = ProvenanceEntry {
+                    source: pol.source.clone(),
+                    specificity,
+                    scope_type: Some(scope_type.clone()),
+                    enforcement_mode: enforcement_mode.clone(),
+                    authoritative: true,
+                };
+                match merge_effective_policy_candidate(
+                    pol,
+                    specificity,
+                    prov,
+                    &mut staging,
+                    &mut per_lineage,
+                    &mut all_warnings,
+                    true, // ignore_non_evaluation_conflicts
+                ) {
+                    MergeOutcome::Conflict(conflict) => {
+                        results.insert(sys_id, ResolutionOutcome::Conflict(vec![conflict]));
+                        continue 'system;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // If no bundle assignments exist, fall back to legacy direct policies.
+        if !has_assignments {
+            // Apply environment direct policies
+            if let Some(eid) = env_id {
+                if let Some(env_pols) = env_direct_policies.get(&eid) {
+                    for (pv_id, lin_id, ptype, config) in env_pols {
+                        let idx = staging.len();
+                        per_lineage.insert(*lin_id, (*pv_id, PolicySpecificity::Environment, idx));
+                        staging.push(EffectivePolicy {
+                            policy_version_id: *pv_id,
+                            policy_lineage_id: *lin_id,
+                            policy_type: ptype.clone(),
+                            source: EffectivePolicySource::LegacyDirect,
+                            specificity: PolicySpecificity::Environment,
+                            baseline_order: None,
+                            addition_order: None,
+                            overrides: Vec::new(),
+                            effective_config: config.clone(),
+                            assignment_mode: AssignmentMode::Enforce,
+                            effective_mode: AssignmentMode::Enforce,
+                            provenance: Vec::new(),
+                        });
+                    }
+                }
+            }
+
+            // Apply system direct policies (override environment for same lineage)
+            if let Some(sys_pols) = sys_direct_policies.get(&sys_id) {
+                for (pv_id, lin_id, ptype, config) in sys_pols {
+                    if let Some(&(_, _, existing_idx)) = per_lineage.get(lin_id) {
+                        all_warnings.push(format!(
+                            "Legacy system direct policy {} overrides environment-level version",
+                            pv_id
+                        ));
+                        staging[existing_idx] = EffectivePolicy {
+                            policy_version_id: *pv_id,
+                            policy_lineage_id: *lin_id,
+                            policy_type: ptype.clone(),
+                            source: EffectivePolicySource::LegacyDirect,
+                            specificity: PolicySpecificity::System,
+                            baseline_order: None,
+                            addition_order: None,
+                            overrides: Vec::new(),
+                            effective_config: config.clone(),
+                            assignment_mode: AssignmentMode::Enforce,
+                            effective_mode: AssignmentMode::Enforce,
+                            provenance: Vec::new(),
+                        };
+                        per_lineage.insert(*lin_id, (*pv_id, PolicySpecificity::System, existing_idx));
+                    } else {
+                        let idx = staging.len();
+                        per_lineage.insert(*lin_id, (*pv_id, PolicySpecificity::System, idx));
+                        staging.push(EffectivePolicy {
+                            policy_version_id: *pv_id,
+                            policy_lineage_id: *lin_id,
+                            policy_type: ptype.clone(),
+                            source: EffectivePolicySource::LegacyDirect,
+                            specificity: PolicySpecificity::System,
+                            baseline_order: None,
+                            addition_order: None,
+                            overrides: Vec::new(),
+                            effective_config: config.clone(),
+                            assignment_mode: AssignmentMode::Enforce,
+                            effective_mode: AssignmentMode::Enforce,
+                            provenance: Vec::new(),
+                        });
+                    }
+                }
+            }
+
+            if !staging.is_empty() {
+                all_warnings.push("Legacy direct-policy resolution used (no bundle assignments)".to_string());
+            }
+        }
+
+        let all_policies = staging;
+        let effective_pids: Vec<Uuid> = all_policies.iter().map(|p| p.policy_version_id).collect();
+        let mut additions: Vec<Uuid> = all_policies
+            .iter()
+            .filter(|p| matches!(p.source, EffectivePolicySource::Addition))
+            .map(|p| p.policy_version_id)
+            .collect();
+        additions.sort();
+        let mut direct: Vec<Uuid> = all_policies
+            .iter()
+            .filter(|p| matches!(p.source, EffectivePolicySource::LegacyDirect))
+            .map(|p| p.policy_version_id)
+            .collect();
+        direct.sort();
+        let bundle_version_ids_ordered: Vec<Uuid> = primary_bundle_version_id.into_iter().collect();
+        let canonical = CombinedEffectiveSetCanonical {
+            bundle_version_ids_ordered,
+            addition_policy_version_ids: additions,
+            direct_policy_version_ids: direct,
+            effective_policy_version_ids: effective_pids,
+            policy_modes: all_policies
+                .iter()
+                .map(|p| (p.policy_version_id, p.effective_mode.as_str().to_string()))
+                .collect(),
+            effective_configs: all_policies
+                .iter()
+                .map(|p| (p.policy_version_id, p.effective_config.clone()))
+                .collect(),
+        };
+
+        results.insert(
+            sys_id,
+            ResolutionOutcome::Resolved(EffectivePolicySet {
+                bundle_version_id: primary_bundle_version_id.unwrap_or_default(),
+                assignment_id: None,
+                target: AssignmentTarget::System { system_id: sys_id },
+                policies: all_policies,
+                effective_set_digest: canonical.compute_digest(),
+                warnings: all_warnings,
+            }),
+        );
+    }
+
+    Ok(results)
+}
+
 async fn resolve_system_effective_policies_with_options(
     pool: &PgPool,
     system_id: Uuid,

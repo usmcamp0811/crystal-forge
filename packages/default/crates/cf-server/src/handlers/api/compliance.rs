@@ -2500,7 +2500,7 @@ pub async fn xccdf_preview(
                 })
                 .collect();
 
-            // Check summaries (system + body parts)
+            // Check summaries (system + full body parts — no truncation).
             let check_summaries: Vec<serde_json::Value> = r
                 .checks
                 .iter()
@@ -2510,10 +2510,12 @@ pub async fn xccdf_preview(
                         .iter()
                         .map(|part| match part {
                             crate::compliance::xccdf::models::CheckBodyPart::Inline { content } => {
-                                let truncated: String = content.chars().take(200).collect();
                                 serde_json::json!({
                                     "type": "inline",
-                                    "preview": truncated,
+                                    // "content" carries the full text; "preview" is kept for
+                                    // backward compatibility but now also contains the full text.
+                                    "content": content,
+                                    "preview": content,
                                 })
                             }
                             crate::compliance::xccdf::models::CheckBodyPart::Reference {
@@ -2538,16 +2540,46 @@ pub async fn xccdf_preview(
                 })
                 .collect();
 
+            // Fix/remediation — send the full content.  The 200-char "preview"
+            // truncation prevented the actual remediation Nix snippet from
+            // appearing in the Refine modal for longer fix texts.
             let fix_summary = r.fix.as_ref().map(|f| {
-                let truncated: String = f.content.chars().take(200).collect();
                 serde_json::json!({
                     "id": f.id,
                     "system": f.system,
                     "complexity": f.complexity,
                     "disruption": f.disruption,
-                    "preview": truncated,
+                    // "content" is the canonical field; "preview" is preserved for
+                    // backward compatibility with older web-ui builds.
+                    "content": f.content,
+                    "preview": f.content,
                 })
             });
+
+            // Infer conservative NixOS assertions from the fix text.
+            let inferred_assertions: Vec<serde_json::Value> = r
+                .fix
+                .as_ref()
+                .map(|f| {
+                    crate::compliance::xccdf::inference::infer_nixos_assertions(&f.content)
+                        .into_iter()
+                        .map(|a| {
+                            serde_json::json!({
+                                "option_path": a.option_path,
+                                "expected_value": a.expected_value,
+                                "nix_expression": a.nix_expression,
+                                "description": a.description,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Clean VulnDiscussion from description — strip the XML sub-element
+            // tags that STIG documents embed inside the <description> text node.
+            let clean_description = r.description.as_deref().map(
+                crate::compliance::xccdf::inference::extract_vuln_discussion,
+            );
 
             let refs: Vec<serde_json::Value> = r
                 .references
@@ -2563,7 +2595,9 @@ pub async fn xccdf_preview(
             serde_json::json!({
                 "id": r.id,
                 "title": r.title,
-                "description": r.description,
+                // "description" now contains the cleaned VulnDiscussion text only,
+                // without raw XML sub-element tags.
+                "description": clean_description,
                 "severity": r.severity,
                 "version": r.version,
                 "is_native": r.cf_policy_meta.is_some(),
@@ -2572,6 +2606,7 @@ pub async fn xccdf_preview(
                 "identifiers": idents,
                 "checks": check_summaries,
                 "fix": fix_summary,
+                "inferred_assertions": inferred_assertions,
                 "references": refs,
                 "has_opaque_xml": r.preserved_xml.is_some(),
             })
