@@ -1323,6 +1323,14 @@ Phase 2 assignment mutation slice (isolated branch TASK-412-phase2-atomicity): i
 3. Extend preview DTOs for complete source check/fix/identifier/reference/platform data and add exact MapExisting policy-version selection.
 4. Remove top-level rule_customizations in favor of action-local customization and update server record construction/validation accordingly.
 5. Add focused pure state, serialization, validation, and server importer tests; run targeted Nix checks; commit and push each focused slice to TASK-412-cf-xccdf-interchange.
+
+### Regression correction: pre-evaluation compliance policy loading
+- Preserve the complete effective-set digest for compliance/deployment semantics, but add a dedicated canonical evaluation-policy projection/digest for `load_policies_by_configuration_for_eval`.
+- Build that projection after assignment resolution, effective-mode filtering, disabled-policy filtering, Nix-evaluated filtering, and CF-agent exclusion; canonicalize/sort rules deterministically and represent an empty set as the digest of `[]`.
+- Compare only the evaluation-policy digest for systems sharing a flake configuration; retain conflict detection for actual Nix-evaluation differences.
+- Ensure systems with no Nix gates still participate as an empty evaluation set so they cannot inherit another system's gates silently; define the shared-configuration behavior in tests.
+- Add focused regression tests for report-only/manual differences, empty-vs-nonempty shared configurations, and actual enforce/Nix expression differences. Keep resolver infrastructure failures retryable rather than deterministic where the existing failure classification permits.
+- Verify with targeted server tests and offline/live database checks as available; do not change unrelated TASK-412 interchange/UI scope.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -1355,4 +1363,6 @@ Verification update: server and web-ui cargo checks pass; targeted resolver/dige
 2026-08-07: Removed the unreachable legacy inline Refine branch from compliance.rs; structured Refine plus final Import Review is now the only active path. UI cargo check passed after cleanup. Existing-policy mapping is version-aware via DeploymentPolicySummary.version_id, selected from the current draft/published version pointer.
 
 2026-08-07: Fixed Policies export selection cleanup so successful JSON/TOML downloads clear selected policy IDs and exit selection mode. UI cargo check passed. Repository-wide `cargo fmt --all --check` was attempted and fails on existing formatting differences across the web-ui package; no formatting-only rewrite was applied.
+
+2026-08-07: Investigated the reported regression. `load_policies_by_configuration_for_eval` compares the complete resolver digest before filtering and skips empty filtered sets. The implementation correction is scoped to evaluation-specific projection/digest handling plus regression coverage; the resolver's complete digest remains authoritative for other consumers.
 <!-- SECTION:NOTES:END -->
