@@ -1856,6 +1856,20 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         }
                         div { style: "display:flex;gap:8px;",
                             button {
+                                class: "btn btn-ghost focus-ring",
+                                disabled: !can_advance || *committing.read(),
+                                style: if !can_advance || *committing.read() { "opacity:0.5;cursor:not-allowed;" } else { "" },
+                                onclick: move |_| {
+                                    if can_advance && !*committing.read() {
+                                        cursor.set(0);
+                                        step.set("refine".to_string());
+                                    }
+                                },
+                                "Refine {sel_count} "
+                                if sel_count == 1 { "policy" } else { "policies" }
+                                Icon { name: IconName::ChevronRight, size: 13 }
+                            }
+                            button {
                                 class: "btn btn-primary focus-ring",
                                 disabled: !can_advance || *committing.read(),
                                 style: if !can_advance || *committing.read() { "opacity:0.5;cursor:not-allowed;" } else { "" },
@@ -1921,9 +1935,8 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         }
                                     });
                                 },
-                                if *committing.read() { "Importing…" } else {
-                                    "Import {sel_count} "
-                                    if sel_count == 1 { "policy" } else { "policies" }
+                                    if *committing.read() { "Importing…" } else {
+                                    "Skip & create all"
                                 }
                             }
                         }
@@ -2145,8 +2158,64 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                             button {
                                                 class: "btn btn-primary focus-ring",
                                                 onclick: move |_| {
-                                                    done_total.set(sel_count);
-                                                    step.set("done".to_string());
+                                                    if *committing.read() { return; }
+                                                    let selected_rule_ids: Vec<String> = rules
+                                                        .read()
+                                                        .iter()
+                                                        .filter(|r| r.selected)
+                                                        .map(|r| r.rule_id.clone())
+                                                        .collect();
+                                                    let rule_actions: Vec<XccdfRuleImportAction> = selected_rule_ids
+                                                        .iter()
+                                                        .map(|rule_id| XccdfRuleImportAction::CreateUnbound {
+                                                            rule_id: rule_id.clone(),
+                                                        })
+                                                        .collect();
+                                                    let sha256 = preview_response
+                                                        .read()
+                                                        .as_ref()
+                                                        .map(|p| p.sha256.clone())
+                                                        .unwrap_or_default();
+                                                    let plan = XccdfImportPlan {
+                                                        expected_sha256: sha256,
+                                                        selected_profile_id: None,
+                                                        selected_rule_ids,
+                                                        rule_actions,
+                                                        bundle: ImportedBundlePlan {
+                                                            name: bundle_name.read().trim().to_string(),
+                                                            framework: "xccdf".to_string(),
+                                                            version: bench_ver.read().clone(),
+                                                            layer: None,
+                                                            owner: None,
+                                                            description: None,
+                                                        },
+                                                    };
+                                                    let bytes = file_bytes.read().clone();
+                                                    let fname = file_name.read().clone();
+                                                    let mut committing = committing;
+                                                    let mut import_error = import_error;
+                                                    let mut import_result = import_result;
+                                                    let mut done_total = done_total;
+                                                    let mut step = step;
+                                                    let on_success = props.on_success;
+                                                    committing.set(true);
+                                                    import_error.set(None);
+                                                    spawn(async move {
+                                                        match import_xccdf(&bytes, &fname, &plan).await {
+                                                            Ok(result) => {
+                                                                let total = result.created_policy_count + result.reused_policy_count;
+                                                                done_total.set(total as usize);
+                                                                import_result.set(Some(result));
+                                                                committing.set(false);
+                                                                step.set("done".to_string());
+                                                                on_success.call(());
+                                                            }
+                                                            Err(err) => {
+                                                                committing.set(false);
+                                                                import_error.set(Some(format!("Import failed: {err}")));
+                                                            }
+                                                        }
+                                                    });
                                                 },
                                                 Icon { name: IconName::Check, size: 13 }
                                                 " Create bundle + {sel_count} "

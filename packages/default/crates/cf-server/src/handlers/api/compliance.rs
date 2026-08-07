@@ -4128,7 +4128,27 @@ async fn read_multipart_file_and_plan(
         let field_name = field.name().map(String::from);
         let has_filename = field.file_name().is_some();
 
-        if has_filename {
+        if field_name.as_deref() == Some("plan") {
+            if plan.is_some() {
+                return Err(MultipartReadError::MultipleFiles); // reuse variant for duplicate plan
+            }
+            let mut bytes = Vec::new();
+            loop {
+                match field.chunk().await {
+                    Ok(Some(chunk)) => {
+                        // Plans are expected to be small; cap at 1 MiB.
+                        if bytes.len() + chunk.len() > 1024 * 1024 {
+                            return Err(MultipartReadError::TooLarge);
+                        }
+                        bytes.extend_from_slice(&chunk);
+                    }
+                    Ok(None) => break,
+                    Err(e) if is_body_limit_error(&e) => return Err(MultipartReadError::TooLarge),
+                    Err(_) => return Err(MultipartReadError::Malformed),
+                }
+            }
+            plan = Some(bytes);
+        } else if has_filename {
             if field_name.as_deref() != Some("file") {
                 return Err(MultipartReadError::InvalidFieldName);
             }
@@ -4151,26 +4171,6 @@ async fn read_multipart_file_and_plan(
                 }
             }
             file = Some(MultipartUpload { bytes, filename });
-        } else if field_name.as_deref() == Some("plan") {
-            if plan.is_some() {
-                return Err(MultipartReadError::MultipleFiles); // reuse variant for duplicate plan
-            }
-            let mut bytes = Vec::new();
-            loop {
-                match field.chunk().await {
-                    Ok(Some(chunk)) => {
-                        // Plans are expected to be small; cap at 1 MiB.
-                        if bytes.len() + chunk.len() > 1024 * 1024 {
-                            return Err(MultipartReadError::TooLarge);
-                        }
-                        bytes.extend_from_slice(&chunk);
-                    }
-                    Ok(None) => break,
-                    Err(e) if is_body_limit_error(&e) => return Err(MultipartReadError::TooLarge),
-                    Err(_) => return Err(MultipartReadError::Malformed),
-                }
-            }
-            plan = Some(bytes);
         }
         // Unknown non-file fields are drained and ignored.
     }

@@ -2170,14 +2170,10 @@ async fn send_xccdf_multipart(
         .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
 
     if let Some(plan) = plan_json {
-        let plan_blob = {
-            let plan_arr = js_sys::Uint8Array::from(plan.as_bytes());
-            let plan_parts = js_sys::Array::new();
-            plan_parts.push(&plan_arr);
-            web_sys::Blob::new_with_u8_array_sequence(&plan_parts)
-                .map_err(|e| ApiClientError::Network(format!("{e:?}")))?
-        };
-        form.append_with_blob_and_filename("plan", &plan_blob, "plan.json")
+        // Keep the import plan a normal multipart text field.  Supplying a
+        // filename makes browsers mark it as a file part, which the server
+        // correctly rejects because only the XCCDF payload may be a file.
+        form.append_with_str("plan", plan)
             .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
     }
 
