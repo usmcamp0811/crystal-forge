@@ -1316,6 +1316,13 @@ Continuation from 8ade2843: implement only CF-native XCCDF reconciliation in two
 Stabilization gate continuation from c7138212: first add non-ignored live/native concurrency, mixed-reconciliation, identity/digest, bundle, mapping, and idempotent reimport fixtures; verify locked re-read/order and make only minimal reconciliation fixes. Second reproduce and fix GET /api/v1/scanning/deployed with a failing live endpoint test, keeping scanning changes separate. Third run targeted/full checks, update MR description, and report unrun checks explicitly.
 
 Phase 2 assignment mutation slice (isolated branch TASK-412-phase2-atomicity): inspect existing assignment lineage/version schema and audit conventions; introduce immutable assignment-version child records with expected_version_id optimistic concurrency; refactor create/update/deactivate into one transactional mutation service with deterministic advisory lock order (target, bundle lineage, sorted policy lineages, assignment lineage); add typed 409/404/422 error mapping and transactional audit metadata; inject test-only failure points and live rollback/concurrency tests before broader resolver/evaluation integration. Preserve existing assignment route permissions and do not touch unrelated dirty worktree files.
+
+## Refine workflow replacement phase (2026-08-07)
+1. Inspect the authoritative ImportStigModal.jsx and PoliciesView.jsx design, then extract the current inline Refine block into focused Dioxus components under packages/web-ui/src/components/compliance/.
+2. Replace StigRule's mixed source/local fields with SourceStigRule plus RefinedPolicyDraft and typed assertion/evidence drafts; keep source cards immutable and convert drafts to canonical import DTOs only at submission.
+3. Extend preview DTOs for complete source check/fix/identifier/reference/platform data and add exact MapExisting policy-version selection.
+4. Remove top-level rule_customizations in favor of action-local customization and update server record construction/validation accordingly.
+5. Add focused pure state, serialization, validation, and server importer tests; run targeted Nix checks; commit and push each focused slice to TASK-412-cf-xccdf-interchange.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
