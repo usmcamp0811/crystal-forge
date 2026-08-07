@@ -13,7 +13,9 @@ use crate::api::models::{
     DeploymentPolicySummary, EnvironmentSummary, ImportedBundlePlan, PublishBundleVersionRequest,
     PolicyValueOverride, TrustBundleVersionRequest, UpdateComplianceBundleRequest, XccdfImportPlan,
     XccdfImportResponse,
-    XccdfPreviewResponse, XccdfRuleImportAction,
+    XccdfPreviewResponse, XccdfRuleImportAction, ImportedPolicyCustomization,
+    ImportedCustomCheck, ImportedCustomCheckRule, ImportedEvidenceRequirement,
+    XccdfRuleCustomization,
 };
 use crate::components::compliance::{
     BundleCatalog, BundleHeader, EvidenceDrawer, ScoreStrip, SystemsMatrix,
@@ -1321,6 +1323,8 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
 struct StigRule {
     rule_id: String,
     stig_id: String,
+    source_description: String,
+    group_id: String,
     severity: String, // "high" | "medium" | "low"
     title: String,
     fixtext: String,
@@ -1328,6 +1332,14 @@ struct StigRule {
     srg: String,
     selected: bool,
     is_native: bool,
+    action: String,
+    local_name: String,
+    local_description: String,
+    implementation_note: String,
+    assertion_mode: String,
+    assertions: Vec<ImportedCustomCheckRule>,
+    evidence_requirements: Vec<ImportedEvidenceRequirement>,
+    mapped_policy_version_id: Option<uuid::Uuid>,
 }
 
 fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
@@ -1373,6 +1385,8 @@ fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
             StigRule {
                 rule_id: r.id.clone(),
                 stig_id,
+                source_description: r.description.clone().unwrap_or_default(),
+                group_id: r.group_id.clone().unwrap_or_default(),
                 severity: r.severity.as_deref().unwrap_or("medium").to_string(),
                 title: r.title.as_deref().unwrap_or(&r.id).to_string(),
                 fixtext: fix_text,
@@ -1380,6 +1394,14 @@ fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
                 srg,
                 selected: true,
                 is_native: r.is_native,
+                action: if r.is_native { "native" } else { "unbound" }.to_string(),
+                local_name: r.title.as_deref().unwrap_or(&r.id).to_string(),
+                local_description: r.description.clone().unwrap_or_default(),
+                implementation_note: String::new(),
+                assertion_mode: "all".to_string(),
+                assertions: Vec::new(),
+                evidence_requirements: Vec::new(),
+                mapped_policy_version_id: None,
             }
         })
         .collect()
@@ -1405,6 +1427,60 @@ fn sev_label(sev: &str) -> &'static str {
         "medium" => "Medium",
         _ => "Low",
     }
+}
+
+fn import_action_from_rule(rule: &StigRule) -> XccdfRuleImportAction {
+    let customization = ImportedPolicyCustomization {
+        policy_name: Some(rule.local_name.clone()),
+        policy_description: Some(rule.local_description.clone()),
+        implementation_note: (!rule.implementation_note.trim().is_empty())
+            .then(|| rule.implementation_note.clone()),
+        policy_severity: Some(rule.severity.clone()),
+        policy_rationale: (!rule.fixtext.trim().is_empty()).then(|| rule.fixtext.clone()),
+    };
+    match rule.action.as_str() {
+        "native" => XccdfRuleImportAction::CreateNativeCustom {
+            rule_id: rule.rule_id.clone(),
+            customization,
+            custom_check: ImportedCustomCheck {
+                mode: rule.assertion_mode.clone(),
+                rules: rule.assertions.clone(),
+            },
+            evidence_requirements: rule.evidence_requirements.clone(),
+        },
+        "manual" => XccdfRuleImportAction::CreateManual {
+            rule_id: rule.rule_id.clone(),
+            customization,
+            evidence_requirements: rule.evidence_requirements.clone(),
+        },
+        "opaque" => XccdfRuleImportAction::PreserveOpaque {
+            rule_id: rule.rule_id.clone(),
+            customization,
+        },
+        "exclude" => XccdfRuleImportAction::Exclude {
+            rule_id: rule.rule_id.clone(),
+        },
+        _ => XccdfRuleImportAction::CreateUnbound {
+            rule_id: rule.rule_id.clone(),
+            customization,
+        },
+    }
+}
+
+fn import_customizations_from_rules(rules: &[StigRule]) -> Vec<XccdfRuleCustomization> {
+    rules
+        .iter()
+        .filter(|rule| rule.selected)
+        .map(|rule| XccdfRuleCustomization {
+            rule_id: rule.rule_id.clone(),
+            policy_name: Some(rule.local_name.clone()),
+            policy_description: Some(rule.local_description.clone()),
+            implementation_note: (!rule.implementation_note.trim().is_empty())
+                .then(|| rule.implementation_note.clone()),
+            policy_severity: Some(rule.severity.clone()),
+            policy_rationale: (!rule.fixtext.trim().is_empty()).then(|| rule.fixtext.clone()),
+        })
+        .collect()
 }
 
 #[derive(Props, Clone, PartialEq)]
@@ -1885,9 +1961,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         .read()
                                         .iter()
                                         .filter(|r| r.selected)
-                                        .map(|r| XccdfRuleImportAction::CreateUnbound {
-                                            rule_id: r.rule_id.clone(),
-                                        })
+                                        .map(import_action_from_rule)
                                         .collect();
                                     let sha256 = preview_response
                                         .read()
@@ -1899,6 +1973,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         selected_profile_id: None,
                                         selected_rule_ids,
                                         rule_actions,
+                                         rule_customizations: import_customizations_from_rules(&rules.read()),
                                         bundle: ImportedBundlePlan {
                                             name: bundle_name.read().trim().to_string(),
                                             framework: "xccdf".to_string(),
@@ -1959,6 +2034,14 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                             let rule_id2 = rule.rule_id.clone();
                             let rule_id3 = rule.rule_id.clone();
                             let rule_id4 = rule.rule_id.clone();
+                            let rule_id5 = rule.rule_id.clone();
+                            let rule_id6 = rule.rule_id.clone();
+                            let rule_id7 = rule.rule_id.clone();
+                            let rule_id8 = rule.rule_id.clone();
+                            let rule_id9 = rule.rule_id.clone();
+                            let rule_id10 = rule.rule_id.clone();
+                            let rule_id11 = rule.rule_id.clone();
+                            let rule_id12 = rule.rule_id.clone();
                             let sev_col  = sev_color(&rule.severity).to_string();
                             let cat_str  = format!("{} · {}", sev_cat(&rule.severity), sev_label(&rule.severity));
                             let pct      = ((cur + 1) as f64 / total as f64 * 100.0) as u32;
@@ -1993,16 +2076,33 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         }
                                     }
 
-                                    // Policy name
+                                    // Immutable source metadata. Local fields below
+                                    // are deliberately separate from the official STIG.
+                                    div { class: "card", style: "padding:12px;margin-bottom:14px;border-left:3px solid var(--cf-brand-purple);",
+                                        div { style: "font-size:10px;text-transform:uppercase;font-weight:700;color:var(--cf-text-muted);margin-bottom:7px;", "From the STIG · read only" }
+                                        div { style: "font-size:13px;font-weight:600;", "{rule.title}" }
+                                        if !rule.source_description.is_empty() {
+                                            p { style: "font-size:12px;color:var(--cf-text-secondary);white-space:pre-wrap;", "{rule.source_description}" }
+                                        }
+                                        div { class: "mono", style: "font-size:10px;color:var(--cf-text-muted);",
+                                            "Rule ID: {rule.rule_id}"
+                                            if !rule.group_id.is_empty() { " · Group: {rule.group_id}" }
+                                            " · Source severity: {sev_label(&rule.severity)}"
+                                        }
+                                        if !rule.check.is_empty() { div { style: "margin-top:8px;font-size:11px;white-space:pre-wrap;", strong { "Official check · " } "{rule.check}" } }
+                                        if !rule.fixtext.is_empty() { div { style: "margin-top:8px;font-size:11px;white-space:pre-wrap;", strong { "Official fix · " } "{rule.fixtext}" } }
+                                    }
+
+                                    // Policy basics (local Crystal Forge presentation)
                                     div { class: "field",
-                                        label { "Policy name" }
+                                        label { "Policy name (local)" }
                                         input {
                                             class: "input focus-ring mono",
-                                            value: "{rule.stig_id}",
+                                            value: "{rule.local_name}",
                                             oninput: move |e| {
                                                 let mut r = rules.write();
-                                                if let Some(rule) = r.iter_mut().find(|r| r.rule_id == rule_id) {
-                                                    rule.stig_id = e.value();
+                                                if let Some(rule) = r.iter_mut().find(|r| r.rule_id == rule_id5) {
+                                                    rule.local_name = e.value();
                                                 }
                                             },
                                         }
@@ -2010,7 +2110,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
 
                                     // Severity seg
                                     div { class: "field",
-                                        label { "Severity" }
+                                            label { "Local policy severity" }
                                         div { class: "seg", style: "width:fit-content;",
                                             for sev in ["high", "medium", "low"] {
                                                 {
@@ -2024,8 +2124,8 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                             style: if is_active { format!("color:{c};") } else { "".to_string() },
                                                             onclick: move |_| {
                                                                 let mut r = rules.write();
-                                                                if let Some(rule) = r.iter_mut().find(|r| r.rule_id == rid) {
-                                                                    rule.severity = sev_s.clone();
+                                                                 if let Some(rule) = r.iter_mut().find(|r| r.rule_id == rid) {
+                                                                     rule.severity = sev_s.clone();
                                                                 }
                                                             },
                                                             "{sev_cat(sev)} · {sev_label(sev)}"
@@ -2036,6 +2136,23 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         }
                                     }
 
+                                    div { class: "field",
+                                        label { "Implementation action" }
+                                        select {
+                                            class: "input focus-ring",
+                                            value: "{rule.action}",
+                                            onchange: move |e| {
+                                                let mut r = rules.write();
+                                                if let Some(rule) = r.iter_mut().find(|r| r.rule_id == rule_id6) { rule.action = e.value(); }
+                                            },
+                                            option { value: "native", "Create native custom policy" }
+                                            option { value: "manual", "Create manual policy" }
+                                            option { value: "unbound", "Create unbound policy" }
+                                            option { value: "opaque", "Preserve as opaque" }
+                                            option { value: "exclude", "Exclude" }
+                                        }
+                                    }
+
                                     // Description
                                     div { class: "field",
                                         label { "Description / control statement" }
@@ -2043,37 +2160,80 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                             class: "input focus-ring",
                                             rows: 2,
                                             style: "resize:vertical;",
-                                            value: "{rule.title}",
+                                            value: "{rule.local_description}",
                                             oninput: move |e| {
                                                 let mut r = rules.write();
                                                 if let Some(rule) = r.iter_mut().find(|r| r.rule_id == rule_id3) {
-                                                    rule.title = e.value();
+                                                    rule.local_description = e.value();
                                                 }
                                             },
                                         }
                                     }
 
-                                    // Check
-                                    div { class: "field",
-                                        label {
-                                            "Compliance check "
-                                            span { style: "color:var(--cf-text-muted);font-weight:400;",
-                                                "· becomes the policy assertion"
+                                    if rule.action == "native" {
+                                        div { class: "field", style: "border-top:1px solid var(--cf-divider);padding-top:12px;",
+                                            label { "NixOS config assertions · EVAL-TIME" }
+                                            p { style: "font-size:11px;color:var(--cf-text-muted);", "Asserted against the rendered configuration during Nix evaluation. A failing assertion blocks evaluation before deployment." }
+                                            select {
+                                                class: "input focus-ring",
+                                                value: "{rule.assertion_mode}",
+                                                onchange: move |e| {
+                                                    let mut r = rules.write();
+                                                    if let Some(rule) = r.iter_mut().find(|r| r.rule_id == rule_id4) { rule.assertion_mode = e.value(); }
+                                                },
+                                                option { value: "all", "All assertions must pass" }
+                                                option { value: "any", "Any assertion may pass" }
+                                            }
+                                            for (ai, assertion) in rule.assertions.iter().enumerate() {
+                                                {
+                                                    let rid1 = rule.rule_id.clone();
+                                                    let rid2 = rule.rule_id.clone();
+                                                    let rid3 = rule.rule_id.clone();
+                                                    let rid4 = rule.rule_id.clone();
+                                                    rsx! { div { class: "card", style: "padding:8px;margin-top:7px;",
+                                                        input { class: "input focus-ring mono", placeholder: "field name", value: "{assertion.field_name}", oninput: move |e| { let mut r=rules.write(); if let Some(rule)=r.iter_mut().find(|r|r.rule_id==rid1) { if let Some(a)=rule.assertions.get_mut(ai) { a.field_name=e.value(); } } } }
+                                                        textarea { class: "input focus-ring mono", rows: 2, placeholder: "cfg.config... (must evaluate to true)", value: "{assertion.expression}", oninput: move |e| { let mut r=rules.write(); if let Some(rule)=r.iter_mut().find(|r|r.rule_id==rid2) { if let Some(a)=rule.assertions.get_mut(ai) { a.expression=e.value(); } } } }
+                                                        input { class: "input focus-ring", placeholder: "Failure message", value: "{assertion.description}", oninput: move |e| { let mut r=rules.write(); if let Some(rule)=r.iter_mut().find(|r|r.rule_id==rid3) { if let Some(a)=rule.assertions.get_mut(ai) { a.description=e.value(); } } } }
+                                                        button { class: "btn btn-ghost", aria_label: "Remove assertion", onclick: move |_| { let mut r=rules.write(); if let Some(rule)=r.iter_mut().find(|r|r.rule_id==rid4) { if ai < rule.assertions.len() { rule.assertions.remove(ai); } } }, "Remove" }
+                                                    } }
+                                                }
+                                            }
+                                            div { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:7px;",
+                                                button { class: "btn btn-ghost", onclick: move |_| { let mut r=rules.write(); if let Some(rule)=r.iter_mut().find(|r|r.rule_id==rule_id7) { let n=rule.assertions.len()+1; rule.assertions.push(ImportedCustomCheckRule { field_name: format!("stigAssertion{n}"), expression: "cfg.config.".into(), description: "Assertion failed".into(), strict: true }); } }, "＋ Custom nix expression" }
+                                                button { class: "btn btn-ghost", onclick: move |_| { let mut r=rules.write(); if let Some(rule)=r.iter_mut().find(|r|r.rule_id==rule_id8) { let n=rule.assertions.len()+1; rule.assertions.push(ImportedCustomCheckRule { field_name: format!("nixosOption{n}"), expression: "cfg.config.services.".into(), description: "NixOS option assertion failed".into(), strict: true }); } }, "＋ NixOS option" }
+                                                button { class: "btn btn-ghost", onclick: move |_| { let mut r=rules.write(); if let Some(rule)=r.iter_mut().find(|r|r.rule_id==rule_id9) { let n=rule.assertions.len()+1; rule.assertions.push(ImportedCustomCheckRule { field_name: format!("packageAssertion{n}"), expression: "builtins.any (x: (x.pname or \"\") == \"package\") cfg.config.environment.systemPackages".into(), description: "Required package is installed".into(), strict: true }); } }, "＋ Packages installed" }
+                                            }
+                                            if rule.assertions.is_empty() { div { class: "sd-callout sd-callout-warn", "No assertion is configured. Add one or choose Manual, Unbound, or Opaque." } }
+
+                                            div { style: "margin-top:14px;border-top:1px solid var(--cf-divider);padding-top:10px;",
+                                                label { "Evidence for ATO" }
+                                                p { style: "font-size:11px;color:var(--cf-text-muted);", "Artifacts collected during evaluation, deployment, or runtime to demonstrate the control to an assessor." }
+                                                for (ei, evidence) in rule.evidence_requirements.iter().enumerate() {
+                                                    {
+                                                        let rid1 = rule.rule_id.clone();
+                                                        let rid2 = rule.rule_id.clone();
+                                                        let rid3 = rule.rule_id.clone();
+                                                        rsx! { div { class: "card", style: "padding:8px;margin-top:6px;",
+                                                            match evidence {
+                                                                ImportedEvidenceRequirement::Command { command, expected_output } => rsx! { div { "Command output" input { class: "input focus-ring mono", value: "{command}", oninput: move |e| { let mut r=rules.write(); if let Some(rule)=r.iter_mut().find(|r|r.rule_id==rid1) { if let Some(ImportedEvidenceRequirement::Command { command, .. })=rule.evidence_requirements.get_mut(ei) { *command=e.value(); } } } } input { class: "input focus-ring", value: "{expected_output}", placeholder: "Expected output", oninput: move |e| { let mut r=rules.write(); if let Some(rule)=r.iter_mut().find(|r|r.rule_id==rid2) { if let Some(ImportedEvidenceRequirement::Command { expected_output, .. })=rule.evidence_requirements.get_mut(ei) { *expected_output=e.value(); } } } } } },
+                                                                ImportedEvidenceRequirement::Attestation { description } => rsx! { div { "Store-path or signed agent attestation" textarea { class: "input focus-ring", value: "{description}", oninput: move |e| { let mut r=rules.write(); if let Some(rule)=r.iter_mut().find(|r|r.rule_id==rid1) { if let Some(ImportedEvidenceRequirement::Attestation { description })=rule.evidence_requirements.get_mut(ei) { *description=e.value(); } } } } } },
+                                                                _ => rsx! { div { "Evidence requirement configured" } },
+                                                            }
+                                                            button { class: "btn btn-ghost", aria_label: "Remove evidence requirement", onclick: move |_| { let mut r=rules.write(); if let Some(rule)=r.iter_mut().find(|r|r.rule_id==rid3) { if ei < rule.evidence_requirements.len() { rule.evidence_requirements.remove(ei); } } }, "Remove" }
+                                                        } }
+                                                    }
+                                                }
+                                                div { style: "display:flex;gap:6px;margin-top:7px;",
+                                                    button { class: "btn btn-ghost", onclick: move |_| { let mut r=rules.write(); if let Some(rule)=r.iter_mut().find(|r|r.rule_id==rule_id10) { rule.evidence_requirements.push(ImportedEvidenceRequirement::Command { command: String::new(), expected_output: String::new() }); } }, "＋ Command output" }
+                                                    button { class: "btn btn-ghost", onclick: move |_| { let mut r=rules.write(); if let Some(rule)=r.iter_mut().find(|r|r.rule_id==rule_id11) { rule.evidence_requirements.push(ImportedEvidenceRequirement::Attestation { description: String::new() }); } }, "＋ Attestation" }
+                                                }
                                             }
                                         }
-                                        textarea {
-                                            class: "input focus-ring mono",
-                                            rows: 3,
-                                            style: "resize:vertical;font-size:12px;",
-                                            placeholder: "How Crystal Forge verifies this control…",
-                                            value: "{rule.check}",
-                                            oninput: move |e| {
-                                                let mut r = rules.write();
-                                                if let Some(rule) = r.iter_mut().find(|r| r.rule_id == rule_id4) {
-                                                    rule.check = e.value();
-                                                }
-                                            },
-                                        }
+                                    }
+
+                                    div { class: "field",
+                                        label { "Implementation note (local)" }
+                                        textarea { class: "input focus-ring", rows: 2, value: "{rule.implementation_note}", oninput: move |e| { let mut r=rules.write(); if let Some(rule)=r.iter_mut().find(|r|r.rule_id==rule_id12) { rule.implementation_note=e.value(); } } }
                                     }
 
                                     // Fixtext
@@ -2165,11 +2325,11 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                         .filter(|r| r.selected)
                                                         .map(|r| r.rule_id.clone())
                                                         .collect();
-                                                    let rule_actions: Vec<XccdfRuleImportAction> = selected_rule_ids
+                                                    let rule_actions: Vec<XccdfRuleImportAction> = rules
+                                                        .read()
                                                         .iter()
-                                                        .map(|rule_id| XccdfRuleImportAction::CreateUnbound {
-                                                            rule_id: rule_id.clone(),
-                                                        })
+                                                        .filter(|r| r.selected)
+                                                        .map(import_action_from_rule)
                                                         .collect();
                                                     let sha256 = preview_response
                                                         .read()
@@ -2181,6 +2341,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                         selected_profile_id: None,
                                                         selected_rule_ids,
                                                         rule_actions,
+                                                         rule_customizations: import_customizations_from_rules(&rules.read()),
                                                         bundle: ImportedBundlePlan {
                                                             name: bundle_name.read().trim().to_string(),
                                                             framework: "xccdf".to_string(),

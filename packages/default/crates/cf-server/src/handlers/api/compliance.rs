@@ -2563,6 +2563,7 @@ pub async fn xccdf_preview(
             serde_json::json!({
                 "id": r.id,
                 "title": r.title,
+                "description": r.description,
                 "severity": r.severity,
                 "version": r.version,
                 "is_native": r.cf_policy_meta.is_some(),
@@ -2597,6 +2598,7 @@ pub async fn xccdf_preview(
             "id": p.id,
             "title": p.title,
             "rule_count": p.select_ids.len(),
+            "rule_ids": p.select_ids,
         })).collect::<Vec<_>>(),
         "rules": rule_summaries,
         "rule_count": parsed.rules.len(),
@@ -4130,7 +4132,7 @@ async fn read_multipart_file_and_plan(
 
         if field_name.as_deref() == Some("plan") {
             if plan.is_some() {
-                return Err(MultipartReadError::MultipleFiles); // reuse variant for duplicate plan
+                return Err(MultipartReadError::DuplicatePlan);
             }
             let mut bytes = Vec::new();
             loop {
@@ -4292,6 +4294,7 @@ enum MultipartReadError {
     Malformed,
     InvalidFieldName,
     MultipleFiles,
+    DuplicatePlan,
 }
 
 async fn read_multipart_upload(
@@ -4374,6 +4377,15 @@ fn multipart_read_error_response(error: MultipartReadError) -> axum::response::R
         MultipartReadError::MultipleFiles => {
             bad_request("Exactly one file field named 'file' is required")
         }
+        MultipartReadError::DuplicatePlan => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "DUPLICATE_IMPORT_PLAN".into(),
+                message: "Exactly one import plan field named 'plan' is required".into(),
+                details: None,
+            }),
+        )
+            .into_response(),
     }
 }
 
@@ -4599,6 +4611,24 @@ mod tests {
         body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
     }
 
+    async fn multipart_from_body(body: Vec<u8>) -> Multipart {
+        let request = Request::builder()
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .body(Body::from(body))
+            .expect("request");
+        Multipart::from_request(request, &())
+            .await
+            .expect("multipart extractor accepts request stream")
+    }
+
+    async fn read_file_and_plan(body: Vec<u8>) -> Result<(MultipartUpload, Vec<u8>), MultipartReadError> {
+        let mut multipart = multipart_from_body(body).await;
+        read_multipart_file_and_plan(&mut multipart).await
+    }
+
     async fn post_multipart(base: &str, token: &str, body: Vec<u8>) -> reqwest::Response {
         reqwest::Client::new()
             .post(format!("{base}/api/v1/compliance/xccdf/preview"))
@@ -4637,6 +4667,89 @@ mod tests {
             multipart_read_error_response(MultipartReadError::Malformed).status(),
             StatusCode::BAD_REQUEST
         );
+    }
+
+    #[tokio::test]
+    async fn import_multipart_accepts_text_plan_and_either_field_order() {
+        for plan_first in [false, true] {
+            let mut body = Vec::new();
+            if plan_first {
+                push_text_field(&mut body, "plan", br#"{"expected_sha256":"abc"}"#);
+                push_file_field(&mut body, "file", "test.xml", b"xml");
+            } else {
+                push_file_field(&mut body, "file", "test.xml", b"xml");
+                push_text_field(&mut body, "plan", br#"{"expected_sha256":"abc"}"#);
+            }
+            finish_multipart(&mut body);
+
+            let (upload, plan) = read_file_and_plan(body).await.expect("multipart fields accepted");
+            assert_eq!(upload.filename.as_deref(), Some("test.xml"));
+            assert_eq!(upload.bytes, b"xml");
+            assert_eq!(plan, br#"{"expected_sha256":"abc"}"#);
+        }
+    }
+
+    #[tokio::test]
+    async fn import_multipart_accepts_plan_with_incidental_filename() {
+        let mut body = Vec::new();
+        push_file_field(&mut body, "file", "test.xml", b"xml");
+        push_file_field(&mut body, "plan", "plan.json", br#"{"expected_sha256":"abc"}"#);
+        finish_multipart(&mut body);
+
+        let (_, plan) = read_file_and_plan(body).await.expect("plan filename is tolerated");
+        assert_eq!(plan, br#"{"expected_sha256":"abc"}"#);
+    }
+
+    #[tokio::test]
+    async fn import_multipart_rejects_duplicate_file_and_plan_distinctly() {
+        let mut body = Vec::new();
+        push_file_field(&mut body, "file", "one.xml", b"one");
+        push_file_field(&mut body, "file", "two.xml", b"two");
+        push_text_field(&mut body, "plan", b"{}");
+        finish_multipart(&mut body);
+        assert_eq!(read_file_and_plan(body).await, Err(MultipartReadError::MultipleFiles));
+
+        let mut body = Vec::new();
+        push_file_field(&mut body, "file", "one.xml", b"one");
+        push_text_field(&mut body, "plan", b"{}");
+        push_file_field(&mut body, "plan", "plan.json", b"{}");
+        finish_multipart(&mut body);
+        assert_eq!(read_file_and_plan(body).await, Err(MultipartReadError::DuplicatePlan));
+        assert_eq!(
+            multipart_read_error_response(MultipartReadError::DuplicatePlan).status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn import_multipart_rejects_missing_fields_unknown_files_and_limits() {
+        let mut body = Vec::new();
+        push_text_field(&mut body, "plan", b"{}");
+        finish_multipart(&mut body);
+        assert_eq!(read_file_and_plan(body).await, Err(MultipartReadError::InvalidFieldName));
+
+        let mut body = Vec::new();
+        push_file_field(&mut body, "file", "test.xml", b"xml");
+        finish_multipart(&mut body);
+        assert_eq!(read_file_and_plan(body).await, Err(MultipartReadError::InvalidFieldName));
+
+        let mut body = Vec::new();
+        push_file_field(&mut body, "unexpected", "test.xml", b"xml");
+        push_text_field(&mut body, "plan", b"{}");
+        finish_multipart(&mut body);
+        assert_eq!(read_file_and_plan(body).await, Err(MultipartReadError::InvalidFieldName));
+
+        let mut body = Vec::new();
+        push_file_field(&mut body, "file", "big.xml", &vec![b'x'; MAX_XCCDF_UPLOAD_BYTES]);
+        push_text_field(&mut body, "plan", b"{}");
+        finish_multipart(&mut body);
+        assert_eq!(read_file_and_plan(body).await, Err(MultipartReadError::TooLarge));
+
+        let mut body = Vec::new();
+        push_file_field(&mut body, "file", "test.xml", b"xml");
+        push_text_field(&mut body, "plan", &vec![b'x'; 1024 * 1024 + 1]);
+        finish_multipart(&mut body);
+        assert_eq!(read_file_and_plan(body).await, Err(MultipartReadError::TooLarge));
     }
 
     #[test]

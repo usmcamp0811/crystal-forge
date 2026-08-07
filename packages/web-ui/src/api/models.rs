@@ -1279,6 +1279,8 @@ pub struct XccdfDiagnostic {
 pub struct XccdfBenchmarkInfo {
     pub id: String,
     pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     pub version: Option<String>,
     pub status: Option<String>,
     pub platforms: Vec<String>,
@@ -1290,6 +1292,8 @@ pub struct XccdfProfileInfo {
     pub id: String,
     pub title: Option<String>,
     pub rule_count: usize,
+    #[serde(default)]
+    pub rule_ids: Vec<String>,
 }
 
 /// Parsed rule summary returned by the XCCDF preview endpoint.
@@ -1297,6 +1301,8 @@ pub struct XccdfProfileInfo {
 pub struct XccdfRuleInfo {
     pub id: String,
     pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     pub severity: Option<String>,
     pub is_native: bool,
     #[serde(default)]
@@ -1348,10 +1354,82 @@ pub struct XccdfPreviewResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum XccdfRuleImportAction {
-    CreateManual { rule_id: String },
-    CreateUnbound { rule_id: String },
-    PreserveOpaque { rule_id: String },
+    CreateNativeCustom {
+        rule_id: String,
+        customization: ImportedPolicyCustomization,
+        custom_check: ImportedCustomCheck,
+        evidence_requirements: Vec<ImportedEvidenceRequirement>,
+    },
+    CreateManual {
+        rule_id: String,
+        #[serde(default)]
+        customization: ImportedPolicyCustomization,
+        #[serde(default)]
+        evidence_requirements: Vec<ImportedEvidenceRequirement>,
+    },
+    CreateUnbound {
+        rule_id: String,
+        #[serde(default)]
+        customization: ImportedPolicyCustomization,
+    },
+    PreserveOpaque {
+        rule_id: String,
+        #[serde(default)]
+        customization: ImportedPolicyCustomization,
+    },
+    MapExisting { rule_id: String, policy_version_id: Uuid },
     Exclude { rule_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ImportedPolicyCustomization {
+    pub policy_name: Option<String>,
+    pub policy_description: Option<String>,
+    pub implementation_note: Option<String>,
+    #[serde(default)]
+    pub policy_severity: Option<String>,
+    #[serde(default)]
+    pub policy_rationale: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportedCustomCheck {
+    #[serde(default)]
+    pub mode: String,
+    pub rules: Vec<ImportedCustomCheckRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportedCustomCheckRule {
+    pub field_name: String,
+    pub expression: String,
+    pub description: String,
+    #[serde(default = "default_true")]
+    pub strict: bool,
+}
+
+fn default_true() -> bool { true }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImportedEvidenceRequirement {
+    Command { command: String, expected_output: String },
+    File { path: String, expected_content: String },
+    UnitState { unit: String, state: String },
+    Log { source: String, unit: Option<String>, pattern: String },
+    Attestation { description: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct XccdfRuleCustomization {
+    pub rule_id: String,
+    pub policy_name: Option<String>,
+    pub policy_description: Option<String>,
+    pub implementation_note: Option<String>,
+    #[serde(default)]
+    pub policy_severity: Option<String>,
+    #[serde(default)]
+    pub policy_rationale: Option<String>,
 }
 
 /// Bundle metadata included in the XCCDF import plan.
@@ -1372,6 +1450,8 @@ pub struct XccdfImportPlan {
     pub selected_profile_id: Option<String>,
     pub selected_rule_ids: Vec<String>,
     pub rule_actions: Vec<XccdfRuleImportAction>,
+    #[serde(default)]
+    pub rule_customizations: Vec<XccdfRuleCustomization>,
     pub bundle: ImportedBundlePlan,
 }
 

@@ -180,16 +180,34 @@ pub async fn commit_foreign_import(
     let mut created_policy_version_ids: Vec<Uuid> = Vec::new();
 
     for rec in &policy_records {
+        if let Some(mapped_version_id) = rec.mapped_policy_version_id {
+            let exists: Option<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM deployment_policy_versions WHERE id = $1",
+            )
+            .bind(mapped_version_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("failed to verify mapped policy version")?;
+            if exists.is_none() {
+                anyhow::bail!(
+                    "IMPORT_POLICY_VERSION_NOT_FOUND: mapped policy version {} does not exist",
+                    mapped_version_id
+                );
+            }
+            continue;
+        }
         // Insert policy lineage.
         sqlx::query(
             r#"
             INSERT INTO deployment_policies (id, name, description, policy_type, config, enabled)
-            VALUES ($1, $2, $3, 'imported_xccdf', '{}', false)
+            VALUES ($1, $2, $3, $4, $5, false)
             "#,
         )
         .bind(rec.policy_id)
         .bind(&rec.name)
         .bind(&rec.description)
+        .bind(&rec.policy_type)
+        .bind(&rec.config)
         .execute(&mut *tx)
         .await
         .context("failed to insert policy lineage")?;
@@ -207,10 +225,10 @@ pub async fn commit_foreign_import(
             ) VALUES (
                 $1, $2, $3,
                 $4, $5,
-                'imported_xccdf', $6, 'not-applicable',
-                '{}', $7, '[]',
-                $8, 'pending', $9,
-                $10, false
+                $6, $7, $8,
+                $9, $10, $11,
+                $12, 'pending', $13,
+                $14, false
             )
             "#,
         )
@@ -219,8 +237,12 @@ pub async fn commit_foreign_import(
         .bind("0.1-draft") // initial draft version label
         .bind(&rec.name)
         .bind(&rec.description)
+        .bind(&rec.policy_type)
         .bind(&rec.implementation_state)
+        .bind(&rec.execution_phase)
+        .bind(&rec.config)
         .bind(&rec.compliance_metadata)
+        .bind(&rec.dependencies)
         .bind(&rec.opaque_xml)
         .bind(source_artifact_id)
         .bind(importing_user_id)
@@ -241,6 +263,9 @@ pub async fn commit_foreign_import(
 
     // ── 4. Ordered membership ─────────────────────────────────────────────────
     for (policy_order, rec) in policy_records.iter().enumerate() {
+        let policy_version_id = rec
+            .mapped_policy_version_id
+            .unwrap_or(rec.policy_version_id);
         sqlx::query(
             r#"
             INSERT INTO compliance_bundle_version_policies
@@ -249,7 +274,7 @@ pub async fn commit_foreign_import(
             "#,
         )
         .bind(bundle_version_id)
-        .bind(rec.policy_version_id)
+        .bind(policy_version_id)
         .bind(policy_order as i32)
         .execute(&mut *tx)
         .await
@@ -277,6 +302,9 @@ pub async fn commit_foreign_import(
 
     // Rules → policy versions
     for rec in &policy_records {
+        let policy_version_id = rec
+            .mapped_policy_version_id
+            .unwrap_or(rec.policy_version_id);
         sqlx::query(
             r#"
             INSERT INTO compliance_source_object_mappings
@@ -287,7 +315,7 @@ pub async fn commit_foreign_import(
         )
         .bind(source_artifact_id)
         .bind(&rec.source_rule_id)
-        .bind(rec.policy_version_id)
+        .bind(policy_version_id)
         .execute(&mut *tx)
         .await
         .context("failed to insert rule source mapping")?;
@@ -301,6 +329,9 @@ pub async fn commit_foreign_import(
 
     // ── 6. Compute and persist semantic digests ───────────────────────────────
     for rec in &policy_records {
+        if rec.mapped_policy_version_id.is_some() {
+            continue;
+        }
         let opaque_xml_digest =
             PolicyVersionCanonical::digest_opaque_xml(rec.opaque_xml.as_deref());
 
@@ -1082,8 +1113,11 @@ mod tests {
                 .iter()
                 .map(|id| XccdfRuleImportAction::CreateManual {
                     rule_id: id.to_string(),
+                    customization: Default::default(),
+                    evidence_requirements: Vec::new(),
                 })
                 .collect(),
+            rule_customizations: Vec::new(),
             bundle: ImportedBundlePlan {
                 name: "Test Import Bundle".into(),
                 framework: "XCCDF-TEST".into(),
@@ -1449,11 +1483,14 @@ mod tests {
             rule_actions: vec![
                 XccdfRuleImportAction::CreateManual {
                     rule_id: "xccdf_test_rule_001".into(),
+                    customization: Default::default(),
+                    evidence_requirements: Vec::new(),
                 },
                 XccdfRuleImportAction::Exclude {
                     rule_id: "xccdf_test_rule_002".into(),
                 },
             ],
+            rule_customizations: Vec::new(),
             bundle: ImportedBundlePlan {
                 name: "Partial Import Bundle".into(),
                 framework: "XCCDF-TEST".into(),

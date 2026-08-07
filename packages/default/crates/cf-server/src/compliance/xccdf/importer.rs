@@ -222,11 +222,14 @@ pub fn validate_cf_native_document(
             description: canonical.description,
             compliance_metadata,
             opaque_xml: rule.preserved_xml.clone(),
+            mapped_policy_version_id: None,
+            evidence_requirements: Vec::new(),
         });
         rules.push((
             rule.clone(),
             XccdfRuleImportAction::CreateUnbound {
                 rule_id: rule.id.clone(),
+                customization: Default::default(),
             },
         ));
     }
@@ -280,6 +283,7 @@ pub fn validate_cf_native_document(
             description: bundle_canonical.description,
         },
         rules_to_import: rules,
+        rule_customizations: Vec::new(),
     };
     Ok((validated, records))
 }
@@ -355,6 +359,47 @@ pub fn validate_import_plan(
         if !seen_selected.contains(rule_id) {
             return Err(ImportPlanError::action_for_unselected(rule_id));
         }
+        if let XccdfRuleImportAction::CreateNativeCustom { custom_check, .. } = action {
+            if !matches!(custom_check.mode.as_str(), "all" | "any") {
+                return Err(ImportPlanError::native_check_invalid(
+                    rule_id,
+                    "mode must be 'all' or 'any'",
+                ));
+            }
+            if custom_check.rules.is_empty() {
+                return Err(ImportPlanError::native_check_invalid(
+                    rule_id,
+                    "at least one assertion is required",
+                ));
+            }
+            for assertion in &custom_check.rules {
+                if assertion.field_name.trim().is_empty()
+                    || assertion.expression.trim().is_empty()
+                    || assertion.description.trim().is_empty()
+                {
+                    return Err(ImportPlanError::native_check_invalid(
+                        rule_id,
+                        "assertion field_name, expression, and description are required",
+                    ));
+                }
+                if !assertion.expression.contains("cfg.config") {
+                    return Err(ImportPlanError::native_check_invalid(
+                        rule_id,
+                        "assertion expression must use the cfg.config binding",
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut customization_by_rule_id = HashSet::new();
+    for customization in &plan.rule_customizations {
+        if !seen_selected.contains(customization.rule_id.as_str()) {
+            return Err(ImportPlanError::action_for_unselected(&customization.rule_id));
+        }
+        if !customization_by_rule_id.insert(customization.rule_id.as_str()) {
+            return Err(ImportPlanError::action_duplicate(&customization.rule_id));
+        }
     }
 
     // ── Every selected rule must have exactly one action ───────────────────
@@ -407,6 +452,7 @@ pub fn validate_import_plan(
         expected_sha256: plan.expected_sha256,
         bundle: plan.bundle,
         rules_to_import,
+        rule_customizations: plan.rule_customizations,
     })
 }
 
@@ -414,6 +460,8 @@ pub fn validate_import_plan(
 
 /// Build an [`ImportedPolicyRecord`] for each non-excluded rule.
 pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPolicyRecord> {
+    let customizations: HashMap<&str, &crate::compliance::xccdf::import_models::XccdfRuleCustomization> =
+        validated.rule_customizations.iter().map(|c| (c.rule_id.as_str(), c)).collect();
     validated
         .rules_to_import
         .iter()
@@ -421,13 +469,61 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
         .filter_map(|(order_in_selected, (rule, action))| {
             let impl_state = action.implementation_state()?.to_owned(); // None = Exclude
 
-            let name = rule
+            let customization = customizations.get(rule.id.as_str()).copied();
+            let name = customization
+                .and_then(|c| c.policy_name.clone())
+                .filter(|t| !t.trim().is_empty())
+                .or_else(|| rule
                 .title
                 .clone()
                 .filter(|t| !t.trim().is_empty())
+                )
                 .unwrap_or_else(|| rule.id.clone());
 
-            let compliance_metadata = ImportedPolicyRecord::build_compliance_metadata(rule);
+            let mut compliance_metadata = ImportedPolicyRecord::build_compliance_metadata(rule);
+            let (policy_type, execution_phase, config, evidence_requirements) = match action {
+                XccdfRuleImportAction::CreateNativeCustom {
+                    custom_check,
+                    evidence_requirements,
+                    ..
+                } => (
+                    "custom_check".to_string(),
+                    "nix-evaluation".to_string(),
+                    serde_json::to_value(custom_check).unwrap_or_else(|_| serde_json::json!({})),
+                    evidence_requirements.clone(),
+                ),
+                XccdfRuleImportAction::CreateManual {
+                    evidence_requirements,
+                    ..
+                } => (
+                    "imported_xccdf".to_string(),
+                    "not-applicable".to_string(),
+                    serde_json::json!({}),
+                    evidence_requirements.clone(),
+                ),
+                _ => (
+                    "imported_xccdf".to_string(),
+                    "not-applicable".to_string(),
+                    serde_json::json!({}),
+                    Vec::new(),
+                ),
+            };
+            if !evidence_requirements.is_empty() {
+                compliance_metadata["evidence_requirements"] =
+                    serde_json::to_value(&evidence_requirements).unwrap_or_else(|_| serde_json::json!([]));
+            }
+            if let Some(note) = customization.and_then(|c| c.implementation_note.clone()) {
+                compliance_metadata["implementation_note"] = serde_json::Value::String(note);
+            }
+            if let Some(severity) = customization
+                .and_then(|c| c.policy_severity.clone())
+                .filter(|value| matches!(value.as_str(), "high" | "medium" | "low"))
+            {
+                compliance_metadata["policy_severity"] = serde_json::Value::String(severity);
+            }
+            if let Some(rationale) = customization.and_then(|c| c.policy_rationale.clone()) {
+                compliance_metadata["policy_rationale"] = serde_json::Value::String(rationale);
+            }
 
             // For opaque rules, preserve the full XML fragment when available.
             let opaque_xml = if impl_state == "opaque" {
@@ -436,16 +532,26 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
                 None
             };
 
+            let description = customization
+                .and_then(|c| c.policy_description.clone())
+                .or_else(|| rule.description.clone());
+            let mapped_policy_version_id = match action {
+                XccdfRuleImportAction::MapExisting { policy_version_id, .. } => {
+                    Some(*policy_version_id)
+                }
+                _ => None,
+            };
+
             Some(ImportedPolicyRecord {
                 policy_id: Uuid::new_v4(),
                 policy_version_id: Uuid::new_v4(),
                 source_rule_id: rule.id.clone(),
                 source_rule_order: rule.rule_order.unwrap_or(order_in_selected),
                 implementation_state: impl_state,
-                policy_type: "imported_xccdf".into(),
+                policy_type,
                 version: None,
-                execution_phase: "not-applicable".into(),
-                config: serde_json::json!({}),
+                execution_phase,
+                config,
                 dependencies: serde_json::json!([]),
                 enabled_by_default: false,
                 portable: false,
@@ -453,9 +559,11 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
                 selected: true,
                 policy_order: rule.rule_order.unwrap_or(order_in_selected) as i32,
                 name,
-                description: rule.description.clone(),
+                description,
                 compliance_metadata,
                 opaque_xml,
+                mapped_policy_version_id,
+                evidence_requirements,
             })
         })
         .collect()
@@ -466,7 +574,10 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compliance::xccdf::import_models::{ImportedBundlePlan, XccdfImportPlan};
+    use crate::compliance::xccdf::import_models::{
+        ImportedBundlePlan, ImportedCustomCheck, ImportedCustomCheckRule,
+        XccdfImportPlan, XccdfRuleCustomization, XccdfRuleImportAction,
+    };
     use crate::compliance::xccdf::models::{DocumentClass, Fidelity, ParsedXccdf};
 
     fn minimal_foreign_parsed(rule_ids: &[&str]) -> ParsedXccdf {
@@ -532,8 +643,11 @@ mod tests {
                 .iter()
                 .map(|id| XccdfRuleImportAction::CreateManual {
                     rule_id: id.to_string(),
+                    customization: Default::default(),
+                    evidence_requirements: Vec::new(),
                 })
                 .collect(),
+            rule_customizations: Vec::new(),
             bundle: ImportedBundlePlan {
                 name: "Test Bundle".into(),
                 framework: "TEST".into(),
@@ -557,6 +671,91 @@ mod tests {
         );
         let validated = result.unwrap();
         assert_eq!(validated.rules_to_import.len(), 2);
+    }
+
+    #[test]
+    fn native_custom_check_requires_cfg_binding_and_preserves_assertions() {
+        let parsed = minimal_foreign_parsed(&["rule-1"]);
+        let mut plan = valid_plan(&["rule-1"]);
+        plan.rule_actions = vec![XccdfRuleImportAction::CreateNativeCustom {
+            rule_id: "rule-1".into(),
+            customization: Default::default(),
+            custom_check: ImportedCustomCheck {
+                mode: "any".into(),
+                rules: vec![ImportedCustomCheckRule {
+                    field_name: "firewallEnabled".into(),
+                    expression: "cfg.config.networking.firewall.enable".into(),
+                    description: "Firewall is enabled".into(),
+                    strict: false,
+                }],
+            },
+            evidence_requirements: Vec::new(),
+        }];
+
+        let validated = validate_import_plan(plan, &parsed).expect("native plan is valid");
+        let records = build_policy_records(&validated);
+        assert_eq!(records[0].implementation_state, "native");
+        assert_eq!(records[0].policy_type, "custom_check");
+        assert_eq!(records[0].config["mode"], "any");
+        assert_eq!(records[0].config["rules"][0]["field_name"], "firewallEnabled");
+        assert_eq!(records[0].config["rules"][0]["strict"], false);
+    }
+
+    #[test]
+    fn native_custom_check_rejects_non_cfg_expression() {
+        let parsed = minimal_foreign_parsed(&["rule-1"]);
+        let mut plan = valid_plan(&["rule-1"]);
+        plan.rule_actions = vec![XccdfRuleImportAction::CreateNativeCustom {
+            rule_id: "rule-1".into(),
+            customization: Default::default(),
+            custom_check: ImportedCustomCheck {
+                mode: "all".into(),
+                rules: vec![ImportedCustomCheckRule {
+                    field_name: "bad".into(),
+                    expression: "true".into(),
+                    description: "Not bound to the evaluated config".into(),
+                    strict: true,
+                }],
+            },
+            evidence_requirements: Vec::new(),
+        }];
+
+        let result = validate_import_plan(plan, &parsed);
+        assert!(matches!(
+            result,
+            Err(ImportPlanError {
+                code: "IMPORT_NATIVE_CHECK_INVALID",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rule_customization_overrides_local_policy_fields() {
+        let parsed = minimal_foreign_parsed(&["rule-1"]);
+        let mut plan = valid_plan(&["rule-1"]);
+        plan.rule_customizations = vec![XccdfRuleCustomization {
+            rule_id: "rule-1".into(),
+            policy_name: Some("Local firewall policy".into()),
+            policy_description: Some("Local control description".into()),
+            implementation_note: Some("Reviewed by platform security".into()),
+            policy_severity: Some("high".into()),
+            policy_rationale: Some("Apply the approved remediation".into()),
+        }];
+
+        let validated = validate_import_plan(plan, &parsed).expect("customized plan is valid");
+        let records = build_policy_records(&validated);
+        assert_eq!(records[0].name, "Local firewall policy");
+        assert_eq!(records[0].description.as_deref(), Some("Local control description"));
+        assert_eq!(
+            records[0].compliance_metadata["implementation_note"],
+            "Reviewed by platform security"
+        );
+        assert_eq!(records[0].compliance_metadata["policy_severity"], "high");
+        assert_eq!(
+            records[0].compliance_metadata["policy_rationale"],
+            "Apply the approved remediation"
+        );
     }
 
     #[test]
@@ -609,6 +808,8 @@ mod tests {
         plan.selected_rule_ids = vec!["r1".into(), "r1".into()];
         plan.rule_actions = vec![XccdfRuleImportAction::CreateManual {
             rule_id: "r1".into(),
+            customization: Default::default(),
+            evidence_requirements: Vec::new(),
         }];
         let result = validate_import_plan(plan, &parsed);
         assert!(matches!(
@@ -641,9 +842,12 @@ mod tests {
         plan.rule_actions = vec![
             XccdfRuleImportAction::CreateManual {
                 rule_id: "r1".into(),
+                customization: Default::default(),
+                evidence_requirements: Vec::new(),
             },
             XccdfRuleImportAction::CreateUnbound {
                 rule_id: "r1".into(),
+                customization: Default::default(),
             },
         ];
         let result = validate_import_plan(plan, &parsed);
@@ -662,6 +866,8 @@ mod tests {
         let mut plan = valid_plan(&["r1", "r2"]);
         plan.rule_actions = vec![XccdfRuleImportAction::CreateManual {
             rule_id: "r1".into(),
+            customization: Default::default(),
+            evidence_requirements: Vec::new(),
         }]; // r2 missing
         let result = validate_import_plan(plan, &parsed);
         assert!(matches!(
@@ -680,6 +886,8 @@ mod tests {
         // Add action for r99 which is not in selected_rule_ids.
         plan.rule_actions.push(XccdfRuleImportAction::CreateManual {
             rule_id: "r99".into(),
+            customization: Default::default(),
+            evidence_requirements: Vec::new(),
         });
         let result = validate_import_plan(plan, &parsed);
         assert!(matches!(
@@ -750,11 +958,14 @@ mod tests {
             rule_actions: vec![
                 XccdfRuleImportAction::CreateManual {
                     rule_id: "r1".into(),
+                    customization: Default::default(),
+                    evidence_requirements: Vec::new(),
                 },
                 XccdfRuleImportAction::Exclude {
                     rule_id: "r2".into(),
                 },
             ],
+            rule_customizations: Vec::new(),
             bundle: ImportedBundlePlan {
                 name: "Bundle".into(),
                 framework: "FW".into(),

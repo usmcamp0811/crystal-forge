@@ -29,8 +29,63 @@ pub struct XccdfImportPlan {
     pub selected_rule_ids: Vec<String>,
     /// One action per selected rule.
     pub rule_actions: Vec<XccdfRuleImportAction>,
+    /// Optional local presentation changes keyed by source rule ID. Source
+    /// benchmark metadata remains preserved separately in compliance_metadata.
+    #[serde(default)]
+    pub rule_customizations: Vec<XccdfRuleCustomization>,
     /// Metadata for the draft bundle to create.
     pub bundle: ImportedBundlePlan,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct XccdfRuleCustomization {
+    pub rule_id: String,
+    pub policy_name: Option<String>,
+    pub policy_description: Option<String>,
+    pub implementation_note: Option<String>,
+    #[serde(default)]
+    pub policy_severity: Option<String>,
+    #[serde(default)]
+    pub policy_rationale: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ImportedPolicyCustomization {
+    pub policy_name: Option<String>,
+    pub policy_description: Option<String>,
+    pub implementation_note: Option<String>,
+    #[serde(default)]
+    pub policy_severity: Option<String>,
+    #[serde(default)]
+    pub policy_rationale: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ImportedCustomCheck {
+    #[serde(default)]
+    pub mode: String,
+    pub rules: Vec<ImportedCustomCheckRule>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ImportedCustomCheckRule {
+    pub field_name: String,
+    pub expression: String,
+    pub description: String,
+    #[serde(default = "default_true")]
+    pub strict: bool,
+}
+
+fn default_true() -> bool { true }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImportedEvidenceRequirement {
+    Command { command: String, expected_output: String },
+    File { path: String, expected_content: String },
+    UnitState { unit: String, state: String },
+    Log { source: String, unit: Option<String>, pattern: String },
+    Attestation { description: String },
 }
 
 /// Metadata for the draft bundle created during import.
@@ -48,12 +103,38 @@ pub struct ImportedBundlePlan {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum XccdfRuleImportAction {
+    CreateNativeCustom {
+        rule_id: String,
+        customization: ImportedPolicyCustomization,
+        custom_check: ImportedCustomCheck,
+        evidence_requirements: Vec<ImportedEvidenceRequirement>,
+    },
     /// Import as a manual policy — the user must provide evidence of compliance.
-    CreateManual { rule_id: String },
+    CreateManual {
+        rule_id: String,
+        #[serde(default)]
+        customization: ImportedPolicyCustomization,
+        #[serde(default)]
+        evidence_requirements: Vec<ImportedEvidenceRequirement>,
+    },
     /// Import as an unbound policy — exists in the bundle but has no implementation.
-    CreateUnbound { rule_id: String },
+    CreateUnbound {
+        rule_id: String,
+        #[serde(default)]
+        customization: ImportedPolicyCustomization,
+    },
     /// Import as an opaque policy — check content is preserved but not executed.
-    PreserveOpaque { rule_id: String },
+    PreserveOpaque {
+        rule_id: String,
+        #[serde(default)]
+        customization: ImportedPolicyCustomization,
+    },
+    /// Reuse an exact immutable local policy version while preserving the
+    /// imported rule metadata and source mapping.
+    MapExisting {
+        rule_id: String,
+        policy_version_id: Uuid,
+    },
     /// Exclude the rule — create no policy or membership row.
     Exclude { rule_id: String },
 }
@@ -61,9 +142,11 @@ pub enum XccdfRuleImportAction {
 impl XccdfRuleImportAction {
     pub fn rule_id(&self) -> &str {
         match self {
-            Self::CreateManual { rule_id } => rule_id,
-            Self::CreateUnbound { rule_id } => rule_id,
-            Self::PreserveOpaque { rule_id } => rule_id,
+            Self::CreateNativeCustom { rule_id, .. } => rule_id,
+            Self::CreateManual { rule_id, .. } => rule_id,
+            Self::CreateUnbound { rule_id, .. } => rule_id,
+            Self::PreserveOpaque { rule_id, .. } => rule_id,
+            Self::MapExisting { rule_id, .. } => rule_id,
             Self::Exclude { rule_id } => rule_id,
         }
     }
@@ -75,10 +158,12 @@ impl XccdfRuleImportAction {
     /// The `implementation_state` value to store for non-excluded rules.
     pub fn implementation_state(&self) -> Option<&'static str> {
         match self {
+            Self::CreateNativeCustom { .. } => Some("native"),
             Self::CreateManual { .. } => Some("manual"),
             Self::CreateUnbound { .. } => Some("unbound"),
             Self::PreserveOpaque { .. } => Some("opaque"),
             Self::Exclude { .. } => None,
+            Self::MapExisting { .. } => Some("mapped"),
         }
     }
 }
@@ -93,6 +178,7 @@ pub struct ValidatedImportPlan {
     pub bundle: ImportedBundlePlan,
     /// Non-excluded rules in document order, each paired with its action.
     pub rules_to_import: Vec<(ParsedRule, XccdfRuleImportAction)>,
+    pub rule_customizations: Vec<XccdfRuleCustomization>,
 }
 
 // ── Validation errors ─────────────────────────────────────────────────────────
@@ -202,6 +288,13 @@ impl ImportPlanError {
         )
     }
 
+    pub fn native_check_invalid(rule_id: &str, message: impl Into<String>) -> Self {
+        Self::new(
+            "IMPORT_NATIVE_CHECK_INVALID",
+            format!("rule {:?}: {}", rule_id, message.into()),
+        )
+    }
+
     pub fn profile_not_found(profile_id: &str) -> Self {
         Self::new(
             "IMPORT_PROFILE_NOT_FOUND",
@@ -302,6 +395,9 @@ pub struct ImportedPolicyRecord {
     pub compliance_metadata: serde_json::Value,
     /// The full original opaque XML for `preserve_opaque` rules, when present.
     pub opaque_xml: Option<String>,
+    /// Set for MapExisting actions. No new local policy lineage is created.
+    pub mapped_policy_version_id: Option<Uuid>,
+    pub evidence_requirements: Vec<ImportedEvidenceRequirement>,
 }
 
 impl ImportedPolicyRecord {
