@@ -5,6 +5,17 @@
 **Date:** 2026-07-31  
 **Status:** Design draft for implementation review
 
+> **Implementation status for this branch:** The server-side CF-XCCDF path is
+> implemented for the supported policy and bundle version model. Bundle and
+> policy lineages are distinct from exact version identities; the catalog may
+> select a current published revision, but export and assignment APIs require
+> an explicit version ID. Draft revisions are mutable and accepted revisions
+> are immutable. Assignment overlays are resolved server-side and can be
+> exported as an effective derived benchmark. Preview/import parsing is
+> server-side and digest-checked. The compatibility claims in this document
+> are limited to the tested behavior described in Section 22; design-draft
+> features not listed there are not implementation claims.
+
 ## 1. Purpose
 
 This specification defines how Crystal Forge imports and exports compliance bundles and policies using XCCDF 1.2 XML.
@@ -77,7 +88,7 @@ A generic scanner is not expected to execute a Crystal Forge Nix or deployment p
 - Bundle publication and version identity
 - Bundle assignment overlays
 - Imported source preservation
-- Optional XCCDF `TestResult` export
+- XCCDF `TestResult` mapping is specified, but export is not implemented in this branch
 - Current Crystal Forge policy types
 - NixOS configuration checks using the Crystal Forge `cfg` evaluation context
 - Operational policies, including approval, time-window, rollout, and vulnerability controls
@@ -587,7 +598,10 @@ The default assignment has no exclusions and no additions. It enforces the full 
 
 ### 16.2 Canonical bundle export
 
-A canonical bundle export contains the immutable bundle version and baseline profile. It does not contain local environment or system assignment state.
+A canonical bundle export is selected by an explicit bundle version ID and
+contains that exact revision and its baseline profile. A catalog's `current`
+selection is not a substitute for the requested version identity. Canonical
+export does not contain local environment or system assignment state.
 
 ### 16.3 Tailoring export
 
@@ -597,7 +611,9 @@ When an assignment only:
 - selects existing alternatives; or
 - changes values already represented by XCCDF `Value` elements,
 
-Crystal Forge MAY export an XCCDF `Tailoring` document that references the canonical benchmark.
+Crystal Forge does not currently export an XCCDF `Tailoring` document for this
+path. The implemented assignment export endpoint resolves the overlay and
+writes a standalone effective benchmark instead.
 
 ### 16.4 Added policies
 
@@ -754,14 +770,16 @@ A degraded import MUST display the lost or unsupported features before publicati
 
 ### 19.1 Export modes
 
-Crystal Forge SHOULD support:
+The implemented export modes are:
 
 - canonical bundle XCCDF;
 - effective assignment XCCDF;
-- XCCDF tailoring;
-- XCCDF benchmark plus `TestResult`;
-- source-preserving re-export; and
-- future SCAP package export.
+- policy JSON/TOML interchange; and
+- source-preserving source-artifact retention for imported content.
+
+XCCDF `Tailoring`, XCCDF `TestResult` export, and a complete byte-preserving
+modified foreign-document re-export are not implementation claims for this
+branch.
 
 ### 19.2 Source-preserving re-export
 
@@ -784,6 +802,10 @@ A producer MAY include a standard alternative check, such as OVAL or OCIL, when 
 ## 20. Assessment result export
 
 Assessment results are separate from the immutable bundle definition.
+
+The result mapping below is a profile specification, not an implementation
+claim for this branch. XCCDF `TestResult` export is not currently exposed by the
+implemented interchange API.
 
 Crystal Forge MAY export one XCCDF `TestResult` per target assessment. Each policy result maps to one `rule-result`.
 
@@ -877,7 +899,11 @@ Crystal Forge MUST describe compatibility using explicit levels.
 - Required SCAP packaging is valid.
 - A named third-party scanner successfully executes the checks.
 
-Version 0.1 targets Levels A through C. It does not claim Level D by default.
+This branch has tested server behavior for Levels A through C only. It does not
+claim Level D generic SCAP execution. No named third-party viewer or STIG Viewer
+release is claimed as compatible unless that exact version has a recorded test;
+XCCDF schema validity does not prove that a viewer accepts Crystal Forge
+extension content.
 
 ## 23. Validation and test suite
 
@@ -896,32 +922,18 @@ A CF-XCCDF implementation MUST include automated fixtures and tests for:
 11. Bundle baseline selection.
 12. Assignment exclusions.
 13. Assignment additions through derived-benchmark export.
-14. Value tailoring.
+14. Assignment value overrides in effective export.
 15. Unsupported check-system handling as `notchecked`.
 16. Result and waiver mapping.
 17. Malicious XML and archive rejection.
 18. Missing custom-module dependency behavior.
 
-The release test matrix SHOULD include:
-
-- an XCCDF schema validator;
-- OpenSCAP XCCDF validation;
-- DISA STIG Viewer 3 import and display checks;
-- a Crystal Forge-to-Crystal Forge round trip; and
-- at least one non-Crystal-Forge XCCDF viewer.
-
-The STIG Viewer acceptance fixture SHOULD verify display or search of:
-
-- rule title;
-- severity;
-- discussion;
-- check;
-- fix;
-- Group ID;
-- Rule ID;
-- STIG ID when present;
-- CCI identifiers; and
-- legacy IDs when present.
+The branch's focused tests cover server-side parsing and writing, identity and
+digest reconciliation, supported policy JSON/TOML round trips, assignment
+resolution, effective-set digest consistency, and canonical/effective XCCDF
+export. They do not establish OpenSCAP execution of Crystal Forge checks,
+DISA STIG Viewer compatibility, or generic scanner execution. Any such claim
+must name the exact tested tool version and fixture.
 
 Tool compatibility MUST be stated against tested versions. Standards conformance alone does not guarantee that every product accepts every valid extension pattern.
 

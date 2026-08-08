@@ -42,6 +42,11 @@ pub struct PolicyRevisionSummary {
     pub created_at: String,
     pub is_current_published: bool,
     pub is_current_draft: bool,
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
+    pub config: serde_json::Value,
+    pub enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

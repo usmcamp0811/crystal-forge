@@ -1314,6 +1314,12 @@ pub struct DeploymentPolicyVersionSummary {
     pub is_current_published: bool,
     #[serde(default)]
     pub is_current_draft: bool,
+    /// Version payload used by policy management to inspect historical revisions.
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
+    pub config: serde_json::Value,
+    pub enabled: bool,
 }
 
 /// Environment with its required policies (the baseline).

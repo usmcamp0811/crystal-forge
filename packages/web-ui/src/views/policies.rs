@@ -474,6 +474,9 @@ pub fn PoliciesView() -> Element {
                                 }
                                 p { class: "text-gray-400 mb-2", "No policies match these filters." }
                                 p { class: "text-sm text-gray-500", "Clear the filters or try a different search." }
+                            } else if policies_load_error.read().is_some() {
+                                p { class: "text-gray-400 mb-2", "Policy data is unavailable." }
+                                p { class: "text-sm text-gray-500", "Resolve the management API error above and retry." }
                             } else {
                                 svg { class: "w-12 h-12 mx-auto text-gray-600 mb-4", fill: "none", stroke: "currentColor", view_box: "0 0 24 24",
                                     path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "1.5", d: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" }
@@ -626,14 +629,46 @@ fn PolicyDrawer(
     on_export: EventHandler<(PolicyDefinition, String)>,
     on_edit: EventHandler<PolicyDefinition>,
 ) -> Element {
-    let category = policy_category(&policy);
-    let rules = crate::components::policy::policy_rule_summaries(&policy);
-    let is_core = is_core_policy(&policy);
-    let policy_for_edit = policy.clone();
+    let mut selected_version_id = use_signal(|| policy.version_id);
+    let policy_version_id = policy.version_id;
+    use_effect(move || selected_version_id.set(policy_version_id));
+
+    let selected_revision = selected_version_id()
+        .and_then(|id| policy.revisions.iter().find(|revision| revision.id == id));
+    let displayed_policy = selected_revision.map_or_else(|| policy.clone(), |revision| {
+        let body = serde_json::to_string_pretty(&serde_json::json!({
+            "policy_type": revision.policy_type,
+            "enabled": revision.enabled,
+            "config": revision.config,
+        }))
+        .unwrap_or_else(|_| "{}".to_string());
+        PolicyDefinition {
+            id: policy.id,
+            lineage_id: policy.lineage_id,
+            version_id: Some(revision.id),
+            revision: Some(revision.version.clone()),
+            publication_state: Some(revision.publication_state.clone()),
+            semantic_digest: Some(revision.semantic_digest.clone()),
+            revisions: policy.revisions.clone(),
+            name: revision.name.clone(),
+            description: revision
+                .description
+                .clone()
+                .unwrap_or_else(|| "No description".to_string()),
+            format: policy.format,
+            body,
+            policy_type: Some(revision.policy_type.clone()),
+            system_count: policy.system_count,
+        }
+    });
+    let category = policy_category(&displayed_policy);
+    let rules = crate::components::policy::policy_rule_summaries(&displayed_policy);
+    let is_core = is_core_policy(&displayed_policy);
+    let policy_for_edit = displayed_policy.clone();
     let mut busy = use_signal(|| false);
     let mut action_status = use_signal(|| None::<String>);
 
-    let version_id = policy.version_id;
+    let version_id = displayed_policy.version_id;
 
     rsx! {
         div {
@@ -651,7 +686,7 @@ fn PolicyDrawer(
                     div { style: "min-width: 0;",
                         div {
                             style: "display: flex; align-items: center; gap: 8px; flex-wrap: wrap;",
-                            span { class: "mono", style: "font-weight: 700; font-size: 15px;", "{policy.name}" }
+                             span { class: "mono", style: "font-weight: 700; font-size: 15px;", "{displayed_policy.name}" }
                             span {
                                 class: "chip",
                                 style: "color: {category.color()}; background: color-mix(in oklab, {category.color()} 14%, transparent);",
@@ -665,7 +700,7 @@ fn PolicyDrawer(
                         }
                         div {
                             style: "font-size: 12px; color: var(--cf-text-muted); margin-top: 4px;",
-                            "{policy.description}"
+                             "{displayed_policy.description}"
                         }
                     }
                 }
@@ -680,7 +715,7 @@ fn PolicyDrawer(
                     button {
                         class: "btn btn-ghost focus-ring xs",
                         onclick: {
-                            let policy = policy.clone();
+                            let policy = displayed_policy.clone();
                             move |_| on_export.call((policy.clone(), "json".to_string()))
                         },
                         "JSON"
@@ -688,7 +723,7 @@ fn PolicyDrawer(
                     button {
                         class: "btn btn-ghost focus-ring xs",
                         onclick: {
-                            let policy = policy.clone();
+                            let policy = displayed_policy.clone();
                             move |_| on_export.call((policy.clone(), "toml".to_string()))
                         },
                         "TOML"
@@ -767,6 +802,35 @@ fn PolicyDrawer(
                         crate::components::icon::Icon { name: crate::components::icon::IconName::X, size: 16 }
                     }
                 }
+                if !policy.revisions.is_empty() {
+                    div { class: "policy-revision-strip", style: "padding: 10px 16px; border-top: 1px solid var(--cf-border); border-bottom: 1px solid var(--cf-border);",
+                        div { style: "font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--cf-text-muted); margin-bottom: 7px;", "Revisions" }
+                        div { style: "display: flex; flex-direction: column; gap: 5px;",
+                            for revision in policy.revisions.iter().cloned() {
+                                {
+                                    let revision_id = revision.id;
+                                    let selected = selected_version_id() == Some(revision_id);
+                                    rsx! {
+                                        button {
+                                            class: "btn btn-ghost focus-ring",
+                                            style: if selected { "display:flex;justify-content:space-between;align-items:center;text-align:left;border-color:var(--cf-accent);background:color-mix(in oklab, var(--cf-accent) 12%, transparent);" } else { "display:flex;justify-content:space-between;align-items:center;text-align:left;" },
+                                            onclick: move |_| selected_version_id.set(Some(revision_id)),
+                                            span {
+                                                span { class: "mono", "v{revision.version}" }
+                                                span { style: "margin-left: 7px; color: var(--cf-text-muted);", "{revision.publication_state}" }
+                                            }
+                                            span { style: "display:flex;gap:5px;align-items:center;",
+                                                if revision.is_current_draft { span { class: "chip chip-info", "current draft" } }
+                                                if revision.is_current_published { span { class: "chip chip-healthy", "current" } }
+                                                if selected { span { class: "chip", "selected" } }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             div {
                 class: "ed-body",
@@ -791,7 +855,7 @@ fn PolicyDrawer(
                         pre {
                             class: "mono",
                             style: "margin: 0; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; padding: 12px; border-radius: 8px; background: var(--cf-subtle-bg);",
-                            "{policy.body}"
+                             "{displayed_policy.body}"
                         }
                     }
                 }

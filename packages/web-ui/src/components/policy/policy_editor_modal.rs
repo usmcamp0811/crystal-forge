@@ -672,9 +672,15 @@ pub fn PolicyEditorModal(
                                 spawn(async move {
                                     match delete_deployment_policy(&policy_id).await {
                                         Ok(()) => {
-                                            let latest = policies_api::load_policies_with_fallback().await;
-                                            policy_library.set(latest);
-                                            on_close.call(());
+                                             match policies_api::load_policies().await {
+                                                 policies_api::PolicyLoadResult::Ok(latest) => {
+                                                     policy_library.set(latest);
+                                                     on_close.call(());
+                                                 }
+                                                 policies_api::PolicyLoadResult::Err(error) => {
+                                                     save_error.set(format!("Policy removed, but refresh failed: {error}"));
+                                                 }
+                                             }
                                         }
                                         Err(error) => save_error.set(format!("Failed to remove policy: {error}")),
                                     }
@@ -1026,8 +1032,12 @@ pub fn PolicyEditorModal(
 
                                     match result {
                                         Ok(()) => {
-                                            let latest = policies_api::load_policies_with_fallback().await;
-                                            policy_library.set(latest);
+                                             match policies_api::load_policies().await {
+                                                 policies_api::PolicyLoadResult::Ok(latest) => policy_library.set(latest),
+                                                 policies_api::PolicyLoadResult::Err(error) => {
+                                                     save_error.set(format!("Policy saved, but refresh failed: {error}"));
+                                                 }
+                                             }
                                             is_saving.set(false);
                                             on_close.call(());
                                         }

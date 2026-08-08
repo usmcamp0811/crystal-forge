@@ -51,16 +51,6 @@ pub async fn load_policies() -> PolicyLoadResult {
     }
 }
 
-/// Backwards-compatible shim used by any existing call site that still expects
-/// the old signature. Returns an empty list on error so the view remains
-/// renderable; callers should migrate to `load_policies()`.
-pub async fn load_policies_with_fallback() -> Vec<PolicyDefinition> {
-    match load_policies().await {
-        PolicyLoadResult::Ok(p) => p,
-        PolicyLoadResult::Err(_) => Vec::new(),
-    }
-}
-
 /// Convert a backend DeploymentPolicyRecord to a frontend PolicyDefinition.
 fn policy_record_to_definition_with_count(
     record: DeploymentPolicyRecord,
@@ -91,6 +81,11 @@ fn policy_record_to_definition_with_count(
             created_at: v.created_at.to_rfc3339(),
             is_current_published: v.is_current_published,
             is_current_draft: v.is_current_draft,
+            name: v.name,
+            description: v.description,
+            policy_type: v.policy_type,
+            config: v.config,
+            enabled: v.enabled,
         }).collect(),
         name: record.name,
         description: record
@@ -101,91 +96,4 @@ fn policy_record_to_definition_with_count(
         policy_type: Some(record.policy_type),
         system_count,
     }
-}
-
-/// Mock policies for fallback when API is unavailable.
-fn mock_policies() -> Vec<PolicyDefinition> {
-    use crate::components::policy::PolicyFormat;
-
-    let mock_count = 12i64;
-    vec![
-        PolicyDefinition {
-            id: Uuid::from_u128(1),
-            lineage_id: Uuid::from_u128(1),
-            version_id: None,
-            revision: None,
-            publication_state: None,
-            semantic_digest: None,
-            revisions: Vec::new(),
-            name: "Require Crystal Forge Agent".to_string(),
-            description: "This policy ensures the Crystal Forge agent and client services are enabled on the target system.".to_string(),
-            format: PolicyFormat::Toml,
-            body: r#"[[policy]]
-type = "require_crystal_forge_agent"
-strict = true
-"#.to_string(),
-            policy_type: Some("require_crystal_forge_agent".to_string()),
-            system_count: mock_count,
-        },
-        PolicyDefinition {
-            id: Uuid::from_u128(2),
-            lineage_id: Uuid::from_u128(2),
-            version_id: None,
-            revision: None,
-            publication_state: None,
-            semantic_digest: None,
-            revisions: Vec::new(),
-            name: "Require Firewall".to_string(),
-            description: "Ensure firewall is enabled on all systems.".to_string(),
-            format: PolicyFormat::Toml,
-            body: r#"[[policy]]
-type = "custom_check"
-expression = "config.networking.firewall.enable"
-description = "Firewall must be enabled"
-strict = true
-"#.to_string(),
-            policy_type: Some("custom_check".to_string()),
-            system_count: mock_count,
-        },
-        PolicyDefinition {
-            id: Uuid::from_u128(3),
-            lineage_id: Uuid::from_u128(3),
-            version_id: None,
-            revision: None,
-            publication_state: None,
-            semantic_digest: None,
-            revisions: Vec::new(),
-            name: "Require SSH Key Auth".to_string(),
-            description: "Require SSH key-only authentication (no passwords).".to_string(),
-            format: PolicyFormat::Toml,
-            body: r#"[[policy]]
-type = "custom_check"
-expression = "!config.services.openssh.settings.PasswordAuthentication"
-description = "Password authentication must be disabled"
-strict = false
-"#.to_string(),
-            policy_type: Some("custom_check".to_string()),
-            system_count: mock_count,
-        },
-        PolicyDefinition {
-            id: Uuid::from_u128(4),
-            lineage_id: Uuid::from_u128(4),
-            version_id: None,
-            revision: None,
-            publication_state: None,
-            semantic_digest: None,
-            revisions: Vec::new(),
-            name: "Require Auditd".to_string(),
-            description: "Require audit daemon for security compliance.".to_string(),
-            format: PolicyFormat::Toml,
-            body: r#"[[policy]]
-type = "custom_check"
-expression = "config.services.auditd.enable or false"
-description = "Audit daemon should be enabled"
-strict = false
-"#.to_string(),
-            policy_type: Some("custom_check".to_string()),
-            system_count: mock_count,
-        },
-    ]
 }

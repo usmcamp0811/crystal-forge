@@ -1,190 +1,155 @@
-# Compliance Interchange Operator Guide
+# CF-XCCDF Compliance Interchange Operator Guide
 
-## Importing a STIG or XCCDF benchmark
+This guide describes the implemented server/API behavior in this branch. It does
+not imply that every CF-XCCDF design-draft feature is available in the UI.
 
-1. **Prerequisites:** Administrator role. The user must have `admin` RBAC.
+## Version and lineage semantics
 
-2. **Navigate to Compliance.** The Compliance view loads bundle and policy data.
+A bundle lineage is the logical bundle identity. Each immutable bundle revision
+has its own version ID and contains an ordered snapshot of policy version IDs.
+The same distinction applies to policy lineages and policy versions.
 
-3. **Open the Import/Export menu** in the page header.
+`current` is a selection/pointer concept: the catalog may show the current
+published revision by default, while an operator can explicitly select another
+revision. `publication_state` is lifecycle state: draft revisions are editable;
+accepted revisions are published and immutable. A revision is not changed merely
+because a newer revision becomes current.
 
-4. **Select "Import STIG or XCCDF (.xml/.zip)"** or **"Import Crystal Forge bundle (.xml)".**
+Exports and assignments use an exact bundle version ID. Do not infer a revision
+from the bundle name, display order, or the newest row returned by a list query.
+To edit a published revision, create a derived draft first.
 
-5. **Choose a file.** The modal accepts `.xml` and `.zip` files up to 50 MiB.
-   Only well-formed XCCDF 1.2 documents are accepted.
+## Importing foreign STIG/XCCDF
 
-6. **Review the preview.** The server parses the file and displays:
-   - Benchmark title, version, and document classification
-   - Rule count and profiles
-   - Source SHA-256 digest
-   - Any blocking diagnostics or warnings
-   For CF-native imports, exact reuse decisions and identity conflicts are shown.
+The server owns parsing and validation. The browser is not the authoritative XML
+parser.
 
-7. **Select rules.** For foreign STIG imports, all rules default to selected and
-   are imported as unbound draft policies. Use the rule checklist to include or
-   exclude individual rules.
+1. As an administrator, call `POST /api/v1/compliance/xccdf/preview` with the
+   XML or supported ZIP package in the `file` multipart field.
+2. Review benchmark metadata, profiles, rules, identifiers, checks, fixes,
+   source digest, fidelity, warnings, and blocking diagnostics.
+3. Select the benchmark/profile/rules and provide an import plan.
+4. Call `POST /api/v1/compliance/xccdf/import` with the same file and plan.
+5. The server reparses the upload, verifies the plan and source digest, and
+   commits the import atomically.
 
-8. **Set the bundle name** and optionally assign environments.
+Foreign rules are preserved as imported requirements. Unsupported checks are not
+turned into invented Nix expressions. Imported content starts as draft,
+disabled, untrusted, and unassigned. Import does not activate policies, evaluate
+expressions, install modules, or assign a bundle.
 
-9. **Click "Import N policies"** to commit. The import is atomic — partial failure
-   rolls back completely. The server always reparses the file and verifies the
-   source digest from the preview.
+The original package bytes and source provenance are retained. ZIP processing
+selects an XCCDF entry server-side and records the selected entry and hashes.
 
-10. **After import:**
-    - New policies are **draft**, **disabled**, and **untrusted**
-    - The bundle is **draft** and **untrusted**
-    - Nothing is assigned to any environment or system
+## Importing CF-XCCDF
 
-## Trusting imported content
+CF-native imports reconcile by portable version identity and semantic digest:
 
-Imported executable content is never activated automatically. You must review and
-trust it before publishing or assigning.
+- An identical version is reused.
+- A different version ID in the same lineage creates a new version.
+- An existing immutable identity with a different digest is a blocking conflict.
+- Titles, names, slugs, and local database IDs are not sufficient for identity.
 
-### Trusting a bundle version
+Resolve conflicts explicitly. The importer never silently overwrites an
+immutable version.
 
-1. Select the bundle in the catalog.
-2. Select the draft version in the version selector.
-3. Use the **Version actions** panel:
-   - Click **Mark trusted** to trust the version
-   - Optionally add a review note through the API
+## Trust and publication
 
-### Publishing a bundle version
+Import and trust are separate operations. Review executable policy XML,
+dependencies, preserved source content, and fidelity warnings before trusting.
 
-1. Ensure the version is trusted.
-2. In the Version actions panel, click **Publish version**.
-3. The version becomes immutable (accepted state). Any included draft policy
-   versions are published atomically.
-4. Once published, the version cannot be modified. Use **Create draft** to build
-   a new editable version derived from the published one.
+Publishing an accepted bundle revision freezes its metadata, ordered membership,
+policy-version references, and digest. Included draft policy versions may be
+published atomically when the publish request opts into that behavior.
 
-> **Note:** Individual policy trust and publish operations are currently available
-> through the API only (`POST /api/v1/policy-versions/:id/trust`,
-> `POST /api/v1/policy-versions/:id/publish`).
+Published revisions are immutable. Create a new draft derived from the published
+revision for changes. Policy trust and publication are currently available via
+the server API; do not assume a complete UI workflow for every lifecycle action.
 
-## Creating assignments
+## Assignments and overlays
 
-A bundle assignment enforces the bundle's policy baseline on an environment or system.
+An assignment references one exact bundle version and can contain baseline
+exclusions, added policy versions, supported value overrides, and `enforce` or
+`report_only` mode.
 
-1. Select a published bundle version.
-2. The **Assign bundle** panel appears below the version actions.
-3. Choose the scope type (environment or system).
-4. Select or enter the scope UUID.
-5. Choose enforcement mode (enforce or report-only).
-6. Click **Create assignment.**
+The assignment effective set is resolved server-side:
 
-After creation, the effective policy set for that scope is computed by the resolver.
+```text
+bundle baseline - exclusions + additions + value overrides
+```
 
-### Understanding the effective policy set
+For system resolution, specificity is system over environment over bundle
+baseline. Same-version contributions are deduplicated. Different versions of
+one policy lineage at the same specificity produce a typed conflict; the server
+does not silently choose the newest version.
 
-The resolver uses priority: **system > environment > bundle baseline.**
+Use `POST /api/v1/compliance/assignments/preview` before saving when a preview is
+needed. Effective policies are available from:
 
-- A system-level policy version overrides an environment-level version
-- An environment version overrides a bundle baseline version
-- Same exact version from multiple sources is deduplicated
-- Different versions at equal specificity produce a typed conflict
+- `GET /api/v1/compliance/assignments/:id/effective-policies`;
+- `GET /api/v1/systems/:id/effective-policies`; and
+- the assignment-aware resolver used by assignment previews and exports.
 
-Excluded policies are removed. Added policies are included. Overrides modify
-specific fields within the effective policy configuration.
+## XCCDF export
 
-## Managing assignments
+Canonical baseline export is exact-revision scoped:
 
-- **View:** Existing assignments for a scope can be listed through the API endpoints
-  (`GET /api/v1/environments/:id/compliance-assignments`,
-  `GET /api/v1/systems/:id/compliance-assignments`).
-- **Edit:** Use `PUT /api/v1/compliance/assignments/:id` with an `expected_version_id`
-  for optimistic concurrency. A 409 `ASSIGNMENT_STALE_UPDATE` indicates another
-  update occurred. Reload and retry.
-- **Deactivate:** Assignment deactivation is available in the UI and API
-  (`DELETE /api/v1/compliance/assignments/:id`).
+```text
+GET /api/v1/compliance/bundle-versions/:version_id/xccdf
+```
 
-## Exporting XCCDF
+It returns one XCCDF 1.2 `Benchmark`, one baseline `Profile`, and one `Rule`
+per exported policy version. The baseline export does not include local
+assignment state.
 
-1. Select a bundle in the catalog.
-2. Choose the version (draft or published) from the version selector.
-3. Open the Import/Export menu and select **Export XCCDF**.
-4. The browser downloads the XCCDF XML file.
+To export the resolved assignment, including exclusions, additions, and applied
+configuration overrides, use:
 
-The exported document is a valid XCCDF 1.2 `Benchmark` containing:
-- One baseline `Profile` selecting every bundle policy
-- One `Rule` per policy version
-- Standard metadata (titles, descriptions, severities, identifiers, checks, fixes)
-- CF-XCCDF extension elements for native policy types
+```text
+GET /api/v1/compliance/assignments/:assignment_id/xccdf
+```
 
-## Exporting JSON/TOML policies
+This is an effective derived benchmark export. It resolves the assignment first
+and refuses export when the effective set has a conflict. Do not describe this
+as an XCCDF `Tailoring` document: Tailoring is not the implemented export path
+for these assignment overlays.
 
-In the Policies view:
-- **Single policy:** Click a policy to open the detail drawer. Use the export action
-  with JSON or TOML format selectors.
-- **Bulk export:** Enable selection mode, check the policies to export, and use the
-  Import/Export menu.
-- **All custom policies:** Use "Export all custom policies" from the Import/Export menu.
+The writer emits XCCDF through typed server structures. It preserves supported
+CF policy configuration, standard metadata, imported checks/fixes where valid,
+and opaque source content supported by the model. Invalid imported check or fix
+content is reported as a validation error rather than silently rewritten.
 
-## Reimporting Crystal Forge content
+## Policy JSON/TOML interchange
 
-A CF-native XCCDF export can be imported into another Crystal Forge instance:
+Policy JSON/TOML endpoints are server-side canonical adapters. They support the
+native policy types and multi-rule custom checks without flattening them to one
+expression. The legacy simplified single-expression custom-check shape is
+accepted and normalized. Imported policies remain draft until explicitly
+activated or published.
 
-1. Export a bundle as XCCDF from the source instance.
-2. On the target instance, open **Import Crystal Forge bundle** from the Import/Export menu.
-3. Select the exported file. The server matches by portable version identities:
-   - **Exact versions are reused** (no duplicates)
-   - **New versions are created** when lineage matches but version identity differs
-   - **Digest mismatches are rejected** with a typed conflict (409)
+## Compatibility and tested limits
 
-## Importing JSON/TOML policies
+The implemented and tested compatibility claim is:
 
-1. Open the Policies view.
-2. Use the **Import/Export** menu → **Import policies…**
-3. Select a `.json` or `.toml` file containing a `urn:crystal-forge:policy-set:1` document.
-4. Click **Preview import.** The server validates and displays the policy set with
-   the source SHA-256.
-5. Review the preview (policy names, types, implementation states, versions).
-6. Click **Commit import** to persist. Imported policies are created as draft versions.
-   Exact existing version IDs are reused; digest conflicts are rejected.
+- **Level A:** XCCDF 1.2 XML is produced and standard fields are available to
+  compatible XCCDF viewers.
+- **Level B:** Standard human-readable rule content can be used as a checklist
+  where the consumer supports it.
+- **Level C:** Crystal Forge can parse its supported CF-XCCDF extension and
+  reconstruct supported policy/bundle data by identity and digest.
 
-## Understanding evidence states
+Level D generic SCAP execution is **not claimed**. CF-XCCDF policy checks are
+not automatically OVAL/OCIL checks, and no generic scanner execution guarantee
+is made.
 
-The compliance rollup distinguishes these states:
+The branch tests server parsing, XML writing, schema-shaped exports, identity and
+digest handling, policy JSON/TOML round trips, assignment resolution, effective
+set digests, and effective assignment export. Compatibility with a particular
+third-party viewer or STIG Viewer release has not been established here unless a
+separate test record names that exact version. XCCDF validity alone does not
+guarantee acceptance of Crystal Forge extension content by every product.
 
-| State | Meaning |
-|-------|---------|
-| Pass | Control evaluated and satisfied |
-| Warn | Control evaluated with warnings |
-| Fail | Control not satisfied |
-| Waiver | Failed but formally accepted |
-| Not Checked | No evaluation or evidence exists |
-| Not Applicable | Control does not apply to this configuration |
-| Error | Evaluator could not complete |
-
-**Important:** The evidence system currently computes rollups from direct bundle
-membership, not from assignment-resolved effective policies. If you use assignment
-exclusions or additions, the rollup counts may not reflect the actual resolved
-policy set. This is a known limitation (AC #30, #31).
-
-## Handling conflicts
-
-Common conflict scenarios and resolutions:
-
-- **`POLICY_VERSION_DIGEST_CONFLICT` (409):** A policy version ID already exists
-  but with a different semantic digest. The import must not proceed. Resolution:
-  import to a clean target, or export with a new version identity.
-
-- **`ASSIGNMENT_STALE_UPDATE` (409):** Another administrator modified the assignment
-  between when you loaded it and when you submitted your update. Reload and reapply
-  your changes.
-
-- **Assignment resolution conflict:** Two sources contribute different versions of
-  the same policy lineage at equal specificity. The UI displays the conflict details.
-  Resolution: adjust the assignment or system-level policy choices to remove ambiguity.
-
-## Security limits
-
-The server enforces these limits on XCCDF uploads:
-
-- Maximum file size: 50 MiB
-- Maximum XML depth: 50
-- Maximum attributes per element: 200
-- Maximum text node length: 1 MiB
-- DTD processing: disabled
-- External entities: rejected
-- Network schema retrieval: blocked
-- ZIP bombs and path traversal: rejected
+The server enforces bounded XML/ZIP processing, rejects DTD/external-entity and
+archive traversal conditions, and reports structured blocking diagnostics. The
+configured upload and parser limits are implementation limits, not a promise
+that arbitrary large STIG packages are supported.

@@ -1264,6 +1264,16 @@ pub struct DeploymentPolicyVersionSummary {
     pub is_current_published: bool,
     #[serde(default)]
     pub is_current_draft: bool,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub policy_type: String,
+    #[serde(default)]
+    pub config: serde_json::Value,
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// Response for listing deployment policies with pagination.

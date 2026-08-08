@@ -249,8 +249,12 @@ pub fn ScanningView() -> Element {
                                                     div {
                                                         class: "mono",
                                                         style: "font-size:11px; color:var(--cf-text-muted); display:flex; align-items:center; gap:4px;",
-                                                        if is_latest { span { title: "Latest commit for this flake", style: "color:#f59e0b; font-size:12px;", "★" } }
-                                                        "{flake_commit(row)}"
+                                                         if is_latest {
+                                                             span { class: "latest-star", title: "Latest commit for this flake", style: "display:inline; margin-right:2px; vertical-align:-1px;",
+                                                                 Icon { name: IconName::Star, size: 9 }
+                                                             }
+                                                         }
+                                                         "{flake_commit(row)}"
                                                     }
                                                 }
                                                 td {
@@ -347,7 +351,9 @@ pub fn ScanningView() -> Element {
                                                             class: "mono",
                                                             style: "font-size:11px; color:var(--cf-text-muted); display:flex; align-items:center; gap:4px;",
                                                             if is_latest {
-                                                                span { title: "Latest commit for this flake", style: "color:#f59e0b; font-size:12px;", "★" }
+                                                                 span { class: "latest-star", title: "Latest commit for this flake", style: "display:inline; margin-right:2px; vertical-align:-1px;",
+                                                                     Icon { name: IconName::Star, size: 9 }
+                                                                 }
                                                             }
                                                             "{flake_commit(row)}"
                                                         }
@@ -593,7 +599,11 @@ pub fn ScanningView() -> Element {
                                                                                                 tr { style: "border-top:1px solid var(--cf-divider);",
                                                                                                     td { style: "padding:7px 8px;",
                                                                                                         div { style: "display:flex; align-items:center; gap:4px;",
-                                                                                                            if is_latest { span { title: "Latest commit for this flake", style: "color:#f59e0b; font-size:12px;", "★" } }
+                                                                                                             if is_latest {
+                                                                                                                 span { class: "latest-star", title: "Latest commit for this flake", style: "display:inline; margin-right:2px; vertical-align:-1px;",
+                                                                                                                     Icon { name: IconName::Star, size: 9 }
+                                                                                                                 }
+                                                                                                             }
                                                                                                             span { class: "mono", style: "font-weight:600;", "{commit_label(&row.commit_hash)}" }
                                                                                                         }
                                                                                                         if is_current { span { class: "chip chip-info", style: "font-size:9px; margin-left:6px;", "current" } }

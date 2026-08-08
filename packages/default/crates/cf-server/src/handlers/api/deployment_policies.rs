@@ -576,8 +576,8 @@ pub async fn list_deployment_policies(
     .map(|(id, published, draft)| (id, (published, draft)))
     .collect();
 
-    let version_rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, String, String, chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>, Option<Uuid>)>(
-        "SELECT id, policy_id, version, publication_state, trust_state, semantic_digest, created_at, published_at, derived_from_version_id FROM deployment_policy_versions WHERE policy_id = ANY($1) ORDER BY policy_id, created_at DESC, id DESC",
+    let version_rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, String, String, chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>, Option<Uuid>, String, Option<String>, String, Value, bool)>(
+        "SELECT id, policy_id, version, publication_state, trust_state, semantic_digest, created_at, published_at, derived_from_version_id, name, description, policy_type, config, enabled FROM deployment_policy_versions WHERE policy_id = ANY($1) ORDER BY policy_id, created_at DESC, id DESC",
     )
     .bind(&policy_ids)
     .fetch_all(&state.pool)
@@ -606,6 +606,11 @@ pub async fn list_deployment_policies(
                         derived_from_version_id: row.8,
                         is_current_published: pointers.0 == Some(row.0),
                         is_current_draft: pointers.1 == Some(row.0),
+                        name: row.9.clone(),
+                        description: row.10.clone(),
+                        policy_type: row.11.clone(),
+                        config: row.12.clone(),
+                        enabled: row.13,
                     }
                 }).collect(),
                 policy,
