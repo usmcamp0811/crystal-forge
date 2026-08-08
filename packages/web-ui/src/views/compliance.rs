@@ -3,7 +3,7 @@ use dioxus::prelude::*;
 use crate::api::client::{
     create_bundle_draft, create_compliance_assignment, create_compliance_bundle,
     delete_compliance_bundle, fetch_compliance_bundle_systems, fetch_compliance_bundles,
-    fetch_compliance_system_evidence, fetch_environments, fetch_policies,
+    fetch_compliance_system_evidence, fetch_environments, fetch_policies, fetch_systems,
     import_xccdf, preview_compliance_assignment,
     preview_xccdf, publish_bundle_version, trust_bundle_version, update_compliance_bundle,
 };
@@ -15,6 +15,7 @@ use crate::api::models::{
     XccdfImportResponse,
     XccdfPreviewResponse, XccdfRuleImportAction, ImportedPolicyCustomization,
     ImportedCustomCheck, ImportedCustomCheckRule, ImportedEvidenceRequirement,
+    SortOrder, SystemSummary, SystemsListParams,
 };
 use crate::components::compliance::{
     action_to_import, BundleCatalog, BundleHeader, EvidenceDrawer, ImportReview, RefinedPolicyDraft,
@@ -518,10 +519,11 @@ pub fn ComplianceView() -> Element {
                                           }
                                           if *show_assignment.read() {
                                               AssignmentCreatePanel {
-                                                  bundle: bundle.clone(),
-                                                  bundle_version_id: vid,
-                                                  environments: environments.read().clone(),
-                                              }
+                                                   bundle: bundle.clone(),
+                                                   bundle_version_id: vid,
+                                                   environments: environments.read().clone(),
+                                                   policies: policies.read().clone(),
+                                               }
                                           }
                                      }
                                  }
@@ -859,28 +861,98 @@ struct AssignmentCreatePanelProps {
     bundle: ComplianceBundleSummary,
     bundle_version_id: uuid::Uuid,
     environments: Vec<EnvironmentSummary>,
+    policies: Vec<DeploymentPolicySummary>,
 }
 
 #[component]
 fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
     let mut scope_type = use_signal(|| "environment".to_string());
     let mut scope_id = use_signal(|| String::new());
+    let mut system_search = use_signal(String::new);
     let mut enforcement_mode = use_signal(|| "enforce".to_string());
-    let mut exclusions = use_signal(String::new);
-    let mut additions = use_signal(String::new);
-    let mut value_overrides = use_signal(String::new);
+    let mut exclusions = use_signal(Vec::<uuid::Uuid>::new);
+    let mut additions = use_signal(Vec::<uuid::Uuid>::new);
     let mut busy = use_signal(|| false);
     let mut success = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
+    let mut preview = use_signal(|| None::<crate::api::models::EffectivePolicySetResponse>);
+    let mut previewed_request = use_signal(|| None::<CreateAssignmentRequest>);
+    let mut preview_busy = use_signal(|| false);
 
-    let can_submit = !scope_id.read().trim().is_empty()
-        && uuid::Uuid::parse_str(scope_id.read().trim()).is_ok()
+    let systems = use_resource({
+        let scope_type = scope_type;
+        let system_search = system_search;
+        move || {
+            let scope_type = scope_type.read().clone();
+            let search = system_search.read().trim().to_string();
+            async move {
+                if scope_type != "system" {
+                    return Ok(Vec::<SystemSummary>::new());
+                }
+                fetch_systems(&SystemsListParams {
+                    page: Some(1),
+                    per_page: Some(200),
+                    search: (!search.is_empty()).then_some(search),
+                    health_status: None,
+                    deployment_status: None,
+                    environment: None,
+                    sort_by: Some("hostname".to_string()),
+                    sort_order: Some(SortOrder::Asc),
+                })
+                .await
+                .map(|response| response.items)
+            }
+        }
+    });
+
+    let selected_version = props
+        .bundle
+        .versions
+        .iter()
+        .find(|version| version.id == props.bundle_version_id);
+    let revision_is_current = selected_version
+        .is_some_and(|version| version.is_current_published || version.is_current_draft);
+    let revision_label = selected_version
+        .map(|version| version.version.clone())
+        .unwrap_or_else(|| props.bundle.version.clone());
+    let revision_state = selected_version
+        .map(|version| version.publication_state.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let request = move || {
+        let scope_id = uuid::Uuid::parse_str(scope_id.read().trim()).ok()?;
+        Some(CreateAssignmentRequest {
+            bundle_version_id: props.bundle_version_id,
+            scope_type: scope_type.read().clone(),
+            scope_id,
+            enforcement_mode: Some(enforcement_mode.read().clone()),
+            exclusions: (!exclusions.read().is_empty()).then_some(exclusions.read().clone()),
+            additions: (!additions.read().is_empty()).then_some(additions.read().clone()),
+            value_overrides: None,
+        })
+    };
+
+    let current_request = request();
+    let can_preview = current_request.is_some() && !*preview_busy.read() && !*busy.read();
+    let can_submit = current_request.is_some()
+        && previewed_request.read().as_ref() == current_request.as_ref()
+        && preview.read().is_some()
         && !*busy.read();
 
     rsx! {
         div { class: "card", style: "padding:14px 16px;display:flex;flex-direction:column;gap:12px;",
-            div { style: "font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);",
-                "Assign bundle to environment or system"
+                 div { style: "font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);",
+                "Assign bundle revision {revision_label}"
+            }
+            div { style: "font-size:10px;color:var(--cf-text-muted);",
+                "Exact revision: " span { class: "mono", "{props.bundle_version_id}" }
+                " · {revision_state}"
+            }
+            if !revision_is_current {
+                div { class: "sd-callout sd-callout-warning", style: "font-size:11px;",
+                    Icon { name: IconName::Warn, size: 13 }
+                    "This is a non-current bundle revision. The assignment will use this exact revision, not the current pointer."
+                }
             }
 
             if *success.read() {
@@ -900,7 +972,12 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
                         select {
                             class: "input focus-ring",
                             value: "{scope_type.read()}",
-                            onchange: move |e| scope_type.set(e.value()),
+                            onchange: move |e| {
+                                scope_type.set(e.value());
+                                scope_id.set(String::new());
+                                preview.set(None);
+                                previewed_request.set(None);
+                            },
                             option { value: "environment", "Environment" }
                             option { value: "system", "System" }
                         }
@@ -912,51 +989,91 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
                         select {
                             class: "input focus-ring",
                             value: "{enforcement_mode.read()}",
-                            onchange: move |e| enforcement_mode.set(e.value()),
+                            onchange: move |e| {
+                                enforcement_mode.set(e.value());
+                                preview.set(None);
+                                previewed_request.set(None);
+                            },
                             option { value: "enforce", "Enforce (default)" }
                             option { value: "report_only", "Report only" }
                         }
                     }
                 }
-                div { class: "field",
-                    label { "Value overrides (JSON array)" }
-                    textarea {
-                        class: "input focus-ring mono",
-                        rows: "2",
-                        placeholder: "JSON array of policy_version_id, value_path, and value",
-                        value: "{value_overrides.read()}",
-                        oninput: move |e| value_overrides.set(e.value()),
-                    }
-                }
-
                 div { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px;",
                     div { class: "field",
-                        label { "Exclude baseline policy versions (comma-separated UUIDs)" }
-                        input {
-                            class: "input focus-ring mono",
-                            placeholder: "optional",
-                            value: "{exclusions.read()}",
-                            oninput: move |e| exclusions.set(e.value()),
+                        label { "Exclude baseline policies" }
+                        div { style: "display:flex;flex-direction:column;gap:5px;max-height:130px;overflow:auto;",
+                            for policy in props.policies.iter() {
+                                if props.bundle.policy_ids.contains(&policy.id) {
+                                    if let Some(version_id) = policy.version_id {
+                                    label { style: "display:flex;gap:6px;align-items:center;font-size:11px;",
+                                        input {
+                                            r#type: "checkbox",
+                                            checked: exclusions.read().contains(&version_id),
+                                            onchange: move |event| {
+                                                if event.checked() {
+                                                    exclusions.with_mut(|ids| { if !ids.contains(&version_id) { ids.push(version_id); } });
+                                                } else {
+                                                    exclusions.with_mut(|ids| ids.retain(|id| *id != version_id));
+                                                }
+                                                preview.set(None);
+                                                previewed_request.set(None);
+                                            },
+                                        }
+                                        "{policy.name}"
+                                    }
+                                    }
+                                }
+                            }
+                        }
+                        if !props.policies.iter().any(|policy| {
+                            props.bundle.policy_ids.contains(&policy.id) && policy.version_id.is_some()
+                        }) {
+                            div { style: "font-size:11px;color:var(--cf-text-muted);", "No versioned policies available." }
                         }
                     }
                     div { class: "field",
-                        label { "Add policy versions (comma-separated UUIDs)" }
-                        input {
-                            class: "input focus-ring mono",
-                            placeholder: "optional",
-                            value: "{additions.read()}",
-                            oninput: move |e| additions.set(e.value()),
+                        label { "Add policies" }
+                        div { style: "display:flex;flex-direction:column;gap:5px;max-height:130px;overflow:auto;",
+                            for policy in props.policies.iter() {
+                                if let Some(version_id) = policy.version_id {
+                                    label { style: "display:flex;gap:6px;align-items:center;font-size:11px;",
+                                        input {
+                                            r#type: "checkbox",
+                                            checked: additions.read().contains(&version_id),
+                                            onchange: move |event| {
+                                                if event.checked() {
+                                                    additions.with_mut(|ids| { if !ids.contains(&version_id) { ids.push(version_id); } });
+                                                } else {
+                                                    additions.with_mut(|ids| ids.retain(|id| *id != version_id));
+                                                }
+                                                preview.set(None);
+                                                previewed_request.set(None);
+                                            },
+                                        }
+                                        "{policy.name}"
+                                    }
+                                }
+                            }
+                        }
+                        if props.policies.iter().all(|policy| policy.version_id.is_none()) {
+                            div { style: "font-size:11px;color:var(--cf-text-muted);", "No versioned policies available." }
                         }
                     }
                 }
 
                 // Environment picker (when scope is environment)
-                if *scope_type.read() == "environment" && !props.environments.is_empty() {
+                if *scope_type.read() == "environment" {
                     div { class: "field",
                         label { "Environment" }
                         select {
                             class: "input focus-ring",
-                            onchange: move |e| scope_id.set(e.value()),
+                            value: "{scope_id.read()}",
+                            onchange: move |e| {
+                                scope_id.set(e.value());
+                                preview.set(None);
+                                previewed_request.set(None);
+                            },
                             option { value: "", "Select an environment…" }
                             for env in &props.environments {
                                 option { value: "{env.id}", "{env.name}" }
@@ -964,62 +1081,74 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
                         }
                     }
                 } else {
-                    // Manual UUID entry (systems or when no environments loaded)
                     div { class: "field",
-                        label {
-                            if *scope_type.read() == "system" {
-                                "System UUID"
-                            } else {
-                                "Environment UUID"
-                            }
-                        }
+                        label { "System" }
                         input {
-                            class: "input focus-ring mono",
-                            placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+                            class: "input focus-ring",
+                            placeholder: "Search by hostname",
+                            value: "{system_search.read()}",
+                            oninput: move |e| system_search.set(e.value()),
+                        }
+                        select {
+                            class: "input focus-ring",
                             value: "{scope_id.read()}",
-                            oninput: move |e| scope_id.set(e.value()),
+                            onchange: move |e| {
+                                scope_id.set(e.value());
+                                preview.set(None);
+                                previewed_request.set(None);
+                            },
+                            option { value: "", "Select a system…" }
+                            match systems.read().as_ref() {
+                                Some(Ok(items)) => rsx! {
+                                    for system in items {
+                                        option { value: "{system.id}", "{system.hostname}" }
+                                    }
+                                },
+                                Some(Err(_)) => rsx! { option { value: "", "Unable to load systems" } },
+                                None => rsx! { option { value: "", "Loading systems…" } },
+                            }
                         }
                     }
                 }
 
+                button {
+                    class: "btn btn-ghost focus-ring xs",
+                    disabled: !can_preview,
+                    style: if !can_preview { "opacity:0.5;cursor:not-allowed;" } else { "" },
+                    onclick: move |_| {
+                        let Some(req) = request() else { return; };
+                        preview_busy.set(true);
+                        error.set(None);
+                        spawn(async move {
+                            match preview_compliance_assignment(&req).await {
+                                Ok(value) => {
+                                    preview.set(Some(value));
+                                    previewed_request.set(Some(req));
+                                }
+                                Err(err) => error.set(Some(format!("Preview failed: {err}"))),
+                            }
+                            preview_busy.set(false);
+                        });
+                    },
+                    if *preview_busy.read() { "Previewing…" } else { "Preview effective set" }
+                }
+                if let Some(value) = preview.read().as_ref() {
+                    div { class: "sd-callout sd-callout-info", style: "font-size:11px;",
+                        "Preview: {value.policies.len()} effective policies · digest "
+                        span { class: "mono", "{value.effective_set_digest}" }
+                        if !value.warnings.is_empty() {
+                            div { "Warnings: {value.warnings.join(\"; \")}" }
+                        }
+                    }
+                }
                 button {
                     class: "btn btn-primary focus-ring xs",
                     disabled: !can_submit,
                     style: if !can_submit { "opacity:0.5;cursor:not-allowed;" } else { "" },
                     onclick: move |_| {
                         if !can_submit { return; }
-                        let sid_str = scope_id.read().trim().to_string();
-                        let Ok(sid) = uuid::Uuid::parse_str(&sid_str) else { return; };
-                        let Ok(exclusion_ids) = parse_uuid_list(&exclusions.read()) else {
-                            error.set(Some("Exclusions must be comma-separated UUIDs".to_string()));
-                            return;
-                        };
-                        let Ok(addition_ids) = parse_uuid_list(&additions.read()) else {
-                            error.set(Some("Additions must be comma-separated UUIDs".to_string()));
-                            return;
-                        };
-                        let override_text = value_overrides.read().trim().to_string();
-                        let parsed_overrides = if override_text.is_empty() {
-                            Vec::new()
-                        } else {
-                            match serde_json::from_str::<Vec<PolicyValueOverride>>(&override_text) {
-                                Ok(value) => value,
-                                Err(_) => {
-                                    error.set(Some("Overrides must be a JSON array of typed values".to_string()));
-                                    return;
-                                }
-                            }
-                        };
-                        let req = CreateAssignmentRequest {
-                            bundle_version_id: props.bundle_version_id,
-                            scope_type: scope_type.read().clone(),
-                            scope_id: sid,
-                            enforcement_mode: Some(enforcement_mode.read().clone()),
-                            exclusions: (!exclusion_ids.is_empty()).then_some(exclusion_ids),
-                            additions: (!addition_ids.is_empty()).then_some(addition_ids),
-                            value_overrides: (!parsed_overrides.is_empty()).then_some(parsed_overrides),
-                        };
-                        busy.set(true);
+                         let Some(req) = request() else { return; };
+                         busy.set(true);
                         error.set(None);
                         spawn(async move {
                             match create_compliance_assignment(&req).await {

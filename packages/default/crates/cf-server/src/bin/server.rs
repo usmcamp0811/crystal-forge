@@ -505,6 +505,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/compliance/bundle-versions/:version_id/xccdf",
             get(compliance::export_bundle_xccdf),
         )
+        .route(
+            "/api/v1/compliance/assignments/:assignment_id/xccdf",
+            get(compliance::export_assignment_xccdf),
+        )
         // Policy interchange endpoints
         .route(
             "/api/v1/policies/interchange/export",

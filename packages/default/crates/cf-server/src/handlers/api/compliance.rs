@@ -2919,6 +2919,176 @@ pub async fn export_bundle_xccdf(
     }
 }
 
+/// `GET /api/v1/compliance/assignments/:assignment_id/xccdf`
+///
+/// Export the assignment's resolved policy set, including overlay additions,
+/// exclusions, and effective configuration overrides. The ordinary bundle
+/// export intentionally remains a baseline-only export.
+pub async fn export_assignment_xccdf(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(assignment_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((_user_id, _roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let assignment = sqlx::query_as::<_, (Uuid, String, Option<Uuid>, Option<Uuid>, String)>(
+        "SELECT bundle_version_id, scope_type, environment_id, system_id, enforcement_mode \
+         FROM compliance_bundle_assignments WHERE id = $1",
+    )
+    .bind(assignment_id)
+    .fetch_optional(&pool)
+    .await;
+
+    let Some((bundle_version_id, scope_type, environment_id, system_id, mode)) =
+        (match assignment {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::error!(error = %error, %assignment_id, "failed to load XCCDF export assignment");
+                return internal_error("Failed to load assignment for XCCDF export");
+            }
+        })
+    else {
+        return not_found();
+    };
+
+    let target = if scope_type == "environment" {
+        crate::compliance::resolver::AssignmentTarget::Environment {
+            environment_id: environment_id.unwrap_or_default(),
+        }
+    } else if scope_type == "system" {
+        crate::compliance::resolver::AssignmentTarget::System {
+            system_id: system_id.unwrap_or_default(),
+        }
+    } else {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ApiError {
+                error: "invalid_assignment_scope".into(),
+                message: format!("Assignment {assignment_id} has unsupported scope {scope_type:?}"),
+                details: None,
+            }),
+        )
+            .into_response();
+    };
+
+    let exclusions = sqlx::query_scalar(
+        "SELECT policy_version_id FROM compliance_assignment_exclusions
+         WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)
+         ORDER BY policy_version_id",
+    )
+    .bind(assignment_id)
+    .fetch_all(&pool)
+    .await;
+    let additions = sqlx::query_scalar(
+        "SELECT policy_version_id FROM compliance_assignment_additions
+         WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)
+         ORDER BY policy_version_id",
+    )
+    .bind(assignment_id)
+    .fetch_all(&pool)
+    .await;
+    let overrides = sqlx::query_as::<_, (Uuid, String, serde_json::Value)>(
+        "SELECT policy_version_id, value_path, value FROM compliance_assignment_value_overrides
+         WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)
+         ORDER BY policy_version_id, value_path",
+    )
+    .bind(assignment_id)
+    .fetch_all(&pool)
+    .await;
+    let (Ok(exclusions), Ok(additions), Ok(overrides)) = (exclusions, additions, overrides) else {
+        return internal_error("Failed to load assignment overlay for XCCDF export");
+    };
+
+    let input = crate::compliance::resolver::EffectivePolicyResolutionInput {
+        target,
+        bundle_version_id,
+        exclusions,
+        additions,
+        overrides: overrides
+            .into_iter()
+            .map(|(policy_version_id, value_path, value)| {
+                crate::compliance::resolver::PolicyOverride {
+                    policy_version_id,
+                    value_path,
+                    value,
+                }
+            })
+            .collect(),
+        assignment_mode: if mode == "report_only" {
+            crate::compliance::resolver::AssignmentMode::ReportOnly
+        } else {
+            crate::compliance::resolver::AssignmentMode::Enforce
+        },
+        specificity: crate::compliance::resolver::PolicySpecificity::BundleBaseline,
+    };
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::error!(error = %error, %assignment_id, "failed to start XCCDF export resolution transaction");
+            return internal_error("Failed to resolve assignment for XCCDF export");
+        }
+    };
+    let outcome = crate::compliance::resolver::resolve_effective_policy_set(&mut tx, &input).await;
+    let _ = tx.rollback().await;
+    let effective = match outcome {
+        Ok(ResolutionOutcome::Resolved(set)) => set,
+        Ok(ResolutionOutcome::Conflict(conflicts)) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(ApiError {
+                    error: "effective_policy_conflict".into(),
+                    message: "Assignment cannot be exported because its effective policy set has conflicts".into(),
+                    details: Some(serde_json::to_value(conflicts).unwrap_or_default()),
+                }),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            tracing::error!(error = %error, %assignment_id, "assignment resolution failed for XCCDF export");
+            return internal_error("Failed to resolve assignment for XCCDF export");
+        }
+    };
+
+    let policy_ids: Vec<Uuid> = effective.policies.iter().map(|p| p.policy_version_id).collect();
+    let mut snapshot = match load_export_snapshot_for_policies(&pool, bundle_version_id, Some(&policy_ids)).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => return export_snapshot_error_response(error, bundle_version_id),
+    };
+    let effective_configs: std::collections::HashMap<Uuid, serde_json::Value> = effective
+        .policies
+        .into_iter()
+        .map(|policy| (policy.policy_version_id, policy.effective_config))
+        .collect();
+    for policy in &mut snapshot.policies {
+        if let Some(config) = effective_configs.get(&policy.policy_version_id) {
+            policy.config = config.clone();
+        }
+    }
+    snapshot.policies.sort_by_key(|policy| policy.policy_order);
+    snapshot.groups = match build_export_groups(&snapshot.policies) {
+        Ok(groups) => groups,
+        Err(source) => return export_snapshot_error_response(ExportSnapshotError::InvalidGroupProjection { source }, bundle_version_id),
+    };
+
+    match write_bundle_xccdf_export(&snapshot) {
+        Ok(xml) => {
+            let safe_filename = safe_bundle_xml_filename(&format!("{}-assignment", snapshot.name));
+            (
+                StatusCode::OK,
+                [("content-type", "application/xml"), ("content-disposition", &format!("attachment; filename=\"{safe_filename}\""))],
+                xml,
+            ).into_response()
+        }
+        Err(error) => export_snapshot_error_response(
+            ExportSnapshotError::Writer(error),
+            bundle_version_id,
+        ),
+    }
+}
+
 /// Errors from snapshot loading and validation.
 enum ExportSnapshotError {
     NotFound,
@@ -2934,6 +3104,7 @@ enum ExportSnapshotError {
         source: ImportedFixError,
     },
     Db(anyhow::Error),
+    Writer(XccdfWriterError),
 }
 
 impl From<anyhow::Error> for ExportSnapshotError {
@@ -2985,6 +3156,10 @@ fn export_snapshot_error_response(
             tracing::error!(error = %error, %version_id, "failed to load export snapshot");
             internal_error("Failed to load bundle version for export")
         }
+        ExportSnapshotError::Writer(error) => {
+            tracing::error!(error = %error, %version_id, "failed to write assignment XCCDF export");
+            internal_error("Failed to generate XCCDF export")
+        }
     }
 }
 
@@ -2997,6 +3172,14 @@ fn export_snapshot_error_response(
 async fn load_export_snapshot(
     pool: &PgPool,
     version_id: Uuid,
+) -> Result<XccdfBundleExport, ExportSnapshotError> {
+    load_export_snapshot_for_policies(pool, version_id, None).await
+}
+
+async fn load_export_snapshot_for_policies(
+    pool: &PgPool,
+    version_id: Uuid,
+    effective_policy_ids: Option<&[Uuid]>,
 ) -> Result<XccdfBundleExport, ExportSnapshotError> {
     // Acquire a dedicated connection and pin the isolation level so every
     // subsequent query sees the same database state.
@@ -3061,6 +3244,23 @@ async fn load_export_snapshot(
     .fetch_all(&mut *tx)
     .await
     .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+
+    // Assignment exports use the resolver's already-validated order. This
+    // replaces baseline membership only for the new endpoint; the ordinary
+    // bundle export retains the stored membership and selection state.
+    let membership = if let Some(policy_ids) = effective_policy_ids {
+        policy_ids
+            .iter()
+            .enumerate()
+            .map(|(order, policy_version_id)| MembershipRow {
+                policy_version_id: *policy_version_id,
+                policy_order: order as i32,
+                selected: true,
+            })
+            .collect()
+    } else {
+        membership
+    };
 
     // 3. Load every policy version referenced by membership in one query.
     let policy_version_ids: Vec<Uuid> = membership.iter().map(|m| m.policy_version_id).collect();
