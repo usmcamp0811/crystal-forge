@@ -443,6 +443,10 @@ async fn main() -> anyhow::Result<()> {
             post(compliance::publish_policy_version),
         )
         .route(
+            "/api/v1/policy-versions/:version_id/export",
+            get(compliance::policy_version_interchange_export),
+        )
+        .route(
             "/api/v1/policies/:policy_id/drafts",
             post(compliance::create_policy_draft),
         )
@@ -457,6 +461,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/compliance/bundles/:bundle_id/drafts",
             post(compliance::create_bundle_draft),
+        )
+        .route(
+            "/api/v1/compliance/bundle-versions/:version_id/policies",
+            get(compliance::get_bundle_version_policy_membership),
         )
         // Phase 2: Bundle assignment endpoints
         .route(

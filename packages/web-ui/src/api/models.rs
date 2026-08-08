@@ -1280,6 +1280,17 @@ pub struct DeploymentPolicyVersionSummary {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BundleVersionPolicyMembership {
+    pub policy_version_id: Uuid,
+    pub policy_lineage_id: Uuid,
+    pub policy_order: i32,
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
+    pub enabled: bool,
+}
+
 /// Response for listing deployment policies with pagination.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentPoliciesListResponse {

@@ -2,7 +2,8 @@ use dioxus::prelude::*;
 
 use crate::api::client::{
     create_bundle_draft, create_compliance_assignment, create_compliance_bundle,
-    delete_compliance_bundle, fetch_compliance_bundle_systems, fetch_compliance_bundles,
+    delete_compliance_bundle, fetch_bundle_version_policy_membership,
+    fetch_compliance_bundle_systems, fetch_compliance_bundles,
     fetch_compliance_system_evidence, fetch_environments, fetch_policies, fetch_systems,
     import_xccdf, preview_compliance_assignment,
     preview_xccdf, publish_bundle_version, trust_bundle_version, update_compliance_bundle,
@@ -879,6 +880,11 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
     let mut previewed_request = use_signal(|| None::<CreateAssignmentRequest>);
     let mut preview_busy = use_signal(|| false);
 
+    let membership = use_resource({
+        let bundle_version_id = props.bundle_version_id;
+        move || async move { fetch_bundle_version_policy_membership(&bundle_version_id).await }
+    });
+
     let systems = use_resource({
         let scope_type = scope_type;
         let system_search = system_search;
@@ -940,6 +946,12 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
         && !*busy.read();
     let created_scope_id = uuid::Uuid::parse_str(scope_id.read().trim()).ok();
     let created_scope_type = scope_type.read().clone();
+    let exact_members = membership
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .cloned()
+        .unwrap_or_default();
 
     rsx! {
         div { class: "card", style: "padding:14px 16px;display:flex;flex-direction:column;gap:12px;",
@@ -1011,33 +1023,34 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
                     div { class: "field",
                         label { "Exclude baseline policies" }
                         div { style: "display:flex;flex-direction:column;gap:5px;max-height:130px;overflow:auto;",
-                            for policy in props.policies.iter() {
-                                if props.bundle.policy_ids.contains(&policy.id) {
-                                    if let Some(version_id) = policy.version_id {
-                                    label { style: "display:flex;gap:6px;align-items:center;font-size:11px;",
-                                        input {
-                                            r#type: "checkbox",
-                                            checked: exclusions.read().contains(&version_id),
-                                            onchange: move |event| {
-                                                if event.checked() {
-                                                    exclusions.with_mut(|ids| { if !ids.contains(&version_id) { ids.push(version_id); } });
-                                                } else {
-                                                    exclusions.with_mut(|ids| ids.retain(|id| *id != version_id));
+                            if exact_members.is_empty() {
+                                div { style: "font-size:11px;color:var(--cf-text-muted);", "Loading revision policies…" }
+                            } else {
+                                for member in exact_members.iter() {
+                                    {
+                                        let version_id = member.policy_version_id;
+                                        let name = member.name.clone();
+                                        rsx! {
+                                            label { style: "display:flex;gap:6px;align-items:center;font-size:11px;",
+                                                input {
+                                                    r#type: "checkbox",
+                                                    checked: exclusions.read().contains(&version_id),
+                                                    onchange: move |event| {
+                                                        if event.checked() {
+                                                            exclusions.with_mut(|ids| { if !ids.contains(&version_id) { ids.push(version_id); } });
+                                                        } else {
+                                                            exclusions.with_mut(|ids| ids.retain(|id| *id != version_id));
+                                                        }
+                                                        preview.set(None);
+                                                        previewed_request.set(None);
+                                                    },
                                                 }
-                                                preview.set(None);
-                                                previewed_request.set(None);
-                                            },
+                                                "{name}"
+                                            }
                                         }
-                                        "{policy.name}"
-                                    }
                                     }
                                 }
                             }
-                        }
-                        if !props.policies.iter().any(|policy| {
-                            props.bundle.policy_ids.contains(&policy.id) && policy.version_id.is_some()
-                        }) {
-                            div { style: "font-size:11px;color:var(--cf-text-muted);", "No versioned policies available." }
                         }
                     }
                     div { class: "field",

@@ -1322,6 +1322,18 @@ pub struct DeploymentPolicyVersionSummary {
     pub enabled: bool,
 }
 
+/// An exact policy-version member of a selected bundle version.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct BundleVersionPolicyMembership {
+    pub policy_version_id: Uuid,
+    pub policy_lineage_id: Uuid,
+    pub policy_order: i32,
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
+    pub enabled: bool,
+}
+
 /// Environment with its required policies (the baseline).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvironmentWithPolicies {

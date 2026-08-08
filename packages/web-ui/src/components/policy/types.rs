@@ -128,6 +128,15 @@ pub fn is_policy_enabled(policy: &PolicyDefinition) -> bool {
         .unwrap_or(true)
 }
 
+/// Published and deprecated revisions are immutable; only draft revisions can
+/// be edited in place.
+pub fn is_policy_version_editable(policy: &PolicyDefinition) -> bool {
+    policy
+        .publication_state
+        .as_deref()
+        .is_none_or(|state| state.eq_ignore_ascii_case("draft"))
+}
+
 pub fn policy_category(policy: &PolicyDefinition) -> PolicyCategory {
     let policy_type = normalized_policy_type(policy);
     let config = policy_config(policy).unwrap_or(serde_json::Value::Null);

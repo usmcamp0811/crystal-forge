@@ -4,8 +4,8 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use super::types::{
-    PolicyDefinition, is_core_policy, is_policy_enabled, normalized_policy_type, policy_category,
-    policy_rule_summaries,
+    PolicyDefinition, is_core_policy, is_policy_enabled, is_policy_version_editable,
+    normalized_policy_type, policy_category, policy_rule_summaries,
 };
 
 /// Card component for displaying a policy definition with design-parity rule summaries.
@@ -24,6 +24,7 @@ pub fn PolicyCard(
     let rules = policy_rule_summaries(&policy);
     let is_core = is_core_policy(&policy);
     let enabled = is_policy_enabled(&policy);
+    let is_editable = is_policy_version_editable(&policy);
     let policy_type = normalized_policy_type(&policy);
     let type_label = if is_core { "built-in" } else { "custom" };
     let type_chip = if is_core {
@@ -122,7 +123,7 @@ pub fn PolicyCard(
                 }
                 if is_core {
                     span { class: "text-xs text-emerald-300", "Always on" }
-                } else {
+                } else if is_editable {
                     div { class: "flex items-center gap-2",
                         button {
                             class: "btn btn-subtle focus-ring xs",
@@ -142,6 +143,8 @@ pub fn PolicyCard(
                             "Delete"
                         }
                     }
+                } else {
+                    span { class: "chip chip-unknown", "read-only" }
                 }
             }
         }

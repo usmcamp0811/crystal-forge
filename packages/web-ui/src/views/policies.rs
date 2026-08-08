@@ -9,7 +9,8 @@ use crate::components::io_menu::{IOMenu, IOMenuItem};
 use crate::components::layout::Card;
 use crate::components::policy::{
     POLICY_CATEGORIES, PolicyCard, PolicyCategory, PolicyDefinition, PolicyEditorModal,
-    PolicyFormat, is_core_policy, normalized_policy_type, policy_category,
+    PolicyFormat, is_core_policy, is_policy_version_editable, normalized_policy_type,
+    policy_category,
 };
 use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 use crate::state::{app_state::AppState, auth};
@@ -664,6 +665,7 @@ fn PolicyDrawer(
     let category = policy_category(&displayed_policy);
     let rules = crate::components::policy::policy_rule_summaries(&displayed_policy);
     let is_core = is_core_policy(&displayed_policy);
+    let is_editable = is_policy_version_editable(&displayed_policy);
     let policy_for_edit = displayed_policy.clone();
     let mut busy = use_signal(|| false);
     let mut action_status = use_signal(|| None::<String>);
@@ -705,7 +707,7 @@ fn PolicyDrawer(
                     }
                 }
                 div { style: "display: flex; gap: 6px; align-items: center;",
-                    if !is_core {
+                    if !is_core && is_editable {
                         button {
                             class: "btn btn-ghost focus-ring xs",
                             onclick: move |_| on_edit.call(policy_for_edit.clone()),
@@ -736,7 +738,7 @@ fn PolicyDrawer(
                             rsx! {
                                 if let Some(status) = action_status.read().as_ref() {
                                     span { class: "chip chip-info", style: "font-size:10px;", "{status}" }
-                                } else if !*busy.read() {
+                                } else if !*busy.read() && is_editable {
                                     button {
                                         class: "btn btn-ghost focus-ring xs",
                                         title: "Mark this policy version as trusted",
@@ -775,22 +777,24 @@ fn PolicyDrawer(
                                         "Publish"
                                     }
                                 }
-                                button {
-                                    class: "btn btn-ghost focus-ring xs",
-                                    disabled: *busy.read(),
-                                    title: "Create a new draft from this accepted version",
-                                    onclick: {
-                                        move |_| {
-                                            busy.set(true);
-                                            spawn(async move {
-                                                match crate::api::client::create_policy_draft(&pid).await {
-                                                    Ok(_) => { busy.set(false); action_status.set(Some("Draft created".into())); }
-                                                    Err(e) => { busy.set(false); action_status.set(Some(format!("Error: {e}"))); }
-                                                }
-                                            });
-                                        }
-                                    },
-                                    "New draft"
+                                if !is_editable {
+                                    button {
+                                        class: "btn btn-ghost focus-ring xs",
+                                        disabled: *busy.read(),
+                                        title: "Create a new draft from this accepted version",
+                                        onclick: {
+                                            move |_| {
+                                                busy.set(true);
+                                                spawn(async move {
+                                                    match crate::api::client::create_policy_draft(&pid).await {
+                                                        Ok(_) => { busy.set(false); action_status.set(Some("Draft created".into())); }
+                                                        Err(e) => { busy.set(false); action_status.set(Some(format!("Error: {e}"))); }
+                                                    }
+                                                });
+                                            }
+                                        },
+                                        "Create draft"
+                                    }
                                 }
                             }
                         }

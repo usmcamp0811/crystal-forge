@@ -1155,6 +1155,17 @@ pub async fn fetch_compliance_bundles() -> Result<Vec<ComplianceBundleSummary>, 
     fetch_json(&url).await
 }
 
+/// Fetch the exact policy-version membership for one bundle revision.
+pub async fn fetch_bundle_version_policy_membership(
+    bundle_version_id: &Uuid,
+) -> Result<Vec<BundleVersionPolicyMembership>, ApiClientError> {
+    let url = format!(
+        "{}/compliance/bundle-versions/{}/policies",
+        base_url(), bundle_version_id
+    );
+    fetch_json(&url).await
+}
+
 pub async fn fetch_compliance_bundle_systems(
     bundle_id: &Uuid,
     version_id: Option<&Uuid>,

@@ -40,6 +40,7 @@ use crate::queries::compliance::{
     create_bundle as create_bundle_row, delete_bundle as delete_bundle_row, get_system_evidence,
     list_bundle_systems, list_bundles, list_system_bundles, update_bundle as update_bundle_row,
     BundleValidationError, list_bundle_systems_for_version,
+    list_bundle_version_policy_membership,
 };
 use crate::queries::compliance_interchange;
 
@@ -73,6 +74,26 @@ pub async fn get_compliance_bundle(
             None => not_found(),
         },
         Err(_) => internal_error("Failed to load compliance bundle"),
+    }
+}
+
+/// `GET /api/v1/compliance/bundle-versions/:version_id/policies`
+///
+/// Returns the exact immutable policy-version IDs selected by this bundle
+/// revision. This must not be derived from the policy lineage's current pointer.
+pub async fn get_bundle_version_policy_membership(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(version_id): Path<Uuid>,
+) -> impl IntoResponse {
+    if authenticated_user_roles(&pool, &headers).await.is_none() {
+        return forbidden();
+    }
+
+    match list_bundle_version_policy_membership(&pool, version_id).await {
+        Ok(Some(members)) => (StatusCode::OK, Json(members)).into_response(),
+        Ok(None) => not_found(),
+        Err(_) => internal_error("Failed to load bundle version policy membership"),
     }
 }
 
@@ -2444,6 +2465,11 @@ pub struct PolicyInterchangeExportRequest {
     pub format: String, // "json" or "toml"
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PolicyInterchangeExportFormatQuery {
+    pub format: String,
+}
+
 #[derive(Debug)]
 struct NormalizedPolicyImport {
     lineage_id: Uuid,
@@ -3922,6 +3948,161 @@ pub async fn policy_interchange_export(
         }
         _ => unreachable!("format validated above"),
     }
+}
+
+/// `GET /api/v1/policy-versions/:version_id/export?format=json|toml`
+///
+/// Exports one exact policy version using the same canonical policy document
+/// fields and JSON/TOML codec as the policy-set exporter above. Reading a
+/// version never changes its publication or activation state.
+pub async fn policy_version_interchange_export(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(version_id): Path<Uuid>,
+    Query(query): Query<PolicyInterchangeExportFormatQuery>,
+) -> impl IntoResponse {
+    let Some((_user_id, _roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !matches!(query.format.as_str(), "json" | "toml") {
+        return bad_request("format must be 'json' or 'toml'");
+    }
+
+    let row = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            serde_json::Value,
+            String,
+        ),
+    >(
+        r#"SELECT id, policy_id, version, publication_state, name, description,
+                  policy_type, implementation_state, execution_phase, config,
+                  semantic_digest
+           FROM deployment_policy_versions
+           WHERE id = $1"#,
+    )
+    .bind(version_id)
+    .fetch_optional(&pool)
+    .await;
+
+    let Some((
+        id,
+        policy_id,
+        version,
+        publication_state,
+        name,
+        description,
+        policy_type,
+        implementation_state,
+        execution_phase,
+        config,
+        semantic_digest,
+    )) = (match row {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::error!(error = %error, %version_id, "failed to load policy version for export");
+            return internal_error("Failed to load policy version");
+        }
+    })
+    else {
+        return not_found();
+    };
+
+    let policy = serde_json::json!({
+        "lineage_id": policy_id,
+        "version_id": id,
+        "version": version,
+        "publication_state": publication_state,
+        "name": name,
+        "description": description,
+        "policy_type": policy_type,
+        "implementation_state": implementation_state,
+        "execution_phase": execution_phase,
+        "config": config,
+        "semantic_digest": semantic_digest,
+        "canonicalization_version": "cf-model-json-1",
+    });
+
+    match query.format.as_str() {
+        "json" => match serde_json::to_string_pretty(&policy) {
+            Ok(body) => (
+                StatusCode::OK,
+                [
+                    ("content-type", "application/json"),
+                    (
+                        "content-disposition",
+                        &format!(
+                            "attachment; filename=\"{}\"",
+                            safe_policy_json_filename(&name)
+                        ),
+                    ),
+                ],
+                body,
+            )
+                .into_response(),
+            Err(error) => {
+                tracing::error!(error = %error, %version_id, "failed to serialize policy export");
+                internal_error("Failed to serialize policy export")
+            }
+        },
+        "toml" => match json_to_toml(&policy) {
+            Ok(body) => (
+                StatusCode::OK,
+                [
+                    ("content-type", "application/toml"),
+                    (
+                        "content-disposition",
+                        &format!(
+                            "attachment; filename=\"{}\"",
+                            safe_policy_toml_filename(&name)
+                        ),
+                    ),
+                ],
+                body,
+            )
+                .into_response(),
+            Err(error) => {
+                tracing::error!(error, %version_id, "failed to serialize policy TOML export");
+                internal_error("Failed to serialize policy export")
+            }
+        },
+        _ => unreachable!("format validated above"),
+    }
+}
+
+fn safe_policy_filename(name: &str, extension: &str) -> String {
+    let safe = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!(
+        "{}.{}",
+        if safe.is_empty() { "policy" } else { &safe },
+        extension
+    )
+}
+
+fn safe_policy_json_filename(name: &str) -> String {
+    safe_policy_filename(name, "json")
+}
+
+fn safe_policy_toml_filename(name: &str) -> String {
+    safe_policy_filename(name, "toml")
 }
 
 /// `POST /api/v1/policies/interchange/import`
@@ -9598,8 +9779,12 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
 
     /// Spawn a server that includes the policy interchange export route.
     async fn spawn_interchange_server(pool: PgPool) -> String {
-        use axum::routing::post;
+        use axum::routing::{get, post};
         let app = Router::new()
+            .route(
+                "/api/v1/policy-versions/:version_id/export",
+                get(policy_version_interchange_export),
+            )
             .route(
                 "/api/v1/policies/interchange/export",
                 post(policy_interchange_export),
@@ -9779,6 +9964,19 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
         // The TOML body must parse as valid TOML.
         let parsed: Result<toml::Value, _> = toml::from_str(&body);
         assert!(parsed.is_ok(), "exported TOML must parse as valid TOML");
+
+        let exact_resp = reqwest::Client::new()
+            .get(format!(
+                "{base}/api/v1/policy-versions/{pv_id}/export?format=json"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("exact policy export");
+        assert_eq!(exact_resp.status().as_u16(), 200);
+        let exact_body: serde_json::Value = exact_resp.json().await.expect("exact JSON body");
+        assert_eq!(exact_body["version_id"], pv_id);
+        assert_eq!(exact_body["policy_type"], "custom_check");
     }
 
     #[tokio::test]

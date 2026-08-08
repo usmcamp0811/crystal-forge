@@ -403,11 +403,50 @@ fn validate_bundle_request(name: &str, framework: &str, policy_ids: &[Uuid]) -> 
 }
 
 use crate::api::models::{
-    ComplianceBundleSummary, ComplianceBundleVersionSummary, ComplianceBundleSystemsResponse, ComplianceControlEvidence,
+    BundleVersionPolicyMembership, ComplianceBundleSummary, ComplianceBundleVersionSummary, ComplianceBundleSystemsResponse, ComplianceControlEvidence,
     ComplianceControlStatus, ComplianceEnvironmentRef, ComplianceEvidenceArtifact,
     ComplianceEvidenceItem, ComplianceEvidenceResponse, ComplianceRollupTotals,
     ComplianceSystemRollup, CreateComplianceBundleRequest, UpdateComplianceBundleRequest,
 };
+
+/// Load the exact immutable policy versions selected by one bundle version.
+pub async fn list_bundle_version_policy_membership(
+    pool: &PgPool,
+    bundle_version_id: Uuid,
+) -> Result<Option<Vec<BundleVersionPolicyMembership>>> {
+    let bundle_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM compliance_bundle_versions WHERE id = $1)",
+    )
+    .bind(bundle_version_id)
+    .fetch_one(pool)
+    .await?;
+
+    if !bundle_exists {
+        return Ok(None);
+    }
+
+    let members = sqlx::query_as::<_, BundleVersionPolicyMembership>(
+        r#"
+        SELECT cbvp.policy_version_id,
+               pv.policy_id AS policy_lineage_id,
+               cbvp.policy_order,
+               pv.name,
+               pv.description,
+               pv.policy_type,
+               COALESCE(pv.enabled_by_default, true) AS enabled
+        FROM compliance_bundle_version_policies cbvp
+        JOIN deployment_policy_versions pv ON pv.id = cbvp.policy_version_id
+        WHERE cbvp.bundle_version_id = $1
+          AND cbvp.selected = true
+        ORDER BY cbvp.policy_order
+        "#,
+    )
+    .bind(bundle_version_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(Some(members))
+}
 
 #[derive(Debug, FromRow)]
 struct BundleRow {
