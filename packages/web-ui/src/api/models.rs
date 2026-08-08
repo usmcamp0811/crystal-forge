@@ -1647,6 +1647,8 @@ pub struct EffectivePolicyDto {
     pub overrides: Vec<PolicyValueOverride>,
     pub effective_config: serde_json::Value,
     pub enforcement_mode: String,
+    #[serde(default)]
+    pub provenance: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

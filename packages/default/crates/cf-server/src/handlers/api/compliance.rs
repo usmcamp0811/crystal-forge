@@ -1045,6 +1045,7 @@ fn effective_set_to_response(
                 overrides,
                 effective_config: p.effective_config,
                 enforcement_mode: mode,
+                provenance: p.provenance,
             }
         })
         .collect();
