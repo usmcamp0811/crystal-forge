@@ -1335,6 +1335,12 @@ Phase 2 assignment mutation slice (isolated branch TASK-412-phase2-atomicity): i
 Final assignment UX pass: update `packages/web-ui/src/views/compliance.rs` only to replace visible UUID/JSON assignment inputs with environment/system and policy selectors backed by existing APIs/models, display the exact selected bundle revision with a non-current warning, preview the exact create request before allowing creation, and preserve UUID payload semantics. Verify with formatting and the targeted web-ui build/check available in this worktree.
 
 Remaining correctness gap: extend the existing set-based system effective-policy batch resolver with an optional exact bundle-version filter. The versioned bundle systems query will resolve all applicable systems in one batch, use the requested bundle version's assignments/overlays/direct-policy precedence, and fall back to exact baseline membership only where no matching assignment exists; the legacy no-version query remains unchanged. Add focused pure tests for exact-version policy selection and exclusion/addition behavior, then run offline server cargo check and targeted tests.
+
+### Focused assignment-effective export wiring
+- Add a Dioxus API client helper for `GET /compliance/assignments/:assignment_id/xccdf`.
+- Add a distinct server-backed effective-assignment XCCDF download action to the existing assignment list cards; retain the baseline bundle-version export action unchanged.
+- Do not parse or construct XML in the browser.
+- Verify with the repository `web-ui` cargo check and inspect the final diff for focused scope.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
