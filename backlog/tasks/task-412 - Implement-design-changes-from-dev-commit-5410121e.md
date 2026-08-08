@@ -1369,4 +1369,15 @@ Verification update: server and web-ui cargo checks pass; targeted resolver/dige
 2026-08-07: Implemented evaluation-specific canonical digesting in `server/mod.rs`. Active systems are filtered to enforce/enabled/Nix-evaluated/non-CF-agent policies, sorted by version ID, and compared using a dedicated digest; empty sets now participate in shared-configuration comparison. SQLx resolver failures are classified as transient for retry handling. Focused digest tests pass (2 tests). Full workspace fmt remains blocked by pre-existing formatting drift; direct rustfmt invocation without Cargo edition context is not a valid verification.
 
 2026-08-07: Completed the remaining resolver issue. Evaluation preflight now uses a resolver mode that ignores same-specificity conflicts when both versions are non-Nix (including operational/report-only/manual policy types), while the normal compliance/deployment resolver still reports those conflicts. Nix-evaluation policy conflicts remain blocking. Committed as `d29253e3` (`fix(evaluation): ignore non-nix policy conflicts`) and pushed to `origin/TASK-412-cf-xccdf-interchange`.
+
+2026-08-08: Verified branch baseline 2a8b8599 and remote branch, preserved untracked STIG ZIP and generated Tailwind asset. Added/pushed commit 74150922 (feat(compliance): add revision-aware UI and evidence APIs). This includes bundle/policy revision summaries, exact bundle-version systems selection, exact-version evidence query context, frontend revision reload wiring, and hidden assignment-panel gating. `SQLX_OFFLINE=true cargo check -p cf-server`, web-ui `cargo check`, and `git diff --check` passed. `nix build .#checks.x86_64-linux.web-ui --no-link` and `nix flake check --keep-going` were started but exceeded the 10-minute/20-minute command timeouts while building VM checks; neither is reported as passed. Remaining major gaps from the requested final pass: assignment-aware fleet rollups/evidence using one batch resolver, typed assignment modal/preview and provenance metadata, effective assignment XCCDF export, complete exact policy-version APIs/UI, scanning complete-data verification, lifecycle/performance tests, documentation, screenshots, and CI verification. MR !313 was not merged.
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+created: 2026-08-08 15:45
+---
+Pushed commit 74150922 to TASK-412-cf-xccdf-interchange. The branch is not yet review-ready against the full final-pass checklist; major correctness and verification gaps remain as documented in Implementation Notes.
+---
+<!-- COMMENTS:END -->
