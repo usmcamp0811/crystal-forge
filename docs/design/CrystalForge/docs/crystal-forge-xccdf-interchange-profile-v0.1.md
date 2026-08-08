@@ -1,9 +1,9 @@
 # Crystal Forge XCCDF Interchange Profile
 
 **Abbreviation:** CF-XCCDF  
-**Version:** 0.1  
-**Date:** 2026-08-06  
-**Status:** Implemented (MR !313) — see §14 for implementation notes and current limitations.
+**Version:** 0.1 Draft  
+**Date:** 2026-07-31  
+**Status:** Design draft for implementation review
 
 ## 1. Purpose
 
@@ -1058,12 +1058,12 @@ This draft makes the following product decisions explicit:
 
 ## 27. Open decisions before version 0.2
 
-1. ~~Choose and freeze the public Crystal Forge XML namespace and check-system URIs.~~ **Resolved in v0.1:** `urn:crystal-forge:xccdf:1`, `urn:crystal-forge:check-system:policy:1`, `urn:crystal-forge:fix-system:nix:1`.
-2. ~~Define the exact XSD for the Crystal Forge extension.~~ **Resolved in v0.1:** `schemas/cf-xccdf-1/cf-xccdf-1.xsd`.
-3. ~~Define the canonical semantic digest representation.~~ **Resolved in v0.1:** `cf-model-json-1` canonicalization with SHA-256.
+1. Choose and freeze the public Crystal Forge XML namespace and check-system URIs.
+2. Define the exact XSD for the Crystal Forge extension.
+3. Define the canonical semantic digest representation.
 4. Decide whether policy and bundle version strings must follow Semantic Versioning.
 5. Define a portable publisher identity and trust-store model.
-6. ~~Define the minimum manual-check policy type for foreign XCCDF rules.~~ **Resolved in v0.1:** `implementation_state` supports `native`, `manual`, `external`, `unbound`, `opaque`.
+6. Define the minimum manual-check policy type for foreign XCCDF rules.
 7. Define whether one Crystal Forge policy may intentionally back several imported source rules while preserving distinct XCCDF rule identities.
 8. Define standard parameterization rules for converting policy configuration fields to XCCDF `Value` elements.
 9. Define evidence attachment packaging and result signatures.
@@ -1080,82 +1080,3 @@ This draft makes the following product decisions explicit:
 - Current Crystal Forge compliance bundle API and persistence model.
 - Current Crystal Forge deployment policy model and Nix policy evaluator.
 - Current Crystal Forge Nix STIG module implementation.
-
-## 30. Implementation notes (v0.1, MR !313)
-
-### 30.1 What is implemented
-
-- **XCCDF 1.2 benchmark import:** Accepts `.xml` and `.zip` uploads, parses server-side with
-  security controls (no DTD, no external entities, bounded size/depth/attributes).
-  Returns structured JSON including benchmark metadata, profiles, rules, identifiers,
-  checks, fixes, and fidelity classification.
-
-- **XCCDF 1.2 benchmark export:** Generates schema-valid `Benchmark` documents with one
-  baseline `Profile` per bundle version, one `Rule` per policy version, and
-  `cf:*` extension elements for CF-native metadata.
-
-- **Foreign XCCDF import:** Classifies foreign vs. CF-native documents. Rules are imported
-  as unbound/opaque draft policies with preserved source metadata. Imported content
-  defaults to draft, disabled, untrusted, and unassigned.
-
-- **CF-native exact import:** Matches by portable version identity and semantic digest.
-  Exact existing versions are reused; new versions are created when lineage matches
-  but version identity differs. Digest conflicts are rejected with typed 409 responses.
-
-- **Policy JSON/TOML interchange:** Canonical `urn:crystal-forge:policy-set:1` document
-  format. Preview-first import with source SHA-256 verification (`X-Policy-Source-SHA256`
-  header). All native policy types are supported including multi-rule custom checks.
-
-- **Version lifecycle:** Draft versions are mutable; published versions are immutable.
-  Publishing a bundle may atomically publish included draft policies. Draft derivation
-  from published versions is supported.
-
-- **Bundle assignments:** CRUD endpoints with advisory locking and versioned concurrency.
-  Support for exclusions, additions, typed overrides, enforce/report-only mode.
-  System specificity overrides environment specificity.
-
-- **Effective policy resolution:** One resolver for API, assignment validation,
-  and deployment. Baseline < environment < system specificity. Same-specificity
-  version conflicts are reported.
-
-- **Trust workflow:** Trust/reject endpoints for policy and bundle versions with
-  optional review notes. UI supports bundle version trust/publish/draft operations.
-
-- **Import UI:** Real file upload → server preview → rule selection → commit flow
-  for both foreign STIG and CF-native bundles. Classification, fidelity, and
-  diagnostics are displayed.
-
-- **Export UI:** XCCDF export for any bundle version (draft or published). JSON/TOML
-  export for single and bulk policy selections.
-
-- **Scanning:** Deployed tab is the default. Latest-per-flake gold star treatment.
-
-### 30.2 Current limitations
-
-- **Policy-level trust/publish UI:** Not yet available in the Policies view. Trust and
-  publish operations for individual policy versions are accessible through the API
-  only.
-
-- **Assignment-aware evidence:** The compliance evidence query uses direct bundle
-  membership rather than the assignment-resolved effective policy set. Evidence
-  for systems with assignment exclusions/additions may not reflect the actual
-  resolved policy configuration.
-
-- **Effective export:** The XCCDF export endpoint exports the baseline bundle version,
-  not the assignment-resolved effective set (which may include exclusions, additions,
-  or overrides).
-
-- **CF-XCCDF schema validation in CI:** The vendored schemas are included and validated
-  by the xccdf-schema Nix check, but the full STIG lifecycle round-trip (foreign import →
-  publish → assign → export → reimport → semantic equivalence) is not covered by
-  browser-based Playwright tests.
-
-### 30.3 Compatibility levels achieved
-
-- **Level A:** Valid and viewable XCCDF. ✅
-- **Level B:** Checklist-usable content. ✅ (standard consumers see rules, checks, fixes,
-  identifiers, and severities)
-- **Level C:** Crystal Forge executable round trip. ✅ (supported through CF-native
-  exact import path with portable identities and semantic digests)
-- **Level D:** Generic SCAP execution. ❌ (not targeted for v0.1; requires SCAP
-  data stream packaging and OVAL/OCIL check execution support)

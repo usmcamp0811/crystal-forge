@@ -1,7 +1,7 @@
 // Compliance view — bundle catalog + per-system control evidence + export
 
 function ComplianceView({ onOpenSystem, selectedBundleId, onClearBundle }) {
-  const [bundleId, setBundleId] = React.useState(selectedBundleId || COMPLIANCE_BUNDLES[0]?.id || null);
+  const [bundleId, setBundleId] = React.useState(selectedBundleId || COMPLIANCE_BUNDLES.find(b => b.publicationState === "current")?.id || COMPLIANCE_BUNDLES[0]?.id || null);
 
   React.useEffect(() => {
     if (selectedBundleId) { setBundleId(selectedBundleId); onClearBundle?.(); }
@@ -18,8 +18,7 @@ function ComplianceView({ onOpenSystem, selectedBundleId, onClearBundle }) {
 
   const applicableSystems = React.useMemo(() => {
     if (!bundle) return [];
-    return SYSTEMS.filter(s => bundle.requiredEnvs.includes(s.environment))
-      .map(s => ({ sys: s, rollup: bundleStatusForSystem(bundle, s) }));
+    return SYSTEMS.map(s => ({ sys: s, rollup: bundleStatusForSystem(bundle, s) })).filter(({ rollup }) => rollup.applies);
   }, [bundleId]);
 
   const stats = React.useMemo(() => {
@@ -64,7 +63,7 @@ function ComplianceView({ onOpenSystem, selectedBundleId, onClearBundle }) {
         <div style={{ display:"flex", gap:8 }}>
           <IOMenu items={[
             { label:"Import STIG (.xml)", icon:"shield", onClick:() => setImportOpen(true) },
-            { label:"Import bundle (.xml)", icon:"upload", onClick:() => setImportBundleOpen(true) },
+            { label:"Import bundle (.xml / DISA .zip)", icon:"upload", onClick:() => setImportBundleOpen(true) },
             "divider",
             { label:"Export this bundle (XCCDF .xml)", icon:"download", onClick:() => bundle && exportBundle(bundle) },
             { label:"Export evidence report…", icon:"download", onClick:() => setExportOpen(true) },
@@ -150,7 +149,7 @@ function ComplianceView({ onOpenSystem, selectedBundleId, onClearBundle }) {
           onDelete={() => {
             const idx = COMPLIANCE_BUNDLES.findIndex(b => b.id === bundle.id);
             if (idx >= 0) COMPLIANCE_BUNDLES.splice(idx, 1);
-            const next = COMPLIANCE_BUNDLES[0]?.id || null;
+            const next = COMPLIANCE_BUNDLES.find(b => b.publicationState === "current")?.id || COMPLIANCE_BUNDLES[0]?.id || null;
             setBundleId(next);
             setSelectedSysId(null);
           }}
@@ -160,35 +159,101 @@ function ComplianceView({ onOpenSystem, selectedBundleId, onClearBundle }) {
   );
 }
 
-/* ── Left rail: bundle catalog ── */
+/* ── Left rail: bundle catalog, grouped by lineage ── */
+const PUB_STATE_COLOR = { current:"#34d399", accepted:"#60a5fa", deprecated:"#6b7280", draft:"#fbbf24" };
+function PubStateChip({ state }) {
+  const c = PUB_STATE_COLOR[state] || "#6b7280";
+  return <span className="chip" style={{ fontSize:9, padding:"1px 6px", color:c, background:`color-mix(in oklab, ${c} 16%, transparent)` }}>{state}</span>;
+}
+
 function BundleCatalog({ bundles, selectedId, onSelect }) {
+  const groups = React.useMemo(() => groupBundlesByLineage(bundles), [bundles]);
+  const [expanded, setExpanded] = React.useState(() => new Set(groups.filter(g => g.revisions.some(r => r.id === selectedId)).map(g => g.lineageId)));
+  const [pickerFor, setPickerFor] = React.useState(null);
+
+  React.useEffect(() => {
+    const g = groups.find(g => g.revisions.some(r => r.id === selectedId));
+    if (g) setExpanded(prev => new Set(prev).add(g.lineageId));
+  }, [selectedId]);
+
+  const toggle = (lineageId) => setExpanded(prev => { const n = new Set(prev); n.has(lineageId) ? n.delete(lineageId) : n.add(lineageId); return n; });
+
   return (
     <div className="card" style={{ padding:0, position:"sticky", top:16, maxHeight:"calc(100vh - 160px)", overflow:"auto" }}>
       <div style={{ padding:"12px 14px", borderBottom:"1px solid var(--cf-divider)", fontSize:11, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", fontWeight:600 }}>
         Compliance bundles
       </div>
-      {bundles.map(b => {
-        const isSel = b.id === selectedId;
+      {groups.map(g => {
+        const isOpen = expanded.has(g.lineageId);
+        const selRev = g.revisions.find(r => r.id === selectedId);
+        const shown = selRev || g.current;
+        const multi = g.revisions.length > 1;
+        const manyRevisions = g.revisions.length > 3;
         return (
-          <button key={b.id}
-            onClick={() => onSelect(b.id)}
-            className="focus-ring"
-            style={{
-              all:"unset", cursor:"pointer", display:"block",
-              padding:"12px 14px", width:"100%", boxSizing:"border-box",
-              borderLeft: `3px solid ${isSel ? "var(--cf-brand-purple)" : "transparent"}`,
-              background: isSel ? "color-mix(in oklab,var(--cf-brand-purple) 8%, transparent)" : "transparent",
-              borderBottom:"1px solid var(--cf-divider)",
-            }}>
-            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, marginBottom:4 }}>
-              <span style={{ fontSize:12, fontWeight:600, color:"var(--cf-text-primary)" }}>{b.name}</span>
-              <span className="chip chip-unknown" style={{ fontSize:9, padding:"1px 6px" }}>{b.layer}</span>
-            </div>
-            <div style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{b.framework} · {b.version}</div>
-            <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:4 }}>{b.policyIds.length} controls · {b.requiredEnvs.length} env{b.requiredEnvs.length === 1 ? "" : "s"}</div>
-          </button>
+          <div key={g.lineageId} style={{ borderBottom:"1px solid var(--cf-divider)" }}>
+            <button
+              onClick={() => multi ? (manyRevisions ? setPickerFor(g) : toggle(g.lineageId)) : onSelect(shown.id)}
+              className="focus-ring"
+              style={{
+                all:"unset", cursor:"pointer", display:"block",
+                padding:"12px 14px", width:"100%", boxSizing:"border-box",
+                borderLeft: `3px solid ${!isOpen && !!selRev ? "var(--cf-brand-purple)" : "transparent"}`,
+                background: !isOpen && !!selRev ? "color-mix(in oklab,var(--cf-brand-purple) 8%, transparent)" : "transparent",
+              }}>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, marginBottom:4 }}>
+                <span style={{ fontSize:12, fontWeight:600, color:"var(--cf-text-primary)" }}>{g.lineageName}</span>
+                <span style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
+                  <span className="chip chip-unknown" style={{ fontSize:9, padding:"1px 6px" }}>{shown.layer}</span>
+                  {multi && <Icon name={manyRevisions ? "search" : (isOpen ? "chevron-up" : "chevron-down")} size={12} style={{ color:"var(--cf-text-muted)" }}/>}
+                </span>
+              </div>
+              <div style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{shown.framework} · {shown.version}</div>
+              <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:5, flexWrap:"wrap" }}>
+                <PubStateChip state={shown.publicationState}/>
+                {selRev && selRev.id !== g.current.id && <span className="chip chip-info" style={{ fontSize:9 }}>selected</span>}
+                <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{shown.policyIds.length} controls</span>
+                {multi && <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>· {g.revisions.length} revisions{manyRevisions ? " · browse & select" : ""}</span>}
+              </div>
+            </button>
+            {isOpen && multi && !manyRevisions && (
+              <div style={{ padding:"2px 10px 8px" }}>
+                {g.revisions.map(r => {
+                  const isSel = r.id === selectedId;
+                  return (
+                    <button key={r.id} onClick={() => onSelect(r.id)} className="focus-ring"
+                      style={{
+                        all:"unset", cursor:"pointer", display:"flex", flexDirection:"column", gap:3,
+                        padding:"8px 10px", borderRadius:8, width:"100%", boxSizing:"border-box", marginTop:4,
+                        background: isSel ? "color-mix(in oklab,var(--cf-brand-purple) 12%, transparent)" : "var(--cf-subtle-bg)",
+                        border: `1px solid ${isSel ? "var(--cf-brand-purple)" : "transparent"}`,
+                      }}>
+                      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
+                        <span className="mono" style={{ fontSize:11.5, fontWeight:600 }}>Revision {r.revision} <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· {r.version}</span></span>
+                        {r.id === g.current.id && <span className="chip" style={{ fontSize:8.5, color:"#34d399", background:"color-mix(in oklab, #34d399 16%, transparent)" }}>Current</span>}
+                      </div>
+                      <div style={{ display:"flex", alignItems:"center", gap:6, flexWrap:"wrap" }}>
+                        <PubStateChip state={r.publicationState}/>
+                        <span style={{ fontSize:10.5, color:"var(--cf-text-muted)" }}>{r.publishedDate}</span>
+                        {r.digest && <span className="mono" style={{ fontSize:10, color:"var(--cf-text-muted)" }}>{r.digest.slice(0,14)}</span>}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         );
       })}
+      {pickerFor && (
+        <RevisionPickerModal
+          title={pickerFor.lineageName}
+          revisions={pickerFor.revisions}
+          currentId={pickerFor.current.id}
+          selectedId={selectedId}
+          onSelect={(id) => { onSelect(id); setPickerFor(null); }}
+          onClose={() => setPickerFor(null)}
+        />
+      )}
     </div>
   );
 }
@@ -241,11 +306,18 @@ function BundleDrilldown({ bundle, filter, setFilter, applicableSystems, onOpenS
         <Icon name="shield" size={13}/>
         <div style={{ fontSize:12 }}>Select a host to step through its <strong>per-control evidence</strong> — the proof Crystal Forge collected that each control is satisfied.</div>
       </div>
+      {bundle.publicationState !== "current" && applicableSystems.length > 0 && (
+        <div className="sd-callout sd-callout-warn" style={{ margin:"10px 16px 0" }}>
+          <Icon name="warn" size={13}/>
+          <div style={{ fontSize:12 }}>These {applicableSystems.length} host{applicableSystems.length===1?"":"s"} are explicitly pinned to this <strong>{bundle.publicationState}</strong> revision rather than tracking current — see each host's assignment reason below.</div>
+        </div>
+      )}
       <table className="sys-table">
         <thead>
           <tr>
             <th>Host</th>
             <th>Env</th>
+            <th>Assignment</th>
             <th>Score</th>
             <th>Pass</th>
             <th>Warn</th>
@@ -264,6 +336,13 @@ function BundleDrilldown({ bundle, filter, setFilter, applicableSystems, onOpenS
                 </div>
               </td>
               <td><EnvBadge env={sys.environment}/></td>
+              <td>
+                {(() => {
+                  const st = rollup.assignment?.status || "current";
+                  const meta = COMPLIANCE_ASSIGNMENT_STATUS[st] || COMPLIANCE_ASSIGNMENT_STATUS.current;
+                  return <span className="chip" title={rollup.assignment?.reason || "Tracking current baseline"} style={{ fontSize:9, color:meta.color, background:`color-mix(in oklab, ${meta.color} 14%, transparent)` }}>{meta.label}</span>;
+                })()}
+              </td>
               <td>
                 <div style={{ display:"flex", alignItems:"center", gap:8 }}>
                   <div style={{ width:48, height:5, background:"var(--cf-subtle-bg)", borderRadius:99, overflow:"hidden" }}>
@@ -292,6 +371,7 @@ function BundleDrilldown({ bundle, filter, setFilter, applicableSystems, onOpenS
 /* ── Drawer: walk through controls for a host ── */
 function ControlsEvidenceDrawer({ bundle, sys, onClose, onOpenSystem, showSystemLink, onOpenBundle }) {
   const [activeIdx, setActiveIdx] = React.useState(0);
+  const assignment = resolveComplianceAssignment(sys, bundle.lineageId || bundle.id);
 
   React.useEffect(() => {
     const onKey = (e) => {
@@ -370,6 +450,23 @@ function ControlsEvidenceDrawer({ bundle, sys, onClose, onOpenSystem, showSystem
 
           {/* Right: evidence detail */}
           <div style={{ overflow:"auto", padding:20, display:"flex", flexDirection:"column", gap:16 }}>
+            {assignment && assignment.status !== "current" && (() => {
+              const meta = COMPLIANCE_ASSIGNMENT_STATUS[assignment.status] || COMPLIANCE_ASSIGNMENT_STATUS.current;
+              return (
+                <div className="sd-callout" style={{ background:`color-mix(in oklab, ${meta.color} 8%, transparent)`, borderColor:`color-mix(in oklab, ${meta.color} 30%, transparent)` }}>
+                  <Icon name="warn" size={13} style={{ color:meta.color }}/>
+                  <div style={{ fontSize:12 }}>
+                    <div><strong style={{ color:meta.color }}>{meta.label}</strong> — pinned to this revision instead of the current baseline.</div>
+                    <div style={{ marginTop:4, color:"var(--cf-text-secondary)" }}>{assignment.reason}</div>
+                    <div style={{ marginTop:4, display:"flex", gap:12, flexWrap:"wrap", fontSize:11, color:"var(--cf-text-muted)" }}>
+                      <span>Approved by <span className="mono">{assignment.approvedBy}</span></span>
+                      {assignment.deadline && <span>Migration deadline <span className="mono">{assignment.deadline}</span></span>}
+                      {assignment.poam && <span>POA&M <span className="mono">{assignment.poam}</span></span>}
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
             <ControlEvidenceCard evidence={active} controlIdx={activeIdx} total={bundle.policyIds.length}/>
           </div>
         </div>
@@ -727,7 +824,7 @@ function NewBundleModal({ onClose, bundle: editBundle, onDelete }) {
   const [query, setQuery] = React.useState("");
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
 
-  const policies = (typeof POLICIES !== "undefined" ? POLICIES : []);
+  const policies = (typeof POLICIES !== "undefined" ? POLICIES : []).filter(p => p.publicationState !== "deprecated");
   const filtered = policies.filter(p =>
     !query || p.name.toLowerCase().includes(query.toLowerCase()) || (p.description||"").toLowerCase().includes(query.toLowerCase())
   );
@@ -925,7 +1022,7 @@ function DeleteBundleConfirm({ bundle, onCancel, onConfirm }) {
   );
 }
 
-Object.assign(window, { ComplianceView, ControlsEvidenceDrawer, ControlEvidenceCard, exportBundle });
+Object.assign(window, { ComplianceView, ControlsEvidenceDrawer, ControlEvidenceCard, exportBundle, PubStateChip });
 
 // ── Community bundle interchange — XCCDF 1.2 + a small Crystal Forge extension,
 // per the CF-XCCDF Interchange Profile draft. A bundle exports as one <Benchmark>:
@@ -1061,8 +1158,23 @@ function ImportBundleModal({ onClose, onComplete }) {
     if (!file) return;
     setError("");
     try {
-      const text = await file.text();
-      const isXml = /\.xml$/i.test(file.name) || text.trim().startsWith("<");
+      const isZip = /\.zip$/i.test(file.name);
+      let text, sourceName = file.name;
+      if (isZip) {
+        if (typeof JSZip === "undefined") throw new Error("Zip support failed to load — try again or extract the XCCDF .xml manually.");
+        const zip = await JSZip.loadAsync(file);
+        const xmlEntries = Object.values(zip.files).filter(f => !f.dir && /\.xml$/i.test(f.name));
+        if (!xmlEntries.length) throw new Error("No XCCDF .xml file found inside this zip.");
+        // DISA STIG zips bundle an XCCDF benchmark plus OVAL/CPE/manual-check XML — prefer the one that's actually the benchmark.
+        const scored = xmlEntries.map(f => ({ f, score: /xccdf/i.test(f.name) ? 2 : /manual/i.test(f.name) ? 1 : 0 }));
+        scored.sort((a,b) => b.score - a.score);
+        const entry = scored[0].f;
+        text = await entry.async("string");
+        sourceName = entry.name;
+      } else {
+        text = await file.text();
+      }
+      const isXml = /\.xml$/i.test(sourceName) || text.trim().startsWith("<");
       let data;
       if (isXml) {
         data = parseCfXccdf(text);
@@ -1072,7 +1184,7 @@ function ImportBundleModal({ onClose, onComplete }) {
       }
       if (!data.policies.length) throw new Error("No policies found in this bundle file.");
       setParsed(data);
-      setName(data.meta.name || file.name.replace(/\.(json|xml)$/i,""));
+      setName(data.meta.name || file.name.replace(/\.(json|xml|zip)$/i,""));
     } catch (e) {
       setError(e.message || "Could not parse this file.");
     }
@@ -1103,7 +1215,7 @@ function ImportBundleModal({ onClose, onComplete }) {
       <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(600px,96vw)", maxHeight:"92vh" }}>
         <div className="modal-head">
           <h2><Icon name="upload" size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/>Import a shared bundle</h2>
-          <p>Upload a bundle exported from another Crystal Forge instance — an XCCDF 1.2 benchmark with the Crystal Forge extension (CF-XCCDF). Plain STIG XCCDF and legacy JSON bundle exports are also accepted.</p>
+          <p>Upload a bundle exported from another Crystal Forge instance — an XCCDF 1.2 benchmark with the Crystal Forge extension (CF-XCCDF). Plain STIG XCCDF, a DISA STIG .zip download, and legacy JSON bundle exports are also accepted.</p>
         </div>
         <div className="modal-body" style={{ overflowY:"auto" }}>
           {!parsed ? (
@@ -1118,10 +1230,10 @@ function ImportBundleModal({ onClose, onComplete }) {
                 background: dragOver ? "color-mix(in oklab, var(--cf-brand-purple) 7%, var(--cf-card-bg))" : "var(--cf-card-bg)",
                 borderRadius:12, padding:"38px 20px", textAlign:"center", cursor:"pointer",
               }}>
-              <input ref={fileRef} type="file" accept=".xml,.json,application/xml" style={{ display:"none" }}
+              <input ref={fileRef} type="file" accept=".xml,.json,.zip,application/xml,application/zip" style={{ display:"none" }}
                 onChange={e=>handleFile(e.target.files[0])}/>
               <Icon name="upload" size={22} style={{ color:"var(--cf-text-muted)" }}/>
-              <div style={{ fontSize:14, fontWeight:600, marginTop:8 }}>Drop a bundle .xml here, or click to browse</div>
+              <div style={{ fontSize:14, fontWeight:600, marginTop:8 }}>Drop a bundle .xml or DISA STIG .zip here, or click to browse</div>
             </div>
           ) : (
             <>

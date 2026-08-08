@@ -49,6 +49,10 @@ const POLICY_BUILTIN = [
 const POLICY_CUSTOM = [
   {
     id: "cve-gated",
+    lineageId: "cve-gated",
+    revision: 1,
+    publicationState: "current",
+    publishedDate: "2026-02-15",
     name: "cve-gated",
     category: "pipeline",
     description: "Block deploys that introduce any critical CVE.",
@@ -67,6 +71,10 @@ const POLICY_CUSTOM = [
   },
   {
     id: "business-hours",
+    lineageId: "business-hours",
+    revision: 1,
+    publicationState: "current",
+    publishedDate: "2026-03-08",
     name: "business-hours",
     category: "rollout",
     description: "Auto-deploy permitted only between 09:00–17:00 weekdays, US-East.",
@@ -84,6 +92,10 @@ const POLICY_CUSTOM = [
   },
   {
     id: "two-approver",
+    lineageId: "two-approver",
+    revision: 1,
+    publicationState: "current",
+    publishedDate: "2026-07-05",
     name: "two-approver",
     category: "rollout",
     description: "Requires sign-off from 2 distinct operators with admin role.",
@@ -101,6 +113,10 @@ const POLICY_CUSTOM = [
   },
   {
     id: "canary-25",
+    lineageId: "canary-25",
+    revision: 1,
+    publicationState: "draft",
+    publishedDate: "2026-07-25",
     name: "canary-25",
     category: "rollout",
     description: "Roll out to 25% of matching systems at a time, watch for 30 min, then continue.",
@@ -118,6 +134,12 @@ const POLICY_CUSTOM = [
   },
   {
     id: "stig-sshd",
+    lineageId: "stig-sshd",
+    revision: 1,
+    publicationState: "current",
+    publishedDate: "2026-05-28",
+    srgIds: ["SRG-OS-000109","SRG-OS-000163","SRG-OS-000033"],
+    cciIds: ["CCI-000770","CCI-001133","CCI-000068"],
     name: "stig-ssh-hardening",
     category: "security",
     description: "Anduril NixOS STIG: SSH daemon hardening — no root login, FIPS ciphers, 10-min idle timeout.",
@@ -143,6 +165,12 @@ const POLICY_CUSTOM = [
   },
   {
     id: "stig-auditd",
+    lineageId: "stig-auditd",
+    revision: 1,
+    publicationState: "current",
+    publishedDate: "2026-06-02",
+    srgIds: ["SRG-OS-000004","SRG-OS-000298"],
+    cciIds: ["CCI-000018","CCI-000366"],
     name: "stig-audit-daemon",
     category: "security",
     description: "Anduril NixOS STIG: audit daemon enabled with the firewall to enforce host logging and ingress control.",
@@ -166,6 +194,12 @@ const POLICY_CUSTOM = [
   },
   {
     id: "stig-banner",
+    lineageId: "stig-banner",
+    revision: 1,
+    publicationState: "current",
+    publishedDate: "2026-06-18",
+    srgIds: ["SRG-OS-000023-GPOS-00006"],
+    cciIds: ["CCI-000048"],
     name: "stig-consent-banner",
     category: "security",
     description: "Anduril NixOS STIG: DoD Notice and Consent banner on all command-line logon paths.",
@@ -187,6 +221,12 @@ const POLICY_CUSTOM = [
   },
   {
     id: "stig-fips",
+    lineageId: "stig-fips",
+    revision: 1,
+    publicationState: "current",
+    publishedDate: "2026-06-25",
+    srgIds: ["SRG-OS-000478","SRG-OS-000185"],
+    cciIds: ["CCI-002450","CCI-001199"],
     name: "stig-fips-crypto",
     category: "security",
     description: "Anduril NixOS STIG: FIPS-validated cryptography enabled and data-at-rest encrypted.",
@@ -209,6 +249,12 @@ const POLICY_CUSTOM = [
   },
   {
     id: "stig-usbguard",
+    lineageId: "stig-usbguard",
+    revision: 1,
+    publicationState: "current",
+    publishedDate: "2026-07-01",
+    srgIds: ["SRG-OS-000114"],
+    cciIds: ["CCI-001958"],
     name: "stig-usbguard",
     category: "security",
     description: "Anduril NixOS STIG: USBguard enabled with an allow-list policy to control peripheral access.",
@@ -230,6 +276,13 @@ const POLICY_CUSTOM = [
   },
   {
     id: "stig-pwquality",
+    lineageId: "stig-pwquality",
+    revision: 2,
+    publicationState: "current",
+    publishedDate: "2026-07-10",
+    digest: "sha256:2b7e91",
+    srgIds: ["SRG-OS-000078","SRG-OS-000112"],
+    cciIds: ["CCI-000205","CCI-000196"],
     name: "stig-password-policy",
     category: "security",
     description: "Anduril NixOS STIG: enforce 15-character minimum password length and encrypted password storage.",
@@ -249,7 +302,127 @@ const POLICY_CUSTOM = [
     createdAt: "4w ago",
     lastModified: "1w ago",
   },
+  {
+    id: "stig-pwquality-r2",
+    lineageId: "stig-pwquality",
+    revision: 2,
+    publicationState: "deprecated",
+    publishedDate: "2026-04-01",
+    digest: "sha256:5c9d02",
+    srgIds: ["SRG-OS-000078"],
+    cciIds: ["CCI-000205"],
+    name: "stig-password-policy",
+    category: "security",
+    description: "Anduril NixOS STIG: enforce 12-character minimum password length.",
+    type: "custom",
+    severity: "medium",
+    enabled: false,
+    rules: [
+      { kind:"custom_eval", expr:"config.security.pam.services ? pwquality && config.security.pam.pwquality.minlen >= 12", message:"Minimum password length must be >= 12" },
+    ],
+    rationale: "V-268134 (12-char minimum length, interim revision). SRG-OS-000078.",
+    evidence: [
+      { kind:"command", cmd:"grep minlen /etc/security/pwquality.conf", expect:"minlen = 12" },
+    ],
+    createdBy: "security-team",
+    createdAt: "4mo ago",
+    lastModified: "3mo ago",
+  },
+  {
+    id: "stig-pwquality-r3",
+    lineageId: "stig-pwquality",
+    revision: 3,
+    publicationState: "deprecated",
+    publishedDate: "2026-05-05",
+    digest: "sha256:6da813",
+    srgIds: ["SRG-OS-000078"],
+    cciIds: ["CCI-000205"],
+    name: "stig-password-policy",
+    category: "security",
+    description: "Anduril NixOS STIG: enforce 13-character minimum password length.",
+    type: "custom",
+    severity: "medium",
+    enabled: false,
+    rules: [
+      { kind:"custom_eval", expr:"config.security.pam.services ? pwquality && config.security.pam.pwquality.minlen >= 13", message:"Minimum password length must be >= 13" },
+    ],
+    rationale: "V-268134 (13-char minimum length, interim revision). SRG-OS-000078.",
+    evidence: [
+      { kind:"command", cmd:"grep minlen /etc/security/pwquality.conf", expect:"minlen = 13" },
+    ],
+    createdBy: "security-team",
+    createdAt: "3mo ago",
+    lastModified: "2mo ago",
+  },
+  {
+    id: "stig-pwquality-r4",
+    lineageId: "stig-pwquality",
+    revision: 4,
+    publicationState: "deprecated",
+    publishedDate: "2026-06-02",
+    digest: "sha256:7eb924",
+    srgIds: ["SRG-OS-000078","SRG-OS-000112"],
+    cciIds: ["CCI-000205","CCI-000196"],
+    name: "stig-password-policy",
+    category: "security",
+    description: "Anduril NixOS STIG: enforce 14-character minimum password length and encrypted password storage.",
+    type: "custom",
+    severity: "medium",
+    enabled: false,
+    rules: [
+      { kind:"custom_eval", expr:"config.security.pam.services ? pwquality && config.security.pam.pwquality.minlen >= 14", message:"Minimum password length must be >= 14" },
+      { kind:"custom_eval", expr:"builtins.elem config.security.pam.hashAlgorithm [\"yescrypt\" \"sha512\"]", message:"Passwords must be stored using yescrypt or sha512" },
+    ],
+    rationale: "V-268134 (14-char minimum length), V-268130 (encrypted password storage). SRG-OS-000078 / 000112.",
+    evidence: [
+      { kind:"command", cmd:"grep minlen /etc/security/pwquality.conf", expect:"minlen = 14" },
+    ],
+    createdBy: "security-team",
+    createdAt: "2mo ago",
+    lastModified: "5w ago",
+  },
+  {
+    id: "stig-pwquality-r1",
+    lineageId: "stig-pwquality",
+    revision: 1,
+    publicationState: "deprecated",
+    publishedDate: "2026-03-02",
+    digest: "sha256:9a10f4",
+    srgIds: ["SRG-OS-000078"],
+    cciIds: ["CCI-000205"],
+    name: "stig-password-policy",
+    category: "security",
+    description: "Anduril NixOS STIG: enforce 10-character minimum password length (superseded by 15-char revision).",
+    type: "custom",
+    severity: "medium",
+    enabled: false,
+    rules: [
+      { kind:"custom_eval", expr:"config.security.pam.services ? pwquality && config.security.pam.pwquality.minlen >= 10", message:"Minimum password length must be >= 10" },
+    ],
+    rationale: "V-268134 (10-char minimum length, prior revision). SRG-OS-000078.",
+    evidence: [
+      { kind:"command", cmd:"grep minlen /etc/security/pwquality.conf", expect:"minlen = 10" },
+    ],
+    createdBy: "security-team",
+    createdAt: "5mo ago",
+    lastModified: "4mo ago",
+  },
 ];
+
+// Group policies by lineage (bundle-independent revision history) — newest revision first.
+function groupPoliciesByLineage(policies) {
+  const byLineage = new Map();
+  policies.forEach(p => {
+    const key = p.lineageId || p.id;
+    if (!byLineage.has(key)) byLineage.set(key, []);
+    byLineage.get(key).push(p);
+  });
+  return Array.from(byLineage.entries()).map(([lineageId, revisions]) => {
+    const sorted = [...revisions].sort((a,b) => (b.revision||0) - (a.revision||0));
+    const current = sorted.find(r => r.publicationState === "current") || sorted[0];
+    return { lineageId, current, revisions: sorted };
+  });
+}
 
 const POLICIES = (typeof __fx === "function" && __fx("policies")) || [...POLICY_BUILTIN, ...POLICY_CUSTOM];
 
@@ -261,4 +434,4 @@ function policyUsage(policyId) {
   return { systems, count: systems.length, byEnv };
 }
 
-Object.assign(window, { POLICIES, POLICY_BUILTIN, POLICY_CUSTOM, POLICY_CATEGORIES, policyCategoryMeta, policyUsage });
+Object.assign(window, { POLICIES, POLICY_BUILTIN, POLICY_CUSTOM, POLICY_CATEGORIES, policyCategoryMeta, policyUsage, groupPoliciesByLineage });

@@ -2,10 +2,83 @@
 
 const COMPLIANCE_BUNDLES = (typeof __fx === "function" && __fx("compliance")) || [
   {
+    id: "disa-rhel9-stig-r1",
+    lineageId: "disa-nixos-stig",
+    name: "Anduril NixOS STIG (v1r1)",
+    framework: "DISA STIG",
+    version: "NixOS v1r1",
+    revision: 1,
+    publicationState: "deprecated",
+    publishedDate: "2025-11-02",
+    digest: "sha256:a1f92c",
+    description: "Anduril NixOS Security Technical Implementation Guide — operating system controls (superseded).",
+    layer: "system",
+    owner: "security-team",
+    lastReview: "2025-11-02",
+    policyIds: ["stig-ssh", "stig-auditd", "stig-banner", "stig-fips", "cve-gated"],
+    requiredEnvs: [],
+  },
+  {
+    id: "disa-rhel9-stig-r2",
+    lineageId: "disa-nixos-stig",
+    name: "Anduril NixOS STIG (v1r2 draft)",
+    framework: "DISA STIG",
+    version: "NixOS v1r2-draft",
+    revision: 2,
+    publicationState: "deprecated",
+    publishedDate: "2025-12-20",
+    digest: "sha256:b204e7",
+    description: "Anduril NixOS STIG — operating system controls (superseded).",
+    layer: "system",
+    owner: "security-team",
+    lastReview: "2025-12-20",
+    policyIds: ["stig-ssh", "stig-auditd", "stig-banner", "stig-fips", "cve-gated"],
+    requiredEnvs: [],
+  },
+  {
+    id: "disa-rhel9-stig-r3",
+    lineageId: "disa-nixos-stig",
+    name: "Anduril NixOS STIG (v1r3-rc)",
+    framework: "DISA STIG",
+    version: "NixOS v1r3-rc",
+    revision: 3,
+    publicationState: "deprecated",
+    publishedDate: "2026-01-15",
+    digest: "sha256:c317f8",
+    description: "Anduril NixOS STIG — operating system controls (superseded).",
+    layer: "system",
+    owner: "security-team",
+    lastReview: "2026-01-15",
+    policyIds: ["stig-ssh", "stig-auditd", "stig-banner", "stig-usbguard", "stig-fips", "cve-gated"],
+    requiredEnvs: [],
+  },
+  {
+    id: "disa-rhel9-stig-r4",
+    lineageId: "disa-nixos-stig",
+    name: "Anduril NixOS STIG (v1r4-rc)",
+    framework: "DISA STIG",
+    version: "NixOS v1r4-rc",
+    revision: 4,
+    publicationState: "deprecated",
+    publishedDate: "2026-02-28",
+    digest: "sha256:d428a9",
+    description: "Anduril NixOS STIG — operating system controls (superseded).",
+    layer: "system",
+    owner: "security-team",
+    lastReview: "2026-02-28",
+    policyIds: ["stig-ssh", "stig-auditd", "stig-banner", "stig-usbguard", "stig-pwquality", "stig-fips", "cve-gated"],
+    requiredEnvs: [],
+  },
+  {
     id: "disa-rhel9-stig",
+    lineageId: "disa-nixos-stig",
     name: "Anduril NixOS STIG (v1r2)",
     framework: "DISA STIG",
     version: "NixOS v1r2",
+    revision: 5,
+    publicationState: "current",
+    publishedDate: "2026-04-12",
+    digest: "sha256:7be410",
     description: "Anduril NixOS Security Technical Implementation Guide — operating system controls.",
     layer: "system",
     owner: "security-team",
@@ -15,9 +88,14 @@ const COMPLIANCE_BUNDLES = (typeof __fx === "function" && __fx("compliance")) ||
   },
   {
     id: "disa-app-stig",
+    lineageId: "disa-app-stig",
     name: "DISA Application Security STIG",
     framework: "DISA STIG",
     version: "v6r1",
+    revision: 1,
+    publicationState: "current",
+    publishedDate: "2026-03-18",
+    digest: "sha256:d40c11",
     description: "Application-layer STIG: TLS, auth, logging, secrets rotation.",
     layer: "application",
     owner: "security-team",
@@ -27,9 +105,14 @@ const COMPLIANCE_BUNDLES = (typeof __fx === "function" && __fx("compliance")) ||
   },
   {
     id: "nist-800-53-mod",
+    lineageId: "nist-800-53-mod",
     name: "NIST 800-53 Moderate",
     framework: "NIST 800-53",
     version: "Rev 5",
+    revision: 1,
+    publicationState: "current",
+    publishedDate: "2026-02-04",
+    digest: "sha256:9e2a08",
     description: "FedRAMP Moderate baseline subset — access control, audit, configuration management.",
     layer: "system",
     owner: "compliance-team",
@@ -39,9 +122,14 @@ const COMPLIANCE_BUNDLES = (typeof __fx === "function" && __fx("compliance")) ||
   },
   {
     id: "internal-prod-baseline",
+    lineageId: "internal-prod-baseline",
     name: "Internal Production Baseline",
     framework: "Internal",
     version: "v2.4",
+    revision: 1,
+    publicationState: "current",
+    publishedDate: "2026-05-01",
+    digest: "sha256:5cf873",
     description: "Crystal Forge organization minimum bar for production hosts.",
     layer: "system",
     owner: "ops-team",
@@ -50,6 +138,21 @@ const COMPLIANCE_BUNDLES = (typeof __fx === "function" && __fx("compliance")) ||
     requiredEnvs: ["production"],
   },
 ];
+
+// Group bundles by lineage (bundle lineage, not display name) — newest revision first.
+function groupBundlesByLineage(bundles) {
+  const byLineage = new Map();
+  bundles.forEach(b => {
+    const key = b.lineageId || b.id;
+    if (!byLineage.has(key)) byLineage.set(key, []);
+    byLineage.get(key).push(b);
+  });
+  return Array.from(byLineage.entries()).map(([lineageId, revisions]) => {
+    const sorted = [...revisions].sort((a,b) => (b.revision||0) - (a.revision||0));
+    const current = sorted.find(r => r.publicationState === "current") || sorted[0];
+    return { lineageId, lineageName: current.name.replace(/\s*\([^)]*\)\s*$/, "") || current.name, revisions: sorted, current };
+  });
+}
 
 // Evidence types Crystal Forge can collect for a (system, policy) pair
 const EVIDENCE_TYPES = {
@@ -61,9 +164,30 @@ const EVIDENCE_TYPES = {
   policy_eval:   { label:"Policy evaluation",    icon:"check",    desc:"Gate decision + per-rule outcomes" },
 };
 
-// Per-system compliance rollup vs a bundle
+// Per-system compliance assignment vs a bundle *lineage* — an explicit override that pins a
+// system to a specific published revision, with the reason/approval/deadline that makes the
+// exception defensible. Absent an assignment, a system tracks whichever revision is "current".
+const COMPLIANCE_ASSIGNMENT_STATUS = {
+  current:        { label:"Current",        color:"#34d399" },
+  transitioning:  { label:"Transitioning",  color:"#60a5fa" },
+  exception:      { label:"Exception",      color:"#f87171" },
+  grandfathered:  { label:"Grandfathered",  color:"#a78bfa" },
+};
+function resolveComplianceAssignment(sys, lineageId) {
+  return (sys.compliance?.assignments || []).find(a => a.lineageId === lineageId);
+}
+
+// Per-system compliance rollup vs a bundle. A bundle applies to a system when either:
+// (a) the system has an explicit assignment pinning it to exactly this bundle version, or
+// (b) there's no assignment and this is the *current* published revision for an env the
+//     lineage targets — i.e. the default steady state is "track current".
 function bundleStatusForSystem(bundle, sys) {
-  if (!bundle.requiredEnvs.includes(sys.environment) && !sys.compliance?.bundles?.includes(bundle.id)) {
+  const lineageId = bundle.lineageId || bundle.id;
+  const assignment = resolveComplianceAssignment(sys, lineageId);
+  const applies = assignment
+    ? assignment.bundleId === bundle.id
+    : bundle.requiredEnvs.includes(sys.environment) && bundle.publicationState === "current";
+  if (!applies) {
     return { applies: false };
   }
   const seed = (sys.id + bundle.id).split("").reduce((a,c) => a + c.charCodeAt(0), 0);
@@ -77,7 +201,7 @@ function bundleStatusForSystem(bundle, sys) {
     else if (r < 0.94) fail++;
     else waiver++;
   });
-  return { applies:true, total, pass, warn, fail, waiver, score: Math.round((pass + waiver) / total * 100) };
+  return { applies:true, total, pass, warn, fail, waiver, score: Math.round((pass + waiver) / total * 100), assignment: assignment || null };
 }
 
 // Generate the actual artifact body for an evidence item — the proof an auditor reads.
@@ -170,4 +294,4 @@ function evidenceForControl(bundle, policyId, sys) {
   };
 }
 
-Object.assign(window, { COMPLIANCE_BUNDLES, EVIDENCE_TYPES, bundleStatusForSystem, evidenceForControl });
+Object.assign(window, { COMPLIANCE_BUNDLES, EVIDENCE_TYPES, bundleStatusForSystem, evidenceForControl, groupBundlesByLineage, resolveComplianceAssignment, COMPLIANCE_ASSIGNMENT_STATUS });

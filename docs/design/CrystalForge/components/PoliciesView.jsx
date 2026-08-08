@@ -7,6 +7,7 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
   const [editPolicy, setEditPolicy] = React.useState(null);
   const [addOpen, setAddOpen] = React.useState(false);
   const [drawerPolicy, setDrawerPolicy] = React.useState(null);
+  const [drawerTab, setDrawerTab] = React.useState(null);
   const [importOpen, setImportOpen] = React.useState(false);
   const [selectMode, setSelectMode] = React.useState(false);
   const [selectedIds, setSelectedIds] = React.useState(() => new Set());
@@ -18,22 +19,27 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
     onClearFocus?.();
   }, [focus]);
 
-  const list = POLICIES.filter(p => {
-    if (catFilter !== "all" && (p.category || "deployment") !== catFilter) return false;
-    if (typeFilter !== "all" && p.type !== typeFilter) return false;
-    if (query) {
-      const q = query.toLowerCase();
-      if (!p.name.toLowerCase().includes(q) && !p.description.toLowerCase().includes(q)) return false;
-    }
-    return true;
+  const searchMatch = (p) => {
+    if (!query) return true;
+    const q = query.toLowerCase();
+    return p.name.toLowerCase().includes(q) || p.description.toLowerCase().includes(q)
+      || (p.srgIds||[]).some(s => s.toLowerCase().includes(q)) || (p.cciIds||[]).some(s => s.toLowerCase().includes(q));
+  };
+
+  const lineages = (typeof groupPoliciesByLineage === "function" ? groupPoliciesByLineage(POLICIES) : POLICIES.map(p => ({ lineageId:p.id, current:p, revisions:[p] })));
+  const groupList = lineages.filter(g => {
+    if (catFilter !== "all" && (g.current.category || "deployment") !== catFilter) return false;
+    if (typeFilter !== "all" && g.current.type !== typeFilter) return false;
+    return g.revisions.some(searchMatch);
   });
 
-  // Group the filtered list by category, preserving POLICY_CATEGORIES order.
+  // Group by category, preserving POLICY_CATEGORIES order.
   const groups = POLICY_CATEGORIES
-    .map(cat => ({ cat, items: list.filter(p => (p.category || "deployment") === cat.id) }))
+    .map(cat => ({ cat, items: groupList.filter(g => (g.current.category || "deployment") === cat.id) }))
     .filter(g => g.items.length > 0);
 
-  const catCount = (id) => POLICIES.filter(p => (p.category || "deployment") === id).length;
+  const catCount = (id) => lineages.filter(g => (g.current.category || "deployment") === id).length;
+  const currentPolicies = lineages.map(g => g.current);
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
@@ -41,7 +47,7 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
         <div>
           <h1 className="page-title">Policies</h1>
           <p className="page-subtitle">
-            Criteria a system must satisfy to deploy · {POLICY_BUILTIN.length} built-in · {POLICY_CUSTOM.length} custom · governing {SYSTEMS.length} systems
+            Criteria a system must satisfy to deploy · {currentPolicies.filter(p=>p.type==="builtin").length} built-in · {currentPolicies.filter(p=>p.type==="custom").length} custom · governing {SYSTEMS.length} systems
           </p>
         </div>
         <div style={{ display:"flex", gap:8 }}>
@@ -119,7 +125,7 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
             <Icon name="x" size={11}/> Clear
           </button>
         )}
-        <span className="filter-count">{list.length} {list.length === 1 ? "policy" : "policies"}</span>
+        <span className="filter-count">{groupList.length} {groupList.length === 1 ? "policy" : "policies"}</span>
       </div>
 
       {groups.length === 0 ? (
@@ -139,12 +145,12 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
             </div>
           </div>
           <div className="cards-grid">
-            {items.map(p => (
-              <PolicyCard key={p.id} policy={p}
-                onOpen={() => selectMode ? toggleSelected(p.id) : setDrawerPolicy(p)}
-                onEdit={!selectMode && p.type === "custom" ? () => setEditPolicy(p) : null}
+            {items.map(g => (
+              <PolicyCard key={g.lineageId} group={g}
+                onOpen={(p, tab) => selectMode ? toggleSelected(p.id) : (setDrawerPolicy(p), setDrawerTab(tab || null))}
+                onEdit={!selectMode ? (p) => setEditPolicy(p) : null}
                 selectMode={selectMode}
-                selected={selectedIds.has(p.id)}
+                selected={selectedIds}
               />
             ))}
           </div>
@@ -154,9 +160,11 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
       {drawerPolicy && (
         <PolicyDrawer
           policy={drawerPolicy}
+          initialTab={drawerTab}
           onClose={() => setDrawerPolicy(null)}
           onEdit={drawerPolicy.type === "custom" ? () => { setEditPolicy(drawerPolicy); setDrawerPolicy(null); } : null}
           onOpenSystem={onOpenSystem}
+          onSwitchPolicy={setDrawerPolicy}
         />
       )}
       {(editPolicy || addOpen) && (
@@ -391,18 +399,22 @@ function ImportPoliciesModal({ onClose }) {
   );
 }
 
-function PolicyCard({ policy, onOpen, onEdit, selectMode, selected }) {
+function PolicyCard({ group, onOpen, onEdit, selectMode, selected }) {
+  const [shownId, setShownId] = React.useState(group.current.id);
+  const policy = group.revisions.find(r => r.id === shownId) || group.current;
+  const multi = group.revisions.length > 1;
+  const isSelected = selectMode && selected.has(policy.id);
   const usage = policyUsage(policy.id);
   const cat = policyCategoryMeta(policy.category || "deployment");
   const disabled = policy.type === "custom" && policy.enabled === false;
   const railColor = disabled ? "#6b7280" : cat.color;
 
   return (
-    <div className="sys-card" onClick={onOpen} style={{ cursor:"pointer", opacity: disabled ? 0.72 : 1, outline: selectMode && selected ? "2px solid var(--cf-brand-purple)" : "none", outlineOffset: -1 }}>
+    <div className="sys-card" onClick={() => onOpen(policy)} style={{ cursor:"pointer", opacity: disabled ? 0.72 : 1, outline: isSelected ? "2px solid var(--cf-brand-purple)" : "none", outlineOffset: -1 }}>
       <div className="status-rail" style={{ "--status-color": railColor }}/>
       {selectMode && (
-        <span className={`pol-select-box${selected?" checked":""}`}>
-          {selected && <Icon name="check" size={11} style={{ color:"#fff" }}/>}
+        <span className={`pol-select-box${isSelected?" checked":""}`}>
+          {isSelected && <Icon name="check" size={11} style={{ color:"#fff" }}/>}
         </span>
       )}
       <div className="sys-card-head">
@@ -414,6 +426,7 @@ function PolicyCard({ policy, onOpen, onEdit, selectMode, selected }) {
           {policy.type === "builtin"
             ? <span className="chip chip-info">built-in</span>
             : <span className="chip chip-healthy">custom</span>}
+          {multi && <PubStateChip state={policy.publicationState}/>}
           {disabled && <span className="chip chip-unknown" style={{ fontSize:9 }}>disabled</span>}
           {policy.severity && (
             <span className="chip" style={{ fontSize:9,
@@ -440,17 +453,88 @@ function PolicyCard({ policy, onOpen, onEdit, selectMode, selected }) {
         </div>
       </div>
 
+      {(policy.srgIds?.length || policy.cciIds?.length) ? (
+        <div style={{ display:"flex", flexWrap:"wrap", gap:4 }}>
+          {(policy.srgIds||[]).map(s => <span key={s} className="chip chip-unknown mono" style={{ fontSize:9 }}>{s}</span>)}
+          {(policy.cciIds||[]).map(s => <span key={s} className="chip chip-unknown mono" style={{ fontSize:9 }}>{s}</span>)}
+        </div>
+      ) : null}
+
       <div style={{ paddingTop:10, borderTop:"1px solid var(--cf-divider)", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
         <div style={{ display:"flex", alignItems:"center", gap:8 }}>
           <Icon name="server" size={11} style={{ color:"var(--cf-text-muted)" }}/>
           <span className="mono" style={{ fontSize:12, fontWeight:600 }}>{usage.count}</span>
           <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>systems use this</span>
         </div>
-        {onEdit && (
-          <button className="btn btn-subtle focus-ring" style={{ padding:"4px 10px", fontSize:12 }} onClick={e=>{ e.stopPropagation(); onEdit(); }}>
+        {onEdit && policy.type === "custom" && (
+          <button className="btn btn-subtle focus-ring" style={{ padding:"4px 10px", fontSize:12 }} onClick={e=>{ e.stopPropagation(); onEdit(policy); }}>
             <Icon name="gear" size={12}/> Edit
           </button>
         )}
+      </div>
+
+      {multi && (
+        <div style={{ margin:"2px -16px -16px", borderTop:"1px solid var(--cf-divider)", background:"var(--cf-subtle-bg)", borderRadius:"0 0 var(--radius-xl) var(--radius-xl)" }}>
+          <button className="focus-ring" onClick={e => { e.stopPropagation(); onOpen(policy, "revisions"); }}
+            style={{ all:"unset", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"space-between", width:"100%", boxSizing:"border-box", padding:"9px 14px", fontSize:11.5, color:"var(--cf-text-secondary)" }}>
+            <span>{group.revisions.length} revisions</span>
+            <Icon name="chevron-right" size={12}/>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Drawer/modal for browsing many revisions at once — used when a lineage has more than a few. */
+function RevisionPickerModal({ title, revisions, currentId, selectedId, onSelect, onClose }) {
+  const [query, setQuery] = React.useState("");
+  const q = query.toLowerCase();
+  const filtered = revisions.filter(r => !q
+    || String(r.revision).includes(q) || (r.version||"").toLowerCase().includes(q)
+    || (r.publicationState||"").toLowerCase().includes(q) || (r.publishedDate||"").includes(q)
+    || (r.digest||"").toLowerCase().includes(q));
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(520px,94vw)", maxHeight:"84vh", display:"flex", flexDirection:"column" }}>
+        <div className="modal-head">
+          <h2><Icon name="sync" size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/>{title} — {revisions.length} revisions</h2>
+          <p>Pick an exact revision. The selection is preserved as-is — it won't silently move to “latest” later.</p>
+        </div>
+        <div className="modal-body" style={{ overflowY:"auto", flex:1 }}>
+          <div className="filter-search" style={{ marginBottom:10 }}>
+            <Icon name="search"/>
+            <input className="input focus-ring" placeholder="Search revision, state, date, digest…" value={query} onChange={e=>setQuery(e.target.value)} autoFocus/>
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
+            {filtered.map(r => {
+              const isSel = r.id === selectedId;
+              return (
+                <button key={r.id} onClick={() => onSelect(r.id)} className="focus-ring"
+                  style={{ all:"unset", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"space-between", gap:8,
+                    padding:"9px 12px", borderRadius:8, background: isSel ? "color-mix(in oklab,var(--cf-brand-purple) 12%, transparent)" : "var(--cf-subtle-bg)",
+                    border: `1px solid ${isSel ? "var(--cf-brand-purple)" : "var(--cf-divider)"}` }}>
+                  <span style={{ display:"flex", alignItems:"center", gap:8, minWidth:0 }}>
+                    <span className="mono" style={{ fontSize:12, fontWeight:600, flexShrink:0 }}>Rev {r.revision}</span>
+                    {r.version && <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{r.version}</span>}
+                    {r.digest && <span className="mono" style={{ fontSize:10, color:"var(--cf-text-muted)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.digest}</span>}
+                  </span>
+                  <span style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
+                    <span style={{ fontSize:10.5, color:"var(--cf-text-muted)" }}>{r.publishedDate}</span>
+                    <PubStateChip state={r.publicationState}/>
+                    {r.id === currentId && <span className="chip" style={{ fontSize:8.5, color:"#34d399", background:"color-mix(in oklab, #34d399 16%, transparent)" }}>Current</span>}
+                  </span>
+                </button>
+              );
+            })}
+            {filtered.length === 0 && (
+              <div style={{ fontSize:12, color:"var(--cf-text-muted)", padding:"16px 0", textAlign:"center" }}>No revisions match “{query}”.</div>
+            )}
+          </div>
+        </div>
+        <div className="modal-foot">
+          <button className="btn btn-ghost focus-ring" onClick={onClose}>Close</button>
+        </div>
       </div>
     </div>
   );
@@ -484,7 +568,9 @@ function evidenceSummary(ev) {
   }
 }
 
-function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem }) {
+function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem, onSwitchPolicy, initialTab }) {
+  const [tab, setTab] = React.useState(initialTab || "details");
+  React.useEffect(() => { setTab(initialTab || "details"); }, [policy.lineageId || policy.id]);
   React.useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -492,6 +578,11 @@ function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem }) {
   }, [onClose]);
 
   const usage = policyUsage(policy.id);
+  const group = React.useMemo(() => {
+    const groups = (typeof groupPoliciesByLineage === "function") ? groupPoliciesByLineage(POLICIES) : [];
+    return groups.find(g => g.lineageId === (policy.lineageId || policy.id));
+  }, [policy]);
+  const multi = group && group.revisions.length > 1;
 
   return (
     <>
@@ -531,6 +622,37 @@ function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem }) {
           {policy.createdBy && <div className="ed-stat"><div className="ed-stat-label">Owner</div><div className="ed-stat-val mono" style={{ fontSize:13 }}>{policy.createdBy}</div></div>}
         </div>
 
+        {multi && (
+          <div className="seg" style={{ margin:"12px 22px 0", width:"fit-content" }}>
+            <button className={tab==="details"?"active":""} onClick={()=>setTab("details")}>Details</button>
+            <button className={tab==="revisions"?"active":""} onClick={()=>setTab("revisions")}>Revisions · {group.revisions.length}</button>
+          </div>
+        )}
+
+        {tab === "revisions" && multi ? (
+          <div className="ed-body" style={{ padding:"18px 22px", overflow:"auto", display:"flex", flexDirection:"column", gap:8 }}>
+            <div style={{ fontSize:12, color:"var(--cf-text-muted)", marginBottom:2 }}>Revision history for this policy lineage — selecting a revision does not change which policy other bundles reference.</div>
+            {group.revisions.map(r => {
+              const isSel = r.id === policy.id;
+              return (
+                <button key={r.id} onClick={() => onSwitchPolicy?.(r)} className="focus-ring"
+                  style={{ all:"unset", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"space-between", gap:10,
+                    padding:"10px 12px", borderRadius:9, background: isSel ? "color-mix(in oklab,var(--cf-brand-purple) 10%, transparent)" : "var(--cf-subtle-bg)",
+                    border: `1px solid ${isSel ? "var(--cf-brand-purple)" : "var(--cf-divider)"}` }}>
+                  <span style={{ display:"flex", alignItems:"center", gap:10, minWidth:0 }}>
+                    <span className="mono" style={{ fontSize:12.5, fontWeight:600, flexShrink:0 }}>Revision {r.revision}</span>
+                    <span style={{ fontSize:11.5, color:"var(--cf-text-secondary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.description}</span>
+                  </span>
+                  <span style={{ display:"flex", alignItems:"center", gap:8, flexShrink:0 }}>
+                    <span style={{ fontSize:10.5, color:"var(--cf-text-muted)" }}>{r.publishedDate}</span>
+                    <PubStateChip state={r.publicationState}/>
+                    {r.id === group.current.id && <span className="chip" style={{ fontSize:8.5, color:"#34d399", background:"color-mix(in oklab, #34d399 16%, transparent)" }}>Current</span>}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
         <div className="ed-body" style={{ padding:"18px 22px", overflow:"auto", display:"flex", flexDirection:"column", gap:18 }}>
           {policy.rationale && (
             <section>
@@ -615,6 +737,7 @@ function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem }) {
             )}
           </section>
         </div>
+        )}
       </aside>
     </>
   );
@@ -1068,4 +1191,4 @@ function DeletePolicyConfirm({ policy, onCancel, onConfirm }) {
   );
 }
 
-Object.assign(window, { PoliciesView, RuleEditor, policyToExternal, externalToPolicy, slugify, downloadFile, exportPolicies, parsePolicyFile, ruleDescription, ImportPoliciesModal });
+Object.assign(window, { PoliciesView, RuleEditor, policyToExternal, externalToPolicy, slugify, downloadFile, exportPolicies, parsePolicyFile, ruleDescription, ImportPoliciesModal, RevisionPickerModal });

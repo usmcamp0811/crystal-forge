@@ -1375,7 +1375,21 @@ window.__CF_FIXTURES = {
           "title": "Generation 198 activated",
           "color": "#34d399"
         }
-      ]
+      ],
+      "compliance": {
+        "assignments": [
+          {
+            "lineageId": "disa-nixos-stig",
+            "bundleId": "disa-rhel9-stig-r4",
+            "targetBundleId": "disa-rhel9-stig",
+            "status": "transitioning",
+            "reason": "Phased rollout — build farm is migrating to v1r2 in wave 2.",
+            "approvedBy": "ISSM — R. Chen",
+            "deadline": "2026-08-25",
+            "poam": null
+          }
+        ]
+      }
     },
     {
       "id": "sys-6",
@@ -1791,7 +1805,21 @@ window.__CF_FIXTURES = {
           "title": "Generation 195 activated",
           "color": "#34d399"
         }
-      ]
+      ],
+      "compliance": {
+        "assignments": [
+          {
+            "lineageId": "disa-nixos-stig",
+            "bundleId": "disa-rhel9-stig-r1",
+            "targetBundleId": "disa-rhel9-stig",
+            "status": "exception",
+            "reason": "Legacy Oracle-compatible kernel module is incompatible with the v1r2 FIPS crypto requirement.",
+            "approvedBy": "AO — J. Alvarez",
+            "deadline": "2026-10-01",
+            "poam": "POAM-2026-014"
+          }
+        ]
+      }
     },
     {
       "id": "sys-12",
@@ -1925,7 +1953,21 @@ window.__CF_FIXTURES = {
           "title": "Generation 72 activated",
           "color": "#34d399"
         }
-      ]
+      ],
+      "compliance": {
+        "assignments": [
+          {
+            "lineageId": "disa-nixos-stig",
+            "bundleId": "disa-rhel9-stig-r1",
+            "targetBundleId": "disa-rhel9-stig",
+            "status": "grandfathered",
+            "reason": "Disconnected staging node — offline, pending manual baseline refresh on next maintenance window.",
+            "approvedBy": "ISSM — R. Chen",
+            "deadline": null,
+            "poam": null
+          }
+        ]
+      }
     },
     {
       "id": "sys-14",
@@ -12497,7 +12539,11 @@ window.__CF_FIXTURES = {
       "rationale": "Catches regressions surfaced by vulnix during eval. Critical = hard block.",
       "createdBy": "mreyes",
       "createdAt": "3mo ago",
-      "lastModified": "2w ago"
+      "lastModified": "2w ago",
+      "lineageId": "cve-gated",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-02-15"
     },
     {
       "id": "business-hours",
@@ -12530,7 +12576,11 @@ window.__CF_FIXTURES = {
       "rationale": "Operator-coverage window. Outside hours, defer to manual.",
       "createdBy": "jpark",
       "createdAt": "5mo ago",
-      "lastModified": "1mo ago"
+      "lastModified": "1mo ago",
+      "lineageId": "business-hours",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-03-08"
     },
     {
       "id": "two-approver",
@@ -12555,7 +12605,11 @@ window.__CF_FIXTURES = {
       "rationale": "For tier-0 systems (auth providers, secrets brokers). 4-eyes principle.",
       "createdBy": "security-team",
       "createdAt": "1mo ago",
-      "lastModified": "3d ago"
+      "lastModified": "3d ago",
+      "lineageId": "two-approver",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-07-05"
     },
     {
       "id": "canary-25",
@@ -12580,7 +12634,11 @@ window.__CF_FIXTURES = {
       "rationale": "Staged rollout for the web tier. Disabled — pending observability integration.",
       "createdBy": "dchen",
       "createdAt": "2w ago",
-      "lastModified": "yesterday"
+      "lastModified": "yesterday",
+      "lineageId": "canary-25",
+      "revision": 1,
+      "publicationState": "draft",
+      "publishedDate": "2026-07-25"
     },
     {
       "id": "stig-sshd",
@@ -12640,7 +12698,21 @@ window.__CF_FIXTURES = {
       ],
       "createdBy": "security-team",
       "createdAt": "2mo ago",
-      "lastModified": "1w ago"
+      "lastModified": "1w ago",
+      "lineageId": "stig-sshd",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-05-28",
+      "srgIds": [
+        "SRG-OS-000109",
+        "SRG-OS-000163",
+        "SRG-OS-000033"
+      ],
+      "cciIds": [
+        "CCI-000770",
+        "CCI-001133",
+        "CCI-000068"
+      ]
     },
     {
       "id": "stig-auditd",
@@ -12689,7 +12761,19 @@ window.__CF_FIXTURES = {
       ],
       "createdBy": "security-team",
       "createdAt": "2mo ago",
-      "lastModified": "5d ago"
+      "lastModified": "5d ago",
+      "lineageId": "stig-auditd",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-06-02",
+      "srgIds": [
+        "SRG-OS-000004",
+        "SRG-OS-000298"
+      ],
+      "cciIds": [
+        "CCI-000018",
+        "CCI-000366"
+      ]
     },
     {
       "id": "stig-banner",
@@ -12727,7 +12811,17 @@ window.__CF_FIXTURES = {
       ],
       "createdBy": "security-team",
       "createdAt": "2mo ago",
-      "lastModified": "3w ago"
+      "lastModified": "3w ago",
+      "lineageId": "stig-banner",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-06-18",
+      "srgIds": [
+        "SRG-OS-000023-GPOS-00006"
+      ],
+      "cciIds": [
+        "CCI-000048"
+      ]
     },
     {
       "id": "stig-fips",
@@ -12769,7 +12863,19 @@ window.__CF_FIXTURES = {
       ],
       "createdBy": "security-team",
       "createdAt": "6w ago",
-      "lastModified": "4d ago"
+      "lastModified": "4d ago",
+      "lineageId": "stig-fips",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-06-25",
+      "srgIds": [
+        "SRG-OS-000478",
+        "SRG-OS-000185"
+      ],
+      "cciIds": [
+        "CCI-002450",
+        "CCI-001199"
+      ]
     },
     {
       "id": "stig-usbguard",
@@ -12807,7 +12913,17 @@ window.__CF_FIXTURES = {
       ],
       "createdBy": "security-team",
       "createdAt": "5w ago",
-      "lastModified": "6d ago"
+      "lastModified": "6d ago",
+      "lineageId": "stig-usbguard",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-07-01",
+      "srgIds": [
+        "SRG-OS-000114"
+      ],
+      "cciIds": [
+        "CCI-001958"
+      ]
     },
     {
       "id": "stig-pwquality",
@@ -12844,10 +12960,277 @@ window.__CF_FIXTURES = {
       ],
       "createdBy": "security-team",
       "createdAt": "4w ago",
-      "lastModified": "1w ago"
+      "lastModified": "1w ago",
+      "lineageId": "stig-pwquality",
+      "revision": 5,
+      "publicationState": "current",
+      "publishedDate": "2026-07-10",
+      "digest": "sha256:2b7e91",
+      "srgIds": [
+        "SRG-OS-000078",
+        "SRG-OS-000112"
+      ],
+      "cciIds": [
+        "CCI-000205",
+        "CCI-000196"
+      ]
+    },
+    {
+      "id": "stig-pwquality-r1",
+      "lineageId": "stig-pwquality",
+      "revision": 1,
+      "publicationState": "deprecated",
+      "publishedDate": "2026-03-02",
+      "digest": "sha256:9a10f4",
+      "srgIds": [
+        "SRG-OS-000078"
+      ],
+      "cciIds": [
+        "CCI-000205"
+      ],
+      "name": "stig-password-policy",
+      "category": "security",
+      "description": "Anduril NixOS STIG: enforce 10-character minimum password length (superseded by 15-char revision).",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": false,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.security.pam.services ? pwquality && config.security.pam.pwquality.minlen >= 10",
+          "message": "Minimum password length must be >= 10"
+        }
+      ],
+      "rationale": "V-268134 (10-char minimum length, prior revision). SRG-OS-000078.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "grep minlen /etc/security/pwquality.conf",
+          "expect": "minlen = 10"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "5mo ago",
+      "lastModified": "4mo ago"
+    },
+    {
+      "id": "stig-pwquality-r2",
+      "lineageId": "stig-pwquality",
+      "revision": 2,
+      "publicationState": "deprecated",
+      "publishedDate": "2026-04-01",
+      "digest": "sha256:5c9d02",
+      "srgIds": [
+        "SRG-OS-000078"
+      ],
+      "cciIds": [
+        "CCI-000205"
+      ],
+      "name": "stig-password-policy",
+      "category": "security",
+      "description": "Anduril NixOS STIG: enforce 12-character minimum password length.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": false,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.security.pam.services ? pwquality && config.security.pam.pwquality.minlen >= 12",
+          "message": "Minimum password length must be >= 12"
+        }
+      ],
+      "rationale": "V-268134 (12-char minimum length, interim revision). SRG-OS-000078.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "grep minlen /etc/security/pwquality.conf",
+          "expect": "minlen = 12"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "4mo ago",
+      "lastModified": "3mo ago"
+    },
+    {
+      "id": "stig-pwquality-r3",
+      "lineageId": "stig-pwquality",
+      "revision": 3,
+      "publicationState": "deprecated",
+      "publishedDate": "2026-05-05",
+      "digest": "sha256:6da813",
+      "srgIds": [
+        "SRG-OS-000078"
+      ],
+      "cciIds": [
+        "CCI-000205"
+      ],
+      "name": "stig-password-policy",
+      "category": "security",
+      "description": "Anduril NixOS STIG: enforce 13-character minimum password length.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": false,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.security.pam.services ? pwquality && config.security.pam.pwquality.minlen >= 13",
+          "message": "Minimum password length must be >= 13"
+        }
+      ],
+      "rationale": "V-268134 (13-char minimum length, interim revision). SRG-OS-000078.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "grep minlen /etc/security/pwquality.conf",
+          "expect": "minlen = 13"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "3mo ago",
+      "lastModified": "2mo ago"
+    },
+    {
+      "id": "stig-pwquality-r4",
+      "lineageId": "stig-pwquality",
+      "revision": 4,
+      "publicationState": "deprecated",
+      "publishedDate": "2026-06-02",
+      "digest": "sha256:7eb924",
+      "srgIds": [
+        "SRG-OS-000078",
+        "SRG-OS-000112"
+      ],
+      "cciIds": [
+        "CCI-000205",
+        "CCI-000196"
+      ],
+      "name": "stig-password-policy",
+      "category": "security",
+      "description": "Anduril NixOS STIG: enforce 14-character minimum password length and encrypted password storage.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": false,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.security.pam.services ? pwquality && config.security.pam.pwquality.minlen >= 14",
+          "message": "Minimum password length must be >= 14"
+        },
+        {
+          "kind": "custom_eval",
+          "expr": "builtins.elem config.security.pam.hashAlgorithm [\"yescrypt\" \"sha512\"]",
+          "message": "Passwords must be stored using yescrypt or sha512"
+        }
+      ],
+      "rationale": "V-268134 (14-char minimum length), V-268130 (encrypted password storage). SRG-OS-000078 / 000112.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "grep minlen /etc/security/pwquality.conf",
+          "expect": "minlen = 14"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "2mo ago",
+      "lastModified": "5w ago"
     }
   ],
   "compliance": [
+    {
+      "id": "disa-rhel9-stig-r1",
+      "lineageId": "disa-nixos-stig",
+      "name": "Anduril NixOS STIG (v1r1)",
+      "framework": "DISA STIG",
+      "version": "NixOS v1r1",
+      "revision": 1,
+      "publicationState": "deprecated",
+      "publishedDate": "2025-11-02",
+      "digest": "sha256:a1f92c",
+      "description": "Anduril NixOS Security Technical Implementation Guide — operating system controls (superseded).",
+      "layer": "system",
+      "owner": "security-team",
+      "lastReview": "2025-11-02",
+      "policyIds": [
+        "stig-ssh",
+        "stig-auditd",
+        "stig-banner",
+        "stig-fips",
+        "cve-gated"
+      ],
+      "requiredEnvs": []
+    },
+    {
+      "id": "disa-rhel9-stig-r2",
+      "lineageId": "disa-nixos-stig",
+      "name": "Anduril NixOS STIG (v1r2 draft)",
+      "framework": "DISA STIG",
+      "version": "NixOS v1r2-draft",
+      "revision": 2,
+      "publicationState": "deprecated",
+      "publishedDate": "2025-12-20",
+      "digest": "sha256:b204e7",
+      "description": "Anduril NixOS STIG — operating system controls (superseded).",
+      "layer": "system",
+      "owner": "security-team",
+      "lastReview": "2025-12-20",
+      "policyIds": [
+        "stig-ssh",
+        "stig-auditd",
+        "stig-banner",
+        "stig-fips",
+        "cve-gated"
+      ],
+      "requiredEnvs": []
+    },
+    {
+      "id": "disa-rhel9-stig-r3",
+      "lineageId": "disa-nixos-stig",
+      "name": "Anduril NixOS STIG (v1r3-rc)",
+      "framework": "DISA STIG",
+      "version": "NixOS v1r3-rc",
+      "revision": 3,
+      "publicationState": "deprecated",
+      "publishedDate": "2026-01-15",
+      "digest": "sha256:c317f8",
+      "description": "Anduril NixOS STIG — operating system controls (superseded).",
+      "layer": "system",
+      "owner": "security-team",
+      "lastReview": "2026-01-15",
+      "policyIds": [
+        "stig-ssh",
+        "stig-auditd",
+        "stig-banner",
+        "stig-usbguard",
+        "stig-fips",
+        "cve-gated"
+      ],
+      "requiredEnvs": []
+    },
+    {
+      "id": "disa-rhel9-stig-r4",
+      "lineageId": "disa-nixos-stig",
+      "name": "Anduril NixOS STIG (v1r4-rc)",
+      "framework": "DISA STIG",
+      "version": "NixOS v1r4-rc",
+      "revision": 4,
+      "publicationState": "deprecated",
+      "publishedDate": "2026-02-28",
+      "digest": "sha256:d428a9",
+      "description": "Anduril NixOS STIG — operating system controls (superseded).",
+      "layer": "system",
+      "owner": "security-team",
+      "lastReview": "2026-02-28",
+      "policyIds": [
+        "stig-ssh",
+        "stig-auditd",
+        "stig-banner",
+        "stig-usbguard",
+        "stig-pwquality",
+        "stig-fips",
+        "cve-gated"
+      ],
+      "requiredEnvs": []
+    },
     {
       "id": "disa-rhel9-stig",
       "name": "Anduril NixOS STIG (v1r2)",
@@ -12869,7 +13252,12 @@ window.__CF_FIXTURES = {
       "requiredEnvs": [
         "production",
         "staging"
-      ]
+      ],
+      "lineageId": "disa-nixos-stig",
+      "revision": 5,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "digest": "sha256:7be410"
     },
     {
       "id": "disa-app-stig",
@@ -12888,7 +13276,12 @@ window.__CF_FIXTURES = {
       ],
       "requiredEnvs": [
         "production"
-      ]
+      ],
+      "lineageId": "disa-app-stig",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-03-18",
+      "digest": "sha256:d40c11"
     },
     {
       "id": "nist-800-53-mod",
@@ -12912,7 +13305,12 @@ window.__CF_FIXTURES = {
         "production",
         "staging",
         "edge"
-      ]
+      ],
+      "lineageId": "nist-800-53-mod",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-02-04",
+      "digest": "sha256:9e2a08"
     },
     {
       "id": "internal-prod-baseline",
@@ -12933,7 +13331,12 @@ window.__CF_FIXTURES = {
       ],
       "requiredEnvs": [
         "production"
-      ]
+      ],
+      "lineageId": "internal-prod-baseline",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-05-01",
+      "digest": "sha256:5cf873"
     }
   ],
   "caches": [
