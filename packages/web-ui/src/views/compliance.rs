@@ -3418,7 +3418,7 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
             "accepted" | "deprecated"
         )
     });
-    let assigned_count = props.bundle.environment_count;
+    let assigned_count = props.bundle.active_assignment_count;
 
     let can_save = !name.read().trim().is_empty() && !selected_policy_ids.read().is_empty();
 

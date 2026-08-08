@@ -607,13 +607,46 @@ pub async fn delete_deployment_policy(
     }
 
     let version_references: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM (\
-          SELECT bvp.policy_version_id FROM compliance_bundle_version_policies bvp JOIN deployment_policy_versions pv ON pv.id = bvp.policy_version_id WHERE pv.policy_id = $1\
-          UNION ALL SELECT cbp.policy_id FROM compliance_bundle_policies cbp WHERE cbp.policy_id = $1\
-          UNION ALL SELECT e.policy_version_id FROM compliance_assignment_exclusions e JOIN deployment_policy_versions pv ON pv.id = e.policy_version_id WHERE pv.policy_id = $1\
-          UNION ALL SELECT a.policy_version_id FROM compliance_assignment_additions a JOIN deployment_policy_versions pv ON pv.id = a.policy_version_id WHERE pv.policy_id = $1\
-          UNION ALL SELECT o.policy_version_id FROM compliance_assignment_value_overrides o JOIN deployment_policy_versions pv ON pv.id = o.policy_version_id WHERE pv.policy_id = $1\
-        ) references",
+        r#"
+        SELECT COUNT(*)
+        FROM (
+            SELECT bvp.policy_version_id
+            FROM compliance_bundle_version_policies bvp
+            JOIN deployment_policy_versions pv
+              ON pv.id = bvp.policy_version_id
+            WHERE pv.policy_id = $1
+
+            UNION ALL
+
+            SELECT cbp.policy_id
+            FROM compliance_bundle_policies cbp
+            WHERE cbp.policy_id = $1
+
+            UNION ALL
+
+            SELECT e.policy_version_id
+            FROM compliance_assignment_exclusions e
+            JOIN deployment_policy_versions pv
+              ON pv.id = e.policy_version_id
+            WHERE pv.policy_id = $1
+
+            UNION ALL
+
+            SELECT a.policy_version_id
+            FROM compliance_assignment_additions a
+            JOIN deployment_policy_versions pv
+              ON pv.id = a.policy_version_id
+            WHERE pv.policy_id = $1
+
+            UNION ALL
+
+            SELECT o.policy_version_id
+            FROM compliance_assignment_value_overrides o
+            JOIN deployment_policy_versions pv
+              ON pv.id = o.policy_version_id
+            WHERE pv.policy_id = $1
+        ) AS policy_refs
+        "#,
     )
     .bind(policy_id)
     .fetch_one(&mut *tx)

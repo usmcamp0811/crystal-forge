@@ -1013,6 +1013,9 @@ pub struct ComplianceBundleSummary {
     pub required_envs: Vec<ComplianceEnvironmentRef>,
     pub control_count: i64,
     pub environment_count: i64,
+    /// Active versioned bundle assignments across environment and system scopes.
+    #[serde(default)]
+    pub active_assignment_count: i64,
     #[serde(default)]
     pub current_draft_version_id: Option<Uuid>,
     #[serde(default)]
