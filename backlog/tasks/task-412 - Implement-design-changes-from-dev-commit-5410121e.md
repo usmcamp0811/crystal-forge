@@ -1331,6 +1331,8 @@ Phase 2 assignment mutation slice (isolated branch TASK-412-phase2-atomicity): i
 - Ensure systems with no Nix gates still participate as an empty evaluation set so they cannot inherit another system's gates silently; define the shared-configuration behavior in tests.
 - Add focused regression tests for report-only/manual differences, empty-vs-nonempty shared configurations, and actual enforce/Nix expression differences. Keep resolver infrastructure failures retryable rather than deterministic where the existing failure classification permits.
 - Verify with targeted server tests and offline/live database checks as available; do not change unrelated TASK-412 interchange/UI scope.
+
+Final assignment UX pass: update `packages/web-ui/src/views/compliance.rs` only to replace visible UUID/JSON assignment inputs with environment/system and policy selectors backed by existing APIs/models, display the exact selected bundle revision with a non-current warning, preview the exact create request before allowing creation, and preserve UUID payload semantics. Verify with formatting and the targeted web-ui build/check available in this worktree.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -1371,6 +1373,8 @@ Verification update: server and web-ui cargo checks pass; targeted resolver/dige
 2026-08-07: Completed the remaining resolver issue. Evaluation preflight now uses a resolver mode that ignores same-specificity conflicts when both versions are non-Nix (including operational/report-only/manual policy types), while the normal compliance/deployment resolver still reports those conflicts. Nix-evaluation policy conflicts remain blocking. Committed as `d29253e3` (`fix(evaluation): ignore non-nix policy conflicts`) and pushed to `origin/TASK-412-cf-xccdf-interchange`.
 
 2026-08-08: Verified branch baseline 2a8b8599 and remote branch, preserved untracked STIG ZIP and generated Tailwind asset. Added/pushed commit 74150922 (feat(compliance): add revision-aware UI and evidence APIs). This includes bundle/policy revision summaries, exact bundle-version systems selection, exact-version evidence query context, frontend revision reload wiring, and hidden assignment-panel gating. `SQLX_OFFLINE=true cargo check -p cf-server`, web-ui `cargo check`, and `git diff --check` passed. `nix build .#checks.x86_64-linux.web-ui --no-link` and `nix flake check --keep-going` were started but exceeded the 10-minute/20-minute command timeouts while building VM checks; neither is reported as passed. Remaining major gaps from the requested final pass: assignment-aware fleet rollups/evidence using one batch resolver, typed assignment modal/preview and provenance metadata, effective assignment XCCDF export, complete exact policy-version APIs/UI, scanning complete-data verification, lifecycle/performance tests, documentation, screenshots, and CI verification. MR !313 was not merged.
+
+Started the requested final assignment UX pass directly in the TASK-412 worktree. Existing `fetch_systems` supports search/pagination; `preview_compliance_assignment` accepts the same request shape as create.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
