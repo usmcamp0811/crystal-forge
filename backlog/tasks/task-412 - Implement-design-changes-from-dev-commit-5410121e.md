@@ -1409,6 +1409,10 @@ Added focused unit coverage in resolver.rs and queries/compliance.rs. Verificati
 Investigated TASK-412 historical assignment bug in dedicated worktree. Compliance UI currently derives exclusions from bundle lineage policy_ids plus each policy's current version_id, which is incorrect for historical bundle versions. Planned exact membership API/client path and UI-only wiring; additions remain on existing policy catalog.
 
 2026-08-08: Fixed policy revision browsing in the task worktree. Added a shared revision editability check: only draft revisions expose Edit and draft mutation controls; accepted/deprecated historical revisions are read-only and expose the existing Create draft API action. Draft editing and lifecycle APIs were otherwise unchanged. `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed. `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml --check` reports pre-existing formatting differences in unrelated web UI files; no formatting-only changes were applied.
+
+Implemented focused historical assignment fix in TASK-412 worktree: added GET /api/v1/compliance/bundle-versions/:version_id/policies returning selected ordered exact policy-version membership; added server/web DTOs and client method; Compliance exclusion checkboxes now use membership policy_version_id while additions still use existing policy catalog version_id and existing preview API remains wired.
+
+Verification: `nix develop --command cargo check --manifest-path packages/web-ui/Cargo.toml` passed after fixing Dioxus lifetime/syntax. `git diff --check` passed. `cargo fmt --manifest-path packages/default/Cargo.toml --all --check` is blocked by pre-existing formatting drift across the server workspace. `cargo check --manifest-path packages/default/Cargo.toml -p cf-server` is blocked by unavailable PostgreSQL/SQLx compile-time database connection (connection refused).
 <!-- SECTION:NOTES:END -->
 
 ## Comments
