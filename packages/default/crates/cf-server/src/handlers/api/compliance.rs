@@ -58,6 +58,24 @@ pub async fn list_compliance_bundles(
     }
 }
 
+/// `GET /api/v1/compliance/bundles/:id`
+pub async fn get_compliance_bundle(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(bundle_id): Path<Uuid>,
+) -> impl IntoResponse {
+    if authenticated_user_roles(&pool, &headers).await.is_none() {
+        return forbidden();
+    }
+    match list_bundles(&pool).await {
+        Ok(items) => match items.into_iter().find(|item| item.id == bundle_id) {
+            Some(item) => (StatusCode::OK, Json(item)).into_response(),
+            None => not_found(),
+        },
+        Err(_) => internal_error("Failed to load compliance bundle"),
+    }
+}
+
 /// `GET /api/v1/compliance/bundles/:id/systems`
 pub async fn get_compliance_bundle_systems(
     State(pool): State<PgPool>,
