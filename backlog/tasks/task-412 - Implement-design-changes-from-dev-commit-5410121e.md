@@ -1383,6 +1383,8 @@ Implemented focused effective-assignment XCCDF export in the dedicated task work
 Scanning delta review in TASK-412 worktree: the deployed endpoint already returns server-computed is_latest_per_flake from complete flake history, and the UI already defaults to Deployed while retaining Active & Recent and All configs. Scoped implementation change is limited to using the established latest-star/IconName::Star treatment at all three Scanning row render sites; no query or tab behavior change is needed.
 
 Scanning-only delta implemented in packages/web-ui/src/views/scanning.rs: all three latest-commit render sites now use the established latest-star/IconName::Star treatment. Verified server scanning query/API already provide complete flake-history-based is_latest_per_flake; no server changes were needed. Checks: file rustfmt and git diff --check passed; cargo check --manifest-path packages/web-ui/Cargo.toml passed. Workspace cargo fmt --all --check is blocked by pre-existing formatting changes outside this scope; cf-server cargo check is blocked by unavailable PostgreSQL for SQLx compile-time queries.
+
+Implemented the Policies revision UX in TASK-412 worktree: management list versions now carries stored version payloads; drawer selects exact historical revision and marks current draft/published/current selection; per-policy export follows selected version; policy API load/refresh paths no longer use mock or empty fallback and render explicit errors. Verified web-ui WASM cargo check and server SQLx-offline cargo check. Pre-existing worktree changes in docs, scanning, Tailwind asset, and STIG ZIP were left untouched.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
