@@ -22,6 +22,7 @@ use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
     is_reserved_policy_result_field,
 };
+use crate::api::models::DeploymentPolicyVersionSummary;
 use crate::queries::deployment_policies;
 
 // =============================================================================
@@ -34,6 +35,8 @@ pub struct DeploymentPolicyListItem {
     pub policy: DeploymentPolicyRecord,
     /// Exact mutable version represented by the policy-management view.
     pub current_version_id: Option<Uuid>,
+    #[serde(default)]
+    pub versions: Vec<DeploymentPolicyVersionSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -559,11 +562,52 @@ pub async fn list_deployment_policies(
     .into_iter()
     .collect();
 
+    let pointer_rows: HashMap<Uuid, (Option<Uuid>, Option<Uuid>)> = sqlx::query_as::<_, (Uuid, Option<Uuid>, Option<Uuid>)>(
+        "SELECT id, current_published_version_id, current_draft_version_id FROM deployment_policies WHERE id = ANY($1)",
+    )
+    .bind(&policy_ids)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to load policy version pointers: {}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to retrieve policy version pointers".to_string())
+    })?
+    .into_iter()
+    .map(|(id, published, draft)| (id, (published, draft)))
+    .collect();
+
+    let version_rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, String, String, chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>, Option<Uuid>)>(
+        "SELECT id, policy_id, version, publication_state, trust_state, semantic_digest, created_at, published_at, derived_from_version_id FROM deployment_policy_versions WHERE policy_id = ANY($1) ORDER BY policy_id, created_at DESC, id DESC",
+    )
+    .bind(&policy_ids)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to load policy version history: {}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to retrieve policy version history".to_string())
+    })?;
+
     Ok(Json(DeploymentPoliciesListResponse {
         policies: policies
             .into_iter()
             .map(|policy| DeploymentPolicyListItem {
                 current_version_id: versions.get(&policy.id).copied(),
+                versions: version_rows.iter().filter(|row| row.1 == policy.id).map(|row| {
+                    let pointers = pointer_rows.get(&policy.id).copied().unwrap_or((None, None));
+                    DeploymentPolicyVersionSummary {
+                        id: row.0,
+                        policy_id: row.1,
+                        version: row.2.clone(),
+                        publication_state: row.3.clone(),
+                        trust_state: row.4.clone(),
+                        semantic_digest: row.5.clone(),
+                        created_at: row.6,
+                        published_at: row.7,
+                        derived_from_version_id: row.8,
+                        is_current_published: pointers.0 == Some(row.0),
+                        is_current_draft: pointers.1 == Some(row.0),
+                    }
+                }).collect(),
                 policy,
             })
             .collect(),

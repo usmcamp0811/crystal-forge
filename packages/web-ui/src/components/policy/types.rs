@@ -13,8 +13,14 @@ pub enum PolicyFormat {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PolicyDefinition {
     pub id: Uuid,
+    /// Real policy lineage identifier. `id` is retained as a compatibility alias.
+    pub lineage_id: Uuid,
     /// Exact version used for interchange export, if supplied by the API.
     pub version_id: Option<Uuid>,
+    pub revision: Option<String>,
+    pub publication_state: Option<String>,
+    pub semantic_digest: Option<String>,
+    pub revisions: Vec<PolicyRevisionSummary>,
     pub name: String,
     pub description: String,
     pub format: PolicyFormat,
@@ -24,6 +30,18 @@ pub struct PolicyDefinition {
     pub policy_type: Option<String>,
     /// Number of NixOS derivations (systems) this policy applies to.
     pub system_count: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PolicyRevisionSummary {
+    pub id: Uuid,
+    pub version: String,
+    pub publication_state: String,
+    pub trust_state: String,
+    pub semantic_digest: String,
+    pub created_at: String,
+    pub is_current_published: bool,
+    pub is_current_draft: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

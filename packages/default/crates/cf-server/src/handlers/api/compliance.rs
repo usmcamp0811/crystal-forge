@@ -39,7 +39,7 @@ use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
     create_bundle as create_bundle_row, delete_bundle as delete_bundle_row, get_system_evidence,
     list_bundle_systems, list_bundles, list_system_bundles, update_bundle as update_bundle_row,
-    BundleValidationError,
+    BundleValidationError, list_bundle_systems_for_version,
 };
 use crate::queries::compliance_interchange;
 
@@ -63,16 +63,26 @@ pub async fn get_compliance_bundle_systems(
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(bundle_id): Path<Uuid>,
+    Query(query): Query<BundleVersionQuery>,
 ) -> impl IntoResponse {
     if authenticated_user_roles(&pool, &headers).await.is_none() {
         return forbidden();
     }
 
-    match list_bundle_systems(&pool, bundle_id).await {
+    let result = match query.version_id {
+        Some(version_id) => list_bundle_systems_for_version(&pool, bundle_id, version_id).await,
+        None => list_bundle_systems(&pool, bundle_id).await,
+    };
+    match result {
         Ok(Some(response)) => (StatusCode::OK, Json(response)).into_response(),
         Ok(None) => not_found(),
         Err(_) => internal_error("Failed to load compliance systems"),
     }
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct BundleVersionQuery {
+    pub version_id: Option<Uuid>,
 }
 
 /// `GET /api/v1/systems/:system_id/compliance`
@@ -114,12 +124,13 @@ pub async fn get_compliance_system_evidence(
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path((bundle_id, system_id)): Path<(Uuid, Uuid)>,
+    Query(query): Query<BundleVersionQuery>,
 ) -> impl IntoResponse {
     if authenticated_user_roles(&pool, &headers).await.is_none() {
         return forbidden();
     }
 
-    match get_system_evidence(&pool, bundle_id, system_id).await {
+    match get_system_evidence(&pool, bundle_id, system_id, query.version_id).await {
         Ok(Some(response)) => (StatusCode::OK, Json(response)).into_response(),
         Ok(None) => not_found(),
         Err(_) => internal_error("Failed to load compliance evidence"),

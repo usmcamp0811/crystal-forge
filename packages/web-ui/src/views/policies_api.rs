@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::api::client::{ApiClientError, fetch_deployment_policies};
 use crate::api::models::DeploymentPolicyRecord;
 use crate::components::policy::PolicyDefinition;
+use crate::components::policy::PolicyRevisionSummary;
 
 /// Result type for policy loading.
 pub enum PolicyLoadResult {
@@ -76,7 +77,21 @@ fn policy_record_to_definition_with_count(
 
     PolicyDefinition {
         id: record.id,
+        lineage_id: record.id,
         version_id: record.current_version_id,
+        revision: record.versions.first().map(|v| v.version.clone()),
+        publication_state: record.versions.iter().find(|v| Some(v.id) == record.current_version_id).map(|v| v.publication_state.clone()),
+        semantic_digest: record.versions.iter().find(|v| Some(v.id) == record.current_version_id).map(|v| v.semantic_digest.clone()),
+        revisions: record.versions.into_iter().map(|v| PolicyRevisionSummary {
+            id: v.id,
+            version: v.version,
+            publication_state: v.publication_state,
+            trust_state: v.trust_state,
+            semantic_digest: v.semantic_digest,
+            created_at: v.created_at.to_rfc3339(),
+            is_current_published: v.is_current_published,
+            is_current_draft: v.is_current_draft,
+        }).collect(),
         name: record.name,
         description: record
             .description
@@ -96,7 +111,12 @@ fn mock_policies() -> Vec<PolicyDefinition> {
     vec![
         PolicyDefinition {
             id: Uuid::from_u128(1),
+            lineage_id: Uuid::from_u128(1),
             version_id: None,
+            revision: None,
+            publication_state: None,
+            semantic_digest: None,
+            revisions: Vec::new(),
             name: "Require Crystal Forge Agent".to_string(),
             description: "This policy ensures the Crystal Forge agent and client services are enabled on the target system.".to_string(),
             format: PolicyFormat::Toml,
@@ -109,7 +129,12 @@ strict = true
         },
         PolicyDefinition {
             id: Uuid::from_u128(2),
+            lineage_id: Uuid::from_u128(2),
             version_id: None,
+            revision: None,
+            publication_state: None,
+            semantic_digest: None,
+            revisions: Vec::new(),
             name: "Require Firewall".to_string(),
             description: "Ensure firewall is enabled on all systems.".to_string(),
             format: PolicyFormat::Toml,
@@ -124,7 +149,12 @@ strict = true
         },
         PolicyDefinition {
             id: Uuid::from_u128(3),
+            lineage_id: Uuid::from_u128(3),
             version_id: None,
+            revision: None,
+            publication_state: None,
+            semantic_digest: None,
+            revisions: Vec::new(),
             name: "Require SSH Key Auth".to_string(),
             description: "Require SSH key-only authentication (no passwords).".to_string(),
             format: PolicyFormat::Toml,
@@ -139,7 +169,12 @@ strict = false
         },
         PolicyDefinition {
             id: Uuid::from_u128(4),
+            lineage_id: Uuid::from_u128(4),
             version_id: None,
+            revision: None,
+            publication_state: None,
+            semantic_digest: None,
+            revisions: Vec::new(),
             name: "Require Auditd".to_string(),
             description: "Require audit daemon for security compliance.".to_string(),
             format: PolicyFormat::Toml,

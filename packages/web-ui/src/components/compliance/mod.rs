@@ -19,6 +19,10 @@ pub struct BundleCatalogProps {
     pub bundles: Vec<ComplianceBundleSummary>,
     pub selected_id: Option<uuid::Uuid>,
     pub on_select: EventHandler<uuid::Uuid>,
+    #[props(default)]
+    pub selected_version_id: Option<uuid::Uuid>,
+    #[props(default)]
+    pub on_select_version: EventHandler<uuid::Uuid>,
 }
 
 #[component]
@@ -41,6 +45,7 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                     let framework = bundle.framework.clone();
                     let version = bundle.version.clone();
                     let name = bundle.name.clone();
+                    let revisions = bundle.versions.clone();
                     rsx! {
                         button {
                             class: "focus-ring",
@@ -62,6 +67,29 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                             div {
                                 style: "font-size:11px;color:var(--cf-text-muted);margin-top:4px;",
                                 "{control_count} controls · {env_count} env{env_count_suffix(env_count)}"
+                                if revisions.len() > 1 { " · {revisions.len()} revisions" }
+                            }
+                            if revisions.len() > 1 && selected {
+                                div { style: "display:flex;flex-direction:column;gap:4px;margin-top:8px;padding-top:8px;border-top:1px solid var(--cf-divider);",
+                                    for revision in revisions.iter() {
+                                        {
+                                            let revision_id = revision.id;
+                                            let version = revision.version.clone();
+                                            let state = revision.publication_state.clone();
+                                            let is_selected = props.selected_version_id == Some(revision_id);
+                                            rsx! {
+                                                button {
+                                                    class: "focus-ring",
+                                                    onclick: move |event| { event.stop_propagation(); props.on_select_version.call(revision_id); },
+                                                    style: if is_selected { "all:unset;cursor:pointer;padding:5px 7px;border-radius:6px;background:color-mix(in oklab,var(--cf-brand-purple) 14%,transparent);border:1px solid var(--cf-brand-purple);font-size:10px;text-align:left;" } else { "all:unset;cursor:pointer;padding:5px 7px;border-radius:6px;background:var(--cf-subtle-bg);font-size:10px;text-align:left;" },
+                                                    "{version} · {state}"
+                                                    if revision.is_current_published { " · Current" }
+                                                    if revision.is_current_draft { " · Draft" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

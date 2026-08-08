@@ -1298,6 +1298,24 @@ pub struct DeploymentPolicySummary {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploymentPolicyVersionSummary {
+    pub id: Uuid,
+    pub policy_id: Uuid,
+    pub version: String,
+    pub publication_state: String,
+    #[serde(default)]
+    pub trust_state: String,
+    pub semantic_digest: String,
+    pub created_at: DateTime<Utc>,
+    pub published_at: Option<DateTime<Utc>>,
+    pub derived_from_version_id: Option<Uuid>,
+    #[serde(default)]
+    pub is_current_published: bool,
+    #[serde(default)]
+    pub is_current_draft: bool,
+}
+
 /// Environment with its required policies (the baseline).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvironmentWithPolicies {
@@ -1348,6 +1366,27 @@ pub struct ComplianceBundleSummary {
     /// Human-readable version string for the current published version.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_published_version: Option<String>,
+    /// Immutable revisions belonging to this bundle lineage, ordered newest first.
+    #[serde(default)]
+    pub versions: Vec<ComplianceBundleVersionSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceBundleVersionSummary {
+    pub id: uuid::Uuid,
+    pub bundle_id: uuid::Uuid,
+    pub version: String,
+    pub publication_state: String,
+    pub trust_state: String,
+    pub semantic_digest: String,
+    pub created_at: DateTime<Utc>,
+    pub published_at: Option<DateTime<Utc>>,
+    pub derived_from_version_id: Option<uuid::Uuid>,
+    pub control_count: i64,
+    #[serde(default)]
+    pub is_current_published: bool,
+    #[serde(default)]
+    pub is_current_draft: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1360,6 +1399,8 @@ pub struct ComplianceEnvironmentRef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComplianceBundleSystemsResponse {
     pub bundle_id: uuid::Uuid,
+    #[serde(default)]
+    pub bundle_version_id: Option<uuid::Uuid>,
     pub systems: Vec<ComplianceSystemRollup>,
     pub totals: ComplianceRollupTotals,
 }
@@ -1448,6 +1489,8 @@ pub enum ComplianceControlStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComplianceEvidenceResponse {
     pub bundle_id: uuid::Uuid,
+    #[serde(default)]
+    pub bundle_version_id: Option<uuid::Uuid>,
     pub system_id: uuid::Uuid,
     pub hostname: String,
     pub controls: Vec<ComplianceControlEvidence>,

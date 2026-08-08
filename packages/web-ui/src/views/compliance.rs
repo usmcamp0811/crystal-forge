@@ -67,6 +67,7 @@ pub fn ComplianceView() -> Element {
     let mut sys_filter = use_signal(|| "all".to_string());
     let mut selected_export_version_id = use_signal(|| None::<uuid::Uuid>);
     let mut export_version_pointers = use_signal(|| (None::<uuid::Uuid>, None::<uuid::Uuid>));
+    let mut show_assignment = use_signal(|| false);
 
     // Generation counters guard against stale async responses overwriting the
     // state of a subsequently-selected bundle or system.  Each spawn captures
@@ -84,14 +85,14 @@ pub fn ComplianceView() -> Element {
     // Spawn a systems fetch for `bundle_id`.  Increments `systems_gen` and
     // clears existing systems/error state before returning the new generation
     // so the caller can pass it into the async block.
-    let mut start_systems_fetch = move |bundle_id: uuid::Uuid| {
+    let mut start_systems_fetch = move |bundle_id: uuid::Uuid, version_id: Option<uuid::Uuid>| {
         let gen_id = *systems_gen.read() + 1;
         systems_gen.set(gen_id);
         systems.set(None);
         systems_error.set(None);
         systems_loading.set(true);
         spawn(async move {
-            match fetch_compliance_bundle_systems(&bundle_id).await {
+            match fetch_compliance_bundle_systems(&bundle_id, version_id.as_ref()).await {
                 Ok(resp) => {
                     if *systems_gen.read() == gen_id {
                         systems.set(Some(resp));
@@ -118,13 +119,16 @@ pub fn ComplianceView() -> Element {
             match fetch_compliance_bundles().await {
                 Ok(items) => {
                     let first_id = items.first().map(|b| b.id);
+                    let first_version_id = items.first().and_then(|b| {
+                        b.current_published_version_id.or(b.current_draft_version_id)
+                    });
                     bundles.set(items);
                     selected_bundle_id.set(first_id);
                     // loaded = true before the systems fetch so the bundle list
                     // renders immediately; systems has its own loading indicator.
                     loaded.set(true);
                     if let Some(bundle_id) = first_id {
-                        start_systems_fetch(bundle_id);
+                         start_systems_fetch(bundle_id, first_version_id);
                     }
                 }
                 Err(err) => {
@@ -156,7 +160,9 @@ pub fn ComplianceView() -> Element {
         let eg = *evidence_gen.read() + 1;
         evidence_gen.set(eg);
         sys_filter.set("all".to_string());
-        start_systems_fetch(bundle_id);
+        let version_id = bundles.read().iter().find(|bundle| bundle.id == bundle_id)
+            .and_then(|bundle| bundle.current_published_version_id.or(bundle.current_draft_version_id));
+        start_systems_fetch(bundle_id, version_id);
     };
 
     use_effect(move || {
@@ -180,10 +186,13 @@ pub fn ComplianceView() -> Element {
         // selected bundle is refreshed or published and the old version is no
         // longer one of the current pointers, prefer published, then draft.
         let current = *selected_export_version_id.read();
-        let next = if current.is_some_and(|id| pointers.0 == Some(id) || pointers.1 == Some(id)) {
+        let version_exists = bundle_id
+            .and_then(|bid| bundles_snapshot.iter().find(|bundle| bundle.id == bid))
+            .is_some_and(|bundle| current.is_some_and(|id| bundle.versions.iter().any(|v| v.id == id)));
+        let next = if version_exists {
             current
         } else {
-            pointers.0.or(pointers.1)
+            pointers.0.or(pointers.1).or_else(|| bundle_id.and_then(|bid| bundles_snapshot.iter().find(|bundle| bundle.id == bid).and_then(|bundle| bundle.versions.first().map(|v| v.id))))
         };
         selected_export_version_id.set(next);
     });
@@ -194,8 +203,15 @@ pub fn ComplianceView() -> Element {
             evidence_error.set(None);
             let gen_id = *evidence_gen.read() + 1;
             evidence_gen.set(gen_id);
+            let version_id = *selected_export_version_id.read();
             spawn(async move {
-                match fetch_compliance_system_evidence(&bundle_id, &system_id).await {
+                match fetch_compliance_system_evidence(
+                    &bundle_id,
+                    &system_id,
+                    version_id.as_ref(),
+                )
+                .await
+                {
                     Ok(resp) => {
                         if *evidence_gen.read() == gen_id {
                             evidence.set(Some(resp));
@@ -355,11 +371,18 @@ pub fn ComplianceView() -> Element {
                 div {
                     style: "display:grid;grid-template-columns:320px 1fr;gap:16px;align-items:start;",
                     // Left rail: catalog
-                    BundleCatalog {
-                        bundles: bundles.read().clone(),
-                        selected_id: *selected_bundle_id.read(),
-                        on_select: on_select_bundle,
-                    }
+                     BundleCatalog {
+                         bundles: bundles.read().clone(),
+                         selected_id: *selected_bundle_id.read(),
+                         on_select: on_select_bundle,
+                         selected_version_id: *selected_export_version_id.read(),
+                         on_select_version: move |version_id| {
+                             selected_export_version_id.set(Some(version_id));
+                             if let Some(bundle_id) = *selected_bundle_id.read() {
+                                 start_systems_fetch(bundle_id, Some(version_id));
+                             }
+                         },
+                     }
                     // Right: bundle content
                     if let Some(bundle) = selected_bundle {
                         div { style: "display:flex;flex-direction:column;gap:14px;min-width:0;",
@@ -371,7 +394,12 @@ pub fn ComplianceView() -> Element {
                              XccdfVersionSelector {
                                  bundle: bundle.clone(),
                                  selected_version_id: *selected_export_version_id.read(),
-                                 on_select: move |version_id| selected_export_version_id.set(version_id),
+                                   on_select: move |version_id| {
+                                       selected_export_version_id.set(version_id);
+                                       if let Some(bundle_id) = *selected_bundle_id.read() {
+                                           start_systems_fetch(bundle_id, version_id);
+                                       }
+                                   },
                              }
                              // ── Version lifecycle actions (admin-only) ─
                              if is_admin {
@@ -449,18 +477,6 @@ pub fn ComplianceView() -> Element {
                                      },
                                  }
                              }
-                             // ── Assignment panel (admin-only, published versions) ─
-                             if is_admin {
-                                 if let Some(vid) = *selected_export_version_id.read() {
-                                     if bundle.current_published_version_id == Some(vid) {
-                                         AssignmentCreatePanel {
-                                             bundle: bundle.clone(),
-                                             bundle_version_id: vid,
-                                             environments: environments.read().clone(),
-                                         }
-                                     }
-                                 }
-                             }
                              if let Some(err) = systems_error.read().as_ref() {
                                 div { class: "sd-callout sd-callout-danger",
                                     Icon { name: IconName::X, size: 13 }
@@ -470,8 +486,8 @@ pub fn ComplianceView() -> Element {
                                             class: "btn btn-ghost focus-ring xs",
                                             style: "width:fit-content;",
                             onclick: move |_| {
-                                if let Some(bid) = *selected_bundle_id.read() {
-                                    start_systems_fetch(bid);
+                             if let Some(bid) = *selected_bundle_id.read() {
+                                     start_systems_fetch(bid, *selected_export_version_id.read());
                                 }
                             },
                                             Icon { name: IconName::Sync, size: 11 }
@@ -484,15 +500,32 @@ pub fn ComplianceView() -> Element {
                                     Icon { name: IconName::Shield, size: 13 }
                                     div { style: "font-size:12px;", "Loading systems rollup…" }
                                 }
-                            } else if let Some(resp) = systems.read().as_ref() {
-                                ScoreStrip { totals: resp.totals.clone() }
-                                SystemsMatrix {
+                             } else if let Some(resp) = systems.read().as_ref() {
+                                 ScoreStrip { totals: resp.totals.clone() }
+                                 SystemsMatrix {
                                     systems: resp.systems.clone(),
                                     on_evidence,
                                     filter: sys_filter.read().clone(),
-                                    on_filter: move |f| sys_filter.set(f),
-                                }
-                            }
+                                     on_filter: move |f| sys_filter.set(f),
+                                 }
+                                 // Administrative assignment controls stay below operational posture.
+                                 if is_admin {
+                                     if let Some(vid) = *selected_export_version_id.read() {
+                                          button {
+                                              class: "btn btn-primary focus-ring",
+                                              onclick: move |_| show_assignment.set(true),
+                                              "Assign bundle"
+                                          }
+                                          if *show_assignment.read() {
+                                              AssignmentCreatePanel {
+                                                  bundle: bundle.clone(),
+                                                  bundle_version_id: vid,
+                                                  environments: environments.read().clone(),
+                                              }
+                                          }
+                                     }
+                                 }
+                             }
                         }
                     }
                 }
@@ -560,6 +593,7 @@ pub fn ComplianceView() -> Element {
                 on_close: move |_| show_new_bundle.set(false),
                 on_created: move |bundle: ComplianceBundleSummary| {
                     let id = bundle.id;
+                    let version_id = bundle.current_published_version_id.or(bundle.current_draft_version_id);
                     let mut next = bundles.read().clone();
                     next.push(bundle);
                     bundles.set(next);
@@ -569,7 +603,7 @@ pub fn ComplianceView() -> Element {
                     let eg = *evidence_gen.read() + 1;
                     evidence_gen.set(eg);
                     show_new_bundle.set(false);
-                    start_systems_fetch(id);
+                    start_systems_fetch(id, version_id);
                 },
             }
         }
@@ -586,13 +620,14 @@ pub fn ComplianceView() -> Element {
                     on_close: move |_| show_edit_bundle.set(false),
                     on_saved: move |updated: ComplianceBundleSummary| {
                         let id = updated.id;
+                        let version_id = updated.current_published_version_id.or(updated.current_draft_version_id);
                         let mut next = bundles.read().clone();
                         if let Some(pos) = next.iter().position(|b| b.id == id) {
                             next[pos] = updated;
                         }
                         bundles.set(next);
                         show_edit_bundle.set(false);
-                        start_systems_fetch(id);
+                        start_systems_fetch(id, version_id);
                     },
                     on_deleted: move |deleted_id: uuid::Uuid| {
                         let mut next = bundles.read().clone();
@@ -606,7 +641,7 @@ pub fn ComplianceView() -> Element {
                         evidence_gen.set(eg);
                         show_edit_bundle.set(false);
                         if let Some(nid) = next_id {
-                            start_systems_fetch(nid);
+                            start_systems_fetch(nid, None);
                         }
                     },
                 }
@@ -648,15 +683,16 @@ struct XccdfVersionSelectorProps {
 fn XccdfVersionSelector(props: XccdfVersionSelectorProps) -> Element {
     let bundle = &props.bundle;
     let selected = props.selected_version_id;
-    let has_version =
-        bundle.current_published_version_id.is_some() || bundle.current_draft_version_id.is_some();
+    let has_version = !bundle.versions.is_empty()
+        || bundle.current_published_version_id.is_some()
+        || bundle.current_draft_version_id.is_some();
 
     rsx! {
         if has_version {
             div {
                 class: "sd-callout sd-callout-info",
                 style: "display:flex;align-items:center;gap:10px;",
-                label { style: "font-size:12px;font-weight:600;", "Current XCCDF export version" }
+                label { style: "font-size:12px;font-weight:600;", "Selected XCCDF revision" }
                 select {
                     class: "input focus-ring",
                     style: "width:auto;min-width:260px;",
@@ -664,18 +700,13 @@ fn XccdfVersionSelector(props: XccdfVersionSelectorProps) -> Element {
                     onchange: move |event| {
                         props.on_select.call(uuid::Uuid::parse_str(&event.value()).ok());
                     },
-                    if let Some(version_id) = bundle.current_published_version_id {
+                    for version in bundle.versions.iter() {
                         option {
-                            value: "{version_id}",
-                            selected: selected == Some(version_id),
-                            "Export XCCDF: {bundle.current_published_version.clone().unwrap_or_else(|| \"published\".to_string())} published"
-                        }
-                    }
-                    if let Some(version_id) = bundle.current_draft_version_id {
-                        option {
-                            value: "{version_id}",
-                            selected: selected == Some(version_id),
-                            "Export XCCDF: {bundle.current_draft_version.clone().unwrap_or_else(|| \"draft\".to_string())} draft"
+                            value: "{version.id}",
+                            selected: selected == Some(version.id),
+                            "{version.version} · {version.publication_state}"
+                            if version.is_current_published { " · Current" }
+                            if version.is_current_draft { " · Draft" }
                         }
                     }
                 }
@@ -2777,7 +2808,7 @@ fn ExportModal(props: ExportModalProps) -> Element {
                                     let mut all_evidence = Vec::new();
                                     let mut evidence_failures = Vec::new();
                                     for sys_id in &scoped_sys_ids {
-                                        match fetch_compliance_system_evidence(&bundle.id, sys_id).await {
+                                        match fetch_compliance_system_evidence(&bundle.id, sys_id, None).await {
                                             Ok(ev) => all_evidence.push(ev),
                                             Err(err) => {
                                                 let hostname = systems

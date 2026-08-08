@@ -1021,6 +1021,27 @@ pub struct ComplianceBundleSummary {
     pub current_draft_version: Option<String>,
     #[serde(default)]
     pub current_published_version: Option<String>,
+    #[serde(default)]
+    pub versions: Vec<ComplianceBundleVersionSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceBundleVersionSummary {
+    pub id: Uuid,
+    pub bundle_id: Uuid,
+    pub version: String,
+    pub publication_state: String,
+    #[serde(default)]
+    pub trust_state: String,
+    pub semantic_digest: String,
+    pub created_at: DateTime<Utc>,
+    pub published_at: Option<DateTime<Utc>>,
+    pub derived_from_version_id: Option<Uuid>,
+    pub control_count: i64,
+    #[serde(default)]
+    pub is_current_published: bool,
+    #[serde(default)]
+    pub is_current_draft: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1033,6 +1054,8 @@ pub struct ComplianceEnvironmentRef {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ComplianceBundleSystemsResponse {
     pub bundle_id: Uuid,
+    #[serde(default)]
+    pub bundle_version_id: Option<Uuid>,
     pub systems: Vec<ComplianceSystemRollup>,
     pub totals: ComplianceRollupTotals,
 }
@@ -1101,6 +1124,8 @@ pub enum ComplianceControlStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ComplianceEvidenceResponse {
     pub bundle_id: Uuid,
+    #[serde(default)]
+    pub bundle_version_id: Option<Uuid>,
     pub system_id: Uuid,
     pub hostname: String,
     pub controls: Vec<ComplianceControlEvidence>,
@@ -1219,6 +1244,26 @@ pub struct DeploymentPolicyRecord {
     /// Exact draft version shown by the policy-management API, when available.
     #[serde(default)]
     pub current_version_id: Option<Uuid>,
+    #[serde(default)]
+    pub versions: Vec<DeploymentPolicyVersionSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentPolicyVersionSummary {
+    pub id: Uuid,
+    pub policy_id: Uuid,
+    pub version: String,
+    pub publication_state: String,
+    #[serde(default)]
+    pub trust_state: String,
+    pub semantic_digest: String,
+    pub created_at: DateTime<Utc>,
+    pub published_at: Option<DateTime<Utc>>,
+    pub derived_from_version_id: Option<Uuid>,
+    #[serde(default)]
+    pub is_current_published: bool,
+    #[serde(default)]
+    pub is_current_draft: bool,
 }
 
 /// Response for listing deployment policies with pagination.

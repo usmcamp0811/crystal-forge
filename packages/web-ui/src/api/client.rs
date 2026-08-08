@@ -1157,8 +1157,12 @@ pub async fn fetch_compliance_bundles() -> Result<Vec<ComplianceBundleSummary>, 
 
 pub async fn fetch_compliance_bundle_systems(
     bundle_id: &Uuid,
+    version_id: Option<&Uuid>,
 ) -> Result<ComplianceBundleSystemsResponse, ApiClientError> {
-    let url = format!("{}/compliance/bundles/{}/systems", base_url(), bundle_id);
+    let url = match version_id {
+        Some(version_id) => format!("{}/compliance/bundles/{}/systems?version_id={}", base_url(), bundle_id, version_id),
+        None => format!("{}/compliance/bundles/{}/systems", base_url(), bundle_id),
+    };
     fetch_json(&url).await
 }
 
@@ -1174,13 +1178,18 @@ pub async fn fetch_system_compliance_bundles(
 pub async fn fetch_compliance_system_evidence(
     bundle_id: &Uuid,
     system_id: &Uuid,
+    version_id: Option<&Uuid>,
 ) -> Result<ComplianceEvidenceResponse, ApiClientError> {
-    let url = format!(
-        "{}/compliance/bundles/{}/systems/{}/evidence",
-        base_url(),
-        bundle_id,
-        system_id
-    );
+    let url = match version_id {
+        Some(version_id) => format!(
+            "{}/compliance/bundles/{}/systems/{}/evidence?version_id={}",
+            base_url(), bundle_id, system_id, version_id
+        ),
+        None => format!(
+            "{}/compliance/bundles/{}/systems/{}/evidence",
+            base_url(), bundle_id, system_id
+        ),
+    };
     fetch_json(&url).await
 }
 

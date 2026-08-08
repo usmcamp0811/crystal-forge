@@ -399,7 +399,7 @@ fn validate_bundle_request(name: &str, framework: &str, policy_ids: &[Uuid]) -> 
 }
 
 use crate::api::models::{
-    ComplianceBundleSummary, ComplianceBundleSystemsResponse, ComplianceControlEvidence,
+    ComplianceBundleSummary, ComplianceBundleVersionSummary, ComplianceBundleSystemsResponse, ComplianceControlEvidence,
     ComplianceControlStatus, ComplianceEnvironmentRef, ComplianceEvidenceArtifact,
     ComplianceEvidenceItem, ComplianceEvidenceResponse, ComplianceRollupTotals,
     ComplianceSystemRollup, CreateComplianceBundleRequest, UpdateComplianceBundleRequest,
@@ -479,6 +479,7 @@ fn bundle_from_row(row: BundleRow) -> ComplianceBundleSummary {
         current_published_version_id: row.current_published_version_id,
         current_draft_version: row.current_draft_version,
         current_published_version: row.current_published_version,
+        versions: Vec::new(),
     }
 }
 
@@ -531,7 +532,50 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().map(bundle_from_row).collect())
+    let mut bundles: Vec<ComplianceBundleSummary> = rows.into_iter().map(bundle_from_row).collect();
+    let bundle_ids: Vec<Uuid> = bundles.iter().map(|bundle| bundle.id).collect();
+    if bundle_ids.is_empty() {
+        return Ok(bundles);
+    }
+
+    let version_rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, String, String, DateTime<Utc>, Option<DateTime<Utc>>, Option<Uuid>, i64)>(
+        r#"
+        SELECT v.id, v.bundle_id, v.version, v.publication_state, v.trust_state,
+               v.semantic_digest, v.created_at, v.published_at, v.derived_from_version_id,
+               COUNT(cbvp.policy_version_id)::bigint AS control_count
+        FROM compliance_bundle_versions v
+        LEFT JOIN compliance_bundle_version_policies cbvp ON cbvp.bundle_version_id = v.id
+        WHERE v.bundle_id = ANY($1)
+        GROUP BY v.id
+        ORDER BY v.bundle_id, v.created_at DESC, v.id DESC
+        "#,
+    )
+    .bind(&bundle_ids)
+    .fetch_all(pool)
+    .await?;
+
+    for bundle in &mut bundles {
+        bundle.versions = version_rows
+            .iter()
+            .filter(|row| row.1 == bundle.id)
+            .map(|row| ComplianceBundleVersionSummary {
+                id: row.0,
+                bundle_id: row.1,
+                version: row.2.clone(),
+                publication_state: row.3.clone(),
+                trust_state: row.4.clone(),
+                semantic_digest: row.5.clone(),
+                created_at: row.6,
+                published_at: row.7,
+                derived_from_version_id: row.8,
+                control_count: row.9,
+                is_current_published: bundle.current_published_version_id == Some(row.0),
+                is_current_draft: bundle.current_draft_version_id == Some(row.0),
+            })
+            .collect();
+    }
+
+    Ok(bundles)
 }
 
 pub async fn create_bundle(
@@ -1018,6 +1062,54 @@ pub async fn list_bundle_systems(
 
     Ok(Some(ComplianceBundleSystemsResponse {
         bundle_id: bundle.id,
+        bundle_version_id: None,
+        systems: rollups,
+        totals,
+    }))
+}
+
+/// Resolve the systems rollup against one exact immutable bundle revision.
+/// This deliberately does not substitute the lineage's current membership.
+pub async fn list_bundle_systems_for_version(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    bundle_version_id: Uuid,
+) -> Result<Option<ComplianceBundleSystemsResponse>> {
+    let Some(bundle) = find_bundle(pool, bundle_id).await? else {
+        return Ok(None);
+    };
+    let version_belongs: Option<Uuid> = sqlx::query_scalar(
+        "SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1",
+    )
+    .bind(bundle_version_id)
+    .fetch_optional(pool)
+    .await?;
+    if version_belongs != Some(bundle_id) {
+        return Ok(None);
+    }
+
+    let policies = sqlx::query_as::<_, PolicyRow>(
+        r#"SELECT pv.policy_id AS id, $2 AS bundle_id, pv.name, pv.description,
+                  pv.policy_type, pv.config, (dp.enabled AND pv.publication_state IN ('accepted', 'deprecated')) AS enabled
+           FROM compliance_bundle_version_policies cbvp
+           JOIN deployment_policy_versions pv ON pv.id = cbvp.policy_version_id
+           JOIN deployment_policies dp ON dp.id = pv.policy_id
+           WHERE cbvp.bundle_version_id = $1
+           ORDER BY cbvp.policy_order"#,
+    )
+    .bind(bundle_version_id)
+    .bind(bundle_id)
+    .fetch_all(pool)
+    .await?;
+    let systems = list_applicable_system_rows(pool, bundle_id).await?;
+    let rollups: Vec<_> = systems
+        .into_iter()
+        .map(|system| system_rollup(system, &policies))
+        .collect();
+    let totals = totals_for_rollups(&rollups);
+    Ok(Some(ComplianceBundleSystemsResponse {
+        bundle_id,
+        bundle_version_id: Some(bundle_version_id),
         systems: rollups,
         totals,
     }))
@@ -1201,6 +1293,7 @@ pub async fn get_system_evidence(
     pool: &PgPool,
     bundle_id: Uuid,
     system_id: Uuid,
+    bundle_version_id: Option<Uuid>,
 ) -> Result<Option<ComplianceEvidenceResponse>> {
     if find_bundle(pool, bundle_id).await?.is_none() {
         return Ok(None);
@@ -1215,7 +1308,34 @@ pub async fn get_system_evidence(
         return Ok(None);
     };
 
-    let mut policies = list_bundle_policies(pool, bundle_id).await?;
+    let mut policies = match bundle_version_id {
+        Some(version_id) => {
+            let belongs: Option<Uuid> = sqlx::query_scalar(
+                "SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1",
+            )
+            .bind(version_id)
+            .fetch_optional(pool)
+            .await?;
+            if belongs != Some(bundle_id) {
+                return Ok(None);
+            }
+            sqlx::query_as::<_, PolicyRow>(
+                r#"SELECT pv.policy_id AS id, $2 AS bundle_id, pv.name, pv.description,
+                          pv.policy_type, pv.config,
+                          (dp.enabled AND pv.publication_state IN ('accepted', 'deprecated')) AS enabled
+                   FROM compliance_bundle_version_policies cbvp
+                   JOIN deployment_policy_versions pv ON pv.id = cbvp.policy_version_id
+                   JOIN deployment_policies dp ON dp.id = pv.policy_id
+                   WHERE cbvp.bundle_version_id = $1
+                   ORDER BY cbvp.policy_order"#,
+            )
+            .bind(version_id)
+            .bind(bundle_id)
+            .fetch_all(pool)
+            .await?
+        }
+        None => list_bundle_policies(pool, bundle_id).await?,
+    };
     if let ResolutionOutcome::Resolved(effective) =
         resolve_system_effective_policies(pool, system_id).await?
     {
@@ -1266,6 +1386,7 @@ pub async fn get_system_evidence(
 
     Ok(Some(ComplianceEvidenceResponse {
         bundle_id,
+        bundle_version_id,
         system_id,
         hostname: system.hostname,
         controls,
@@ -1800,6 +1921,7 @@ mod tests {
             current_published_version_id: None,
             current_draft_version: None,
             current_published_version: None,
+            versions: vec![],
         }
     }
 
