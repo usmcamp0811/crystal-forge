@@ -957,6 +957,27 @@ pub async fn resolve_systems_effective_policies_for_evaluation_batch(
     pool: &PgPool,
     system_ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, ResolutionOutcome>> {
+    resolve_systems_effective_policies_batch(pool, system_ids, None, true).await
+}
+
+/// Resolve one exact bundle version for all provided systems in one batch.
+/// Explicit assignments for the requested version are authoritative; systems
+/// in the bundle scope without one receive the unmodified baseline. Direct
+/// environment and system policies still use the normal precedence rules.
+pub async fn resolve_systems_effective_policies_for_bundle_version_batch(
+    pool: &PgPool,
+    system_ids: &[Uuid],
+    bundle_version_id: Uuid,
+) -> Result<std::collections::HashMap<Uuid, ResolutionOutcome>> {
+    resolve_systems_effective_policies_batch(pool, system_ids, Some(bundle_version_id), false).await
+}
+
+async fn resolve_systems_effective_policies_batch(
+    pool: &PgPool,
+    system_ids: &[Uuid],
+    bundle_version_filter: Option<Uuid>,
+    ignore_non_evaluation_conflicts: bool,
+) -> Result<std::collections::HashMap<Uuid, ResolutionOutcome>> {
     if system_ids.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
@@ -995,6 +1016,7 @@ pub async fn resolve_systems_effective_policies_for_evaluation_batch(
                       a.environment_id, a.system_id
                FROM compliance_bundle_assignments a
                WHERE a.active AND a.current_version_id IS NOT NULL
+                 AND ($3::uuid IS NULL OR a.bundle_version_id = $3)
                  AND (
                    (a.scope_type = 'environment' AND a.environment_id = ANY($1))
                    OR (a.scope_type = 'system' AND a.system_id = ANY($2))
@@ -1006,7 +1028,8 @@ pub async fn resolve_systems_effective_policies_for_evaluation_batch(
         )
         .bind(&all_env_ids)
         .bind(system_ids)
-        .fetch_all(&mut *tx)
+        .bind(bundle_version_filter)
+         .fetch_all(&mut *tx)
         .await
         .context("batch load bundle assignments")?;
 
@@ -1247,6 +1270,29 @@ pub async fn resolve_systems_effective_policies_for_evaluation_batch(
         }
     }
 
+    // Preserve the versioned endpoint's applicability surface for systems that
+    // have no explicit assignment for this exact version. A virtual baseline
+    // keeps the operation set-based and sends it through the same merge path.
+    if let Some(bundle_version_id) = bundle_version_filter {
+        for &sys_id in system_ids {
+            if !assignments_for_system.contains_key(&sys_id) {
+                assignments_for_system.insert(
+                    sys_id,
+                    vec![(
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        bundle_version_id,
+                        "virtual_baseline".to_string(),
+                        "enforce".to_string(),
+                        None,
+                        Some(sys_id),
+                    )],
+                );
+            }
+        }
+    }
+
     let mut results = std::collections::HashMap::new();
 
     'system: for &sys_id in system_ids {
@@ -1264,10 +1310,10 @@ pub async fn resolve_systems_effective_policies_for_evaluation_batch(
         for (_, av_id, _, bv_id, scope_type, enforcement_mode, _, _) in sys_assignments {
             has_assignments = true;
 
-            let specificity = if scope_type == "environment" {
-                PolicySpecificity::Environment
-            } else {
-                PolicySpecificity::System
+            let specificity = match scope_type.as_str() {
+                "virtual_baseline" => PolicySpecificity::BundleBaseline,
+                "environment" => PolicySpecificity::Environment,
+                _ => PolicySpecificity::System,
             };
             let mode = if enforcement_mode == "report_only" {
                 AssignmentMode::ReportOnly
@@ -1459,15 +1505,14 @@ pub async fn resolve_systems_effective_policies_for_evaluation_batch(
             }
         }
 
-        // If no bundle assignments exist, fall back to legacy direct policies.
-        if !has_assignments {
+        // Direct policies always participate in the effective set. When no
+        // bundle assignment exists this is also the legacy-only fallback.
+        {
             // Apply environment direct policies
             if let Some(eid) = env_id {
                 if let Some(env_pols) = env_direct_policies.get(&eid) {
                     for (pv_id, lin_id, ptype, config) in env_pols {
-                        let idx = staging.len();
-                        per_lineage.insert(*lin_id, (*pv_id, PolicySpecificity::Environment, idx));
-                        staging.push(EffectivePolicy {
+                        let candidate = EffectivePolicy {
                             policy_version_id: *pv_id,
                             policy_lineage_id: *lin_id,
                             policy_type: ptype.clone(),
@@ -1480,7 +1525,26 @@ pub async fn resolve_systems_effective_policies_for_evaluation_batch(
                             assignment_mode: AssignmentMode::Enforce,
                             effective_mode: AssignmentMode::Enforce,
                             provenance: Vec::new(),
-                        });
+                        };
+                        let provenance = ProvenanceEntry {
+                            source: EffectivePolicySource::LegacyDirect,
+                            specificity: PolicySpecificity::Environment,
+                            scope_type: Some("environment".to_string()),
+                            enforcement_mode: "enforce".to_string(),
+                            authoritative: true,
+                        };
+                        if let MergeOutcome::Conflict(conflict) = merge_effective_policy_candidate(
+                            candidate,
+                            PolicySpecificity::Environment,
+                            provenance,
+                            &mut staging,
+                            &mut per_lineage,
+                            &mut all_warnings,
+                            ignore_non_evaluation_conflicts,
+                        ) {
+                            results.insert(sys_id, ResolutionOutcome::Conflict(vec![conflict]));
+                            continue 'system;
+                        }
                     }
                 }
             }
@@ -1488,48 +1552,43 @@ pub async fn resolve_systems_effective_policies_for_evaluation_batch(
             // Apply system direct policies (override environment for same lineage)
             if let Some(sys_pols) = sys_direct_policies.get(&sys_id) {
                 for (pv_id, lin_id, ptype, config) in sys_pols {
-                    if let Some(&(_, _, existing_idx)) = per_lineage.get(lin_id) {
-                        all_warnings.push(format!(
-                            "Legacy system direct policy {} overrides environment-level version",
-                            pv_id
-                        ));
-                        staging[existing_idx] = EffectivePolicy {
-                            policy_version_id: *pv_id,
-                            policy_lineage_id: *lin_id,
-                            policy_type: ptype.clone(),
-                            source: EffectivePolicySource::LegacyDirect,
-                            specificity: PolicySpecificity::System,
-                            baseline_order: None,
-                            addition_order: None,
-                            overrides: Vec::new(),
-                            effective_config: config.clone(),
-                            assignment_mode: AssignmentMode::Enforce,
-                            effective_mode: AssignmentMode::Enforce,
-                            provenance: Vec::new(),
-                        };
-                        per_lineage.insert(*lin_id, (*pv_id, PolicySpecificity::System, existing_idx));
-                    } else {
-                        let idx = staging.len();
-                        per_lineage.insert(*lin_id, (*pv_id, PolicySpecificity::System, idx));
-                        staging.push(EffectivePolicy {
-                            policy_version_id: *pv_id,
-                            policy_lineage_id: *lin_id,
-                            policy_type: ptype.clone(),
-                            source: EffectivePolicySource::LegacyDirect,
-                            specificity: PolicySpecificity::System,
-                            baseline_order: None,
-                            addition_order: None,
-                            overrides: Vec::new(),
-                            effective_config: config.clone(),
-                            assignment_mode: AssignmentMode::Enforce,
-                            effective_mode: AssignmentMode::Enforce,
-                            provenance: Vec::new(),
-                        });
+                    let candidate = EffectivePolicy {
+                        policy_version_id: *pv_id,
+                        policy_lineage_id: *lin_id,
+                        policy_type: ptype.clone(),
+                        source: EffectivePolicySource::LegacyDirect,
+                        specificity: PolicySpecificity::System,
+                        baseline_order: None,
+                        addition_order: None,
+                        overrides: Vec::new(),
+                        effective_config: config.clone(),
+                        assignment_mode: AssignmentMode::Enforce,
+                        effective_mode: AssignmentMode::Enforce,
+                        provenance: Vec::new(),
+                    };
+                    let provenance = ProvenanceEntry {
+                        source: EffectivePolicySource::LegacyDirect,
+                        specificity: PolicySpecificity::System,
+                        scope_type: Some("system".to_string()),
+                        enforcement_mode: "enforce".to_string(),
+                        authoritative: true,
+                    };
+                    if let MergeOutcome::Conflict(conflict) = merge_effective_policy_candidate(
+                        candidate,
+                        PolicySpecificity::System,
+                        provenance,
+                        &mut staging,
+                        &mut per_lineage,
+                        &mut all_warnings,
+                        ignore_non_evaluation_conflicts,
+                    ) {
+                        results.insert(sys_id, ResolutionOutcome::Conflict(vec![conflict]));
+                        continue 'system;
                     }
                 }
             }
 
-            if !staging.is_empty() {
+            if !has_assignments && !staging.is_empty() {
                 all_warnings.push("Legacy direct-policy resolution used (no bundle assignments)".to_string());
             }
         }

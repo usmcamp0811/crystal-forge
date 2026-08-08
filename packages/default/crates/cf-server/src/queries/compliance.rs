@@ -8,7 +8,11 @@ use crate::compliance::digest::{
     load_bundle_membership, write_assignment_effective_set_digest, write_bundle_version_digest,
     BundleMembershipEntry, BundleVersionCanonical,
 };
-use crate::compliance::resolver::{resolve_system_effective_policies, ResolutionOutcome};
+use crate::compliance::resolver::{
+    resolve_system_effective_policies,
+    resolve_systems_effective_policies_for_bundle_version_batch,
+    ResolutionOutcome,
+};
 
 // ─── Draft-lifecycle helpers ──────────────────────────────────────────────────
 
@@ -1075,7 +1079,7 @@ pub async fn list_bundle_systems_for_version(
     bundle_id: Uuid,
     bundle_version_id: Uuid,
 ) -> Result<Option<ComplianceBundleSystemsResponse>> {
-    let Some(bundle) = find_bundle(pool, bundle_id).await? else {
+    let Some(_bundle) = find_bundle(pool, bundle_id).await? else {
         return Ok(None);
     };
     let version_belongs: Option<Uuid> = sqlx::query_scalar(
@@ -1102,9 +1106,24 @@ pub async fn list_bundle_systems_for_version(
     .fetch_all(pool)
     .await?;
     let systems = list_applicable_system_rows(pool, bundle_id).await?;
+    let system_ids: Vec<Uuid> = systems.iter().map(|system| system.id).collect();
+    let effective = resolve_systems_effective_policies_for_bundle_version_batch(
+        pool,
+        &system_ids,
+        bundle_version_id,
+    )
+    .await?;
     let rollups: Vec<_> = systems
         .into_iter()
-        .map(|system| system_rollup(system, &policies))
+        .map(|system| match effective.get(&system.id) {
+            Some(ResolutionOutcome::Resolved(set))
+                if set.bundle_version_id == bundle_version_id => {
+                effective_policy_rollup(&system, &set.policies)
+            }
+            // Conflicts have no authoritative effective set. Keep the exact
+            // requested version visible rather than substituting another one.
+            _ => system_rollup(system, &policies),
+        })
         .collect();
     let totals = totals_for_rollups(&rollups);
     Ok(Some(ComplianceBundleSystemsResponse {
@@ -2342,6 +2361,56 @@ mod tests {
         assert_eq!(rollup.hostname, "test-host-123");
         assert_eq!(rollup.environment, Some("staging".to_string()));
         assert_eq!(rollup.system_id, sys.id);
+    }
+
+    #[test]
+    fn effective_rollup_uses_selected_version_and_overlay_membership() {
+        use crate::compliance::resolver::{
+            AssignmentMode, EffectivePolicy, EffectivePolicySource, PolicySpecificity,
+        };
+
+        let sys = system("healthy", 0, 0);
+        let baseline_version = Uuid::new_v4();
+        let added_version = Uuid::new_v4();
+        let excluded_version = Uuid::new_v4();
+        let effective = vec![
+            EffectivePolicy {
+                policy_version_id: baseline_version,
+                policy_lineage_id: Uuid::new_v4(),
+                policy_type: "require_cf_agent".to_string(),
+                source: EffectivePolicySource::Baseline,
+                specificity: PolicySpecificity::BundleBaseline,
+                baseline_order: Some(0),
+                addition_order: None,
+                overrides: vec![],
+                effective_config: serde_json::json!({}),
+                assignment_mode: AssignmentMode::Enforce,
+                effective_mode: AssignmentMode::Enforce,
+                provenance: vec![],
+            },
+            EffectivePolicy {
+                policy_version_id: added_version,
+                policy_lineage_id: Uuid::new_v4(),
+                policy_type: "require_cve_check".to_string(),
+                source: EffectivePolicySource::Addition,
+                specificity: PolicySpecificity::System,
+                baseline_order: None,
+                addition_order: Some(0),
+                overrides: vec![],
+                effective_config: serde_json::json!({"max_critical": 0}),
+                assignment_mode: AssignmentMode::Enforce,
+                effective_mode: AssignmentMode::Enforce,
+                provenance: vec![],
+            },
+        ];
+
+        let rollup = effective_policy_rollup(&sys, &effective);
+
+        assert_eq!(rollup.total, 2);
+        assert_eq!(rollup.pass, 2);
+        assert_eq!(rollup.evaluated_total, 2);
+        assert!(effective.iter().all(|policy| policy.policy_version_id != excluded_version));
+        assert!(effective.iter().any(|policy| policy.policy_version_id == added_version));
     }
 }
 
