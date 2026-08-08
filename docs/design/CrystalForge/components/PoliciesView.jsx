@@ -660,6 +660,15 @@ function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem, onSwitchPolicy, i
               <div style={{ fontSize:13, color:"var(--cf-text-primary)", lineHeight:1.5 }}>{policy.rationale}</div>
             </section>
           )}
+          {(policy.srgIds?.length || policy.cciIds?.length) ? (
+            <section>
+              <h3 style={{ fontSize:11, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", margin:"0 0 8px", fontWeight:600 }}>SRG / CCI mapping</h3>
+              <div style={{ display:"flex", flexWrap:"wrap", gap:5 }}>
+                {(policy.srgIds||[]).map(s => <span key={s} className="chip chip-unknown mono" style={{ fontSize:10 }}>{s}</span>)}
+                {(policy.cciIds||[]).map(s => <span key={s} className="chip chip-unknown mono" style={{ fontSize:10 }}>{s}</span>)}
+              </div>
+            </section>
+          ) : null}
           <section>
             <h3 style={{ fontSize:11, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", margin:"0 0 8px", fontWeight:600 }}>Rules</h3>
             {policy.rules.length === 0 ? (
@@ -751,6 +760,8 @@ function PolicyFormModal({ mode, policy, onClose }) {
     category: policy.category || "deployment",
     rationale: policy.rationale || "",
     severity: policy.severity || "medium",
+    srgIds: (policy.srgIds || []).join(", "),
+    cciIds: (policy.cciIds || []).join(", "),
     enabled: policy.enabled !== false,
     rules: [...policy.rules],
     evidence: policy.evidence ? policy.evidence.map(e => ({ ...e })) : [],
@@ -760,6 +771,8 @@ function PolicyFormModal({ mode, policy, onClose }) {
     category: "deployment",
     rationale: "",
     severity: "medium",
+    srgIds: "",
+    cciIds: "",
     enabled: true,
     rules: [{ kind:"eval_passed" }, { kind:"build_succeeded" }],
     evidence: [],
@@ -798,11 +811,40 @@ function PolicyFormModal({ mode, policy, onClose }) {
   const removeEvidence = (idx) => set("evidence", form.evidence.filter((_, i) => i !== idx));
   const updateEvidence = (idx, patch) => set("evidence", form.evidence.map((e, i) => i === idx ? { ...e, ...patch } : e));
 
+  const parseIdList = (s) => s.split(",").map(x => x.trim()).filter(Boolean);
+
+  const doSave = () => {
+    const srgIds = parseIdList(form.srgIds);
+    const cciIds = parseIdList(form.cciIds);
+    if (isEdit) {
+      Object.assign(policy, {
+        name: form.name, description: form.description, category: form.category,
+        rationale: form.rationale, severity: form.severity, srgIds, cciIds,
+        enabled: form.enabled, rules: form.rules, evidence: form.evidence,
+        lastModified: "just now",
+      });
+    } else {
+      const id = `custom-${slugify(form.name) || Date.now()}`;
+      POLICIES.push({
+        id, lineageId: id, revision: 1, publicationState: "current", publishedDate: new Date().toISOString().slice(0,10),
+        name: form.name, description: form.description, category: form.category,
+        rationale: form.rationale, severity: form.severity, srgIds, cciIds,
+        type: "custom", enabled: form.enabled, rules: form.rules, evidence: form.evidence,
+        createdBy: "you", createdAt: "just now", lastModified: "just now",
+      });
+    }
+  };
+  const doDelete = () => {
+    const idx = POLICIES.findIndex(p => p.id === policy.id);
+    if (idx >= 0) POLICIES.splice(idx, 1);
+    onClose();
+  };
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(680px,96vw)", maxHeight:"92vh" }}>
         {confirmDelete ? (
-          <DeletePolicyConfirm policy={policy} onCancel={()=>setConfirmDelete(false)} onConfirm={onClose}/>
+          <DeletePolicyConfirm policy={policy} onCancel={()=>setConfirmDelete(false)} onConfirm={doDelete}/>
         ) : (
           <>
             <div className="modal-head">
@@ -878,6 +920,18 @@ function PolicyFormModal({ mode, policy, onClose }) {
                 <label>Rationale</label>
                 <textarea className="input focus-ring" rows={2} value={form.rationale} onChange={e=>set("rationale",e.target.value)}
                   placeholder="Why this policy exists — shown in detail view" style={{ resize:"vertical" }}/>
+              </div>
+              <div className="field">
+                <label>SRG IDs</label>
+                <input className="input focus-ring mono" value={form.srgIds} onChange={e=>set("srgIds",e.target.value)}
+                  placeholder="SRG-OS-000078, SRG-OS-000112"/>
+                <div className="help">Comma-separated Security Requirements Guide IDs this control satisfies — searchable from the policy list.</div>
+              </div>
+              <div className="field">
+                <label>CCI IDs</label>
+                <input className="input focus-ring mono" value={form.cciIds} onChange={e=>set("cciIds",e.target.value)}
+                  placeholder="CCI-000205, CCI-000196"/>
+                <div className="help">Comma-separated CCI mappings, if applicable.</div>
               </div>
 
               {/* Rules */}
@@ -968,7 +1022,7 @@ function PolicyFormModal({ mode, policy, onClose }) {
             </div>
             <div className="modal-foot">
               <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
-              <button className="btn btn-primary focus-ring" onClick={onClose} disabled={!form.name}>
+              <button className="btn btn-primary focus-ring" onClick={()=>{ doSave(); onClose(); }} disabled={!form.name}>
                 <Icon name="check" size={13}/> {isEdit ? "Save changes" : "Create policy"}
               </button>
             </div>
