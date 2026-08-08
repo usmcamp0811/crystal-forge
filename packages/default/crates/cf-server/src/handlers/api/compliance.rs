@@ -2863,9 +2863,12 @@ pub async fn export_bundle_xccdf(
     headers: HeaderMap,
     Path(version_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, _roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
+        return forbidden();
+    }
 
     let snapshot = match load_export_snapshot(&pool, version_id).await {
         Ok(s) => s,
@@ -2929,9 +2932,12 @@ pub async fn export_assignment_xccdf(
     headers: HeaderMap,
     Path(assignment_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, _roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
+        return forbidden();
+    }
 
     let assignment = sqlx::query_as::<_, (Uuid, String, Option<Uuid>, Option<Uuid>, String)>(
         "SELECT bundle_version_id, scope_type, environment_id, system_id, enforcement_mode \

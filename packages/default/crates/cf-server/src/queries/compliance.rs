@@ -2412,6 +2412,99 @@ mod tests {
         assert!(effective.iter().all(|policy| policy.policy_version_id != excluded_version));
         assert!(effective.iter().any(|policy| policy.policy_version_id == added_version));
     }
+
+    #[test]
+    fn effective_rollup_counts_only_exact_selected_membership() {
+        use crate::compliance::resolver::{
+            AssignmentMode, EffectivePolicy, EffectivePolicySource, PolicySpecificity,
+        };
+
+        let sys = system("healthy", 1, 0);
+        let selected_baseline = Uuid::from_u128(101);
+        let selected_addition = Uuid::from_u128(102);
+        let excluded_baseline = Uuid::from_u128(103);
+
+        let effective = vec![
+            EffectivePolicy {
+                policy_version_id: selected_baseline,
+                policy_lineage_id: Uuid::from_u128(201),
+                policy_type: "require_cf_agent".to_string(),
+                source: EffectivePolicySource::Baseline,
+                specificity: PolicySpecificity::BundleBaseline,
+                baseline_order: Some(0),
+                addition_order: None,
+                overrides: vec![],
+                effective_config: serde_json::json!({}),
+                assignment_mode: AssignmentMode::Enforce,
+                effective_mode: AssignmentMode::Enforce,
+                provenance: vec![],
+            },
+            EffectivePolicy {
+                policy_version_id: selected_addition,
+                policy_lineage_id: Uuid::from_u128(202),
+                policy_type: "require_cve_check".to_string(),
+                source: EffectivePolicySource::Addition,
+                specificity: PolicySpecificity::System,
+                baseline_order: None,
+                addition_order: Some(0),
+                overrides: vec![],
+                effective_config: serde_json::json!({"max_critical": 0}),
+                assignment_mode: AssignmentMode::ReportOnly,
+                effective_mode: AssignmentMode::ReportOnly,
+                provenance: vec![],
+            },
+        ];
+
+        let rollup = effective_policy_rollup(&sys, &effective);
+
+        assert_eq!(rollup.total, 2);
+        assert_eq!(rollup.pass, 1);
+        assert_eq!(rollup.fail, 1);
+        assert_eq!(rollup.report_only, 1);
+        assert_eq!(rollup.evaluated_total, 2);
+        assert!(
+            !effective
+                .iter()
+                .any(|policy| { policy.policy_version_id == excluded_baseline })
+        );
+    }
+
+    #[test]
+    fn effective_rollup_uses_overlay_value_override() {
+        use crate::compliance::resolver::{
+            AssignmentMode, EffectivePolicy, EffectivePolicySource, PolicyOverride,
+            PolicySpecificity,
+        };
+
+        let sys = system("healthy", 1, 0);
+        let policy_version_id = Uuid::from_u128(301);
+        let effective = EffectivePolicy {
+            policy_version_id,
+            policy_lineage_id: Uuid::from_u128(302),
+            policy_type: "require_cve_check".to_string(),
+            source: EffectivePolicySource::Addition,
+            specificity: PolicySpecificity::System,
+            baseline_order: None,
+            addition_order: Some(0),
+            overrides: vec![PolicyOverride {
+                policy_version_id,
+                value_path: "max_critical".to_string(),
+                value: serde_json::json!(2),
+            }],
+            effective_config: serde_json::json!({"max_critical": 2}),
+            assignment_mode: AssignmentMode::Enforce,
+            effective_mode: AssignmentMode::Enforce,
+            provenance: vec![],
+        };
+
+        let rollup = effective_policy_rollup(&sys, &[effective]);
+
+        assert_eq!(rollup.total, 1);
+        assert_eq!(rollup.pass, 1);
+        assert_eq!(rollup.fail, 0);
+        assert_eq!(rollup.evaluated_total, 1);
+        assert_eq!(rollup.score, 100);
+    }
 }
 
 // Integration test cases for list_system_bundles (database-dependent)

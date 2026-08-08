@@ -2514,4 +2514,152 @@ mod tests {
             "enforcement mode change must change digest"
         );
     }
+
+    fn candidate(
+        lineage_id: Uuid,
+        version_id: Uuid,
+        source: EffectivePolicySource,
+    ) -> EffectivePolicy {
+        EffectivePolicy {
+            policy_version_id: version_id,
+            policy_lineage_id: lineage_id,
+            policy_type: "require_cf_agent".to_string(),
+            source,
+            specificity: PolicySpecificity::BundleBaseline,
+            baseline_order: None,
+            addition_order: None,
+            overrides: vec![],
+            effective_config: serde_json::json!({}),
+            assignment_mode: AssignmentMode::Enforce,
+            effective_mode: AssignmentMode::Enforce,
+            provenance: vec![],
+        }
+    }
+
+    #[test]
+    fn exact_policy_version_selection_prefers_higher_specificity() {
+        let lineage_id = Uuid::from_u128(1);
+        let baseline_version = Uuid::from_u128(2);
+        let environment_version = Uuid::from_u128(3);
+        let system_version = Uuid::from_u128(4);
+        let mut staging = Vec::new();
+        let mut per_lineage = std::collections::HashMap::new();
+        let mut warnings = Vec::new();
+
+        assert!(matches!(
+            merge_effective_policy_candidate(
+                candidate(
+                    lineage_id,
+                    baseline_version,
+                    EffectivePolicySource::Baseline,
+                ),
+                PolicySpecificity::BundleBaseline,
+                ProvenanceEntry {
+                    source: EffectivePolicySource::Baseline,
+                    specificity: PolicySpecificity::BundleBaseline,
+                    scope_type: Some("environment".to_string()),
+                    enforcement_mode: "enforce".to_string(),
+                    authoritative: true,
+                },
+                &mut staging,
+                &mut per_lineage,
+                &mut warnings,
+                false,
+            ),
+            MergeOutcome::Inserted { .. }
+        ));
+
+        assert!(matches!(
+            merge_effective_policy_candidate(
+                candidate(
+                    lineage_id,
+                    environment_version,
+                    EffectivePolicySource::Addition,
+                ),
+                PolicySpecificity::Environment,
+                ProvenanceEntry {
+                    source: EffectivePolicySource::Addition,
+                    specificity: PolicySpecificity::Environment,
+                    scope_type: Some("environment".to_string()),
+                    enforcement_mode: "enforce".to_string(),
+                    authoritative: true,
+                },
+                &mut staging,
+                &mut per_lineage,
+                &mut warnings,
+                false,
+            ),
+            MergeOutcome::Replaced { .. }
+        ));
+        assert_eq!(staging[0].policy_version_id, environment_version);
+
+        assert!(matches!(
+            merge_effective_policy_candidate(
+                candidate(
+                    lineage_id,
+                    system_version,
+                    EffectivePolicySource::LegacyDirect,
+                ),
+                PolicySpecificity::System,
+                ProvenanceEntry {
+                    source: EffectivePolicySource::LegacyDirect,
+                    specificity: PolicySpecificity::System,
+                    scope_type: Some("system".to_string()),
+                    enforcement_mode: "enforce".to_string(),
+                    authoritative: true,
+                },
+                &mut staging,
+                &mut per_lineage,
+                &mut warnings,
+                false,
+            ),
+            MergeOutcome::Replaced { .. }
+        ));
+        assert_eq!(staging[0].policy_version_id, system_version);
+    }
+
+    #[test]
+    fn exact_same_specificity_version_conflict_is_not_silently_resolved() {
+        let lineage_id = Uuid::from_u128(11);
+        let first_version = Uuid::from_u128(12);
+        let second_version = Uuid::from_u128(13);
+        let mut staging = Vec::new();
+        let mut per_lineage = std::collections::HashMap::new();
+        let mut warnings = Vec::new();
+
+        let provenance = |scope_type: &str| ProvenanceEntry {
+            source: EffectivePolicySource::Addition,
+            specificity: PolicySpecificity::Environment,
+            scope_type: Some(scope_type.to_string()),
+            enforcement_mode: "enforce".to_string(),
+            authoritative: true,
+        };
+
+        assert!(matches!(
+            merge_effective_policy_candidate(
+                candidate(lineage_id, first_version, EffectivePolicySource::Addition),
+                PolicySpecificity::Environment,
+                provenance("environment"),
+                &mut staging,
+                &mut per_lineage,
+                &mut warnings,
+                false,
+            ),
+            MergeOutcome::Inserted { .. }
+        ));
+
+        let result = merge_effective_policy_candidate(
+            candidate(lineage_id, second_version, EffectivePolicySource::Addition),
+            PolicySpecificity::Environment,
+            provenance("environment"),
+            &mut staging,
+            &mut per_lineage,
+            &mut warnings,
+            false,
+        );
+        assert!(
+            matches!(result, MergeOutcome::Conflict(conflict) if conflict.code == "EFFECTIVE_POLICY_VERSION_CONFLICT")
+        );
+        assert_eq!(staging[0].policy_version_id, first_version);
+    }
 }

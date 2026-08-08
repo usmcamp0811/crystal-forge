@@ -938,6 +938,8 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
         && previewed_request.read().as_ref() == current_request.as_ref()
         && preview.read().is_some()
         && !*busy.read();
+    let created_scope_id = uuid::Uuid::parse_str(scope_id.read().trim()).ok();
+    let created_scope_type = scope_type.read().clone();
 
     rsx! {
         div { class: "card", style: "padding:14px 16px;display:flex;flex-direction:column;gap:12px;",
@@ -959,6 +961,12 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
                 div { class: "sd-callout sd-callout-success", style: "font-size:12px;",
                     Icon { name: IconName::Check, size: 13 }
                     "Assignment created. The effective policy set is now active for the selected scope."
+                }
+                if let Some(created_scope_id) = created_scope_id {
+                    AssignmentListPanel {
+                        scope_type: created_scope_type.clone(),
+                        scope_id: created_scope_id,
+                    }
                 }
             } else {
                 if let Some(err) = error.read().as_ref() {
@@ -1180,7 +1188,8 @@ struct AssignmentListPanelProps {
 #[component]
 fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
     use crate::api::client::{
-        delete_compliance_assignment, fetch_environment_assignments, fetch_system_assignments,
+        compliance_assignment_xccdf_url, delete_compliance_assignment,
+        fetch_environment_assignments, fetch_system_assignments,
     };
 
     let mut assignments = use_signal(Vec::<crate::api::models::AssignmentResponse>::new);
@@ -1279,6 +1288,18 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                 " · {assignment.enforcement_mode}"
                             }
                             div { style: "display:flex;gap:4px;",
+                                button {
+                                    class: "btn btn-ghost xs focus-ring",
+                                    style: "font-size:10px;",
+                                    disabled: *deleting.read() || *editing.read(),
+                                    onclick: move |_| {
+                                        let url = compliance_assignment_xccdf_url(&assignment_id);
+                                        if let Some(window) = web_sys::window() {
+                                            let _ = window.location().set_href(&url);
+                                        }
+                                    },
+                                    "Export effective assignment (XCCDF)"
+                                }
                                 button {
                                     class: "btn btn-ghost xs focus-ring",
                                     style: "font-size:10px;",

@@ -2354,6 +2354,17 @@ pub async fn fetch_system_assignments(
     Ok(wrapper.assignments)
 }
 
+/// URL for downloading the server-generated effective XCCDF for an assignment.
+/// The assignment export includes its overlay and resolved policy configuration;
+/// XML generation remains entirely on the server.
+pub fn compliance_assignment_xccdf_url(assignment_id: &Uuid) -> String {
+    format!(
+        "{}/compliance/assignments/{}/xccdf",
+        base_url(),
+        assignment_id
+    )
+}
+
 /// Delete (deactivate) an assignment.
 pub async fn delete_compliance_assignment(assignment_id: &Uuid) -> Result<(), ApiClientError> {
     let url = format!("{}/compliance/assignments/{}", base_url(), assignment_id);

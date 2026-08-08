@@ -499,7 +499,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .route(
             "/api/v1/compliance/xccdf/import",
-            post(compliance::xccdf_import),
+            post(compliance::xccdf_import).layer(DefaultBodyLimit::max(
+                crystal_forge::compliance::interchange::MAX_XCCDF_MULTIPART_BYTES,
+            )),
         )
         .route(
             "/api/v1/compliance/bundle-versions/:version_id/xccdf",
