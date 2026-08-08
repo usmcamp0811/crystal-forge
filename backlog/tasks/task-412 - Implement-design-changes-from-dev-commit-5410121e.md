@@ -1401,6 +1401,8 @@ Implemented remaining exact-version rollup correction in the task worktree: adde
 Beginning focused test-only pass for exact bundle version/control membership and effective overlay rollups. No production behavior or live database setup will be added.
 
 Focused assignment-effective XCCDF UI wiring completed in the requested worktree. Added a server URL helper and an `Export effective assignment (XCCDF)` action to the existing assignment list, exposed after successful assignment creation. Baseline bundle-version export remains unchanged; browser does not parse or construct XML. Verification: `nix develop -c cargo check` from `packages/web-ui` passed after the change. `nix develop -c cargo fmt --all --check` reported pre-existing formatting drift across unrelated web-ui files, so no broad formatting changes were made. `git diff --check` passed. Concurrent changes in `packages/default/crates/cf-server/src/compliance/resolver.rs` and `packages/default/crates/cf-server/src/queries/compliance.rs` were preserved.
+
+Added focused unit coverage in resolver.rs and queries/compliance.rs. Verification: SQLX_OFFLINE=true targeted resolver filter passed 2 tests; targeted compliance rollup filter passed 3 tests; git diff --check passed. Full cargo fmt --all --check was not clean due pre-existing formatting drift across the crate, and an initial online SQLx build could not connect to PostgreSQL; no live DB tests were added or run.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
