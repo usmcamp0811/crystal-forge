@@ -1343,6 +1343,8 @@ Remaining correctness gap: extend the existing set-based system effective-policy
 - Verify with the repository `web-ui` cargo check and inspect the final diff for focused scope.
 
 Focused test pass in the existing cf-server unit-test modules: exercise exact bundle-version membership inputs and resolver precedence/conflict behavior with deterministic UUIDs, and exercise effective compliance rollups for exclusions, additions, report-only overlays, and value overrides. Avoid new live-DB coverage because the pure helpers already expose the relevant semantics; retain the repository's existing ignored integration-test convention unchanged.
+
+Focused historical assignment fix: add an authenticated read-only bundle-version membership endpoint returning ordered exact policy-version DTOs from compliance_bundle_version_policies; add matching web-ui DTO/client function; load that membership for AssignmentCreatePanel and use exact policy version IDs for exclusions while retaining the existing policy catalog/version IDs for additions; keep the existing server-backed assignment preview unchanged. Verify with web-ui cargo check and inspect the final diff/status.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -1403,6 +1405,8 @@ Beginning focused test-only pass for exact bundle version/control membership and
 Focused assignment-effective XCCDF UI wiring completed in the requested worktree. Added a server URL helper and an `Export effective assignment (XCCDF)` action to the existing assignment list, exposed after successful assignment creation. Baseline bundle-version export remains unchanged; browser does not parse or construct XML. Verification: `nix develop -c cargo check` from `packages/web-ui` passed after the change. `nix develop -c cargo fmt --all --check` reported pre-existing formatting drift across unrelated web-ui files, so no broad formatting changes were made. `git diff --check` passed. Concurrent changes in `packages/default/crates/cf-server/src/compliance/resolver.rs` and `packages/default/crates/cf-server/src/queries/compliance.rs` were preserved.
 
 Added focused unit coverage in resolver.rs and queries/compliance.rs. Verification: SQLX_OFFLINE=true targeted resolver filter passed 2 tests; targeted compliance rollup filter passed 3 tests; git diff --check passed. Full cargo fmt --all --check was not clean due pre-existing formatting drift across the crate, and an initial online SQLx build could not connect to PostgreSQL; no live DB tests were added or run.
+
+Investigated TASK-412 historical assignment bug in dedicated worktree. Compliance UI currently derives exclusions from bundle lineage policy_ids plus each policy's current version_id, which is incorrect for historical bundle versions. Planned exact membership API/client path and UI-only wiring; additions remain on existing policy catalog.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
