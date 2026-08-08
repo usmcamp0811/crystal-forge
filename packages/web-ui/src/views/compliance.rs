@@ -3410,6 +3410,15 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
     let mut error = use_signal(|| None::<String>);
     let mut saving = use_signal(|| false);
     let mut confirm_delete = use_signal(|| false);
+    let mut delete_busy = use_signal(|| false);
+
+    let has_immutable_history = props.bundle.versions.iter().any(|version| {
+        matches!(
+            version.publication_state.as_str(),
+            "accepted" | "deprecated"
+        )
+    });
+    let assigned_count = props.bundle.environment_count;
 
     let can_save = !name.read().trim().is_empty() && !selected_policy_ids.read().is_empty();
 
@@ -3441,13 +3450,34 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                     DeleteBundleConfirm {
                         bundle_name: props.bundle.name.clone(),
                         policy_count: props.bundle.policy_ids.len(),
-                        on_cancel: move |_| confirm_delete.set(false),
+                        busy: *delete_busy.read(),
+                        error: error.read().clone(),
+                        on_cancel: move |_| {
+                            if !*delete_busy.read() {
+                                error.set(None);
+                                confirm_delete.set(false);
+                            }
+                        },
                         on_confirm: move |_| {
                             let bid = bundle_id;
+                            error.set(None);
+                            delete_busy.set(true);
                             spawn(async move {
                                 match delete_compliance_bundle(&bid).await {
-                                    Ok(()) => props.on_deleted.call(bid),
-                                    Err(err) => error.set(Some(err.to_string())),
+                                    Ok(()) => {
+                                        delete_busy.set(false);
+                                        props.on_deleted.call(bid)
+                                    }
+                                    Err(err) => {
+                                        web_sys::console::error_1(&format!("Failed to delete bundle: {err}").into());
+                                        delete_busy.set(false);
+                                        error.set(Some(match err {
+                                            crate::api::client::ApiClientError::Status { code, body } => {
+                                                format!("Delete failed (HTTP {code}): {body}")
+                                            }
+                                            other => format!("Failed to delete bundle: {other}"),
+                                        }));
+                                    }
                                 }
                             });
                         },
@@ -3618,17 +3648,28 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                         }
                     }
 
-                    // Danger zone
+                    // Danger zone. Do not present a misleading hard-delete
+                    // action when the server can already prove it is blocked.
                     div { style: "margin-top:10px;padding-top:14px;border-top:1px solid var(--cf-divider);",
                         div { style: "font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);margin-bottom:8px;",
                             "Danger zone"
                         }
-                        button {
-                            class: "btn btn-ghost focus-ring",
-                            style: "color:#f87171;border-color:rgba(248,113,113,0.3);",
-                            onclick: move |_| confirm_delete.set(true),
-                            Icon { name: IconName::Trash, size: 12 }
-                            " Delete bundle"
+                        if has_immutable_history {
+                            div { class: "help", style: "color:#fbbf24;",
+                                "Permanent deletion is unavailable because this bundle has accepted or deprecated compliance history."
+                            }
+                        } else if assigned_count > 0 {
+                            div { class: "help", style: "color:#fbbf24;",
+                                "This bundle is assigned to {assigned_count} target(s). Remove those assignments before permanently deleting it."
+                            }
+                        } else {
+                            button {
+                                class: "btn btn-ghost focus-ring",
+                                style: "color:#f87171;border-color:rgba(248,113,113,0.3);",
+                                onclick: move |_| confirm_delete.set(true),
+                                Icon { name: IconName::Trash, size: 12 }
+                                " Delete bundle"
+                            }
                         }
                     }
                 }
@@ -3684,6 +3725,8 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
 struct DeleteBundleConfirmProps {
     bundle_name: String,
     policy_count: usize,
+    busy: bool,
+    error: Option<String>,
     on_cancel: EventHandler<()>,
     on_confirm: EventHandler<()>,
 }
@@ -3724,6 +3767,9 @@ fn DeleteBundleConfirm(props: DeleteBundleConfirmProps) -> Element {
                     }
                 }
             }
+            if let Some(error) = props.error.as_ref() {
+                div { class: "sd-callout sd-callout-danger", style: "margin-bottom:12px;", "{error}" }
+            }
             div { class: "field",
                 label {
                     "Type "
@@ -3742,6 +3788,7 @@ fn DeleteBundleConfirm(props: DeleteBundleConfirmProps) -> Element {
         div { class: "modal-foot",
             button {
                 class: "btn btn-ghost focus-ring",
+                disabled: props.busy,
                 onclick: move |_| props.on_cancel.call(()),
                 "Cancel"
             }
@@ -3752,10 +3799,10 @@ fn DeleteBundleConfirm(props: DeleteBundleConfirmProps) -> Element {
                 } else {
                     "background:var(--cf-subtle-bg);color:var(--cf-text-muted);"
                 },
-                disabled: !matches,
+                disabled: !matches || props.busy,
                 onclick: move |_| { if matches { props.on_confirm.call(()); } },
                 Icon { name: IconName::Trash, size: 13 }
-                " Delete bundle"
+                if props.busy { " Deleting…" } else { " Delete bundle" }
             }
         }
     }

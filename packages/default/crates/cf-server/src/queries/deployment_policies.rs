@@ -558,16 +558,111 @@ pub async fn update_deployment_policy(
     Ok(policy)
 }
 
-/// Delete a deployment policy
-/// Returns true if deleted, false if not found
-pub async fn delete_deployment_policy(pool: &PgPool, policy_id: &Uuid) -> Result<bool> {
-    let result = sqlx::query("DELETE FROM deployment_policies WHERE id = $1")
-        .bind(policy_id)
-        .execute(pool)
-        .await
-        .context("Failed to delete deployment policy")?;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyDeleteOutcome {
+    Deleted,
+    NotFound,
+    BlockedByImmutableHistory { version_ids: Vec<Uuid> },
+    BlockedByReferences { reference_count: i64 },
+    BlockedByAssignments { assignment_count: i64 },
+}
 
-    Ok(result.rows_affected() > 0)
+/// Delete a policy lineage only when no immutable history or reference would
+/// be destroyed. The lineage row is locked for the full eligibility check and
+/// delete; the FK guards remain defense in depth.
+pub async fn delete_deployment_policy(
+    pool: &PgPool,
+    policy_id: &Uuid,
+) -> Result<PolicyDeleteOutcome> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin policy deletion")?;
+
+    let exists: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM deployment_policies WHERE id = $1 FOR UPDATE")
+            .bind(policy_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to lock deployment policy")?;
+
+    if exists.is_none() {
+        tx.rollback().await.ok();
+        return Ok(PolicyDeleteOutcome::NotFound);
+    }
+
+    let immutable_versions: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM deployment_policy_versions WHERE policy_id = $1 AND publication_state IN ('accepted', 'deprecated') ORDER BY created_at, id",
+    )
+    .bind(policy_id)
+    .fetch_all(&mut *tx)
+    .await
+    .context("Failed to check policy immutable history")?;
+
+    if !immutable_versions.is_empty() {
+        tx.rollback().await.ok();
+        return Ok(PolicyDeleteOutcome::BlockedByImmutableHistory {
+            version_ids: immutable_versions,
+        });
+    }
+
+    let version_references: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM (\
+          SELECT bvp.policy_version_id FROM compliance_bundle_version_policies bvp JOIN deployment_policy_versions pv ON pv.id = bvp.policy_version_id WHERE pv.policy_id = $1\
+          UNION ALL SELECT cbp.policy_id FROM compliance_bundle_policies cbp WHERE cbp.policy_id = $1\
+          UNION ALL SELECT e.policy_version_id FROM compliance_assignment_exclusions e JOIN deployment_policy_versions pv ON pv.id = e.policy_version_id WHERE pv.policy_id = $1\
+          UNION ALL SELECT a.policy_version_id FROM compliance_assignment_additions a JOIN deployment_policy_versions pv ON pv.id = a.policy_version_id WHERE pv.policy_id = $1\
+          UNION ALL SELECT o.policy_version_id FROM compliance_assignment_value_overrides o JOIN deployment_policy_versions pv ON pv.id = o.policy_version_id WHERE pv.policy_id = $1\
+        ) references",
+    )
+    .bind(policy_id)
+    .fetch_one(&mut *tx)
+    .await
+    .context("Failed to check policy version references")?;
+
+    if version_references > 0 {
+        tx.rollback().await.ok();
+        return Ok(PolicyDeleteOutcome::BlockedByReferences {
+            reference_count: version_references,
+        });
+    }
+
+    let environment_assignment_count: i64 = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM environment_policies WHERE policy_id = $1",
+    )
+    .bind(policy_id)
+    .fetch_one(&mut *tx)
+    .await
+    .context("Failed to check environment policy assignments")?;
+    let system_assignment_count: i64 =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM system_policies WHERE policy_id = $1")
+            .bind(policy_id)
+            .fetch_one(&mut *tx)
+            .await
+            .context("Failed to check system policy assignments")?;
+    let assignment_count = environment_assignment_count + system_assignment_count;
+
+    if assignment_count > 0 {
+        tx.rollback().await.ok();
+        return Ok(PolicyDeleteOutcome::BlockedByAssignments { assignment_count });
+    }
+
+    let deleted = sqlx::query("DELETE FROM deployment_policies WHERE id = $1")
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to delete deployment policy")?
+        .rows_affected();
+
+    if deleted != 1 {
+        tx.rollback().await.ok();
+        return Ok(PolicyDeleteOutcome::NotFound);
+    }
+
+    tx.commit()
+        .await
+        .context("Failed to commit deployment policy deletion")?;
+    Ok(PolicyDeleteOutcome::Deleted)
 }
 
 /// Check if a policy name already exists (case-insensitive)

@@ -63,6 +63,8 @@ pub fn PoliciesView() -> Element {
     let mut category_filter = use_signal(|| "all".to_string());
     let mut type_filter = use_signal(|| "all".to_string());
     let mut delete_confirm: Signal<Option<Uuid>> = use_signal(|| None);
+    let mut delete_busy = use_signal(|| false);
+    let mut delete_error: Signal<Option<String>> = use_signal(|| None);
     let mut focused_policy_name = use_signal(|| None::<String>);
     let mut policies_loaded = use_signal(|| false);
     let mut pending_policy_focus = use_signal(|| None::<NavigationFocus>);
@@ -604,9 +606,15 @@ pub fn PoliciesView() -> Element {
                 DeleteConfirmModal {
                     policy_id: id,
                     policy_name: policy_library.read().iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default(),
+                    busy: *delete_busy.read(),
+                    error: delete_error.read().clone(),
                     on_confirm: move |_| {
                         let mut policy_library = policy_library;
                         let mut delete_confirm = delete_confirm;
+                        let mut delete_busy = delete_busy;
+                        let mut delete_error = delete_error;
+                        delete_error.set(None);
+                        delete_busy.set(true);
                         spawn(async move {
                             match delete_deployment_policy(&id).await {
                                 Ok(()) => {
@@ -619,15 +627,28 @@ pub fn PoliciesView() -> Element {
                                             policies_load_error.set(Some(e));
                                         }
                                     }
+                                    delete_busy.set(false);
+                                    delete_confirm.set(None);
                                 }
                                 Err(error) => {
                                     web_sys::console::error_1(&format!("Failed to delete policy: {error}").into());
+                                    delete_busy.set(false);
+                                    delete_error.set(Some(match error {
+                                        crate::api::client::ApiClientError::Status { code, body } => {
+                                            format!("Delete failed (HTTP {code}): {body}")
+                                        }
+                                        other => format!("Failed to delete policy: {other}"),
+                                    }));
                                 }
                             }
-                            delete_confirm.set(None);
                         });
                     },
-                    on_cancel: move |_| delete_confirm.set(None),
+                    on_cancel: move |_| {
+                        if !*delete_busy.read() {
+                            delete_error.set(None);
+                            delete_confirm.set(None);
+                        }
+                    },
                 }
             }
         }
@@ -1051,6 +1072,8 @@ mod interchange_tests {
 fn DeleteConfirmModal(
     policy_id: Uuid,
     policy_name: String,
+    busy: bool,
+    error: Option<String>,
     on_confirm: EventHandler<()>,
     on_cancel: EventHandler<()>,
 ) -> Element {
@@ -1070,15 +1093,18 @@ fn DeleteConfirmModal(
                         }
                     }
                 }
-                h3 { class: "text-lg font-semibold text-white text-center mb-2", "Delete Policy?" }
+                h3 { class: "text-lg font-semibold text-white text-center mb-2", "Delete draft policy?" }
                 p { class: "text-sm {theme::text::SECONDARY} text-center mb-6",
-                    "Are you sure you want to delete "
+                    "This permanently removes the unpublished policy "
                     span { class: "font-medium text-white", "{policy_name}" }
-                    "? This action cannot be undone."
+                    " and its draft history. This cannot be undone."
+                }
+                if let Some(error) = error {
+                    div { class: "sd-callout sd-callout-danger", style: "margin-bottom:12px;", "{error}" }
                 }
                 div { class: "flex gap-3",
-                    button { class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-gray-700 hover:bg-gray-600 text-white", onclick: move |_| on_cancel.call(()), "Cancel" }
-                    button { class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-red-500 hover:bg-red-400 text-white", onclick: move |_| on_confirm.call(()), "Delete" }
+                    button { class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-gray-700 hover:bg-gray-600 text-white", disabled: busy, onclick: move |_| on_cancel.call(()), "Cancel" }
+                    button { class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-red-500 hover:bg-red-400 text-white", disabled: busy, onclick: move |_| on_confirm.call(()), if busy { "Deleting…" } else { "Delete" } }
                 }
             }
         }

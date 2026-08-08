@@ -27,6 +27,7 @@ use crate::models::deployment_policies::{
     is_reserved_policy_result_field,
 };
 use crate::queries::deployment_policies;
+use crate::queries::deployment_policies::PolicyDeleteOutcome;
 
 // =============================================================================
 // Response Models
@@ -1038,71 +1039,93 @@ pub async fn update_deployment_policy(
 /// Available to Admin role only.
 ///
 /// Returns 404 if the policy does not exist.
-/// Returns 409 if the policy is currently assigned to any environments or systems.
+/// Returns typed 409 responses for immutable history, bundle/overlay references,
+/// or legacy environment/system assignments.
 pub async fn delete_deployment_policy(
     RequireAdmin(_user): RequireAdmin,
     State(state): State<CFState>,
     Path(policy_id): Path<Uuid>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let existing = deployment_policies::get_deployment_policy_by_id(&state.pool, &policy_id)
+) -> Result<StatusCode, axum::response::Response> {
+    // Keep the core policy protection before the transactional deletion path.
+    if deployment_policies::get_deployment_policy_by_id(&state.pool, &policy_id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to fetch deployment policy {}: {}", policy_id, e);
-            (
+            tracing::error!(%policy_id, error = %e, "failed to load policy for deletion");
+            policy_delete_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to retrieve deployment policy".to_string(),
+                "internal_error",
+                "Failed to retrieve deployment policy",
+                None,
             )
         })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            "Deployment policy not found".to_string(),
-        ))?;
-
-    if existing.policy_type == "require_cf_agent" {
-        return Err((
+        .is_some_and(|policy| policy.policy_type == "require_cf_agent")
+    {
+        return Err(policy_delete_error(
             StatusCode::CONFLICT,
-            "Core require_cf_agent policy cannot be deleted".to_string(),
+            "policy_core",
+            "The core require_cf_agent policy cannot be permanently deleted.",
+            None,
         ));
     }
 
-    // Check if policy is in use
-    let in_use = deployment_policies::check_policy_in_use(&state.pool, &policy_id)
+    let outcome = deployment_policies::delete_deployment_policy(&state.pool, &policy_id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to check if policy {} is in use: {}", policy_id, e);
-            (
+            tracing::error!(%policy_id, error = %e, "failed to delete deployment policy");
+            policy_delete_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to validate policy deletion".to_string(),
+                "internal_error",
+                "Failed to validate or delete deployment policy",
+                None,
             )
         })?;
 
-    if in_use {
-        return Err((
-            StatusCode::CONFLICT,
-            "Cannot delete policy: it is currently assigned to one or more environments or systems"
-                .to_string(),
-        ));
-    }
-
-    // Delete policy
-    let deleted = deployment_policies::delete_deployment_policy(&state.pool, &policy_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete deployment policy {}: {}", policy_id, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to delete deployment policy".to_string(),
-            )
-        })?;
-
-    if !deleted {
-        return Err((
+    match outcome {
+        PolicyDeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        PolicyDeleteOutcome::NotFound => Err(policy_delete_error(
             StatusCode::NOT_FOUND,
-            "Deployment policy not found".to_string(),
-        ));
+            "not_found",
+            "Deployment policy not found",
+            None,
+        )),
+        PolicyDeleteOutcome::BlockedByImmutableHistory { version_ids } => Err(policy_delete_error(
+            StatusCode::CONFLICT,
+            "policy_immutable_history",
+            "This policy has accepted or deprecated history and cannot be permanently deleted.",
+            Some(serde_json::json!({ "policy_id": policy_id, "blocking_versions": version_ids })),
+        )),
+        PolicyDeleteOutcome::BlockedByReferences { reference_count } => Err(policy_delete_error(
+            StatusCode::CONFLICT,
+            "policy_referenced",
+            "This policy cannot be permanently deleted because compliance bundle versions or assignment overlays reference it.",
+            Some(serde_json::json!({ "policy_id": policy_id, "reference_count": reference_count })),
+        )),
+        PolicyDeleteOutcome::BlockedByAssignments { assignment_count } => Err(policy_delete_error(
+            StatusCode::CONFLICT,
+            "policy_assigned",
+            "This policy is assigned to environments or systems and cannot be permanently deleted.",
+            Some(
+                serde_json::json!({ "policy_id": policy_id, "assignment_count": assignment_count }),
+            ),
+        )),
     }
+}
 
-    Ok(StatusCode::NO_CONTENT)
+fn policy_delete_error(
+    status: StatusCode,
+    error: &str,
+    message: &str,
+    details: Option<serde_json::Value>,
+) -> axum::response::Response {
+    (
+        status,
+        Json(crate::api::models::ApiError {
+            error: error.to_string(),
+            message: message.to_string(),
+            details,
+        }),
+    )
+        .into_response()
 }
 
 // =============================================================================
@@ -1462,7 +1485,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(deleted);
+        assert_eq!(deleted, PolicyDeleteOutcome::Deleted);
 
         // Verify it's actually deleted
         let policy = deployment_policies::get_deployment_policy_by_id(&pool, &policy_id)

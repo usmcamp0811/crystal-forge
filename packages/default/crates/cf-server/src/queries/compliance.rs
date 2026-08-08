@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
@@ -1088,17 +1088,84 @@ pub async fn update_bundle(
     find_bundle(pool, bundle_id).await
 }
 
-pub async fn delete_bundle(pool: &PgPool, bundle_id: Uuid) -> Result<bool> {
-    // The database trigger on compliance_bundles prevents deletion when an
-    // accepted or deprecated version exists (0197/0199 migrations).
-    // The ON DELETE CASCADE on compliance_bundle_versions removes draft
-    // version rows and their associated membership + assignments automatically.
-    let rows =
-        sqlx::query_scalar::<_, i64>("DELETE FROM compliance_bundles WHERE id = $1 RETURNING 1")
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BundleDeleteOutcome {
+    Deleted,
+    NotFound,
+    BlockedByImmutableHistory { version_ids: Vec<Uuid> },
+    BlockedByAssignments { assignment_count: i64 },
+}
+
+/// Delete a bundle lineage only when it is disposable.
+///
+/// The lineage row is locked before eligibility is checked and deleted. The
+/// existing database trigger remains as a final race-safety guard for accepted
+/// and deprecated history; it is not used as the normal API control flow.
+pub async fn delete_bundle(pool: &PgPool, bundle_id: Uuid) -> Result<BundleDeleteOutcome> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin bundle deletion")?;
+
+    let exists: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM compliance_bundles WHERE id = $1 FOR UPDATE")
             .bind(bundle_id)
-            .fetch_optional(pool)
-            .await?;
-    Ok(rows.is_some())
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to lock compliance bundle")?;
+
+    if exists.is_none() {
+        tx.rollback().await.ok();
+        return Ok(BundleDeleteOutcome::NotFound);
+    }
+
+    let immutable_versions: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM compliance_bundle_versions WHERE bundle_id = $1 AND publication_state IN ('accepted', 'deprecated') ORDER BY created_at, id",
+    )
+    .bind(bundle_id)
+    .fetch_all(&mut *tx)
+    .await
+    .context("Failed to check compliance bundle immutable history")?;
+
+    if !immutable_versions.is_empty() {
+        tx.rollback().await.ok();
+        return Ok(BundleDeleteOutcome::BlockedByImmutableHistory {
+            version_ids: immutable_versions,
+        });
+    }
+
+    // Only active assignment rows block deletion. Inactive historical rows
+    // belong to the disposable unpublished lineage and may cascade with it.
+    let assignment_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM compliance_bundle_assignments a JOIN compliance_bundle_versions v ON v.id = a.bundle_version_id WHERE v.bundle_id = $1 AND COALESCE(a.active, true)",
+    )
+    .bind(bundle_id)
+    .fetch_one(&mut *tx)
+    .await
+    .context("Failed to check compliance bundle assignments")?;
+
+    if assignment_count > 0 {
+        tx.rollback().await.ok();
+        return Ok(BundleDeleteOutcome::BlockedByAssignments { assignment_count });
+    }
+
+    // Keep the trigger in place as defense in depth against publication races.
+    let deleted = sqlx::query("DELETE FROM compliance_bundles WHERE id = $1")
+        .bind(bundle_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to delete compliance bundle")?
+        .rows_affected();
+
+    if deleted != 1 {
+        tx.rollback().await.ok();
+        return Ok(BundleDeleteOutcome::NotFound);
+    }
+
+    tx.commit()
+        .await
+        .context("Failed to commit compliance bundle deletion")?;
+    Ok(BundleDeleteOutcome::Deleted)
 }
 
 pub async fn list_bundle_systems(

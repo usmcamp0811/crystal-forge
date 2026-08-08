@@ -35,10 +35,10 @@ use crate::compliance::xccdf::reconciliation::NativeReconcileFailure;
 use crate::compliance::xccdf::xml_writer::{XccdfWriterError, write_bundle_xccdf_export};
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
-    BundleValidationError, create_bundle as create_bundle_row, delete_bundle as delete_bundle_row,
-    get_system_evidence, list_bundle_systems, list_bundle_systems_for_version,
-    list_bundle_version_policy_membership, list_bundles, list_system_bundles,
-    update_bundle as update_bundle_row,
+    BundleDeleteOutcome, BundleValidationError, create_bundle as create_bundle_row,
+    delete_bundle as delete_bundle_row, get_system_evidence, list_bundle_systems,
+    list_bundle_systems_for_version, list_bundle_version_policy_membership, list_bundles,
+    list_system_bundles, update_bundle as update_bundle_row,
 };
 use crate::queries::compliance_interchange;
 
@@ -237,9 +237,36 @@ pub async fn delete_compliance_bundle(
     }
 
     match delete_bundle_row(&pool, bundle_id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => not_found(),
-        Err(_) => internal_error("Failed to delete compliance bundle"),
+        Ok(BundleDeleteOutcome::Deleted) => StatusCode::NO_CONTENT.into_response(),
+        Ok(BundleDeleteOutcome::NotFound) => not_found(),
+        Ok(BundleDeleteOutcome::BlockedByImmutableHistory { version_ids }) => (
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "bundle_immutable_history".to_string(),
+                message: "This compliance bundle has accepted or deprecated history and cannot be permanently deleted.".to_string(),
+                details: Some(serde_json::json!({
+                    "bundle_id": bundle_id,
+                    "blocking_versions": version_ids,
+                })),
+            }),
+        )
+            .into_response(),
+        Ok(BundleDeleteOutcome::BlockedByAssignments { assignment_count }) => (
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "bundle_in_use".to_string(),
+                message: "This compliance bundle is assigned and cannot be permanently deleted.".to_string(),
+                details: Some(serde_json::json!({
+                    "bundle_id": bundle_id,
+                    "assignment_count": assignment_count,
+                })),
+            }),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::error!(%bundle_id, error = %error, "failed to delete compliance bundle");
+            internal_error("Failed to delete compliance bundle")
+        }
     }
 }
 
