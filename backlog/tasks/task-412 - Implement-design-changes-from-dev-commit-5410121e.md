@@ -1341,6 +1341,8 @@ Remaining correctness gap: extend the existing set-based system effective-policy
 - Add a distinct server-backed effective-assignment XCCDF download action to the existing assignment list cards; retain the baseline bundle-version export action unchanged.
 - Do not parse or construct XML in the browser.
 - Verify with the repository `web-ui` cargo check and inspect the final diff for focused scope.
+
+Focused test pass in the existing cf-server unit-test modules: exercise exact bundle-version membership inputs and resolver precedence/conflict behavior with deterministic UUIDs, and exercise effective compliance rollups for exclusions, additions, report-only overlays, and value overrides. Avoid new live-DB coverage because the pure helpers already expose the relevant semantics; retain the repository's existing ignored integration-test convention unchanged.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -1395,6 +1397,8 @@ Scanning-only delta implemented in packages/web-ui/src/views/scanning.rs: all th
 Implemented the Policies revision UX in TASK-412 worktree: management list versions now carries stored version payloads; drawer selects exact historical revision and marks current draft/published/current selection; per-policy export follows selected version; policy API load/refresh paths no longer use mock or empty fallback and render explicit errors. Verified web-ui WASM cargo check and server SQLx-offline cargo check. Pre-existing worktree changes in docs, scanning, Tailwind asset, and STIG ZIP were left untouched.
 
 Implemented remaining exact-version rollup correction in the task worktree: added a batch resolver API scoped to an exact bundle version, virtual baseline resolution for applicable unassigned systems, and authoritative direct environment/system policy merging. The versioned systems query now uses effective_policy_rollup; no-version behavior remains on the legacy path. Added a focused unit test for selected effective membership and rollup accounting. Verification: rustfmt parser check reached only pre-existing formatting differences; host cargo check failed at openssl-sys due missing pkg-config; Nix-shell offline cargo check failed at existing SQLx compile-time queries because PostgreSQL connection was refused (no source/type errors from the changed paths observed).
+
+Beginning focused test-only pass for exact bundle version/control membership and effective overlay rollups. No production behavior or live database setup will be added.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
