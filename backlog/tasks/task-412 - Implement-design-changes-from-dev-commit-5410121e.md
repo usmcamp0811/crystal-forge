@@ -1407,6 +1407,8 @@ Focused assignment-effective XCCDF UI wiring completed in the requested worktree
 Added focused unit coverage in resolver.rs and queries/compliance.rs. Verification: SQLX_OFFLINE=true targeted resolver filter passed 2 tests; targeted compliance rollup filter passed 3 tests; git diff --check passed. Full cargo fmt --all --check was not clean due pre-existing formatting drift across the crate, and an initial online SQLx build could not connect to PostgreSQL; no live DB tests were added or run.
 
 Investigated TASK-412 historical assignment bug in dedicated worktree. Compliance UI currently derives exclusions from bundle lineage policy_ids plus each policy's current version_id, which is incorrect for historical bundle versions. Planned exact membership API/client path and UI-only wiring; additions remain on existing policy catalog.
+
+2026-08-08: Fixed policy revision browsing in the task worktree. Added a shared revision editability check: only draft revisions expose Edit and draft mutation controls; accepted/deprecated historical revisions are read-only and expose the existing Create draft API action. Draft editing and lifecycle APIs were otherwise unchanged. `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed. `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml --check` reports pre-existing formatting differences in unrelated web UI files; no formatting-only changes were applied.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
