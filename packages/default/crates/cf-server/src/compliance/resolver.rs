@@ -957,7 +957,7 @@ pub async fn resolve_systems_effective_policies_for_evaluation_batch(
     pool: &PgPool,
     system_ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, ResolutionOutcome>> {
-    resolve_systems_effective_policies_batch(pool, system_ids, None, true).await
+    resolve_systems_effective_policies_batch(pool, system_ids, None, true, false).await
 }
 
 /// Resolve one exact bundle version for all provided systems in one batch.
@@ -969,7 +969,21 @@ pub async fn resolve_systems_effective_policies_for_bundle_version_batch(
     system_ids: &[Uuid],
     bundle_version_id: Uuid,
 ) -> Result<std::collections::HashMap<Uuid, ResolutionOutcome>> {
-    resolve_systems_effective_policies_batch(pool, system_ids, Some(bundle_version_id), false).await
+    let is_current_published: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM compliance_bundles b WHERE b.current_published_version_id = $1)",
+    )
+    .bind(bundle_version_id)
+    .fetch_one(pool)
+    .await
+    .context("check current published bundle version")?;
+    resolve_systems_effective_policies_batch(
+        pool,
+        system_ids,
+        Some(bundle_version_id),
+        false,
+        is_current_published,
+    )
+    .await
 }
 
 async fn resolve_systems_effective_policies_batch(
@@ -977,6 +991,7 @@ async fn resolve_systems_effective_policies_batch(
     system_ids: &[Uuid],
     bundle_version_filter: Option<Uuid>,
     ignore_non_evaluation_conflicts: bool,
+    allow_virtual_baseline: bool,
 ) -> Result<std::collections::HashMap<Uuid, ResolutionOutcome>> {
     if system_ids.is_empty() {
         return Ok(std::collections::HashMap::new());
@@ -1273,7 +1288,8 @@ async fn resolve_systems_effective_policies_batch(
     // Preserve the versioned endpoint's applicability surface for systems that
     // have no explicit assignment for this exact version. A virtual baseline
     // keeps the operation set-based and sends it through the same merge path.
-    if let Some(bundle_version_id) = bundle_version_filter {
+    if allow_virtual_baseline {
+        if let Some(bundle_version_id) = bundle_version_filter {
         for &sys_id in system_ids {
             if !assignments_for_system.contains_key(&sys_id) {
                 assignments_for_system.insert(
@@ -1290,6 +1306,7 @@ async fn resolve_systems_effective_policies_batch(
                     )],
                 );
             }
+        }
         }
     }
 

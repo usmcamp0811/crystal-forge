@@ -1072,6 +1072,33 @@ pub async fn list_bundle_systems(
     }))
 }
 
+async fn list_explicit_bundle_version_system_rows(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    bundle_version_id: Uuid,
+) -> Result<Vec<SystemRow>> {
+    Ok(sqlx::query_as::<_, SystemRow>(
+        r#"
+        SELECT DISTINCT v.id, v.hostname, v.environment, v.health_status,
+               v.critical_cve_count, v.high_cve_count
+        FROM view_system_list v
+        LEFT JOIN environments e ON e.name = v.environment
+        JOIN compliance_bundle_assignments a
+          ON a.bundle_version_id = $2 AND a.active
+         AND (
+             (a.scope_type = 'system' AND a.system_id = v.id)
+             OR (a.scope_type = 'environment' AND a.environment_id = e.id)
+         )
+        JOIN compliance_bundles b ON b.id = a.bundle_id AND b.id = $1
+        ORDER BY v.hostname ASC
+        "#,
+    )
+    .bind(bundle_id)
+    .bind(bundle_version_id)
+    .fetch_all(pool)
+    .await?)
+}
+
 /// Resolve the systems rollup against one exact immutable bundle revision.
 /// This deliberately does not substitute the lineage's current membership.
 pub async fn list_bundle_systems_for_version(
@@ -1105,7 +1132,18 @@ pub async fn list_bundle_systems_for_version(
     .bind(bundle_id)
     .fetch_all(pool)
     .await?;
-    let systems = list_applicable_system_rows(pool, bundle_id).await?;
+    let is_current_published: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM compliance_bundles WHERE id = $1 AND current_published_version_id = $2)",
+    )
+    .bind(bundle_id)
+    .bind(bundle_version_id)
+    .fetch_one(pool)
+    .await?;
+    let systems = if is_current_published {
+        list_applicable_system_rows(pool, bundle_id).await?
+    } else {
+        list_explicit_bundle_version_system_rows(pool, bundle_id, bundle_version_id).await?
+    };
     let system_ids: Vec<Uuid> = systems.iter().map(|system| system.id).collect();
     let effective = resolve_systems_effective_policies_for_bundle_version_batch(
         pool,
@@ -1120,9 +1158,14 @@ pub async fn list_bundle_systems_for_version(
                 if set.bundle_version_id == bundle_version_id => {
                 effective_policy_rollup(&system, &set.policies)
             }
-            // Conflicts have no authoritative effective set. Keep the exact
-            // requested version visible rather than substituting another one.
-            _ => system_rollup(system, &policies),
+            Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup(
+                system,
+                policies.len() as i64,
+                conflicts.first().map(|c| c.code.as_str()).unwrap_or("conflict"),
+            ),
+            // Missing or mismatched resolution has no authoritative effective
+            // set. Never substitute lineage/current membership for this view.
+            _ => unresolved_system_rollup(system, policies.len() as i64, "not_applicable"),
         })
         .collect();
     let totals = totals_for_rollups(&rollups);
@@ -1321,7 +1364,13 @@ pub async fn get_system_evidence(
     // Use the same environment predicate as list_applicable_system_rows so that
     // requesting evidence for a system outside the bundle's environment scope
     // returns None (→ 404) rather than fabricated out-of-scope compliance data.
-    let system = find_applicable_system_row(pool, bundle_id, system_id).await?;
+    let system = match bundle_version_id {
+        Some(version_id) => list_explicit_bundle_version_system_rows(pool, bundle_id, version_id)
+            .await?
+            .into_iter()
+            .find(|row| row.id == system_id),
+        None => find_applicable_system_row(pool, bundle_id, system_id).await?,
+    };
 
     let Some(system) = system else {
         return Ok(None);
@@ -1355,6 +1404,7 @@ pub async fn get_system_evidence(
         }
         None => list_bundle_policies(pool, bundle_id).await?,
     };
+    let mut resolution_state: Option<String> = None;
     if let ResolutionOutcome::Resolved(effective) =
         resolve_system_effective_policies(pool, system_id).await?
     {
@@ -1363,7 +1413,10 @@ pub async fn get_system_evidence(
                 .bind(effective.bundle_version_id)
                 .fetch_optional(pool)
                 .await?;
-        if resolved_bundle_id == Some(bundle_id) {
+        let exact_requested = bundle_version_id
+            .map(|requested| effective.bundle_version_id == requested)
+            .unwrap_or(resolved_bundle_id == Some(bundle_id));
+        if exact_requested && resolved_bundle_id == Some(bundle_id) {
             let ids: Vec<Uuid> = effective
                 .policies
                 .iter()
@@ -1396,7 +1449,11 @@ pub async fn get_system_evidence(
                     })
                 })
                 .collect();
+        } else if bundle_version_id.is_some() {
+            resolution_state = Some("not_applicable".to_string());
         }
+    } else if bundle_version_id.is_some() {
+        resolution_state = Some("conflict".to_string());
     }
     let controls = policies
         .into_iter()
@@ -1409,6 +1466,7 @@ pub async fn get_system_evidence(
         system_id,
         hostname: system.hostname,
         controls,
+        resolution_state,
     }))
 }
 
@@ -1569,6 +1627,32 @@ pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> Compli
         error: error_count,
         report_only: 0,
         score,
+        resolution_state: None,
+    }
+}
+
+fn unresolved_system_rollup(
+    system: SystemRow,
+    selected_controls: i64,
+    state: &str,
+) -> ComplianceSystemRollup {
+    ComplianceSystemRollup {
+        system_id: system.id,
+        hostname: system.hostname,
+        environment: system.environment,
+        applies: true,
+        total: selected_controls,
+        evaluated_total: 0,
+        pass: 0,
+        warn: 0,
+        fail: 0,
+        waiver: 0,
+        not_checked: selected_controls,
+        not_applicable: 0,
+        error: 0,
+        report_only: 0,
+        score: 0,
+        resolution_state: Some(state.to_string()),
     }
 }
 
@@ -1682,6 +1766,7 @@ pub(crate) fn effective_policy_rollup(
         error: error_count,
         report_only,
         score,
+        resolution_state: None,
     }
 }
 

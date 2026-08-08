@@ -1107,6 +1107,8 @@ pub struct ComplianceSystemRollup {
     pub fail: i64,
     pub waiver: i64,
     pub score: i64,
+    #[serde(default)]
+    pub resolution_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1129,6 +1131,8 @@ pub struct ComplianceEvidenceResponse {
     pub system_id: Uuid,
     pub hostname: String,
     pub controls: Vec<ComplianceControlEvidence>,
+    #[serde(default)]
+    pub resolution_state: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

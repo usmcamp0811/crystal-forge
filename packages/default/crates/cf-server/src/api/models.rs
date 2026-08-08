@@ -1475,6 +1475,10 @@ pub struct ComplianceSystemRollup {
     #[serde(default)]
     pub report_only: i64,
     pub score: i64,
+    /// Resolution state for assignment-aware rollups. A conflict or unavailable
+    /// exact revision must not be presented as a baseline compliance score.
+    #[serde(default)]
+    pub resolution_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1500,6 +1504,8 @@ pub struct ComplianceEvidenceResponse {
     pub system_id: uuid::Uuid,
     pub hostname: String,
     pub controls: Vec<ComplianceControlEvidence>,
+    #[serde(default)]
+    pub resolution_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
