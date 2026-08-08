@@ -55,6 +55,10 @@ pub fn PoliciesView() -> Element {
     let mut edit_description = use_signal(String::new);
     let mut edit_body = use_signal(String::new);
     let mut edit_format = use_signal(|| PolicyFormat::Json);
+    // SRG/CCI mapping fields — seeded from the current policy on edit,
+    // blank on create. These are persisted to compliance_metadata.
+    let mut edit_srg_ids = use_signal(String::new);
+    let mut edit_cci_ids = use_signal(String::new);
     let mut search_query = use_signal(String::new);
     let mut category_filter = use_signal(|| "all".to_string());
     let mut type_filter = use_signal(|| "all".to_string());
@@ -342,6 +346,8 @@ pub fn PoliciesView() -> Element {
                             edit_description.set(String::new());
                             edit_body.set(POLICY_JSON_TEMPLATE.to_string());
                             edit_format.set(PolicyFormat::Json);
+                            edit_srg_ids.set(String::new());
+                            edit_cci_ids.set(String::new());
                             show_editor.set(true);
                         },
                         svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
@@ -519,6 +525,8 @@ pub fn PoliciesView() -> Element {
                                         edit_description.set(p.description.clone());
                                         edit_body.set(p.body.clone());
                                         edit_format.set(p.format);
+                                        edit_srg_ids.set(p.srg_ids.join(", "));
+                                        edit_cci_ids.set(p.cci_ids.join(", "));
                                         show_editor.set(true);
                                     },
                                     on_delete: move |id: Uuid| {
@@ -544,6 +552,8 @@ pub fn PoliciesView() -> Element {
                     edit_description: edit_description.clone(),
                     edit_body: edit_body.clone(),
                     edit_format: edit_format.clone(),
+                    edit_srg_ids: edit_srg_ids.clone(),
+                    edit_cci_ids: edit_cci_ids.clone(),
                     policy_library: policy_library.clone(),
                     on_close: move || show_editor.set(false),
                 }
@@ -583,6 +593,8 @@ pub fn PoliciesView() -> Element {
                         edit_description.set(policy.description.clone());
                         edit_body.set(policy.body.clone());
                         edit_format.set(policy.format);
+                        edit_srg_ids.set(policy.srg_ids.join(", "));
+                        edit_cci_ids.set(policy.cci_ids.join(", "));
                         show_editor.set(true);
                     },
                 }
@@ -636,32 +648,38 @@ fn PolicyDrawer(
 
     let selected_revision = selected_version_id()
         .and_then(|id| policy.revisions.iter().find(|revision| revision.id == id));
-    let displayed_policy = selected_revision.map_or_else(|| policy.clone(), |revision| {
-        let body = serde_json::to_string_pretty(&serde_json::json!({
-            "policy_type": revision.policy_type,
-            "enabled": revision.enabled,
-            "config": revision.config,
-        }))
-        .unwrap_or_else(|_| "{}".to_string());
-        PolicyDefinition {
-            id: policy.id,
-            lineage_id: policy.lineage_id,
-            version_id: Some(revision.id),
-            revision: Some(revision.version.clone()),
-            publication_state: Some(revision.publication_state.clone()),
-            semantic_digest: Some(revision.semantic_digest.clone()),
-            revisions: policy.revisions.clone(),
-            name: revision.name.clone(),
-            description: revision
-                .description
-                .clone()
-                .unwrap_or_else(|| "No description".to_string()),
-            format: policy.format,
-            body,
-            policy_type: Some(revision.policy_type.clone()),
-            system_count: policy.system_count,
-        }
-    });
+    let displayed_policy = selected_revision.map_or_else(
+        || policy.clone(),
+        |revision| {
+            let body = serde_json::to_string_pretty(&serde_json::json!({
+                "policy_type": revision.policy_type,
+                "enabled": revision.enabled,
+                "config": revision.config,
+            }))
+            .unwrap_or_else(|_| "{}".to_string());
+            PolicyDefinition {
+                id: policy.id,
+                lineage_id: policy.lineage_id,
+                version_id: Some(revision.id),
+                revision: Some(revision.version.clone()),
+                publication_state: Some(revision.publication_state.clone()),
+                semantic_digest: Some(revision.semantic_digest.clone()),
+                revisions: policy.revisions.clone(),
+                name: revision.name.clone(),
+                description: revision
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| "No description".to_string()),
+                format: policy.format,
+                body,
+                policy_type: Some(revision.policy_type.clone()),
+                system_count: policy.system_count,
+                // Use the selected revision's exact mappings (not the lineage current).
+                srg_ids: revision.srg_ids.clone(),
+                cci_ids: revision.cci_ids.clone(),
+            }
+        },
+    );
     let category = policy_category(&displayed_policy);
     let rules = crate::components::policy::policy_rule_summaries(&displayed_policy);
     let is_core = is_core_policy(&displayed_policy);
@@ -854,6 +872,31 @@ fn PolicyDrawer(
                             }
                         }
                     }
+
+                    // SRG / CCI mapping — version-specific, PERSISTED.
+                    // Only rendered when the selected revision has mappings.
+                    if !displayed_policy.srg_ids.is_empty() || !displayed_policy.cci_ids.is_empty() {
+                        div {
+                            h3 { style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin: 0 0 8px;", "SRG / CCI mapping" }
+                            div { style: "display: flex; flex-wrap: wrap; gap: 6px;",
+                                for srg in displayed_policy.srg_ids.iter() {
+                                    span {
+                                        class: "chip",
+                                        style: "font-family: monospace; font-size: 11px; color: #60a5fa; background: color-mix(in oklab, #60a5fa 12%, transparent);",
+                                        "{srg}"
+                                    }
+                                }
+                                for cci in displayed_policy.cci_ids.iter() {
+                                    span {
+                                        class: "chip",
+                                        style: "font-family: monospace; font-size: 11px; color: #34d399; background: color-mix(in oklab, #34d399 12%, transparent);",
+                                        "{cci}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     div {
                         h3 { style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin: 0 0 8px;", "Definition" }
                         pre {
@@ -886,9 +929,48 @@ fn policy_matches_filters(
         return false;
     }
 
-    query.trim().is_empty()
-        || policy.name.to_lowercase().contains(query)
-        || policy.description.to_lowercase().contains(query)
+    if query.trim().is_empty() {
+        return true;
+    }
+
+    let q = query.to_lowercase();
+
+    if policy.name.to_lowercase().contains(&q) {
+        return true;
+    }
+    if policy.description.to_lowercase().contains(&q) {
+        return true;
+    }
+
+    // Search across SRG/CCI mappings on ALL revisions (including historical).
+    // This ensures a search for "CCI-000205" or "000205" finds the lineage even
+    // when the mapping only existed on an older version.
+    for revision in &policy.revisions {
+        for srg in &revision.srg_ids {
+            if srg.to_lowercase().contains(&q) {
+                return true;
+            }
+        }
+        for cci in &revision.cci_ids {
+            if cci.to_lowercase().contains(&q) {
+                return true;
+            }
+        }
+    }
+    // Also search the current lineage-level srg/cci (which may be derived from
+    // the current version if revisions list is empty for some reason).
+    for srg in &policy.srg_ids {
+        if srg.to_lowercase().contains(&q) {
+            return true;
+        }
+    }
+    for cci in &policy.cci_ids {
+        if cci.to_lowercase().contains(&q) {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn category_counts(policies: &[PolicyDefinition]) -> Vec<(PolicyCategory, usize)> {

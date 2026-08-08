@@ -358,10 +358,7 @@ impl DeploymentPolicy {
             ),
             DeploymentPolicy::RequirePackages { packages, .. } => {
                 if packages.is_empty() {
-                    return (
-                        format!("hasRequiredPackages_{index}"),
-                        "false".to_string(),
-                    );
+                    return (format!("hasRequiredPackages_{index}"), "false".to_string());
                 }
                 let package_list = packages
                     .iter()
@@ -1346,23 +1343,39 @@ pub struct DeploymentPolicyRecord {
 }
 
 /// Request to create a new deployment policy
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CreateDeploymentPolicyRequest {
     pub name: String,
     pub description: Option<String>,
     pub policy_type: String,
     pub config: serde_json::Value,
     pub enabled: Option<bool>,
+    /// Security Requirements Guide IDs this control satisfies.
+    /// Normalised and validated server-side; stored in compliance_metadata.
+    #[serde(default)]
+    pub srg_ids: Vec<String>,
+    /// Control Correlation Identifier mappings.
+    /// Normalised and validated server-side; stored in compliance_metadata.
+    #[serde(default)]
+    pub cci_ids: Vec<String>,
 }
 
 /// Request to update an existing deployment policy
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateDeploymentPolicyRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub policy_type: Option<String>,
     pub config: Option<serde_json::Value>,
     pub enabled: Option<bool>,
+    /// When `Some`, replace the curated SRG mapping; `Some([])` clears it.
+    /// When `None`, the existing value is preserved.
+    #[serde(default)]
+    pub srg_ids: Option<Vec<String>>,
+    /// When `Some`, replace the curated CCI mapping; `Some([])` clears it.
+    /// When `None`, the existing value is preserved.
+    #[serde(default)]
+    pub cci_ids: Option<Vec<String>>,
 }
 
 // ============================================================================

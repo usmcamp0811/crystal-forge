@@ -50,7 +50,7 @@
 //!   5. Environment direct policy additions apply after bundle baselines.
 //!   6. System direct policy additions apply after everything.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -998,7 +998,10 @@ async fn resolve_systems_effective_policies_batch(
     }
 
     // ── Open a single REPEATABLE READ snapshot for all reads ──────────────────
-    let mut tx = pool.begin().await.context("begin batch resolution transaction")?;
+    let mut tx = pool
+        .begin()
+        .await
+        .context("begin batch resolution transaction")?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         .execute(&mut *tx)
         .await
@@ -1013,8 +1016,7 @@ async fn resolve_systems_effective_policies_batch(
             .context("batch load system environments")?;
 
     // Build lookup maps
-    let sys_env: std::collections::HashMap<Uuid, Option<Uuid>> =
-        system_envs.into_iter().collect();
+    let sys_env: std::collections::HashMap<Uuid, Option<Uuid>> = system_envs.into_iter().collect();
     let all_env_ids: Vec<Uuid> = sys_env
         .values()
         .filter_map(|eid| *eid)
@@ -1024,9 +1026,18 @@ async fn resolve_systems_effective_policies_batch(
 
     // ── Q2: Load all active bundle assignments for all systems/environments ───
     #[allow(clippy::type_complexity)]
-    let raw_assignments: Vec<(Uuid, Uuid, Uuid, Uuid, String, String, String, Option<Uuid>, Option<Uuid>)> =
-        sqlx::query_as(
-            r#"SELECT a.id, a.current_version_id, a.bundle_id, a.bundle_version_id,
+    let raw_assignments: Vec<(
+        Uuid,
+        Uuid,
+        Uuid,
+        Uuid,
+        String,
+        String,
+        String,
+        Option<Uuid>,
+        Option<Uuid>,
+    )> = sqlx::query_as(
+        r#"SELECT a.id, a.current_version_id, a.bundle_id, a.bundle_version_id,
                       a.scope_type, a.enforcement_mode, a.assignment_overlay_digest,
                       a.environment_id, a.system_id
                FROM compliance_bundle_assignments a
@@ -1040,17 +1051,19 @@ async fn resolve_systems_effective_policies_batch(
                  CASE a.scope_type WHEN 'environment' THEN 1 WHEN 'system' THEN 2 ELSE 3 END,
                  a.bundle_id,
                  a.id"#,
-        )
-        .bind(&all_env_ids)
-        .bind(system_ids)
-        .bind(bundle_version_filter)
-         .fetch_all(&mut *tx)
-        .await
-        .context("batch load bundle assignments")?;
+    )
+    .bind(&all_env_ids)
+    .bind(system_ids)
+    .bind(bundle_version_filter)
+    .fetch_all(&mut *tx)
+    .await
+    .context("batch load bundle assignments")?;
 
     // Collect all assignment_version_ids and bundle_version_ids
-    let all_assignment_version_ids: Vec<Uuid> =
-        raw_assignments.iter().map(|(_, av, _, _, _, _, _, _, _)| *av).collect();
+    let all_assignment_version_ids: Vec<Uuid> = raw_assignments
+        .iter()
+        .map(|(_, av, _, _, _, _, _, _, _)| *av)
+        .collect();
     let all_bundle_version_ids: Vec<Uuid> = raw_assignments
         .iter()
         .map(|(_, _, _, bv, _, _, _, _, _)| *bv)
@@ -1110,7 +1123,11 @@ async fn resolve_systems_effective_policies_batch(
         overrides_by_av
             .entry(av_id)
             .or_default()
-            .push(PolicyOverride { policy_version_id: pv_id, value_path: path, value: val });
+            .push(PolicyOverride {
+                policy_version_id: pv_id,
+                value_path: path,
+                value: val,
+            });
     }
 
     // ── Q6: Bulk load bundle version states ───────────────────────────────────
@@ -1131,23 +1148,24 @@ async fn resolve_systems_effective_policies_batch(
             .collect();
 
     // ── Q7: Bulk load baseline memberships for all bundle versions ────────────
-    let raw_baselines: Vec<(Uuid, Uuid, Uuid, String, i32, serde_json::Value)> =
-        sqlx::query_as(
-            r#"SELECT cbvp.bundle_version_id, cbvp.policy_version_id,
+    let raw_baselines: Vec<(Uuid, Uuid, Uuid, String, i32, serde_json::Value)> = sqlx::query_as(
+        r#"SELECT cbvp.bundle_version_id, cbvp.policy_version_id,
                       pv.policy_id, pv.policy_type, cbvp.policy_order, pv.config
                FROM compliance_bundle_version_policies cbvp
                JOIN deployment_policy_versions pv ON pv.id = cbvp.policy_version_id
                WHERE cbvp.bundle_version_id = ANY($1)
                ORDER BY cbvp.bundle_version_id, cbvp.policy_order"#,
-        )
-        .bind(&all_bundle_version_ids)
-        .fetch_all(&mut *tx)
-        .await
-        .context("batch load bundle baselines")?;
+    )
+    .bind(&all_bundle_version_ids)
+    .fetch_all(&mut *tx)
+    .await
+    .context("batch load bundle baselines")?;
 
     // Group by bundle_version_id
-    let mut baselines_by_bv: std::collections::HashMap<Uuid, Vec<(Uuid, Uuid, String, i32, serde_json::Value)>> =
-        std::collections::HashMap::new();
+    let mut baselines_by_bv: std::collections::HashMap<
+        Uuid,
+        Vec<(Uuid, Uuid, String, i32, serde_json::Value)>,
+    > = std::collections::HashMap::new();
     for (bv_id, pv_id, lin_id, ptype, order, config) in raw_baselines {
         baselines_by_bv
             .entry(bv_id)
@@ -1183,8 +1201,10 @@ async fn resolve_systems_effective_policies_batch(
     }
 
     // ── Q9: Bulk load legacy direct environment policies ──────────────────────
-    let mut env_direct_policies: std::collections::HashMap<Uuid, Vec<(Uuid, Uuid, String, serde_json::Value)>> =
-        std::collections::HashMap::new();
+    let mut env_direct_policies: std::collections::HashMap<
+        Uuid,
+        Vec<(Uuid, Uuid, String, serde_json::Value)>,
+    > = std::collections::HashMap::new();
     if !all_env_ids.is_empty() {
         let raw_env_direct: Vec<(Uuid, Uuid, Uuid, String, serde_json::Value)> = sqlx::query_as(
             r#"SELECT ep.environment_id, pv.id, pv.policy_id, pv.policy_type, pv.config
@@ -1214,8 +1234,10 @@ async fn resolve_systems_effective_policies_batch(
     }
 
     // ── Q10: Bulk load legacy direct system policies ──────────────────────────
-    let mut sys_direct_policies: std::collections::HashMap<Uuid, Vec<(Uuid, Uuid, String, serde_json::Value)>> =
-        std::collections::HashMap::new();
+    let mut sys_direct_policies: std::collections::HashMap<
+        Uuid,
+        Vec<(Uuid, Uuid, String, serde_json::Value)>,
+    > = std::collections::HashMap::new();
     {
         let raw_sys_direct: Vec<(Uuid, Uuid, Uuid, String, serde_json::Value)> = sqlx::query_as(
             r#"SELECT sp.system_id, pv.id, pv.policy_id, pv.policy_type, pv.config
@@ -1245,7 +1267,9 @@ async fn resolve_systems_effective_policies_batch(
     }
 
     // Close the transaction — all reads are done.
-    tx.commit().await.context("commit batch resolution snapshot")?;
+    tx.commit()
+        .await
+        .context("commit batch resolution snapshot")?;
 
     // ── Per-system merge phase (pure Rust, no DB access) ──────────────────────
     //
@@ -1260,16 +1284,32 @@ async fn resolve_systems_effective_policies_batch(
         std::collections::HashMap::new();
 
     for row in &raw_assignments {
-        let (a_id, av_id, b_id, bv_id, scope_type, enforcement_mode, _digest, env_id_opt, sys_id_opt) = row;
+        let (
+            a_id,
+            av_id,
+            b_id,
+            bv_id,
+            scope_type,
+            enforcement_mode,
+            _digest,
+            env_id_opt,
+            sys_id_opt,
+        ) = row;
         // Environment-scope assignments apply to every system in that environment.
         if scope_type == "environment" {
             if let Some(env_id) = env_id_opt {
                 for (&sys_id, &ref sys_env_id) in &sys_env {
                     if sys_env_id.as_ref() == Some(env_id) {
-                        assignments_for_system
-                            .entry(sys_id)
-                            .or_default()
-                            .push((*a_id, *av_id, *b_id, *bv_id, scope_type.clone(), enforcement_mode.clone(), *env_id_opt, *sys_id_opt));
+                        assignments_for_system.entry(sys_id).or_default().push((
+                            *a_id,
+                            *av_id,
+                            *b_id,
+                            *bv_id,
+                            scope_type.clone(),
+                            enforcement_mode.clone(),
+                            *env_id_opt,
+                            *sys_id_opt,
+                        ));
                     }
                 }
             }
@@ -1277,10 +1317,16 @@ async fn resolve_systems_effective_policies_batch(
         // System-scope assignments apply only to the targeted system.
         if scope_type == "system" {
             if let Some(sys_id) = sys_id_opt {
-                assignments_for_system
-                    .entry(*sys_id)
-                    .or_default()
-                    .push((*a_id, *av_id, *b_id, *bv_id, scope_type.clone(), enforcement_mode.clone(), *env_id_opt, *sys_id_opt));
+                assignments_for_system.entry(*sys_id).or_default().push((
+                    *a_id,
+                    *av_id,
+                    *b_id,
+                    *bv_id,
+                    scope_type.clone(),
+                    enforcement_mode.clone(),
+                    *env_id_opt,
+                    *sys_id_opt,
+                ));
             }
         }
     }
@@ -1290,23 +1336,23 @@ async fn resolve_systems_effective_policies_batch(
     // keeps the operation set-based and sends it through the same merge path.
     if allow_virtual_baseline {
         if let Some(bundle_version_id) = bundle_version_filter {
-        for &sys_id in system_ids {
-            if !assignments_for_system.contains_key(&sys_id) {
-                assignments_for_system.insert(
-                    sys_id,
-                    vec![(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        bundle_version_id,
-                        "virtual_baseline".to_string(),
-                        "enforce".to_string(),
-                        None,
-                        Some(sys_id),
-                    )],
-                );
+            for &sys_id in system_ids {
+                if !assignments_for_system.contains_key(&sys_id) {
+                    assignments_for_system.insert(
+                        sys_id,
+                        vec![(
+                            Uuid::nil(),
+                            Uuid::nil(),
+                            Uuid::nil(),
+                            bundle_version_id,
+                            "virtual_baseline".to_string(),
+                            "enforce".to_string(),
+                            None,
+                            Some(sys_id),
+                        )],
+                    );
+                }
             }
-        }
         }
     }
 
@@ -1314,7 +1360,10 @@ async fn resolve_systems_effective_policies_batch(
 
     'system: for &sys_id in system_ids {
         let env_id = sys_env.get(&sys_id).and_then(|e| *e);
-        let sys_assignments = assignments_for_system.get(&sys_id).map(|v| v.as_slice()).unwrap_or(&[]);
+        let sys_assignments = assignments_for_system
+            .get(&sys_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
 
         let mut per_lineage: std::collections::HashMap<Uuid, (Uuid, PolicySpecificity, usize)> =
             std::collections::HashMap::new();
@@ -1340,10 +1389,13 @@ async fn resolve_systems_effective_policies_batch(
 
             // Validate bundle version state
             let Some((bv_state, bv_digest)) = bundle_version_info.get(bv_id) else {
-                results.insert(sys_id, ResolutionOutcome::Conflict(vec![ResolutionConflict {
-                    code: "ASSIGNMENT_BUNDLE_NOT_FOUND".to_string(),
-                    message: format!("Bundle version {} does not exist", bv_id),
-                }]));
+                results.insert(
+                    sys_id,
+                    ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                        code: "ASSIGNMENT_BUNDLE_NOT_FOUND".to_string(),
+                        message: format!("Bundle version {} does not exist", bv_id),
+                    }]),
+                );
                 continue 'system;
             };
 
@@ -1358,10 +1410,13 @@ async fn resolve_systems_effective_policies_batch(
                 continue 'system;
             }
             if bv_digest == "pending" {
-                results.insert(sys_id, ResolutionOutcome::Conflict(vec![ResolutionConflict {
-                    code: "ASSIGNMENT_BUNDLE_DIGEST_PENDING".to_string(),
-                    message: format!("Bundle version {} has pending digest", bv_id),
-                }]));
+                results.insert(
+                    sys_id,
+                    ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                        code: "ASSIGNMENT_BUNDLE_DIGEST_PENDING".to_string(),
+                        message: format!("Bundle version {} has pending digest", bv_id),
+                    }]),
+                );
                 continue 'system;
             }
 
@@ -1380,13 +1435,16 @@ async fn resolve_systems_effective_policies_batch(
             // Validate exclusions
             for excl in &exclusions {
                 if !baseline_version_ids.contains(excl) {
-                    results.insert(sys_id, ResolutionOutcome::Conflict(vec![ResolutionConflict {
-                        code: "ASSIGNMENT_EXCLUSION_NOT_IN_BUNDLE".to_string(),
-                        message: format!(
-                            "Exclusion {} is not a member of bundle version {}",
-                            excl, bv_id
-                        ),
-                    }]));
+                    results.insert(
+                        sys_id,
+                        ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                            code: "ASSIGNMENT_EXCLUSION_NOT_IN_BUNDLE".to_string(),
+                            message: format!(
+                                "Exclusion {} is not a member of bundle version {}",
+                                excl, bv_id
+                            ),
+                        }]),
+                    );
                     continue 'system;
                 }
             }
@@ -1420,37 +1478,55 @@ async fn resolve_systems_effective_policies_batch(
 
             for (add_order, add_pv_id) in additions.iter().enumerate() {
                 if exclusions_set.contains(add_pv_id) {
-                    results.insert(sys_id, ResolutionOutcome::Conflict(vec![ResolutionConflict {
-                        code: "ASSIGNMENT_ADDITION_EXCLUDED".to_string(),
-                        message: format!("Policy version {} is both excluded and added", add_pv_id),
-                    }]));
+                    results.insert(
+                        sys_id,
+                        ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                            code: "ASSIGNMENT_ADDITION_EXCLUDED".to_string(),
+                            message: format!(
+                                "Policy version {} is both excluded and added",
+                                add_pv_id
+                            ),
+                        }]),
+                    );
                     continue 'system;
                 }
                 if baseline_version_ids.contains(add_pv_id) {
-                    results.insert(sys_id, ResolutionOutcome::Conflict(vec![ResolutionConflict {
-                        code: "ASSIGNMENT_ADDITION_DUPLICATE".to_string(),
-                        message: format!("Policy version {} is already in the baseline", add_pv_id),
-                    }]));
+                    results.insert(
+                        sys_id,
+                        ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                            code: "ASSIGNMENT_ADDITION_DUPLICATE".to_string(),
+                            message: format!(
+                                "Policy version {} is already in the baseline",
+                                add_pv_id
+                            ),
+                        }]),
+                    );
                     continue 'system;
                 }
 
                 let Some((lin_id, ptype, config)) = addition_pv_info.get(add_pv_id) else {
-                    results.insert(sys_id, ResolutionOutcome::Conflict(vec![ResolutionConflict {
-                        code: "ASSIGNMENT_ADDITION_NOT_FOUND".to_string(),
-                        message: format!("Addition policy version {} not found", add_pv_id),
-                    }]));
+                    results.insert(
+                        sys_id,
+                        ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                            code: "ASSIGNMENT_ADDITION_NOT_FOUND".to_string(),
+                            message: format!("Addition policy version {} not found", add_pv_id),
+                        }]),
+                    );
                     continue 'system;
                 };
 
                 if let Some(existing_vid) = seen_lineages.get(lin_id) {
                     if existing_vid != add_pv_id {
-                        results.insert(sys_id, ResolutionOutcome::Conflict(vec![ResolutionConflict {
-                            code: "ASSIGNMENT_ADDITION_LINEAGE_CONFLICT".to_string(),
-                            message: format!(
-                                "Addition {} conflicts with existing version {} for lineage {}",
-                                add_pv_id, existing_vid, lin_id
-                            ),
-                        }]));
+                        results.insert(
+                            sys_id,
+                            ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                                code: "ASSIGNMENT_ADDITION_LINEAGE_CONFLICT".to_string(),
+                                message: format!(
+                                    "Addition {} conflicts with existing version {} for lineage {}",
+                                    add_pv_id, existing_vid, lin_id
+                                ),
+                            }]),
+                        );
                         continue 'system;
                     }
                 } else {
@@ -1481,7 +1557,8 @@ async fn resolve_systems_effective_policies_batch(
                             &o.value_path,
                             &o.value,
                         ) {
-                            all_warnings.push(format!("Override warning for {}: {e}", o.policy_version_id));
+                            all_warnings
+                                .push(format!("Override warning for {}: {e}", o.policy_version_id));
                         }
                         if !pol.overrides.iter().any(|x| x.value_path == o.value_path) {
                             pol.overrides.push(o.clone());
@@ -1606,7 +1683,9 @@ async fn resolve_systems_effective_policies_batch(
             }
 
             if !has_assignments && !staging.is_empty() {
-                all_warnings.push("Legacy direct-policy resolution used (no bundle assignments)".to_string());
+                all_warnings.push(
+                    "Legacy direct-policy resolution used (no bundle assignments)".to_string(),
+                );
             }
         }
 
@@ -1880,11 +1959,7 @@ async fn resolve_system_effective_policies_with_options(
             specificity,
         };
 
-        let outcome = resolve_effective_policy_set_with_options(
-            &mut tx,
-            &input,
-        )
-        .await?;
+        let outcome = resolve_effective_policy_set_with_options(&mut tx, &input).await?;
 
         match outcome {
             ResolutionOutcome::Resolved(set) => {
@@ -2343,13 +2418,15 @@ mod tests {
             "when_no_scan": "block"
         });
 
-        assert!(validate_typed_override(
-            "require_cve_check",
-            &config,
-            "max_critical",
-            &serde_json::json!(3)
-        )
-        .is_ok());
+        assert!(
+            validate_typed_override(
+                "require_cve_check",
+                &config,
+                "max_critical",
+                &serde_json::json!(3)
+            )
+            .is_ok()
+        );
     }
 
     #[test]

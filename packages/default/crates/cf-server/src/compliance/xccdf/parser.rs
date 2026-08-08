@@ -15,7 +15,7 @@ use std::io::Cursor;
 use uuid::Uuid;
 
 use super::super::interchange::{
-    InterchangeLimits, CF_XCCDF_NAMESPACE, XCCDF_1_1_NAMESPACE, XCCDF_NAMESPACE,
+    CF_XCCDF_NAMESPACE, InterchangeLimits, XCCDF_1_1_NAMESPACE, XCCDF_NAMESPACE,
 };
 use super::models::*;
 
@@ -1431,10 +1431,12 @@ mod tests {
   </Rule>
 </Benchmark>"#;
         let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
-        assert!(parsed
-            .errors
-            .iter()
-            .any(|error| error.code == "INVALID_XSD_BOOLEAN"));
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|error| error.code == "INVALID_XSD_BOOLEAN")
+        );
     }
 
     #[test]
@@ -1446,10 +1448,12 @@ mod tests {
             &InterchangeLimits::default(),
         )
         .unwrap();
-        assert!(parsed
-            .errors
-            .iter()
-            .any(|error| error.code == "CHECK_BODY_MISSING"));
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|error| error.code == "CHECK_BODY_MISSING")
+        );
         assert!(parsed.rules[0].checks.is_empty());
     }
 
@@ -1671,10 +1675,12 @@ mod tests {
         }
         xml.push_str("</Benchmark>");
         let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
-        assert!(parsed
-            .errors
-            .iter()
-            .any(|e| e.code == "RULE_LIMIT_EXCEEDED"));
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|e| e.code == "RULE_LIMIT_EXCEEDED")
+        );
         assert!(parsed.rules.len() <= 2);
     }
 
@@ -1691,10 +1697,12 @@ mod tests {
   <version>0.1</version>
 </Benchmark>"#;
         let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
-        assert!(parsed
-            .errors
-            .iter()
-            .any(|e| e.code == "ATTRIBUTE_LIMIT_EXCEEDED"));
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|e| e.code == "ATTRIBUTE_LIMIT_EXCEEDED")
+        );
     }
 
     #[test]
@@ -1793,10 +1801,12 @@ mod tests {
 </Benchmark>"#
         );
         let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
-        assert!(parsed
-            .errors
-            .iter()
-            .any(|e| e.code == "XML_UNKNOWN_NAMESPACE_PREFIX" && e.blocking));
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|e| e.code == "XML_UNKNOWN_NAMESPACE_PREFIX" && e.blocking)
+        );
         assert_eq!(parsed.class, DocumentClass::InvalidXccdf);
     }
 
@@ -1893,10 +1903,12 @@ mod tests {
 </Benchmark>"#
         );
         let parsed = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
-        assert!(parsed
-            .errors
-            .iter()
-            .any(|e| e.code == "DUPLICATE_BENCHMARK_ID" && e.blocking));
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|e| e.code == "DUPLICATE_BENCHMARK_ID" && e.blocking)
+        );
     }
 
     #[test]
@@ -1919,10 +1931,12 @@ mod tests {
         };
         let body = r#"<Group id="g1"/><Group id="g2"/><Group id="g3"/>"#;
         let parsed = parse_xccdf(doc_with_body(body).as_bytes(), None, &limits).unwrap();
-        assert!(parsed
-            .errors
-            .iter()
-            .any(|e| e.code == "GROUP_LIMIT_EXCEEDED" && e.blocking));
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|e| e.code == "GROUP_LIMIT_EXCEEDED" && e.blocking)
+        );
         assert!(parsed.groups.len() <= 1);
     }
 
@@ -1934,10 +1948,12 @@ mod tests {
         };
         let body = r#"<Value id="v1"/><Value id="v2"/><Value id="v3"/>"#;
         let parsed = parse_xccdf(doc_with_body(body).as_bytes(), None, &limits).unwrap();
-        assert!(parsed
-            .errors
-            .iter()
-            .any(|e| e.code == "VALUE_LIMIT_EXCEEDED" && e.blocking));
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|e| e.code == "VALUE_LIMIT_EXCEEDED" && e.blocking)
+        );
         assert!(parsed.values.len() <= 1);
     }
 

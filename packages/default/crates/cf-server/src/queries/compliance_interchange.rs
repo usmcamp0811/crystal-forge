@@ -181,13 +181,12 @@ pub async fn commit_foreign_import(
 
     for rec in &policy_records {
         if let Some(mapped_version_id) = rec.mapped_policy_version_id {
-            let exists: Option<Uuid> = sqlx::query_scalar(
-                "SELECT id FROM deployment_policy_versions WHERE id = $1",
-            )
-            .bind(mapped_version_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .context("failed to verify mapped policy version")?;
+            let exists: Option<Uuid> =
+                sqlx::query_scalar("SELECT id FROM deployment_policy_versions WHERE id = $1")
+                    .bind(mapped_version_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .context("failed to verify mapped policy version")?;
             if exists.is_none() {
                 anyhow::bail!(
                     "IMPORT_POLICY_VERSION_NOT_FOUND: mapped policy version {} does not exist",

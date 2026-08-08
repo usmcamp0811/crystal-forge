@@ -6,13 +6,16 @@
 //! evidence-for-ATO builder, and an edit-mode danger zone with typed-confirmation
 //! delete.
 //!
-//! Backend reality: the deployment-policy API persists only name, description,
-//! policy_type, config (JSON), and enabled. Rules that map onto the existing
-//! `config` shapes (custom_check / require_packages / require_cve_check) are
-//! persisted. Everything else in this modal (category, severity, rationale,
-//! evidence, and rollout/approval/time-window rules) is shown per the design but
-//! is NOT persisted yet; those sections are visibly flagged as UI-only. Backend
-//! follow-up is tracked in TASK-340.3.
+//! Backend reality: the deployment-policy API persists name, description,
+//! policy_type, config (JSON), enabled, srg_ids, and cci_ids.
+//!
+//! Persisted fields:
+//! - name, description, policy_type, config, enabled
+//! - SRG IDs (compliance_metadata.srg_ids) — searchable, version-specific
+//! - CCI IDs (compliance_metadata.cci_ids) — searchable, version-specific
+//!
+//! NOT yet persisted (UI-only, flagged with badge):
+//! - category, severity, rationale, evidence for ATO
 
 use dioxus::prelude::*;
 use uuid::Uuid;
@@ -542,6 +545,13 @@ pub fn PolicyEditorModal(
     edit_description: Signal<String>,
     edit_body: Signal<String>,
     edit_format: Signal<PolicyFormat>,
+    /// Comma-separated SRG IDs (e.g. "SRG-OS-000298-GPOS-00116, SRG-OS-000096").
+    /// Seeded from the current version's compliance_metadata on edit; blank on create.
+    /// PERSISTED to compliance_metadata via the server API.
+    edit_srg_ids: Signal<String>,
+    /// Comma-separated CCI IDs (e.g. "CCI-000205, CCI-000196").
+    /// PERSISTED to compliance_metadata via the server API.
+    edit_cci_ids: Signal<String>,
     policy_library: Signal<Vec<PolicyDefinition>>,
     on_close: EventHandler<()>,
 ) -> Element {
@@ -819,6 +829,36 @@ pub fn PolicyEditorModal(
                             }
                         }
 
+                        // SRG IDs — PERSISTED to compliance_metadata
+                        div { class: "field",
+                            label { "SRG IDs" }
+                            input {
+                                class: "input focus-ring mono",
+                                r#type: "text",
+                                placeholder: "SRG-OS-000298-GPOS-00116, SRG-OS-000096-GPOS-00050",
+                                value: "{edit_srg_ids}",
+                                oninput: move |event| edit_srg_ids.set(event.value()),
+                            }
+                            div { class: "help",
+                                "Comma-separated Security Requirements Guide IDs this control satisfies — searchable from the policy list. Persisted to policy version compliance metadata."
+                            }
+                        }
+
+                        // CCI IDs — PERSISTED to compliance_metadata
+                        div { class: "field",
+                            label { "CCI IDs" }
+                            input {
+                                class: "input focus-ring mono",
+                                r#type: "text",
+                                placeholder: "CCI-000205, CCI-000196",
+                                value: "{edit_cci_ids}",
+                                oninput: move |event| edit_cci_ids.set(event.value()),
+                            }
+                            div { class: "help",
+                                "Comma-separated CCI mappings, if applicable. Persisted to policy version compliance metadata."
+                            }
+                        }
+
                         // Assertions & gate rules builder
                         div { style: "margin-top:6px;",
                             div { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;",
@@ -1006,6 +1046,20 @@ pub fn PolicyEditorModal(
                                     return;
                                 };
 
+                                // Parse comma-separated SRG/CCI input into vectors.
+                                let srg_raw: Vec<String> = edit_srg_ids
+                                    .read()
+                                    .split(',')
+                                    .map(|s| s.trim().to_string())
+                                    .filter(|s| !s.is_empty())
+                                    .collect();
+                                let cci_raw: Vec<String> = edit_cci_ids
+                                    .read()
+                                    .split(',')
+                                    .map(|s| s.trim().to_string())
+                                    .filter(|s| !s.is_empty())
+                                    .collect();
+
                                 save_error.set(String::new());
                                 is_saving.set(true);
 
@@ -1017,6 +1071,10 @@ pub fn PolicyEditorModal(
                                             policy_type: Some(policy_type),
                                             config: Some(config),
                                             enabled: None,
+                                            // Always send Some(...) so the server replaces
+                                            // the curated mapping (Some([]) clears it).
+                                            srg_ids: Some(srg_raw),
+                                            cci_ids: Some(cci_raw),
                                         };
                                         update_deployment_policy(&policy_id, &request).await.map(|_| ())
                                     } else {
@@ -1026,6 +1084,8 @@ pub fn PolicyEditorModal(
                                             policy_type,
                                             config,
                                             enabled: Some(true),
+                                            srg_ids: srg_raw,
+                                            cci_ids: cci_raw,
                                         };
                                         create_deployment_policy(&request).await.map(|_| ())
                                     };

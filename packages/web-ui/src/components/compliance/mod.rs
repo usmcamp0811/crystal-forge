@@ -8,8 +8,9 @@ use crate::components::icon::{Icon, IconName};
 
 pub mod refine_policy;
 pub use refine_policy::{
-    action_to_import, EvidenceRequirementDraft, PolicyAssertionDraft, RefinedPolicyDraft,
-    ImportReview, RefinePolicyStep, RefinedRuleAction, RefinedStigRule, SourceCheck, SourceStigRule,
+    EvidenceRequirementDraft, ImportReview, PolicyAssertionDraft, RefinePolicyStep,
+    RefinedPolicyDraft, RefinedRuleAction, RefinedStigRule, SourceCheck, SourceStigRule,
+    action_to_import,
 };
 
 // ─── Bundle catalog left rail ────────────────────────────────────────────────
@@ -100,11 +101,7 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
 }
 
 fn env_count_suffix(n: i64) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
-    }
+    if n == 1 { "" } else { "s" }
 }
 
 // ─── Bundle header card ──────────────────────────────────────────────────────

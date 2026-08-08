@@ -20,7 +20,7 @@ use crate::api::models::{
     ComplianceBundleSummary, ComplianceControlEvidence, ComplianceControlStatus,
     ComplianceEvidenceResponse, ComplianceRollupTotals, ComplianceSystemRollup,
 };
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use uuid::Uuid;
 
 // ─── Trigger browser download ─────────────────────────────────────────────────
@@ -106,7 +106,7 @@ impl<'a> ExportPayload<'a> {
 /// Crystal Forge native JSON — full fidelity, re-ingestable.
 pub fn build_cf_json(p: &ExportPayload<'_>) -> String {
     // We lean on serde_json directly since all types derive Serialize.
-    use serde_json::{json, Map, Value};
+    use serde_json::{Map, Value, json};
 
     let systems_arr: Vec<Value> = p
         .scoped_systems()
@@ -296,7 +296,7 @@ fn csv_row(out: &mut String, fields: &[&str]) {
 /// SARIF 2.1.0 — one `run` per bundle, one `result` per (system × control).
 /// Maps: tool=Crystal Forge, rules=controls, results=findings.
 pub fn build_sarif(p: &ExportPayload<'_>) -> String {
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     let scoped_ev = p.scoped_evidence();
 
@@ -479,7 +479,7 @@ pub fn build_sarif(p: &ExportPayload<'_>) -> String {
 /// OSCAL 1.1.2 Assessment Results (JSON).
 /// Produces a minimal but valid AR document from the rollup + evidence data.
 pub fn build_oscal(p: &ExportPayload<'_>) -> String {
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     let now = js_sys::Date::new_0()
         .to_iso_string()

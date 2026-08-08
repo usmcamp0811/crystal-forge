@@ -65,8 +65,8 @@ pub use filters::{
     ViewToggle,
 };
 pub use heartbeat_spinner::HeartbeatSpinner;
-pub use io_menu::{IOMenu, IOMenuItem};
 pub use icon::{Icon, IconName};
+pub use io_menu::{IOMenu, IOMenuItem};
 pub use layout::{AppShell, Card, SidebarNav, TopBar};
 pub use loading::{DashboardLoadingSpinner, ErrorMessage, LoadingSpinner};
 pub use modals::{ConfirmDialog, RollbackConfirmDialog, SyncConfirmDialog};

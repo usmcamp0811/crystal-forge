@@ -314,8 +314,8 @@ pub async fn fetch_hardening_top_services(
     fetch_json(&url).await
 }
 
-pub async fn fetch_hardening_system_postures(
-) -> Result<Vec<HardeningSystemPostureResponse>, ApiClientError> {
+pub async fn fetch_hardening_system_postures()
+-> Result<Vec<HardeningSystemPostureResponse>, ApiClientError> {
     let url = format!("{}/hardening/systems", base_url());
     fetch_json(&url).await
 }
@@ -1101,8 +1101,8 @@ pub async fn fetch_environment_policies(
 }
 
 /// Fetch required policy assignments for visible environments.
-pub async fn fetch_environment_policies_map(
-) -> Result<Vec<EnvironmentPolicyMapEntry>, ApiClientError> {
+pub async fn fetch_environment_policies_map()
+-> Result<Vec<EnvironmentPolicyMapEntry>, ApiClientError> {
     let url = format!("{}/environments/policies-map", base_url());
     fetch_json(&url).await
 }
@@ -1161,7 +1161,8 @@ pub async fn fetch_bundle_version_policy_membership(
 ) -> Result<Vec<BundleVersionPolicyMembership>, ApiClientError> {
     let url = format!(
         "{}/compliance/bundle-versions/{}/policies",
-        base_url(), bundle_version_id
+        base_url(),
+        bundle_version_id
     );
     fetch_json(&url).await
 }
@@ -1171,7 +1172,12 @@ pub async fn fetch_compliance_bundle_systems(
     version_id: Option<&Uuid>,
 ) -> Result<ComplianceBundleSystemsResponse, ApiClientError> {
     let url = match version_id {
-        Some(version_id) => format!("{}/compliance/bundles/{}/systems?version_id={}", base_url(), bundle_id, version_id),
+        Some(version_id) => format!(
+            "{}/compliance/bundles/{}/systems?version_id={}",
+            base_url(),
+            bundle_id,
+            version_id
+        ),
         None => format!("{}/compliance/bundles/{}/systems", base_url(), bundle_id),
     };
     fetch_json(&url).await
@@ -1194,11 +1200,16 @@ pub async fn fetch_compliance_system_evidence(
     let url = match version_id {
         Some(version_id) => format!(
             "{}/compliance/bundles/{}/systems/{}/evidence?version_id={}",
-            base_url(), bundle_id, system_id, version_id
+            base_url(),
+            bundle_id,
+            system_id,
+            version_id
         ),
         None => format!(
             "{}/compliance/bundles/{}/systems/{}/evidence",
-            base_url(), bundle_id, system_id
+            base_url(),
+            bundle_id,
+            system_id
         ),
     };
     fetch_json(&url).await
@@ -2267,9 +2278,7 @@ pub async fn publish_policy_version(
 }
 
 /// Create a new mutable draft from a published policy version.
-pub async fn create_policy_draft(
-    policy_id: &Uuid,
-) -> Result<serde_json::Value, ApiClientError> {
+pub async fn create_policy_draft(policy_id: &Uuid) -> Result<serde_json::Value, ApiClientError> {
     let url = format!("{}/policies/{}/drafts", base_url(), policy_id);
     send_json_with_csrf("POST", &url, None::<&()>).await
 }

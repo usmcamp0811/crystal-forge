@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::api::client::{import_policy_interchange, preview_policy_interchange, ApiClientError};
+use crate::api::client::{ApiClientError, import_policy_interchange, preview_policy_interchange};
 use crate::api::models::{PolicyInterchangeImportResponse, PolicyInterchangePreviewResponse};
 
 const MAX_POLICY_UPLOAD_BYTES: u64 = 50 * 1024 * 1024;
@@ -343,7 +343,7 @@ pub fn PolicyInterchangeModal(on_close: EventHandler<()>, on_success: EventHandl
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_policy_import_error, PolicyImportDiagnosticSeverity};
+    use super::{PolicyImportDiagnosticSeverity, normalize_policy_import_error};
     use crate::api::client::ApiClientError;
 
     #[test]

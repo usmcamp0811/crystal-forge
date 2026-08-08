@@ -5,8 +5,6 @@
 //! can render an explicit error state. Mock policy data is never returned to
 //! the caller (AC #34).
 
-use std::collections::HashMap;
-
 use uuid::Uuid;
 
 use crate::api::client::{ApiClientError, fetch_deployment_policies};
@@ -65,14 +63,31 @@ fn policy_record_to_definition_with_count(
     }))
     .unwrap_or_else(|_| "{}".to_string());
 
-    PolicyDefinition {
-        id: record.id,
-        lineage_id: record.id,
-        version_id: record.current_version_id,
-        revision: record.versions.first().map(|v| v.version.clone()),
-        publication_state: record.versions.iter().find(|v| Some(v.id) == record.current_version_id).map(|v| v.publication_state.clone()),
-        semantic_digest: record.versions.iter().find(|v| Some(v.id) == record.current_version_id).map(|v| v.semantic_digest.clone()),
-        revisions: record.versions.into_iter().map(|v| PolicyRevisionSummary {
+    // Extract SRG/CCI from the current version before consuming `record.versions`.
+    let current_version_id = record.current_version_id;
+    let (current_srg_ids, current_cci_ids) = record
+        .versions
+        .iter()
+        .find(|v| Some(v.id) == current_version_id)
+        .map(|v| (v.srg_ids.clone(), v.cci_ids.clone()))
+        .unwrap_or_default();
+
+    let revision = record.versions.first().map(|v| v.version.clone());
+    let publication_state = record
+        .versions
+        .iter()
+        .find(|v| Some(v.id) == current_version_id)
+        .map(|v| v.publication_state.clone());
+    let semantic_digest = record
+        .versions
+        .iter()
+        .find(|v| Some(v.id) == current_version_id)
+        .map(|v| v.semantic_digest.clone());
+
+    let revisions: Vec<PolicyRevisionSummary> = record
+        .versions
+        .into_iter()
+        .map(|v| PolicyRevisionSummary {
             id: v.id,
             version: v.version,
             publication_state: v.publication_state,
@@ -86,7 +101,19 @@ fn policy_record_to_definition_with_count(
             policy_type: v.policy_type,
             config: v.config,
             enabled: v.enabled,
-        }).collect(),
+            srg_ids: v.srg_ids,
+            cci_ids: v.cci_ids,
+        })
+        .collect();
+
+    PolicyDefinition {
+        id: record.id,
+        lineage_id: record.id,
+        version_id: current_version_id,
+        revision,
+        publication_state,
+        semantic_digest,
+        revisions,
         name: record.name,
         description: record
             .description
@@ -95,5 +122,7 @@ fn policy_record_to_definition_with_count(
         body,
         policy_type: Some(record.policy_type),
         system_count,
+        srg_ids: current_srg_ids,
+        cci_ids: current_cci_ids,
     }
 }

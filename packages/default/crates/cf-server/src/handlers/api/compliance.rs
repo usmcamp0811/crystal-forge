@@ -4,10 +4,10 @@
 //! Crystal Forge systems, environments, deployment policies, and CVE posture.
 
 use axum::{
+    Json,
     extract::{Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -15,11 +15,9 @@ use uuid::Uuid;
 
 use crate::api::models::{
     ApiError, AssignmentResponse, CreateBundleDraftRequest, CreateComplianceBundleRequest,
-    CreatePolicyDraftRequest,
-    PublishBundleVersionRequest, PublishPolicyVersionRequest, SystemComplianceBundle,
-    SystemComplianceBundlesResponse, TrustBundleVersionRequest, TrustPolicyVersionRequest,
-    PolicyValueOverride,
-    UpdateComplianceBundleRequest,
+    CreatePolicyDraftRequest, PolicyValueOverride, PublishBundleVersionRequest,
+    PublishPolicyVersionRequest, SystemComplianceBundle, SystemComplianceBundlesResponse,
+    TrustBundleVersionRequest, TrustPolicyVersionRequest, UpdateComplianceBundleRequest,
 };
 use crate::compliance::interchange::{InterchangeLimits, MAX_XCCDF_UPLOAD_BYTES};
 use crate::compliance::resolver::ResolutionOutcome;
@@ -32,15 +30,15 @@ use crate::compliance::xccdf::importer::{
     build_policy_records, check_document_class, validate_cf_native_document, validate_import_plan,
     validate_sha256_match,
 };
-use crate::compliance::xccdf::package::{process_xccdf_bytes, ProcessingError};
+use crate::compliance::xccdf::package::{ProcessingError, process_xccdf_bytes};
 use crate::compliance::xccdf::reconciliation::NativeReconcileFailure;
-use crate::compliance::xccdf::xml_writer::{write_bundle_xccdf_export, XccdfWriterError};
+use crate::compliance::xccdf::xml_writer::{XccdfWriterError, write_bundle_xccdf_export};
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
-    create_bundle as create_bundle_row, delete_bundle as delete_bundle_row, get_system_evidence,
-    list_bundle_systems, list_bundles, list_system_bundles, update_bundle as update_bundle_row,
-    BundleValidationError, list_bundle_systems_for_version,
-    list_bundle_version_policy_membership,
+    BundleValidationError, create_bundle as create_bundle_row, delete_bundle as delete_bundle_row,
+    get_system_evidence, list_bundle_systems, list_bundle_systems_for_version,
+    list_bundle_version_policy_membership, list_bundles, list_system_bundles,
+    update_bundle as update_bundle_row,
 };
 use crate::queries::compliance_interchange;
 
@@ -1252,8 +1250,8 @@ async fn persist_assignment_inner(
     >,
 ) -> Result<crate::api::models::AssignmentResponse, axum::response::Response> {
     use crate::compliance::resolver::{
-        resolve_effective_policy_set, AssignmentMode, AssignmentTarget,
-        EffectivePolicyResolutionInput, PolicyOverride, ResolutionOutcome,
+        AssignmentMode, AssignmentTarget, EffectivePolicyResolutionInput, PolicyOverride,
+        ResolutionOutcome, resolve_effective_policy_set,
     };
 
     let enforcement_mode = payload.enforcement_mode.as_deref().unwrap_or("enforce");
@@ -1701,13 +1699,12 @@ async fn persist_assignment_inner(
     }
 
     let now = chrono::Utc::now();
-    let bundle_id: Uuid = sqlx::query_scalar(
-        "SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1",
-    )
-    .bind(payload.bundle_version_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| internal_error("Failed to load assignment bundle lineage"))?;
+    let bundle_id: Uuid =
+        sqlx::query_scalar("SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1")
+            .bind(payload.bundle_version_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|_| internal_error("Failed to load assignment bundle lineage"))?;
     Ok(crate::api::models::AssignmentResponse {
         id: assignment_id,
         current_version_id: assignment_version_id,
@@ -1907,11 +1904,13 @@ pub async fn get_assignment(
         }
     }
     .into_iter()
-    .map(|(pvid, path, val)| crate::api::models::PolicyValueOverride {
-        policy_version_id: pvid,
-        value_path: path,
-        value: val,
-    })
+    .map(
+        |(pvid, path, val)| crate::api::models::PolicyValueOverride {
+            policy_version_id: pvid,
+            value_path: path,
+            value: val,
+        },
+    )
     .collect();
 
     let bundle_id: Uuid = match sqlx::query_scalar(
@@ -2102,7 +2101,20 @@ async fn list_assignments_for_scope(
     // Deactivated assignments have current_version_id set to NULL and must
     // not be decoded as Uuid (which would panic). A history endpoint can
     // expose inactive assignments separately with Option<Uuid>.
-    let rows = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid, Uuid, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, bool)>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            Uuid,
+            Uuid,
+            Uuid,
+            String,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+            bool,
+        ),
+    >(
         "SELECT id, current_version_id, bundle_id, bundle_version_id,
                 COALESCE(environment_id, system_id), enforcement_mode,
                 created_at, updated_at, active
@@ -2119,7 +2131,18 @@ async fn list_assignments_for_scope(
     .await?;
 
     let mut assignments = Vec::with_capacity(rows.len());
-    for (id, current_version_id, bundle_id, bundle_version_id, scope_id, enforcement_mode, created_at, updated_at, active) in rows {
+    for (
+        id,
+        current_version_id,
+        bundle_id,
+        bundle_version_id,
+        scope_id,
+        enforcement_mode,
+        created_at,
+        updated_at,
+        active,
+    ) in rows
+    {
         let exclusions: Vec<Uuid> = sqlx::query_scalar(
             "SELECT policy_version_id FROM compliance_assignment_exclusions WHERE assignment_version_id = $1 ORDER BY policy_version_id",
         )
@@ -2184,7 +2207,11 @@ pub async fn list_environment_assignments(
     }
 
     match list_assignments_for_scope(&pool, "environment", environment_id).await {
-        Ok(assignments) => (StatusCode::OK, Json(serde_json::json!({ "assignments": assignments }))).into_response(),
+        Ok(assignments) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "assignments": assignments })),
+        )
+            .into_response(),
         Err(error) => {
             tracing::error!(error = %error, %environment_id, "failed to list environment assignments");
             internal_error("Failed to list environment assignments")
@@ -2206,7 +2233,11 @@ pub async fn list_system_assignments(
     }
 
     match list_assignments_for_scope(&pool, "system", system_id).await {
-        Ok(assignments) => (StatusCode::OK, Json(serde_json::json!({ "assignments": assignments }))).into_response(),
+        Ok(assignments) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "assignments": assignments })),
+        )
+            .into_response(),
         Err(error) => {
             tracing::error!(error = %error, %system_id, "failed to list system assignments");
             internal_error("Failed to list system assignments")
@@ -2383,6 +2414,44 @@ pub async fn preview_assignment(
     }
 
     let scope_type = payload.scope_type.as_str();
+    if scope_type != "environment" && scope_type != "system" {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "Invalid scope_type",
+                "message": "Must be 'environment' or 'system'",
+                "code": "ASSIGNMENT_TARGET_INVALID"
+            })),
+        )
+            .into_response();
+    }
+
+    let target_exists: bool = if scope_type == "environment" {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM environments WHERE id = $1)")
+            .bind(payload.scope_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(false)
+    } else {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM systems WHERE id = $1)")
+            .bind(payload.scope_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(false)
+    };
+
+    if !target_exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "Target not found",
+                "message": format!("{} {} does not exist", scope_type, payload.scope_id),
+                "code": "ASSIGNMENT_TARGET_NOT_FOUND"
+            })),
+        )
+            .into_response();
+    }
+
     let target = if scope_type == "environment" {
         crate::compliance::resolver::AssignmentTarget::Environment {
             environment_id: payload.scope_id,
@@ -2633,9 +2702,10 @@ pub async fn xccdf_preview(
 
             // Clean VulnDiscussion from description — strip the XML sub-element
             // tags that STIG documents embed inside the <description> text node.
-            let clean_description = r.description.as_deref().map(
-                crate::compliance::xccdf::inference::extract_vuln_discussion,
-            );
+            let clean_description = r
+                .description
+                .as_deref()
+                .map(crate::compliance::xccdf::inference::extract_vuln_discussion);
 
             let refs: Vec<serde_json::Value> = r
                 .references
@@ -2992,15 +3062,13 @@ pub async fn export_assignment_xccdf(
     .fetch_optional(&pool)
     .await;
 
-    let Some((bundle_version_id, scope_type, environment_id, system_id, mode)) =
-        (match assignment {
-            Ok(row) => row,
-            Err(error) => {
-                tracing::error!(error = %error, %assignment_id, "failed to load XCCDF export assignment");
-                return internal_error("Failed to load assignment for XCCDF export");
-            }
-        })
-    else {
+    let Some((bundle_version_id, scope_type, environment_id, system_id, mode)) = (match assignment {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::error!(error = %error, %assignment_id, "failed to load XCCDF export assignment");
+            return internal_error("Failed to load assignment for XCCDF export");
+        }
+    }) else {
         return not_found();
     };
 
@@ -3103,8 +3171,18 @@ pub async fn export_assignment_xccdf(
         }
     };
 
-    let policy_ids: Vec<Uuid> = effective.policies.iter().map(|p| p.policy_version_id).collect();
-    let mut snapshot = match load_export_snapshot_for_policies(&pool, bundle_version_id, Some(&policy_ids)).await {
+    let policy_ids: Vec<Uuid> = effective
+        .policies
+        .iter()
+        .map(|p| p.policy_version_id)
+        .collect();
+    let mut snapshot = match load_export_snapshot_for_policies(
+        &pool,
+        bundle_version_id,
+        Some(&policy_ids),
+    )
+    .await
+    {
         Ok(snapshot) => snapshot,
         Err(error) => return export_snapshot_error_response(error, bundle_version_id),
     };
@@ -3121,7 +3199,12 @@ pub async fn export_assignment_xccdf(
     snapshot.policies.sort_by_key(|policy| policy.policy_order);
     snapshot.groups = match build_export_groups(&snapshot.policies) {
         Ok(groups) => groups,
-        Err(source) => return export_snapshot_error_response(ExportSnapshotError::InvalidGroupProjection { source }, bundle_version_id),
+        Err(source) => {
+            return export_snapshot_error_response(
+                ExportSnapshotError::InvalidGroupProjection { source },
+                bundle_version_id,
+            );
+        }
     };
 
     match write_bundle_xccdf_export(&snapshot) {
@@ -3129,14 +3212,20 @@ pub async fn export_assignment_xccdf(
             let safe_filename = safe_bundle_xml_filename(&format!("{}-assignment", snapshot.name));
             (
                 StatusCode::OK,
-                [("content-type", "application/xml"), ("content-disposition", &format!("attachment; filename=\"{safe_filename}\""))],
+                [
+                    ("content-type", "application/xml"),
+                    (
+                        "content-disposition",
+                        &format!("attachment; filename=\"{safe_filename}\""),
+                    ),
+                ],
                 xml,
-            ).into_response()
+            )
+                .into_response()
         }
-        Err(error) => export_snapshot_error_response(
-            ExportSnapshotError::Writer(error),
-            bundle_version_id,
-        ),
+        Err(error) => {
+            export_snapshot_error_response(ExportSnapshotError::Writer(error), bundle_version_id)
+        }
     }
 }
 
@@ -4911,18 +5000,18 @@ fn is_body_limit_error(err: &axum::extract::multipart::MultipartError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::session::{hash_token, SESSION_COOKIE_NAME};
+    use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
     use crate::compliance::canonical::{ImplementationState, PublicationState};
     use crate::compliance::interchange::{MAX_XCCDF_MULTIPART_BYTES, MAX_XCCDF_XML_BYTES};
     use crate::models::auth_identity::AuthRole;
     use crate::queries::auth_identity::{create_user_session, sync_user_role};
     use crate::queries::users::insert_user;
+    use axum::Router;
     use axum::body::Body;
     use axum::extract::DefaultBodyLimit;
     use axum::extract::FromRequest;
     use axum::http::Request;
     use axum::routing::{get, post};
-    use axum::Router;
     use chrono::Utc;
 
     const BOUNDARY: &str = "XCFTESTBOUNDARY";
@@ -5076,7 +5165,9 @@ mod tests {
             .expect("multipart extractor accepts request stream")
     }
 
-    async fn read_file_and_plan(body: Vec<u8>) -> Result<(MultipartUpload, Vec<u8>), MultipartReadError> {
+    async fn read_file_and_plan(
+        body: Vec<u8>,
+    ) -> Result<(MultipartUpload, Vec<u8>), MultipartReadError> {
         let mut multipart = multipart_from_body(body).await;
         read_multipart_file_and_plan(&mut multipart).await
     }
@@ -5134,7 +5225,9 @@ mod tests {
             }
             finish_multipart(&mut body);
 
-            let (upload, plan) = read_file_and_plan(body).await.expect("multipart fields accepted");
+            let (upload, plan) = read_file_and_plan(body)
+                .await
+                .expect("multipart fields accepted");
             assert_eq!(upload.filename.as_deref(), Some("test.xml"));
             assert_eq!(upload.bytes, b"xml");
             assert_eq!(plan, br#"{"expected_sha256":"abc"}"#);
@@ -5145,10 +5238,17 @@ mod tests {
     async fn import_multipart_accepts_plan_with_incidental_filename() {
         let mut body = Vec::new();
         push_file_field(&mut body, "file", "test.xml", b"xml");
-        push_file_field(&mut body, "plan", "plan.json", br#"{"expected_sha256":"abc"}"#);
+        push_file_field(
+            &mut body,
+            "plan",
+            "plan.json",
+            br#"{"expected_sha256":"abc"}"#,
+        );
         finish_multipart(&mut body);
 
-        let (_, plan) = read_file_and_plan(body).await.expect("plan filename is tolerated");
+        let (_, plan) = read_file_and_plan(body)
+            .await
+            .expect("plan filename is tolerated");
         assert_eq!(plan, br#"{"expected_sha256":"abc"}"#);
     }
 
@@ -5159,14 +5259,20 @@ mod tests {
         push_file_field(&mut body, "file", "two.xml", b"two");
         push_text_field(&mut body, "plan", b"{}");
         finish_multipart(&mut body);
-        assert_eq!(read_file_and_plan(body).await, Err(MultipartReadError::MultipleFiles));
+        assert_eq!(
+            read_file_and_plan(body).await,
+            Err(MultipartReadError::MultipleFiles)
+        );
 
         let mut body = Vec::new();
         push_file_field(&mut body, "file", "one.xml", b"one");
         push_text_field(&mut body, "plan", b"{}");
         push_file_field(&mut body, "plan", "plan.json", b"{}");
         finish_multipart(&mut body);
-        assert_eq!(read_file_and_plan(body).await, Err(MultipartReadError::DuplicatePlan));
+        assert_eq!(
+            read_file_and_plan(body).await,
+            Err(MultipartReadError::DuplicatePlan)
+        );
         assert_eq!(
             multipart_read_error_response(MultipartReadError::DuplicatePlan).status(),
             StatusCode::BAD_REQUEST
@@ -5178,30 +5284,50 @@ mod tests {
         let mut body = Vec::new();
         push_text_field(&mut body, "plan", b"{}");
         finish_multipart(&mut body);
-        assert_eq!(read_file_and_plan(body).await, Err(MultipartReadError::InvalidFieldName));
+        assert_eq!(
+            read_file_and_plan(body).await,
+            Err(MultipartReadError::InvalidFieldName)
+        );
 
         let mut body = Vec::new();
         push_file_field(&mut body, "file", "test.xml", b"xml");
         finish_multipart(&mut body);
-        assert_eq!(read_file_and_plan(body).await, Err(MultipartReadError::InvalidFieldName));
+        assert_eq!(
+            read_file_and_plan(body).await,
+            Err(MultipartReadError::InvalidFieldName)
+        );
 
         let mut body = Vec::new();
         push_file_field(&mut body, "unexpected", "test.xml", b"xml");
         push_text_field(&mut body, "plan", b"{}");
         finish_multipart(&mut body);
-        assert_eq!(read_file_and_plan(body).await, Err(MultipartReadError::InvalidFieldName));
+        assert_eq!(
+            read_file_and_plan(body).await,
+            Err(MultipartReadError::InvalidFieldName)
+        );
 
         let mut body = Vec::new();
-        push_file_field(&mut body, "file", "big.xml", &vec![b'x'; MAX_XCCDF_UPLOAD_BYTES]);
+        push_file_field(
+            &mut body,
+            "file",
+            "big.xml",
+            &vec![b'x'; MAX_XCCDF_UPLOAD_BYTES],
+        );
         push_text_field(&mut body, "plan", b"{}");
         finish_multipart(&mut body);
-        assert_eq!(read_file_and_plan(body).await, Err(MultipartReadError::TooLarge));
+        assert_eq!(
+            read_file_and_plan(body).await,
+            Err(MultipartReadError::TooLarge)
+        );
 
         let mut body = Vec::new();
         push_file_field(&mut body, "file", "test.xml", b"xml");
         push_text_field(&mut body, "plan", &vec![b'x'; 1024 * 1024 + 1]);
         finish_multipart(&mut body);
-        assert_eq!(read_file_and_plan(body).await, Err(MultipartReadError::TooLarge));
+        assert_eq!(
+            read_file_and_plan(body).await,
+            Err(MultipartReadError::TooLarge)
+        );
     }
 
     #[test]
@@ -6950,8 +7076,8 @@ mod tests {
     #[ignore = "requires live database connection"]
     async fn preview_accepts_zip_containing_single_xml() {
         use std::io::Write;
-        use zip::write::{FileOptions, SimpleFileOptions};
         use zip::CompressionMethod;
+        use zip::write::{FileOptions, SimpleFileOptions};
 
         let pool = test_pool_from_env().await;
         let token = admin_session_token(&pool).await;
@@ -6984,8 +7110,8 @@ mod tests {
     #[ignore = "requires live database connection"]
     async fn preview_rejects_zip_with_no_xml() {
         use std::io::Write;
-        use zip::write::{FileOptions, SimpleFileOptions};
         use zip::CompressionMethod;
+        use zip::write::{FileOptions, SimpleFileOptions};
 
         let pool = test_pool_from_env().await;
         let token = admin_session_token(&pool).await;
@@ -7405,21 +7531,39 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
             );
 
             // Check content must survive intact.
-            let has_check_content = rule["checks"].as_array().map(|checks| {
-                checks.iter().any(|c| {
-                    c["body_parts"].as_array().map(|parts| {
-                        parts.iter().any(|p| {
-                            p["type"] == "inline"
-                                && p["content"].as_str().unwrap_or("").contains("networking.firewall.enable")
-                        })
-                    }).unwrap_or(false)
+            let has_check_content = rule["checks"]
+                .as_array()
+                .map(|checks| {
+                    checks.iter().any(|c| {
+                        c["body_parts"]
+                            .as_array()
+                            .map(|parts| {
+                                parts.iter().any(|p| {
+                                    p["type"] == "inline"
+                                        && p["content"]
+                                            .as_str()
+                                            .unwrap_or("")
+                                            .contains("networking.firewall.enable")
+                                })
+                            })
+                            .unwrap_or(false)
+                    })
                 })
-            }).unwrap_or(false);
-            assert!(has_check_content, "V-268078 check-content must contain firewall check text");
+                .unwrap_or(false);
+            assert!(
+                has_check_content,
+                "V-268078 check-content must contain firewall check text"
+            );
 
             // Inferred assertions: exactly one boolean assertion for the firewall option.
-            let inferred = rule["inferred_assertions"].as_array().expect("inferred_assertions");
-            assert_eq!(inferred.len(), 1, "exactly one assertion inferred for V-268078");
+            let inferred = rule["inferred_assertions"]
+                .as_array()
+                .expect("inferred_assertions");
+            assert_eq!(
+                inferred.len(),
+                1,
+                "exactly one assertion inferred for V-268078"
+            );
             assert_eq!(inferred[0]["option_path"], "networking.firewall.enable");
             assert_eq!(
                 inferred[0]["nix_expression"],
@@ -7428,8 +7572,13 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
         } else {
             // When using the minimal fixture (no real ZIP), V-268078 is in the fixture
             // with the full firewall fix text — verify the fixture rule is present.
-            let fixture_rule = rules.iter().find(|r| r["id"].as_str().unwrap_or("").contains("268078"));
-            assert!(fixture_rule.is_some(), "fixture should contain a V-268078 rule");
+            let fixture_rule = rules
+                .iter()
+                .find(|r| r["id"].as_str().unwrap_or("").contains("268078"));
+            assert!(
+                fixture_rule.is_some(),
+                "fixture should contain a V-268078 rule"
+            );
         }
     }
 
@@ -8731,9 +8880,11 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
                 (0, 0, 0, 0, 0, 0)
             );
         }
-        assert!(persist_assignment(&pool, admin_id, &payload, None, None)
-            .await
-            .is_ok());
+        assert!(
+            persist_assignment(&pool, admin_id, &payload, None, None)
+                .await
+                .is_ok()
+        );
 
         // ── Barrier-synchronized concurrent create ────────────────────────────
         // Two creates for the same target + bundle lineage. The barrier ensures
@@ -9975,7 +10126,7 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
             .expect("exact policy export");
         assert_eq!(exact_resp.status().as_u16(), 200);
         let exact_body: serde_json::Value = exact_resp.json().await.expect("exact JSON body");
-        assert_eq!(exact_body["version_id"], pv_id);
+        assert_eq!(exact_body["version_id"], pv_id.to_string());
         assert_eq!(exact_body["policy_type"], "custom_check");
     }
 
@@ -10096,22 +10247,30 @@ packages = ["git"]
         let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
 
         // Create two separate bundle+policy fixtures.
-        let (p1, pv1, _) =
-            make_draft_policy(&pool, &format!("list-contract-p1-{}", Uuid::new_v4().simple())).await;
+        let (p1, pv1, _) = make_draft_policy(
+            &pool,
+            &format!("list-contract-p1-{}", Uuid::new_v4().simple()),
+        )
+        .await;
         db_publish_policy_version(&pool, p1, pv1).await;
         let (_, bv1, _) = make_draft_bundle(
             &pool,
             &format!("list-contract-b1-{}", Uuid::new_v4().simple()),
             &[pv1],
-        ).await;
-        let (p2, pv2, _) =
-            make_draft_policy(&pool, &format!("list-contract-p2-{}", Uuid::new_v4().simple())).await;
+        )
+        .await;
+        let (p2, pv2, _) = make_draft_policy(
+            &pool,
+            &format!("list-contract-p2-{}", Uuid::new_v4().simple()),
+        )
+        .await;
         db_publish_policy_version(&pool, p2, pv2).await;
         let (_, bv2, _) = make_draft_bundle(
             &pool,
             &format!("list-contract-b2-{}", Uuid::new_v4().simple()),
             &[pv2],
-        ).await;
+        )
+        .await;
 
         // Publish both bundle versions via direct DB write.
         for bv in [bv1, bv2] {
@@ -10193,7 +10352,9 @@ packages = ["git"]
 
         // List — must return both assignments.
         let list_resp = reqwest::Client::new()
-            .get(format!("{base}/api/v1/systems/{system_id}/compliance-assignments"))
+            .get(format!(
+                "{base}/api/v1/systems/{system_id}/compliance-assignments"
+            ))
             .header("cookie", format!("cf_session={token}"))
             .send()
             .await
@@ -10202,10 +10363,17 @@ packages = ["git"]
         let list_body: serde_json::Value = list_resp.json().await.unwrap();
         // Verify server wraps in { "assignments": [...] }.
         let assignments_arr = list_body["assignments"].as_array().unwrap();
-        assert_eq!(assignments_arr.len(), 2, "both active assignments must be listed");
+        assert_eq!(
+            assignments_arr.len(),
+            2,
+            "both active assignments must be listed"
+        );
         // All items must have current_version_id.
         for item in assignments_arr {
-            assert!(item["current_version_id"].is_string(), "current_version_id required");
+            assert!(
+                item["current_version_id"].is_string(),
+                "current_version_id required"
+            );
             assert!(item["bundle_id"].is_string(), "bundle_id required");
             assert!(item["exclusions"].is_array(), "exclusions required");
             assert!(item["additions"].is_array(), "additions required");
@@ -10219,25 +10387,39 @@ packages = ["git"]
             .send()
             .await
             .expect("deactivate assignment 1");
-        assert_eq!(deact_resp.status().as_u16(), 204, "deactivation must succeed");
+        assert_eq!(
+            deact_resp.status().as_u16(),
+            204,
+            "deactivation must succeed"
+        );
 
         // List again — must return only the active assignment.
         let list_resp2 = reqwest::Client::new()
-            .get(format!("{base}/api/v1/systems/{system_id}/compliance-assignments"))
+            .get(format!(
+                "{base}/api/v1/systems/{system_id}/compliance-assignments"
+            ))
             .header("cookie", format!("cf_session={token}"))
             .send()
             .await
             .expect("list after deactivation");
-        assert_eq!(list_resp2.status().as_u16(), 200, "list must succeed after deactivation");
+        assert_eq!(
+            list_resp2.status().as_u16(),
+            200,
+            "list must succeed after deactivation"
+        );
         let list_body2: serde_json::Value = list_resp2.json().await.unwrap();
         let assignments_arr2 = list_body2["assignments"].as_array().unwrap();
         assert_eq!(
-            assignments_arr2.len(), 1,
+            assignments_arr2.len(),
+            1,
             "only active assignment must appear after deactivation"
         );
         let remaining = &assignments_arr2[0];
         let remaining_id: Uuid = serde_json::from_value(remaining["id"].clone()).unwrap();
-        assert_eq!(remaining_id, a2_id, "remaining assignment must be the active one");
+        assert_eq!(
+            remaining_id, a2_id,
+            "remaining assignment must be the active one"
+        );
 
         // GET the deactivated assignment — must return 410, not 500.
         let deact_get = reqwest::Client::new()
@@ -10247,11 +10429,16 @@ packages = ["git"]
             .await
             .expect("get deactivated assignment");
         assert_eq!(
-            deact_get.status().as_u16(), 410,
+            deact_get.status().as_u16(),
+            410,
             "fetching deactivated assignment must return 410 Gone, not 500"
         );
 
         // Cleanup.
-        sqlx::query("DELETE FROM systems WHERE id = $1").bind(system_id).execute(&pool).await.ok();
+        sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system_id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 }

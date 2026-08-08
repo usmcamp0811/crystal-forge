@@ -61,9 +61,17 @@ impl NixosLiteralValue {
     /// The Nix source representation of this value.
     pub fn nix_repr(&self) -> String {
         match self {
-            Self::Boolean(b) => if *b { "true".into() } else { "false".into() },
+            Self::Boolean(b) => {
+                if *b {
+                    "true".into()
+                } else {
+                    "false".into()
+                }
+            }
             Self::Integer(n) => n.to_string(),
-            Self::StringLiteral(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+            Self::StringLiteral(s) => {
+                format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+            }
         }
     }
 
@@ -116,10 +124,7 @@ pub fn infer_nixos_assertions(fix_text: &str) -> Vec<NixosOptionAssertionDraft> 
             nix_repr,
         );
 
-        let description = format!(
-            "NixOS option {} must be {}",
-            path, nix_repr,
-        );
+        let description = format!("NixOS option {} must be {}", path, nix_repr,);
 
         results.push(NixosOptionAssertionDraft {
             option_path: path.to_string(),
@@ -290,7 +295,10 @@ mod tests {
         let assertions = infer_nixos_assertions(fix);
         assert_eq!(assertions.len(), 1);
         assert_eq!(assertions[0].option_path, "services.openssh.enable");
-        assert_eq!(assertions[0].expected_value, NixosLiteralValue::Boolean(false));
+        assert_eq!(
+            assertions[0].expected_value,
+            NixosLiteralValue::Boolean(false)
+        );
     }
 
     #[test]
@@ -310,7 +318,10 @@ mod tests {
         let fix = r#" environment.etc."pam_tally2".source = "/dev/null";"#;
         // path contains / so not a valid Nix option path — should be skipped
         let assertions = infer_nixos_assertions(fix);
-        assert!(assertions.is_empty(), "path with invalid chars should be skipped");
+        assert!(
+            assertions.is_empty(),
+            "path with invalid chars should be skipped"
+        );
     }
 
     #[test]
@@ -352,7 +363,11 @@ mod tests {
             Rebuild the system with the following command:\n\n\
             $ sudo nixos-rebuild switch";
         let assertions = infer_nixos_assertions(fix);
-        assert_eq!(assertions.len(), 1, "exactly one assertion inferred for firewall rule");
+        assert_eq!(
+            assertions.len(),
+            1,
+            "exactly one assertion inferred for firewall rule"
+        );
         let a = &assertions[0];
         assert_eq!(a.option_path, "networking.firewall.enable");
         assert_eq!(a.expected_value, NixosLiteralValue::Boolean(true));

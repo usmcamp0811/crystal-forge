@@ -1278,6 +1278,12 @@ pub struct DeploymentPolicyVersionSummary {
     pub config: serde_json::Value,
     #[serde(default)]
     pub enabled: bool,
+    /// SRG IDs for this exact revision (from compliance_metadata).
+    #[serde(default)]
+    pub srg_ids: Vec<String>,
+    /// CCI IDs for this exact revision (from compliance_metadata).
+    #[serde(default)]
+    pub cci_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1456,8 +1462,13 @@ pub enum XccdfRuleImportAction {
         #[serde(default)]
         customization: ImportedPolicyCustomization,
     },
-    MapExisting { rule_id: String, policy_version_id: Uuid },
-    Exclude { rule_id: String },
+    MapExisting {
+        rule_id: String,
+        policy_version_id: Uuid,
+    },
+    Exclude {
+        rule_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -1487,16 +1498,33 @@ pub struct ImportedCustomCheckRule {
     pub strict: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ImportedEvidenceRequirement {
-    Command { command: String, expected_output: String },
-    File { path: String, expected_content: String },
-    UnitState { unit: String, state: String },
-    Log { source: String, unit: Option<String>, pattern: String },
-    Attestation { description: String },
+    Command {
+        command: String,
+        expected_output: String,
+    },
+    File {
+        path: String,
+        expected_content: String,
+    },
+    UnitState {
+        unit: String,
+        state: String,
+    },
+    Log {
+        source: String,
+        unit: Option<String>,
+        pattern: String,
+    },
+    Attestation {
+        description: String,
+    },
 }
 
 /// Bundle metadata included in the XCCDF import plan.
@@ -1687,6 +1715,12 @@ pub struct CreateDeploymentPolicyRequest {
     pub config: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// SRG IDs this policy satisfies. Normalised server-side.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub srg_ids: Vec<String>,
+    /// CCI mappings. Normalised server-side.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cci_ids: Vec<String>,
 }
 
 /// Request to update an existing deployment policy.
@@ -1702,6 +1736,14 @@ pub struct UpdateDeploymentPolicyRequest {
     pub config: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// When `Some`, replace the curated SRG mapping; `Some([])` clears it.
+    /// `None` (omitted) preserves the existing value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub srg_ids: Option<Vec<String>>,
+    /// When `Some`, replace the curated CCI mapping; `Some([])` clears it.
+    /// `None` (omitted) preserves the existing value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cci_ids: Option<Vec<String>>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

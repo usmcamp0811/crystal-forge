@@ -459,11 +459,7 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
             let name = customization
                 .and_then(|c| c.policy_name.clone())
                 .filter(|t| !t.trim().is_empty())
-                .or_else(|| rule
-                .title
-                .clone()
-                .filter(|t| !t.trim().is_empty())
-                )
+                .or_else(|| rule.title.clone().filter(|t| !t.trim().is_empty()))
                 .unwrap_or_else(|| rule.id.clone());
 
             let mut compliance_metadata = ImportedPolicyRecord::build_compliance_metadata(rule);
@@ -496,7 +492,8 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
             };
             if !evidence_requirements.is_empty() {
                 compliance_metadata["evidence_requirements"] =
-                    serde_json::to_value(&evidence_requirements).unwrap_or_else(|_| serde_json::json!([]));
+                    serde_json::to_value(&evidence_requirements)
+                        .unwrap_or_else(|_| serde_json::json!([]));
             }
             if let Some(note) = customization.and_then(|c| c.implementation_note.clone()) {
                 compliance_metadata["implementation_note"] = serde_json::Value::String(note);
@@ -522,9 +519,9 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
                 .and_then(|c| c.policy_description.clone())
                 .or_else(|| rule.description.clone());
             let mapped_policy_version_id = match action {
-                XccdfRuleImportAction::MapExisting { policy_version_id, .. } => {
-                    Some(*policy_version_id)
-                }
+                XccdfRuleImportAction::MapExisting {
+                    policy_version_id, ..
+                } => Some(*policy_version_id),
                 _ => None,
             };
 
@@ -682,7 +679,10 @@ mod tests {
         assert_eq!(records[0].implementation_state, "native");
         assert_eq!(records[0].policy_type, "custom_check");
         assert_eq!(records[0].config["mode"], "any");
-        assert_eq!(records[0].config["rules"][0]["field_name"], "firewallEnabled");
+        assert_eq!(
+            records[0].config["rules"][0]["field_name"],
+            "firewallEnabled"
+        );
         assert_eq!(records[0].config["rules"][0]["strict"], false);
     }
 
@@ -722,11 +722,11 @@ mod tests {
         plan.rule_actions = vec![XccdfRuleImportAction::CreateManual {
             rule_id: "rule-1".into(),
             customization: ImportedPolicyCustomization {
-            policy_name: Some("Local firewall policy".into()),
-            policy_description: Some("Local control description".into()),
-            implementation_note: Some("Reviewed by platform security".into()),
-            policy_severity: Some("high".into()),
-            policy_rationale: Some("Apply the approved remediation".into()),
+                policy_name: Some("Local firewall policy".into()),
+                policy_description: Some("Local control description".into()),
+                implementation_note: Some("Reviewed by platform security".into()),
+                policy_severity: Some("high".into()),
+                policy_rationale: Some("Apply the approved remediation".into()),
             },
             evidence_requirements: Vec::new(),
         }];
@@ -734,7 +734,10 @@ mod tests {
         let validated = validate_import_plan(plan, &parsed).expect("customized plan is valid");
         let records = build_policy_records(&validated);
         assert_eq!(records[0].name, "Local firewall policy");
-        assert_eq!(records[0].description.as_deref(), Some("Local control description"));
+        assert_eq!(
+            records[0].description.as_deref(),
+            Some("Local control description")
+        );
         assert_eq!(
             records[0].compliance_metadata["implementation_note"],
             "Reviewed by platform security"

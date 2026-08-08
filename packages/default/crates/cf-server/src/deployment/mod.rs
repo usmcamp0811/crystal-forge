@@ -1,5 +1,5 @@
 use crate::compliance::resolver::{
-    resolve_system_effective_policies, AssignmentMode, EffectivePolicy, ResolutionOutcome,
+    AssignmentMode, EffectivePolicy, ResolutionOutcome, resolve_system_effective_policies,
 };
 use crate::config::CrystalForgeConfig;
 use crate::models::deployment_policies::{
@@ -18,7 +18,7 @@ use crate::services::time_window_policy;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
-use tokio::time::{sleep, Instant};
+use tokio::time::{Instant, sleep};
 use tracing::{debug, error, info, warn};
 pub mod agent;
 pub use agent::*;
@@ -255,12 +255,10 @@ impl DeploymentPolicyManager {
         }
 
         let all_policy_version_ids = all_policy_version_ids.into_iter().collect::<Vec<_>>();
-        let policies_by_id = get_deployment_policies_by_versions(
-            &self.pool,
-            &all_policy_version_ids,
-        )
-        .await
-        .context("Failed to load effective deployment policy versions")?;
+        let policies_by_id =
+            get_deployment_policies_by_versions(&self.pool, &all_policy_version_ids)
+                .await
+                .context("Failed to load effective deployment policy versions")?;
         let failed_policy_loads = all_policy_version_ids
             .into_iter()
             .filter(|version_id| !policies_by_id.contains_key(version_id))

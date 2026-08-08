@@ -1320,6 +1320,12 @@ pub struct DeploymentPolicyVersionSummary {
     pub policy_type: String,
     pub config: serde_json::Value,
     pub enabled: bool,
+    /// Normalised SRG IDs for this exact version (derived from compliance_metadata).
+    #[serde(default)]
+    pub srg_ids: Vec<String>,
+    /// Normalised CCI IDs for this exact version (derived from compliance_metadata).
+    #[serde(default)]
+    pub cci_ids: Vec<String>,
 }
 
 /// An exact policy-version member of a selected bundle version.

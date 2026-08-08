@@ -3,5 +3,6 @@
 pub mod canonical;
 pub mod digest;
 pub mod interchange;
+pub mod mappings;
 pub mod resolver;
 pub mod xccdf;

@@ -13,7 +13,7 @@ use sha2::{Digest as _, Sha256};
 use super::super::interchange::{InterchangeLimits, MAX_XCCDF_XML_BYTES};
 use super::models::ParsedXccdf;
 use super::parser::parse_xccdf;
-use super::zip_extractor::{detect_package_kind, extract_xccdf_from_zip, PackageKind};
+use super::zip_extractor::{PackageKind, detect_package_kind, extract_xccdf_from_zip};
 
 /// Detailed package-source provenance for UI or audit display.
 #[derive(Debug, Clone)]

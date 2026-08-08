@@ -30,6 +30,10 @@ pub struct PolicyDefinition {
     pub policy_type: Option<String>,
     /// Number of NixOS derivations (systems) this policy applies to.
     pub system_count: i64,
+    /// SRG IDs from the current version's compliance_metadata. Persisted.
+    pub srg_ids: Vec<String>,
+    /// CCI IDs from the current version's compliance_metadata. Persisted.
+    pub cci_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,6 +51,10 @@ pub struct PolicyRevisionSummary {
     pub policy_type: String,
     pub config: serde_json::Value,
     pub enabled: bool,
+    /// SRG IDs specific to this revision. Selecting this revision shows these.
+    pub srg_ids: Vec<String>,
+    /// CCI IDs specific to this revision. Selecting this revision shows these.
+    pub cci_ids: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

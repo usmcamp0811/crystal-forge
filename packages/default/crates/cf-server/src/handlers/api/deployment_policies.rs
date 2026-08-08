@@ -16,13 +16,16 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+use crate::api::models::DeploymentPolicyVersionSummary;
 use crate::auth::extractors::{RequireAdmin, RequireAuth, RequireOperator};
+use crate::compliance::mappings::{
+    extract_cci_ids, extract_srg_ids, normalise_cci_ids, normalise_srg_ids,
+};
 use crate::handlers::agent_request::CFState;
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
     is_reserved_policy_result_field,
 };
-use crate::api::models::DeploymentPolicyVersionSummary;
 use crate::queries::deployment_policies;
 
 // =============================================================================
@@ -576,8 +579,10 @@ pub async fn list_deployment_policies(
     .map(|(id, published, draft)| (id, (published, draft)))
     .collect();
 
-    let version_rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, String, String, chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>, Option<Uuid>, String, Option<String>, String, Value, bool)>(
-        "SELECT id, policy_id, version, publication_state, trust_state, semantic_digest, created_at, published_at, derived_from_version_id, name, description, policy_type, config, COALESCE(enabled_by_default, true) FROM deployment_policy_versions WHERE policy_id = ANY($1) ORDER BY policy_id, created_at DESC, id DESC",
+    // Fetch all version rows in one query, including compliance_metadata for
+    // SRG/CCI extraction. No N+1: one query covers all policies in the page.
+    let version_rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, String, String, chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>, Option<Uuid>, String, Option<String>, String, Value, bool, Value)>(
+        "SELECT id, policy_id, version, publication_state, trust_state, semantic_digest, created_at, published_at, derived_from_version_id, name, description, policy_type, config, COALESCE(enabled_by_default, true), compliance_metadata FROM deployment_policy_versions WHERE policy_id = ANY($1) ORDER BY policy_id, created_at DESC, id DESC",
     )
     .bind(&policy_ids)
     .fetch_all(&state.pool)
@@ -592,27 +597,37 @@ pub async fn list_deployment_policies(
             .into_iter()
             .map(|policy| DeploymentPolicyListItem {
                 current_version_id: versions.get(&policy.id).copied(),
-                versions: version_rows.iter().filter(|row| row.1 == policy.id).map(|row| {
-                    let pointers = pointer_rows.get(&policy.id).copied().unwrap_or((None, None));
-                    DeploymentPolicyVersionSummary {
-                        id: row.0,
-                        policy_id: row.1,
-                        version: row.2.clone(),
-                        publication_state: row.3.clone(),
-                        trust_state: row.4.clone(),
-                        semantic_digest: row.5.clone(),
-                        created_at: row.6,
-                        published_at: row.7,
-                        derived_from_version_id: row.8,
-                        is_current_published: pointers.0 == Some(row.0),
-                        is_current_draft: pointers.1 == Some(row.0),
-                        name: row.9.clone(),
-                        description: row.10.clone(),
-                        policy_type: row.11.clone(),
-                        config: row.12.clone(),
-                        enabled: row.13,
-                    }
-                }).collect(),
+                versions: version_rows
+                    .iter()
+                    .filter(|row| row.1 == policy.id)
+                    .map(|row| {
+                        let pointers = pointer_rows
+                            .get(&policy.id)
+                            .copied()
+                            .unwrap_or((None, None));
+                        let compliance_meta = &row.14;
+                        DeploymentPolicyVersionSummary {
+                            id: row.0,
+                            policy_id: row.1,
+                            version: row.2.clone(),
+                            publication_state: row.3.clone(),
+                            trust_state: row.4.clone(),
+                            semantic_digest: row.5.clone(),
+                            created_at: row.6,
+                            published_at: row.7,
+                            derived_from_version_id: row.8,
+                            is_current_published: pointers.0 == Some(row.0),
+                            is_current_draft: pointers.1 == Some(row.0),
+                            name: row.9.clone(),
+                            description: row.10.clone(),
+                            policy_type: row.11.clone(),
+                            config: row.12.clone(),
+                            enabled: row.13,
+                            srg_ids: extract_srg_ids(compliance_meta),
+                            cci_ids: extract_cci_ids(compliance_meta),
+                        }
+                    })
+                    .collect(),
                 policy,
             })
             .collect(),
@@ -764,7 +779,20 @@ pub async fn create_deployment_policy(
         ));
     }
 
-    // Check for duplicate policy semantics (same type + same config)
+    // Validate and normalise SRG/CCI mappings before persistence.
+    if !request.srg_ids.is_empty() {
+        normalise_srg_ids(&request.srg_ids)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid srg_ids: {e}")))?;
+    }
+    if !request.cci_ids.is_empty() {
+        normalise_cci_ids(&request.cci_ids)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid cci_ids: {e}")))?;
+    }
+
+    // Check for duplicate policy semantics (same type + same config).
+    // Note: two policies with the same config but different SRG/CCI mappings
+    // are NOT considered duplicates because compliance_metadata is included in
+    // the canonical digest, making them semantically distinct policy versions.
     let content_exists = deployment_policies::check_policy_content_exists(
         &state.pool,
         &request.policy_type,
@@ -780,7 +808,10 @@ pub async fn create_deployment_policy(
         )
     })?;
 
-    if content_exists {
+    // Only reject exact content duplicates when the caller supplies no mappings
+    // (an exact config duplicate with a different SRG/CCI set is a new semantic
+    // version, not a true duplicate).
+    if content_exists && request.srg_ids.is_empty() && request.cci_ids.is_empty() {
         return Err((
             StatusCode::CONFLICT,
             "A policy with the same type and configuration already exists".to_string(),
@@ -938,27 +969,45 @@ pub async fn update_deployment_policy(
         request.config = Some(candidate_config.clone());
     }
 
-    // Check for duplicate policy semantics (same type + same config)
-    let content_exists = deployment_policies::check_policy_content_exists(
-        &state.pool,
-        &candidate_policy_type,
-        &candidate_config,
-        Some(&policy_id),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to check duplicate policy content: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to validate policy content".to_string(),
-        )
-    })?;
+    // Validate SRG/CCI mappings when the caller is changing them.
+    if let Some(ref srgs) = request.srg_ids {
+        normalise_srg_ids(srgs)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid srg_ids: {e}")))?;
+    }
+    if let Some(ref ccis) = request.cci_ids {
+        normalise_cci_ids(ccis)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid cci_ids: {e}")))?;
+    }
 
-    if content_exists {
-        return Err((
-            StatusCode::CONFLICT,
-            "A policy with the same type and configuration already exists".to_string(),
-        ));
+    // Skip the config-only duplicate check when the caller is changing mappings —
+    // two versions with the same enforcement config but different SRG/CCI sets
+    // are semantically distinct (the canonical digest covers compliance_metadata).
+    let mappings_changing = request.srg_ids.is_some() || request.cci_ids.is_some();
+    let config_changing = request.policy_type.is_some() || request.config.is_some();
+
+    if config_changing && !mappings_changing {
+        // Check for duplicate policy semantics (same type + same config)
+        let content_exists = deployment_policies::check_policy_content_exists(
+            &state.pool,
+            &candidate_policy_type,
+            &candidate_config,
+            Some(&policy_id),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to check duplicate policy content: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to validate policy content".to_string(),
+            )
+        })?;
+
+        if content_exists {
+            return Err((
+                StatusCode::CONFLICT,
+                "A policy with the same type and configuration already exists".to_string(),
+            ));
+        }
     }
 
     // Update policy
@@ -1271,6 +1320,7 @@ mod tests {
             policy_type: "custom_check".to_string(),
             config: serde_json::json!({"expression": "true"}),
             enabled: Some(true),
+            ..Default::default()
         };
 
         deployment_policies::create_deployment_policy(pool, &request)
@@ -1303,6 +1353,7 @@ mod tests {
             policy_type: "custom_check".to_string(),
             config: serde_json::json!({"expression": "true"}),
             enabled: Some(true),
+            ..Default::default()
         };
         deployment_policies::create_deployment_policy(&pool, &enabled_request)
             .await
@@ -1315,6 +1366,7 @@ mod tests {
             policy_type: "custom_check".to_string(),
             config: serde_json::json!({"expression": "false"}),
             enabled: Some(false),
+            ..Default::default()
         };
         deployment_policies::create_deployment_policy(&pool, &disabled_request)
             .await
@@ -1347,6 +1399,7 @@ mod tests {
             policy_type: "custom_check".to_string(),
             config: serde_json::json!({"expression": "config.services.ssh.enable"}),
             enabled: Some(true),
+            ..Default::default()
         };
 
         let policy = deployment_policies::create_deployment_policy(&pool, &request)
@@ -1385,6 +1438,7 @@ mod tests {
             policy_type: None,
             config: None,
             enabled: Some(false),
+            ..Default::default()
         };
 
         let updated =
@@ -1430,6 +1484,7 @@ mod tests {
             policy_type: "custom_check".to_string(),
             config: serde_json::json!({"expression": "true"}),
             enabled: Some(true),
+            ..Default::default()
         };
 
         let result = deployment_policies::create_deployment_policy(&pool, &request).await;

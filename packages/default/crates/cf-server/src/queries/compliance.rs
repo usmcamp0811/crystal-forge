@@ -1,17 +1,16 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::compliance::digest::{
-    load_bundle_membership, write_assignment_effective_set_digest, write_bundle_version_digest,
-    BundleMembershipEntry, BundleVersionCanonical,
+    BundleMembershipEntry, BundleVersionCanonical, load_bundle_membership,
+    write_assignment_effective_set_digest, write_bundle_version_digest,
 };
 use crate::compliance::resolver::{
-    resolve_system_effective_policies,
+    ResolutionOutcome, resolve_system_effective_policies,
     resolve_systems_effective_policies_for_bundle_version_batch,
-    ResolutionOutcome,
 };
 
 // ─── Draft-lifecycle helpers ──────────────────────────────────────────────────
@@ -403,10 +402,11 @@ fn validate_bundle_request(name: &str, framework: &str, policy_ids: &[Uuid]) -> 
 }
 
 use crate::api::models::{
-    BundleVersionPolicyMembership, ComplianceBundleSummary, ComplianceBundleVersionSummary, ComplianceBundleSystemsResponse, ComplianceControlEvidence,
-    ComplianceControlStatus, ComplianceEnvironmentRef, ComplianceEvidenceArtifact,
-    ComplianceEvidenceItem, ComplianceEvidenceResponse, ComplianceRollupTotals,
-    ComplianceSystemRollup, CreateComplianceBundleRequest, UpdateComplianceBundleRequest,
+    BundleVersionPolicyMembership, ComplianceBundleSummary, ComplianceBundleSystemsResponse,
+    ComplianceBundleVersionSummary, ComplianceControlEvidence, ComplianceControlStatus,
+    ComplianceEnvironmentRef, ComplianceEvidenceArtifact, ComplianceEvidenceItem,
+    ComplianceEvidenceResponse, ComplianceRollupTotals, ComplianceSystemRollup,
+    CreateComplianceBundleRequest, UpdateComplianceBundleRequest,
 };
 
 /// Load the exact immutable policy versions selected by one bundle version.
@@ -581,7 +581,21 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
         return Ok(bundles);
     }
 
-    let version_rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, String, String, DateTime<Utc>, Option<DateTime<Utc>>, Option<Uuid>, i64)>(
+    let version_rows = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            String,
+            String,
+            String,
+            String,
+            DateTime<Utc>,
+            Option<DateTime<Utc>>,
+            Option<Uuid>,
+            i64,
+        ),
+    >(
         r#"
         SELECT v.id, v.bundle_id, v.version, v.publication_state, v.trust_state,
                v.semantic_digest, v.created_at, v.published_at, v.derived_from_version_id,
@@ -1148,12 +1162,11 @@ pub async fn list_bundle_systems_for_version(
     let Some(_bundle) = find_bundle(pool, bundle_id).await? else {
         return Ok(None);
     };
-    let version_belongs: Option<Uuid> = sqlx::query_scalar(
-        "SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1",
-    )
-    .bind(bundle_version_id)
-    .fetch_optional(pool)
-    .await?;
+    let version_belongs: Option<Uuid> =
+        sqlx::query_scalar("SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1")
+            .bind(bundle_version_id)
+            .fetch_optional(pool)
+            .await?;
     if version_belongs != Some(bundle_id) {
         return Ok(None);
     }
@@ -1194,13 +1207,17 @@ pub async fn list_bundle_systems_for_version(
         .into_iter()
         .map(|system| match effective.get(&system.id) {
             Some(ResolutionOutcome::Resolved(set))
-                if set.bundle_version_id == bundle_version_id => {
+                if set.bundle_version_id == bundle_version_id =>
+            {
                 effective_policy_rollup(&system, &set.policies)
             }
             Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup(
                 system,
                 policies.len() as i64,
-                conflicts.first().map(|c| c.code.as_str()).unwrap_or("conflict"),
+                conflicts
+                    .first()
+                    .map(|c| c.code.as_str())
+                    .unwrap_or("conflict"),
             ),
             // Missing or mismatched resolution has no authoritative effective
             // set. Never substitute lineage/current membership for this view.
@@ -2191,7 +2208,10 @@ mod tests {
             sys,
             &[policy("require_cf_agent", serde_json::json!({}), false)],
         );
-        assert_eq!(rollup.not_checked, 1, "disabled policy increments not_checked");
+        assert_eq!(
+            rollup.not_checked, 1,
+            "disabled policy increments not_checked"
+        );
         assert_eq!(rollup.warn, 0, "disabled policy must not increment warn");
         assert_eq!(
             rollup.score, 0,
@@ -2235,7 +2255,10 @@ mod tests {
                 true,
             )],
         );
-        assert_eq!(rollup.not_checked, 1, "unsupported policy increments not_checked");
+        assert_eq!(
+            rollup.not_checked, 1,
+            "unsupported policy increments not_checked"
+        );
         assert_eq!(rollup.warn, 0, "unsupported policy must not increment warn");
         assert_eq!(
             rollup.score, 0,
@@ -2273,14 +2296,18 @@ mod tests {
     fn canonical_categories_are_mutually_exclusive() {
         let sys = system("healthy", 0, 0);
         let policies = vec![
-            policy("require_cf_agent", serde_json::json!({}), true),   // pass
-            policy("require_cf_agent", serde_json::json!({}), false),  // not_checked
-            policy("custom_check", serde_json::json!({}), true),       // not_checked (unsupported)
+            policy("require_cf_agent", serde_json::json!({}), true), // pass
+            policy("require_cf_agent", serde_json::json!({}), false), // not_checked
+            policy("custom_check", serde_json::json!({}), true),     // not_checked (unsupported)
         ];
         let rollup = system_rollup(sys, &policies);
-        let canonical_total =
-            rollup.pass + rollup.warn + rollup.fail + rollup.waiver
-            + rollup.not_checked + rollup.not_applicable + rollup.error;
+        let canonical_total = rollup.pass
+            + rollup.warn
+            + rollup.fail
+            + rollup.waiver
+            + rollup.not_checked
+            + rollup.not_applicable
+            + rollup.error;
         assert_eq!(
             canonical_total, rollup.total,
             "canonical categories must exactly sum to total"
@@ -2533,8 +2560,16 @@ mod tests {
         assert_eq!(rollup.total, 2);
         assert_eq!(rollup.pass, 2);
         assert_eq!(rollup.evaluated_total, 2);
-        assert!(effective.iter().all(|policy| policy.policy_version_id != excluded_version));
-        assert!(effective.iter().any(|policy| policy.policy_version_id == added_version));
+        assert!(
+            effective
+                .iter()
+                .all(|policy| policy.policy_version_id != excluded_version)
+        );
+        assert!(
+            effective
+                .iter()
+                .any(|policy| policy.policy_version_id == added_version)
+        );
     }
 
     #[test]

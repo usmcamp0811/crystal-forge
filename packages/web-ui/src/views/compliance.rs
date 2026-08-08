@@ -3,32 +3,30 @@ use dioxus::prelude::*;
 use crate::api::client::{
     create_bundle_draft, create_compliance_assignment, create_compliance_bundle,
     delete_compliance_bundle, fetch_bundle_version_policy_membership,
-    fetch_compliance_bundle_systems, fetch_compliance_bundles,
-    fetch_compliance_system_evidence, fetch_environments, fetch_policies, fetch_systems,
-    import_xccdf, preview_compliance_assignment,
+    fetch_compliance_bundle_systems, fetch_compliance_bundles, fetch_compliance_system_evidence,
+    fetch_environments, fetch_policies, fetch_systems, import_xccdf, preview_compliance_assignment,
     preview_xccdf, publish_bundle_version, trust_bundle_version, update_compliance_bundle,
 };
 use crate::api::models::{
     ComplianceBundleSummary, ComplianceBundleSystemsResponse, ComplianceEvidenceResponse,
     CreateAssignmentRequest, CreateBundleDraftRequest, CreateComplianceBundleRequest,
-    DeploymentPolicySummary, EnvironmentSummary, ImportedBundlePlan, PublishBundleVersionRequest,
-    PolicyValueOverride, TrustBundleVersionRequest, UpdateComplianceBundleRequest, XccdfImportPlan,
-    XccdfImportResponse,
-    XccdfPreviewResponse, XccdfRuleImportAction, ImportedPolicyCustomization,
-    ImportedCustomCheck, ImportedCustomCheckRule, ImportedEvidenceRequirement,
-    SortOrder, SystemSummary, SystemsListParams,
+    DeploymentPolicySummary, EnvironmentSummary, ImportedBundlePlan, ImportedCustomCheck,
+    ImportedCustomCheckRule, ImportedEvidenceRequirement, ImportedPolicyCustomization,
+    PolicyValueOverride, PublishBundleVersionRequest, SortOrder, SystemSummary, SystemsListParams,
+    TrustBundleVersionRequest, UpdateComplianceBundleRequest, XccdfImportPlan, XccdfImportResponse,
+    XccdfPreviewResponse, XccdfRuleImportAction,
 };
 use crate::components::compliance::{
-    action_to_import, BundleCatalog, BundleHeader, EvidenceDrawer, ImportReview, RefinedPolicyDraft,
-    RefinedRuleAction, RefinedStigRule, ScoreStrip, SourceCheck, SourceStigRule, SystemsMatrix,
-    RefinePolicyStep,
+    BundleCatalog, BundleHeader, EvidenceDrawer, ImportReview, RefinePolicyStep,
+    RefinedPolicyDraft, RefinedRuleAction, RefinedStigRule, ScoreStrip, SourceCheck,
+    SourceStigRule, SystemsMatrix, action_to_import,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::components::io_menu::{IOMenu, IOMenuItem};
 use crate::components::loading::DashboardLoadingSpinner;
 use crate::export::{
-    build_cf_json, build_csv, build_oscal, build_sarif, download_print_html, trigger_download,
-    ExportPayload,
+    ExportPayload, build_cf_json, build_csv, build_oscal, build_sarif, download_print_html,
+    trigger_download,
 };
 use crate::state::{app_state::AppState, auth};
 
@@ -122,7 +120,8 @@ pub fn ComplianceView() -> Element {
                 Ok(items) => {
                     let first_id = items.first().map(|b| b.id);
                     let first_version_id = items.first().and_then(|b| {
-                        b.current_published_version_id.or(b.current_draft_version_id)
+                        b.current_published_version_id
+                            .or(b.current_draft_version_id)
                     });
                     bundles.set(items);
                     selected_bundle_id.set(first_id);
@@ -130,7 +129,7 @@ pub fn ComplianceView() -> Element {
                     // renders immediately; systems has its own loading indicator.
                     loaded.set(true);
                     if let Some(bundle_id) = first_id {
-                         start_systems_fetch(bundle_id, first_version_id);
+                        start_systems_fetch(bundle_id, first_version_id);
                     }
                 }
                 Err(err) => {
@@ -162,8 +161,15 @@ pub fn ComplianceView() -> Element {
         let eg = *evidence_gen.read() + 1;
         evidence_gen.set(eg);
         sys_filter.set("all".to_string());
-        let version_id = bundles.read().iter().find(|bundle| bundle.id == bundle_id)
-            .and_then(|bundle| bundle.current_published_version_id.or(bundle.current_draft_version_id));
+        let version_id = bundles
+            .read()
+            .iter()
+            .find(|bundle| bundle.id == bundle_id)
+            .and_then(|bundle| {
+                bundle
+                    .current_published_version_id
+                    .or(bundle.current_draft_version_id)
+            });
         start_systems_fetch(bundle_id, version_id);
     };
 
@@ -190,11 +196,20 @@ pub fn ComplianceView() -> Element {
         let current = *selected_export_version_id.read();
         let version_exists = bundle_id
             .and_then(|bid| bundles_snapshot.iter().find(|bundle| bundle.id == bid))
-            .is_some_and(|bundle| current.is_some_and(|id| bundle.versions.iter().any(|v| v.id == id)));
+            .is_some_and(|bundle| {
+                current.is_some_and(|id| bundle.versions.iter().any(|v| v.id == id))
+            });
         let next = if version_exists {
             current
         } else {
-            pointers.0.or(pointers.1).or_else(|| bundle_id.and_then(|bid| bundles_snapshot.iter().find(|bundle| bundle.id == bid).and_then(|bundle| bundle.versions.first().map(|v| v.id))))
+            pointers.0.or(pointers.1).or_else(|| {
+                bundle_id.and_then(|bid| {
+                    bundles_snapshot
+                        .iter()
+                        .find(|bundle| bundle.id == bid)
+                        .and_then(|bundle| bundle.versions.first().map(|v| v.id))
+                })
+            })
         };
         selected_export_version_id.set(next);
     });
@@ -207,12 +222,8 @@ pub fn ComplianceView() -> Element {
             evidence_gen.set(gen_id);
             let version_id = *selected_export_version_id.read();
             spawn(async move {
-                match fetch_compliance_system_evidence(
-                    &bundle_id,
-                    &system_id,
-                    version_id.as_ref(),
-                )
-                .await
+                match fetch_compliance_system_evidence(&bundle_id, &system_id, version_id.as_ref())
+                    .await
                 {
                     Ok(resp) => {
                         if *evidence_gen.read() == gen_id {
@@ -1209,7 +1220,8 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
     let mut loading = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
     let mut fetched = use_signal(|| false);
-    let mut effective_preview = use_signal(|| None::<crate::api::models::EffectivePolicySetResponse>);
+    let mut effective_preview =
+        use_signal(|| None::<crate::api::models::EffectivePolicySetResponse>);
     let mut preview_loading = use_signal(|| false);
 
     if !*fetched.read() {
@@ -1565,7 +1577,8 @@ fn extract_check_inline_content(check: &serde_json::Value) -> Option<String> {
         }
     }
     // Legacy fallback: top-level content/inline_content fields
-    check.get("inline_content")
+    check
+        .get("inline_content")
         .or_else(|| check.get("content"))
         .and_then(|v| v.as_str())
         .map(str::to_string)
@@ -1577,56 +1590,101 @@ fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
         .iter()
         .map(|r| {
             // Build a summary of identifiers for display
-            let identifier_values = r.identifiers.iter().filter_map(|i| {
-                i.get("value").and_then(|value| value.as_str()).map(str::to_string)
-            }).collect::<Vec<_>>();
-            let vulnerability_id = identifier_values.iter()
+            let identifier_values = r
+                .identifiers
+                .iter()
+                .filter_map(|i| {
+                    i.get("value")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>();
+            let vulnerability_id = identifier_values
+                .iter()
                 .find(|value| value.starts_with("V-"))
                 .cloned()
                 .unwrap_or_default();
-            let srg_ids = identifier_values.iter()
+            let srg_ids = identifier_values
+                .iter()
                 .filter(|value| value.starts_with("SRG-"))
                 .cloned()
                 .collect::<Vec<_>>();
-            let cci_ids = identifier_values.iter()
+            let cci_ids = identifier_values
+                .iter()
                 .filter(|value| value.starts_with("CCI-"))
                 .cloned()
                 .collect::<Vec<_>>();
             let srg = srg_ids.first().cloned().unwrap_or_default();
 
-            let check_summary = r.checks.first().map(|c| {
-                let sys = c.get("system").and_then(|v| v.as_str()).unwrap_or("");
-                sys.to_string()
-            }).unwrap_or_default();
+            let check_summary = r
+                .checks
+                .first()
+                .map(|c| {
+                    let sys = c.get("system").and_then(|v| v.as_str()).unwrap_or("");
+                    sys.to_string()
+                })
+                .unwrap_or_default();
 
-            let checks = r.checks.iter().map(|check| SourceCheck {
-                system: check.get("system").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                selector: check.get("selector").and_then(|v| v.as_str()).map(str::to_string),
-                references: check.get("references").and_then(|v| v.as_array()).map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect()).unwrap_or_default(),
-                inline_content: extract_check_inline_content(check),
-            }).collect::<Vec<_>>();
+            let checks = r
+                .checks
+                .iter()
+                .map(|check| SourceCheck {
+                    system: check
+                        .get("system")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    selector: check
+                        .get("selector")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    references: check
+                        .get("references")
+                        .and_then(|v| v.as_array())
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| item.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    inline_content: extract_check_inline_content(check),
+                })
+                .collect::<Vec<_>>();
 
             // Use "content" (full text) if available; fall back to "preview" for
             // backward compatibility with server responses that only had truncated text.
-            let fix_text = r.fix.as_ref()
-                .and_then(|f| f.get("content").or_else(|| f.get("preview")).and_then(|v| v.as_str()))
+            let fix_text = r
+                .fix
+                .as_ref()
+                .and_then(|f| {
+                    f.get("content")
+                        .or_else(|| f.get("preview"))
+                        .and_then(|v| v.as_str())
+                })
                 .unwrap_or("")
                 .to_string();
 
             // Build pre-populated assertions from server-inferred NixOS options.
             // An inferred assertion sets the action to Native automatically.
             let inferred = &r.inferred_assertions;
-            let assertions: Vec<ImportedCustomCheckRule> = inferred.iter().filter_map(|a| {
-                let path = a.get("option_path").and_then(|v| v.as_str())?;
-                let expr = a.get("nix_expression").and_then(|v| v.as_str())?;
-                let desc = a.get("description").and_then(|v| v.as_str()).unwrap_or("Assertion failed");
-                Some(ImportedCustomCheckRule {
-                    field_name: path.replace('.', "_"),
-                    expression: expr.to_string(),
-                    description: desc.to_string(),
-                    strict: true,
+            let assertions: Vec<ImportedCustomCheckRule> = inferred
+                .iter()
+                .filter_map(|a| {
+                    let path = a.get("option_path").and_then(|v| v.as_str())?;
+                    let expr = a.get("nix_expression").and_then(|v| v.as_str())?;
+                    let desc = a
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Assertion failed");
+                    Some(ImportedCustomCheckRule {
+                        field_name: path.replace('.', "_"),
+                        expression: expr.to_string(),
+                        description: desc.to_string(),
+                        strict: true,
+                    })
                 })
-            }).collect();
+                .collect();
 
             // Default action: Native if assertions were inferred, Unbound otherwise.
             let default_action = if r.is_native {
@@ -1650,7 +1708,17 @@ fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
                 srg_ids,
                 cci_ids,
                 checks,
-                references: r.references.iter().filter_map(|reference| reference.get("href").or_else(|| reference.get("value")).and_then(|v| v.as_str()).map(str::to_string)).collect(),
+                references: r
+                    .references
+                    .iter()
+                    .filter_map(|reference| {
+                        reference
+                            .get("href")
+                            .or_else(|| reference.get("value"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    })
+                    .collect(),
                 platforms: r.platforms.clone(),
                 selected: true,
                 is_native: r.is_native,
@@ -1784,7 +1852,6 @@ fn refined_rules_from_rules(rules: &[StigRule]) -> Vec<RefinedStigRule> {
         selected: rule.selected,
     }).collect()
 }
-
 
 #[derive(Props, Clone, PartialEq)]
 struct ImportStigModalProps {

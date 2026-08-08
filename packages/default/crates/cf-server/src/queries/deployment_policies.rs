@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::compliance::digest::{PolicyVersionCanonical, write_policy_version_digest};
+use crate::compliance::mappings::{initial_policy_metadata, merge_policy_mappings};
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
 };
@@ -396,6 +397,20 @@ pub async fn create_deployment_policy(
 
     // Compute and persist the canonical digest before committing.
     // New policies created via the legacy API have no opaque XML.
+    // Build compliance_metadata containing any supplied SRG/CCI mappings.
+    let srg_ids_opt: Option<&[String]> = if request.srg_ids.is_empty() {
+        None
+    } else {
+        Some(&request.srg_ids)
+    };
+    let cci_ids_opt: Option<&[String]> = if request.cci_ids.is_empty() {
+        None
+    } else {
+        Some(&request.cci_ids)
+    };
+    let compliance_metadata = initial_policy_metadata(srg_ids_opt, cci_ids_opt)
+        .context("Failed to build compliance metadata for new policy")?;
+
     let canonical = PolicyVersionCanonical {
         name: policy.name.clone(),
         description: policy.description.clone(),
@@ -403,7 +418,7 @@ pub async fn create_deployment_policy(
         implementation_state: "native".to_string(),
         execution_phase: "nix-evaluation".to_string(),
         config: policy.config.clone(),
-        compliance_metadata: serde_json::json!({}),
+        compliance_metadata,
         dependencies: serde_json::json!([]),
         opaque_xml_digest: None,
         enabled_by_default: Some(policy.enabled),
@@ -493,24 +508,32 @@ pub async fn update_deployment_policy(
         // Merge: preserve existing rich fields; update only what the legacy
         // request supports. Callers using the full version-aware API can update
         // implementation_state, execution_phase, etc. separately.
-        let (impl_state, exec_phase, meta, deps, opaque_xml) = if let Some(df) = draft_fields {
-            (
-                df.implementation_state,
-                df.execution_phase,
-                df.compliance_metadata,
-                df.dependencies,
-                df.opaque_xml,
-            )
-        } else {
-            // No prior draft version — new policy path, use defaults.
-            (
-                "native".to_string(),
-                "nix-evaluation".to_string(),
-                serde_json::json!({}),
-                serde_json::json!([]),
-                None,
-            )
-        };
+        let (impl_state, exec_phase, existing_meta, deps, opaque_xml) =
+            if let Some(df) = draft_fields {
+                (
+                    df.implementation_state,
+                    df.execution_phase,
+                    df.compliance_metadata,
+                    df.dependencies,
+                    df.opaque_xml,
+                )
+            } else {
+                // No prior draft version — new policy path, use defaults.
+                (
+                    "native".to_string(),
+                    "nix-evaluation".to_string(),
+                    serde_json::json!({}),
+                    serde_json::json!([]),
+                    None,
+                )
+            };
+
+        // Merge SRG/CCI mappings into existing compliance_metadata, preserving
+        // all other metadata keys (source fidelity, rationale, checks, etc.).
+        let srg_opt = request.srg_ids.as_deref();
+        let cci_opt = request.cci_ids.as_deref();
+        let merged_meta = merge_policy_mappings(&existing_meta, srg_opt, cci_opt)
+            .context("Failed to merge SRG/CCI mappings")?;
 
         let canonical = PolicyVersionCanonical {
             name: p.name.clone(),
@@ -519,7 +542,7 @@ pub async fn update_deployment_policy(
             implementation_state: impl_state,
             execution_phase: exec_phase,
             config: p.config.clone(),
-            compliance_metadata: meta,
+            compliance_metadata: merged_meta,
             dependencies: deps,
             opaque_xml_digest: PolicyVersionCanonical::digest_opaque_xml(opaque_xml.as_deref()),
             enabled_by_default: Some(p.enabled),

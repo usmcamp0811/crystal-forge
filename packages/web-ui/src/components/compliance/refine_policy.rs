@@ -31,40 +31,185 @@ pub struct SourceStigRule {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum RefinedRuleAction { Native, Manual, Unbound, Opaque, Existing(Option<uuid::Uuid>) }
-
-#[derive(Clone, PartialEq, Debug)]
-pub enum ComparisonOperator { Equal, NotEqual, GreaterOrEqual, LessOrEqual }
-impl ComparisonOperator { fn as_str(&self) -> &'static str { match self { Self::Equal => "==", Self::NotEqual => "!=", Self::GreaterOrEqual => ">=", Self::LessOrEqual => "<=" } } }
-
-#[derive(Clone, PartialEq, Debug)]
-pub enum TypedPolicyValue { Boolean(bool), Integer(String), String(String), Null, List(String), AttributeSet(String) }
-impl TypedPolicyValue { fn as_nix(&self) -> String { match self { Self::Boolean(v) => v.to_string(), Self::Integer(v) | Self::List(v) | Self::AttributeSet(v) => v.clone(), Self::String(v) => format!("\"{}\"", v.replace('"', "\\\"")), Self::Null => "null".into() } } }
-
-#[derive(Clone, PartialEq, Debug)]
-pub enum PolicyAssertionDraft {
-    NixosOption { path: String, operator: ComparisonOperator, expected_value: TypedPolicyValue, failure_message: String, strict: bool },
-    PackagesInstalled { packages: Vec<String>, failure_message: String, strict: bool },
-    CustomExpression { field_name: String, expression: String, failure_message: String, strict: bool },
+pub enum RefinedRuleAction {
+    Native,
+    Manual,
+    Unbound,
+    Opaque,
+    Existing(Option<uuid::Uuid>),
 }
 
-impl PolicyAssertionDraft {
-    fn to_rule(&self, index: usize) -> ImportedCustomCheckRule {
+#[derive(Clone, PartialEq, Debug)]
+pub enum ComparisonOperator {
+    Equal,
+    NotEqual,
+    GreaterOrEqual,
+    LessOrEqual,
+}
+impl ComparisonOperator {
+    fn as_str(&self) -> &'static str {
         match self {
-            Self::NixosOption { path, operator, expected_value, failure_message, strict } => ImportedCustomCheckRule { field_name: format!("nixosOption{index}"), expression: format!("cfg.config.{path} {} {}", operator.as_str(), expected_value.as_nix()), description: failure_message.clone(), strict: *strict },
-            Self::PackagesInstalled { packages, failure_message, strict } => {
-                let required = packages.iter().map(|package| format!("\"{}\"", package.replace('"', "\\\""))).collect::<Vec<_>>().join(" ");
-                ImportedCustomCheckRule { field_name: format!("packagesInstalled{index}"), expression: format!("builtins.all (required: builtins.any (package: (package.pname or (package.name or \"\")) == required) cfg.config.environment.systemPackages) [ {required} ]"), description: failure_message.clone(), strict: *strict }
-            }
-            Self::CustomExpression { field_name, expression, failure_message, strict } => ImportedCustomCheckRule { field_name: field_name.clone(), expression: expression.clone(), description: failure_message.clone(), strict: *strict },
+            Self::Equal => "==",
+            Self::NotEqual => "!=",
+            Self::GreaterOrEqual => ">=",
+            Self::LessOrEqual => "<=",
         }
     }
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum EvidenceRequirementDraft { Command { command: String, expected_output: String }, File { path: String, expected_content: String }, UnitState { unit: String, state: String }, Log { source: String, unit: Option<String>, pattern: String }, Attestation { description: String } }
+pub enum TypedPolicyValue {
+    Boolean(bool),
+    Integer(String),
+    String(String),
+    Null,
+    List(String),
+    AttributeSet(String),
+}
+impl TypedPolicyValue {
+    fn as_nix(&self) -> String {
+        match self {
+            Self::Boolean(v) => v.to_string(),
+            Self::Integer(v) | Self::List(v) | Self::AttributeSet(v) => v.clone(),
+            Self::String(v) => format!("\"{}\"", v.replace('"', "\\\"")),
+            Self::Null => "null".into(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum PolicyAssertionDraft {
+    NixosOption {
+        path: String,
+        operator: ComparisonOperator,
+        expected_value: TypedPolicyValue,
+        failure_message: String,
+        strict: bool,
+    },
+    PackagesInstalled {
+        packages: Vec<String>,
+        failure_message: String,
+        strict: bool,
+    },
+    CustomExpression {
+        field_name: String,
+        expression: String,
+        failure_message: String,
+        strict: bool,
+    },
+}
+
+impl PolicyAssertionDraft {
+    fn to_rule(&self, index: usize) -> ImportedCustomCheckRule {
+        match self {
+            Self::NixosOption {
+                path,
+                operator,
+                expected_value,
+                failure_message,
+                strict,
+            } => ImportedCustomCheckRule {
+                field_name: format!("nixosOption{index}"),
+                expression: format!(
+                    "cfg.config.{path} {} {}",
+                    operator.as_str(),
+                    expected_value.as_nix()
+                ),
+                description: failure_message.clone(),
+                strict: *strict,
+            },
+            Self::PackagesInstalled {
+                packages,
+                failure_message,
+                strict,
+            } => {
+                let required = packages
+                    .iter()
+                    .map(|package| format!("\"{}\"", package.replace('"', "\\\"")))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                ImportedCustomCheckRule {
+                    field_name: format!("packagesInstalled{index}"),
+                    expression: format!(
+                        "builtins.all (required: builtins.any (package: (package.pname or (package.name or \"\")) == required) cfg.config.environment.systemPackages) [ {required} ]"
+                    ),
+                    description: failure_message.clone(),
+                    strict: *strict,
+                }
+            }
+            Self::CustomExpression {
+                field_name,
+                expression,
+                failure_message,
+                strict,
+            } => ImportedCustomCheckRule {
+                field_name: field_name.clone(),
+                expression: expression.clone(),
+                description: failure_message.clone(),
+                strict: *strict,
+            },
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum EvidenceRequirementDraft {
+    Command {
+        command: String,
+        expected_output: String,
+    },
+    File {
+        path: String,
+        expected_content: String,
+    },
+    UnitState {
+        unit: String,
+        state: String,
+    },
+    Log {
+        source: String,
+        unit: Option<String>,
+        pattern: String,
+    },
+    Attestation {
+        description: String,
+    },
+}
 impl EvidenceRequirementDraft {
-    fn to_requirement(&self) -> ImportedEvidenceRequirement { match self { Self::Command { command, expected_output } => ImportedEvidenceRequirement::Command { command: command.clone(), expected_output: expected_output.clone() }, Self::File { path, expected_content } => ImportedEvidenceRequirement::File { path: path.clone(), expected_content: expected_content.clone() }, Self::UnitState { unit, state } => ImportedEvidenceRequirement::UnitState { unit: unit.clone(), state: state.clone() }, Self::Log { source, unit, pattern } => ImportedEvidenceRequirement::Log { source: source.clone(), unit: unit.clone(), pattern: pattern.clone() }, Self::Attestation { description } => ImportedEvidenceRequirement::Attestation { description: description.clone() } } }
+    fn to_requirement(&self) -> ImportedEvidenceRequirement {
+        match self {
+            Self::Command {
+                command,
+                expected_output,
+            } => ImportedEvidenceRequirement::Command {
+                command: command.clone(),
+                expected_output: expected_output.clone(),
+            },
+            Self::File {
+                path,
+                expected_content,
+            } => ImportedEvidenceRequirement::File {
+                path: path.clone(),
+                expected_content: expected_content.clone(),
+            },
+            Self::UnitState { unit, state } => ImportedEvidenceRequirement::UnitState {
+                unit: unit.clone(),
+                state: state.clone(),
+            },
+            Self::Log {
+                source,
+                unit,
+                pattern,
+            } => ImportedEvidenceRequirement::Log {
+                source: source.clone(),
+                unit: unit.clone(),
+                pattern: pattern.clone(),
+            },
+            Self::Attestation { description } => ImportedEvidenceRequirement::Attestation {
+                description: description.clone(),
+            },
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -81,34 +226,111 @@ pub struct RefinedPolicyDraft {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub struct RefinedStigRule { pub source: SourceStigRule, pub draft: RefinedPolicyDraft, pub selected: bool }
+pub struct RefinedStigRule {
+    pub source: SourceStigRule,
+    pub draft: RefinedPolicyDraft,
+    pub selected: bool,
+}
 impl RefinedStigRule {
-    pub fn is_valid(&self) -> bool { match &self.draft.action { RefinedRuleAction::Native => !self.draft.assertions.is_empty(), RefinedRuleAction::Existing(id) => id.is_some(), _ => true } }
+    pub fn is_valid(&self) -> bool {
+        match &self.draft.action {
+            RefinedRuleAction::Native => !self.draft.assertions.is_empty(),
+            RefinedRuleAction::Existing(id) => id.is_some(),
+            _ => true,
+        }
+    }
 }
 
 pub fn action_to_import(rule: &RefinedStigRule) -> XccdfRuleImportAction {
-    let c = ImportedPolicyCustomization { policy_name: Some(rule.draft.local_name.clone()), policy_description: Some(rule.draft.local_description.clone()), implementation_note: (!rule.draft.implementation_note.trim().is_empty()).then(|| rule.draft.implementation_note.clone()), policy_severity: Some(rule.draft.local_severity.clone()), policy_rationale: (!rule.draft.local_rationale.trim().is_empty()).then(|| rule.draft.local_rationale.clone()) };
+    let c = ImportedPolicyCustomization {
+        policy_name: Some(rule.draft.local_name.clone()),
+        policy_description: Some(rule.draft.local_description.clone()),
+        implementation_note: (!rule.draft.implementation_note.trim().is_empty())
+            .then(|| rule.draft.implementation_note.clone()),
+        policy_severity: Some(rule.draft.local_severity.clone()),
+        policy_rationale: (!rule.draft.local_rationale.trim().is_empty())
+            .then(|| rule.draft.local_rationale.clone()),
+    };
     match &rule.draft.action {
-        RefinedRuleAction::Native => XccdfRuleImportAction::CreateNativeCustom { rule_id: rule.source.rule_id.clone(), customization: c, custom_check: ImportedCustomCheck { mode: rule.draft.assertion_mode.clone(), rules: rule.draft.assertions.iter().enumerate().map(|(i, a)| a.to_rule(i + 1)).collect() }, evidence_requirements: rule.draft.evidence_requirements.iter().map(EvidenceRequirementDraft::to_requirement).collect() },
-        RefinedRuleAction::Manual => XccdfRuleImportAction::CreateManual { rule_id: rule.source.rule_id.clone(), customization: c, evidence_requirements: rule.draft.evidence_requirements.iter().map(EvidenceRequirementDraft::to_requirement).collect() },
-        RefinedRuleAction::Unbound => XccdfRuleImportAction::CreateUnbound { rule_id: rule.source.rule_id.clone(), customization: c },
-        RefinedRuleAction::Opaque => XccdfRuleImportAction::PreserveOpaque { rule_id: rule.source.rule_id.clone(), customization: c },
-        RefinedRuleAction::Existing(Some(id)) => XccdfRuleImportAction::MapExisting { rule_id: rule.source.rule_id.clone(), policy_version_id: *id },
-        RefinedRuleAction::Existing(None) => XccdfRuleImportAction::CreateUnbound { rule_id: rule.source.rule_id.clone(), customization: c },
+        RefinedRuleAction::Native => XccdfRuleImportAction::CreateNativeCustom {
+            rule_id: rule.source.rule_id.clone(),
+            customization: c,
+            custom_check: ImportedCustomCheck {
+                mode: rule.draft.assertion_mode.clone(),
+                rules: rule
+                    .draft
+                    .assertions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| a.to_rule(i + 1))
+                    .collect(),
+            },
+            evidence_requirements: rule
+                .draft
+                .evidence_requirements
+                .iter()
+                .map(EvidenceRequirementDraft::to_requirement)
+                .collect(),
+        },
+        RefinedRuleAction::Manual => XccdfRuleImportAction::CreateManual {
+            rule_id: rule.source.rule_id.clone(),
+            customization: c,
+            evidence_requirements: rule
+                .draft
+                .evidence_requirements
+                .iter()
+                .map(EvidenceRequirementDraft::to_requirement)
+                .collect(),
+        },
+        RefinedRuleAction::Unbound => XccdfRuleImportAction::CreateUnbound {
+            rule_id: rule.source.rule_id.clone(),
+            customization: c,
+        },
+        RefinedRuleAction::Opaque => XccdfRuleImportAction::PreserveOpaque {
+            rule_id: rule.source.rule_id.clone(),
+            customization: c,
+        },
+        RefinedRuleAction::Existing(Some(id)) => XccdfRuleImportAction::MapExisting {
+            rule_id: rule.source.rule_id.clone(),
+            policy_version_id: *id,
+        },
+        RefinedRuleAction::Existing(None) => XccdfRuleImportAction::CreateUnbound {
+            rule_id: rule.source.rule_id.clone(),
+            customization: c,
+        },
     }
 }
 
 #[derive(Props, Clone, PartialEq)]
-pub struct RefinePolicyStepProps { pub rules: Signal<Vec<RefinedStigRule>>, pub cursor: Signal<usize>, pub existing_policies: Vec<(uuid::Uuid, String)>, pub on_back: EventHandler<()>, pub on_review: EventHandler<()> }
+pub struct RefinePolicyStepProps {
+    pub rules: Signal<Vec<RefinedStigRule>>,
+    pub cursor: Signal<usize>,
+    pub existing_policies: Vec<(uuid::Uuid, String)>,
+    pub on_back: EventHandler<()>,
+    pub on_review: EventHandler<()>,
+}
 
 #[component]
 pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
-    let selected: Vec<usize> = props.rules.read().iter().enumerate().filter_map(|(i, r)| r.selected.then_some(i)).collect();
+    let selected: Vec<usize> = props
+        .rules
+        .read()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| r.selected.then_some(i))
+        .collect();
     let position = (*props.cursor.read()).min(selected.len().saturating_sub(1));
-    let Some(index) = selected.get(position).copied() else { return rsx! { div {} }; };
+    let Some(index) = selected.get(position).copied() else {
+        return rsx! { div {} };
+    };
     let rule = props.rules.read()[index].clone();
     let source_id = source_identity(&rule.source);
-    let source_srg = rule.source.identifiers.iter().find(|identifier| identifier.starts_with("SRG-")).cloned();
+    let source_srg = rule
+        .source
+        .identifiers
+        .iter()
+        .find(|identifier| identifier.starts_with("SRG-"))
+        .cloned();
     let percent = ((position + 1) as f32 / selected.len().max(1) as f32 * 100.0).round();
     rsx! {
         div { class: "modal-head refine-modal-head",
@@ -128,8 +350,17 @@ pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
 }
 
 fn source_identity(source: &SourceStigRule) -> String {
-    source.stig_id.clone().filter(|id| id.starts_with("V-"))
-        .or_else(|| source.identifiers.iter().find(|id| id.starts_with("V-")).cloned())
+    source
+        .stig_id
+        .clone()
+        .filter(|id| id.starts_with("V-"))
+        .or_else(|| {
+            source
+                .identifiers
+                .iter()
+                .find(|id| id.starts_with("V-"))
+                .cloned()
+        })
         .or_else(|| source.group_id.clone().filter(|id| id.starts_with("V-")))
         .unwrap_or_else(|| source.rule_id.clone())
 }
@@ -143,10 +374,30 @@ pub struct ImportReviewProps {
 
 #[component]
 pub fn ImportReview(props: ImportReviewProps) -> Element {
-    let selected = props.rules.read().iter().filter(|rule| rule.selected).cloned().collect::<Vec<_>>();
-    let native = selected.iter().filter(|rule| matches!(rule.draft.action, RefinedRuleAction::Native)).count();
-    let manual = selected.iter().filter(|rule| matches!(rule.draft.action, RefinedRuleAction::Manual)).count();
-    let unresolved = selected.iter().filter(|rule| matches!(rule.draft.action, RefinedRuleAction::Unbound | RefinedRuleAction::Opaque)).count();
+    let selected = props
+        .rules
+        .read()
+        .iter()
+        .filter(|rule| rule.selected)
+        .cloned()
+        .collect::<Vec<_>>();
+    let native = selected
+        .iter()
+        .filter(|rule| matches!(rule.draft.action, RefinedRuleAction::Native))
+        .count();
+    let manual = selected
+        .iter()
+        .filter(|rule| matches!(rule.draft.action, RefinedRuleAction::Manual))
+        .count();
+    let unresolved = selected
+        .iter()
+        .filter(|rule| {
+            matches!(
+                rule.draft.action,
+                RefinedRuleAction::Unbound | RefinedRuleAction::Opaque
+            )
+        })
+        .count();
     rsx! {
         div { class: "modal-head", h2 { "Review policy choices" }, p { class: "page-subtitle", "Confirm the selected policy mappings before creating the draft bundle." } }
         div { class: "modal-body",
@@ -159,17 +410,38 @@ pub fn ImportReview(props: ImportReviewProps) -> Element {
 }
 
 fn action_label(action: &RefinedRuleAction) -> &'static str {
-    match action { RefinedRuleAction::Native => "Native assertion", RefinedRuleAction::Manual => "Manual evidence", RefinedRuleAction::Unbound => "Unbound", RefinedRuleAction::Opaque => "Opaque", RefinedRuleAction::Existing(_) => "Mapped existing policy" }
+    match action {
+        RefinedRuleAction::Native => "Native assertion",
+        RefinedRuleAction::Manual => "Manual evidence",
+        RefinedRuleAction::Unbound => "Unbound",
+        RefinedRuleAction::Opaque => "Opaque",
+        RefinedRuleAction::Existing(_) => "Mapped existing policy",
+    }
 }
 
 #[component]
 fn SourceStigCard(rule: SourceStigRule) -> Element {
     let severity = rule.source_severity.as_deref().unwrap_or("medium");
-    let cat = match severity { "high" => "CAT I", "low" => "CAT III", _ => "CAT II" };
+    let cat = match severity {
+        "high" => "CAT I",
+        "low" => "CAT III",
+        _ => "CAT II",
+    };
     let stig_id = source_identity(&rule);
     let title = rule.title.clone().unwrap_or_else(|| rule.rule_id.clone());
     let fix_text = rule.fix_text.clone();
-    let check_text = rule.checks.iter().filter_map(|check| check.inline_content.clone().or_else(|| check.selector.clone()).or_else(|| (!check.system.is_empty()).then(|| check.system.clone()))).collect::<Vec<_>>().join("\n\n");
+    let check_text = rule
+        .checks
+        .iter()
+        .filter_map(|check| {
+            check
+                .inline_content
+                .clone()
+                .or_else(|| check.selector.clone())
+                .or_else(|| (!check.system.is_empty()).then(|| check.system.clone()))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let references = rule.references.join(", ");
     rsx! {
         div { class: "refine-source-card", "data-testid": "xccdf-source-details",
@@ -191,7 +463,11 @@ fn SourceStigCard(rule: SourceStigRule) -> Element {
 }
 
 #[component]
-fn ImplementationChoice(rules: Signal<Vec<RefinedStigRule>>, index: usize, existing_policies: Vec<(uuid::Uuid, String)>) -> Element {
+fn ImplementationChoice(
+    rules: Signal<Vec<RefinedStigRule>>,
+    index: usize,
+    existing_policies: Vec<(uuid::Uuid, String)>,
+) -> Element {
     let current = action_key(&rules.read()[index].draft.action);
     rsx! { div { style: "margin:14px 0;", label { style: "font-size:11px;font-weight:650;", "Implementation" }, select { class: "input focus-ring", "data-testid": "xccdf-implementation-selector", value: current, onchange: move |event| { set_action(&mut rules.write()[index].draft.action, event.value().as_str()); }, option { value: "unbound", "Unbound" }, option { value: "native", "Native assertion" }, option { value: "manual", "Manual evidence" }, option { value: "opaque", "Opaque" }, option { value: "existing", "Existing policy version" } }
         if current == "existing" {
@@ -199,9 +475,30 @@ fn ImplementationChoice(rules: Signal<Vec<RefinedStigRule>>, index: usize, exist
         }
     } }
 }
-fn existing_policy_value(action: &RefinedRuleAction) -> String { match action { RefinedRuleAction::Existing(Some(id)) => id.to_string(), _ => String::new() } }
-fn action_key(action: &RefinedRuleAction) -> &'static str { match action { RefinedRuleAction::Native => "native", RefinedRuleAction::Manual => "manual", RefinedRuleAction::Unbound => "unbound", RefinedRuleAction::Opaque => "opaque", RefinedRuleAction::Existing(_) => "existing" } }
-fn set_action(action: &mut RefinedRuleAction, key: &str) { *action = match key { "native" => RefinedRuleAction::Native, "manual" => RefinedRuleAction::Manual, "opaque" => RefinedRuleAction::Opaque, "existing" => RefinedRuleAction::Existing(None), _ => RefinedRuleAction::Unbound }; }
+fn existing_policy_value(action: &RefinedRuleAction) -> String {
+    match action {
+        RefinedRuleAction::Existing(Some(id)) => id.to_string(),
+        _ => String::new(),
+    }
+}
+fn action_key(action: &RefinedRuleAction) -> &'static str {
+    match action {
+        RefinedRuleAction::Native => "native",
+        RefinedRuleAction::Manual => "manual",
+        RefinedRuleAction::Unbound => "unbound",
+        RefinedRuleAction::Opaque => "opaque",
+        RefinedRuleAction::Existing(_) => "existing",
+    }
+}
+fn set_action(action: &mut RefinedRuleAction, key: &str) {
+    *action = match key {
+        "native" => RefinedRuleAction::Native,
+        "manual" => RefinedRuleAction::Manual,
+        "opaque" => RefinedRuleAction::Opaque,
+        "existing" => RefinedRuleAction::Existing(None),
+        _ => RefinedRuleAction::Unbound,
+    };
+}
 
 #[component]
 fn AssertionSection(rules: Signal<Vec<RefinedStigRule>>, index: usize) -> Element {
@@ -257,7 +554,11 @@ fn EvidenceSection(rules: Signal<Vec<RefinedStigRule>>, index: usize) -> Element
     }
 }
 
-fn push_evidence(rules: &mut Signal<Vec<RefinedStigRule>>, index: usize, evidence: EvidenceRequirementDraft) {
+fn push_evidence(
+    rules: &mut Signal<Vec<RefinedStigRule>>,
+    index: usize,
+    evidence: EvidenceRequirementDraft,
+) {
     let mut all_rules = rules.write();
     if matches!(all_rules[index].draft.action, RefinedRuleAction::Unbound) {
         all_rules[index].draft.action = RefinedRuleAction::Manual;
@@ -279,12 +580,21 @@ fn AssertionEditor(props: AssertionEditorProps) -> Element {
     let index = props.index;
     let assertion_index = props.assertion_index;
     let remove = move |_| {
-        rules.write()[index].draft.assertions.remove(assertion_index);
+        rules.write()[index]
+            .draft
+            .assertions
+            .remove(assertion_index);
     };
     let failure = match &props.assertion {
-        PolicyAssertionDraft::NixosOption { failure_message, .. }
-        | PolicyAssertionDraft::PackagesInstalled { failure_message, .. }
-        | PolicyAssertionDraft::CustomExpression { failure_message, .. } => failure_message.clone(),
+        PolicyAssertionDraft::NixosOption {
+            failure_message, ..
+        }
+        | PolicyAssertionDraft::PackagesInstalled {
+            failure_message, ..
+        }
+        | PolicyAssertionDraft::CustomExpression {
+            failure_message, ..
+        } => failure_message.clone(),
     };
     rsx! {
         div { class: "refine-assertion-card",
@@ -318,11 +628,22 @@ fn AssertionEditor(props: AssertionEditorProps) -> Element {
     }
 }
 
-fn set_assertion_failure(rules: &mut Signal<Vec<RefinedStigRule>>, index: usize, assertion_index: usize, value: String) {
+fn set_assertion_failure(
+    rules: &mut Signal<Vec<RefinedStigRule>>,
+    index: usize,
+    assertion_index: usize,
+    value: String,
+) {
     match &mut rules.write()[index].draft.assertions[assertion_index] {
-        PolicyAssertionDraft::NixosOption { failure_message, .. }
-        | PolicyAssertionDraft::PackagesInstalled { failure_message, .. }
-        | PolicyAssertionDraft::CustomExpression { failure_message, .. } => *failure_message = value,
+        PolicyAssertionDraft::NixosOption {
+            failure_message, ..
+        }
+        | PolicyAssertionDraft::PackagesInstalled {
+            failure_message, ..
+        }
+        | PolicyAssertionDraft::CustomExpression {
+            failure_message, ..
+        } => *failure_message = value,
     }
 }
 
@@ -340,7 +661,10 @@ fn EvidenceEditor(props: EvidenceEditorProps) -> Element {
     let index = props.index;
     let evidence_index = props.evidence_index;
     let remove = move |_| {
-        rules.write()[index].draft.evidence_requirements.remove(evidence_index);
+        rules.write()[index]
+            .draft
+            .evidence_requirements
+            .remove(evidence_index);
     };
     let kind = match &props.evidence {
         EvidenceRequirementDraft::Command { .. } => "command",
@@ -366,28 +690,92 @@ fn EvidenceEditor(props: EvidenceEditorProps) -> Element {
 fn typed_value_text(value: &TypedPolicyValue) -> String {
     match value {
         TypedPolicyValue::Boolean(value) => value.to_string(),
-        TypedPolicyValue::Integer(value) | TypedPolicyValue::String(value) | TypedPolicyValue::List(value) | TypedPolicyValue::AttributeSet(value) => value.clone(),
+        TypedPolicyValue::Integer(value)
+        | TypedPolicyValue::String(value)
+        | TypedPolicyValue::List(value)
+        | TypedPolicyValue::AttributeSet(value) => value.clone(),
         TypedPolicyValue::Null => "null".to_string(),
     }
 }
 
-fn slugify(value: &str) -> String { let mut out = String::new(); for c in value.chars() { if c.is_ascii_alphanumeric() { out.push(c.to_ascii_lowercase()); } else if !out.ends_with('-') { out.push('-'); } } out.trim_matches('-').to_string() }
+fn slugify(value: &str) -> String {
+    let mut out = String::new();
+    for c in value.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn source_and_local_fields_are_independent() { let rule = RefinedStigRule { source: SourceStigRule { rule_id: "V-1".into(), group_id: None, stig_id: Some("V-1".into()), title: Some("Official".into()), description: Some("Source".into()), source_severity: Some("high".into()), fix_text: Some("Fix".into()), checks: vec![], identifiers: vec![], references: vec![], platforms: vec![], rule_order: 0 }, draft: RefinedPolicyDraft { local_name: "Local".into(), local_description: "Local description".into(), local_severity: "low".into(), local_rationale: "Local rationale".into(), implementation_note: String::new(), action: RefinedRuleAction::Unbound, assertion_mode: "all".into(), assertions: vec![], evidence_requirements: vec![] }, selected: true }; assert_eq!(rule.source.source_severity.as_deref(), Some("high")); assert_eq!(rule.source.fix_text.as_deref(), Some("Fix")); assert_eq!(rule.source.description.as_deref(), Some("Source")); }
+    fn source_and_local_fields_are_independent() {
+        let rule = RefinedStigRule {
+            source: SourceStigRule {
+                rule_id: "V-1".into(),
+                group_id: None,
+                stig_id: Some("V-1".into()),
+                title: Some("Official".into()),
+                description: Some("Source".into()),
+                source_severity: Some("high".into()),
+                fix_text: Some("Fix".into()),
+                checks: vec![],
+                identifiers: vec![],
+                references: vec![],
+                platforms: vec![],
+                rule_order: 0,
+            },
+            draft: RefinedPolicyDraft {
+                local_name: "Local".into(),
+                local_description: "Local description".into(),
+                local_severity: "low".into(),
+                local_rationale: "Local rationale".into(),
+                implementation_note: String::new(),
+                action: RefinedRuleAction::Unbound,
+                assertion_mode: "all".into(),
+                assertions: vec![],
+                evidence_requirements: vec![],
+            },
+            selected: true,
+        };
+        assert_eq!(rule.source.source_severity.as_deref(), Some("high"));
+        assert_eq!(rule.source.fix_text.as_deref(), Some("Fix"));
+        assert_eq!(rule.source.description.as_deref(), Some("Source"));
+    }
     #[test]
-    fn slugify_normalizes_punctuation() { assert_eq!(slugify("V-268/089 (STIG)"), "v-268-089-stig"); }
+    fn slugify_normalizes_punctuation() {
+        assert_eq!(slugify("V-268/089 (STIG)"), "v-268-089-stig");
+    }
     #[test]
     fn source_identity_prefers_vulnerability_group_over_rule_id() {
-        let source = SourceStigRule { rule_id: "SV-268089r1_rule".into(), group_id: Some("V-268089".into()), stig_id: None, title: None, description: None, source_severity: None, fix_text: None, checks: vec![], identifiers: vec![], references: vec![], platforms: vec![], rule_order: 0 };
+        let source = SourceStigRule {
+            rule_id: "SV-268089r1_rule".into(),
+            group_id: Some("V-268089".into()),
+            stig_id: None,
+            title: None,
+            description: None,
+            source_severity: None,
+            fix_text: None,
+            checks: vec![],
+            identifiers: vec![],
+            references: vec![],
+            platforms: vec![],
+            rule_order: 0,
+        };
         assert_eq!(source_identity(&source), "V-268089");
     }
     #[test]
     fn package_assertion_serializes_required_package_names() {
-        let assertion = PolicyAssertionDraft::PackagesInstalled { packages: vec!["openssh".into(), "auditd".into()], failure_message: "missing".into(), strict: true };
+        let assertion = PolicyAssertionDraft::PackagesInstalled {
+            packages: vec!["openssh".into(), "auditd".into()],
+            failure_message: "missing".into(),
+            strict: true,
+        };
         let rule = assertion.to_rule(1);
         assert!(rule.expression.contains("[ \"openssh\" \"auditd\" ]"));
         assert!(rule.expression.contains("builtins.all (required:"));

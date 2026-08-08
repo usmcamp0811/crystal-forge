@@ -32,8 +32,8 @@
 use std::collections::BTreeMap;
 use std::io::Cursor;
 
-use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::Writer;
+use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 
 use super::super::canonical::{ImplementationState, PublicationState};
 use super::super::interchange::{

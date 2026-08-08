@@ -12,8 +12,8 @@ use crate::log::log_builder_worker_status;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::DeploymentPolicy;
 use crate::models::evaluate_with_policies::{
-    evaluate_with_mock_eval_jobs, evaluate_with_nix_eval_jobs, finalize_evaluation_attempt,
-    update_commit_metadata_cache, EvaluationFinalizeOutcome, FinalizedDerivation,
+    EvaluationFinalizeOutcome, FinalizedDerivation, evaluate_with_mock_eval_jobs,
+    evaluate_with_nix_eval_jobs, finalize_evaluation_attempt, update_commit_metadata_cache,
 };
 use crate::models::flakes::Flake;
 use crate::queue::QueueNotifier;
@@ -25,23 +25,23 @@ use sqlx::PgPool;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
 use tokio::time;
-use tokio::time::interval;
 use tokio::time::Duration;
 use tokio::time::Instant;
+use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 // ⬇️ bring in the commit-eval helpers you said you added in queries/commits.rs
 use crate::derivations::utils::count_closure_packages;
 use crate::models::deployment_policies::{AssignedPolicy, PoliciesByConfiguration};
-use crate::queries::build_jobs::{recover_orphaned_derivation_build_jobs, QueuedBuild};
+use crate::queries::build_jobs::{QueuedBuild, recover_orphaned_derivation_build_jobs};
 use crate::queries::builders::{
     cleanup_expired_build_logs, mark_stale_builders_offline,
     requeue_orphaned_building_jobs_with_reason,
 };
 use crate::queries::commits::{
-    get_commits_pending_evaluation, mark_commit_evaluation_failed, mark_commit_evaluation_started,
-    next_evaluation_available_at, reset_stuck_commit_evaluations, EvalCancellationOutcome,
-    EvalFailureOutcome, EvalStartOutcome,
+    EvalCancellationOutcome, EvalFailureOutcome, EvalStartOutcome, get_commits_pending_evaluation,
+    mark_commit_evaluation_failed, mark_commit_evaluation_started, next_evaluation_available_at,
+    reset_stuck_commit_evaluations,
 };
 use crate::queries::deployment_policies::{
     get_deployment_policies_by_versions, list_enabled_deployment_policies,
@@ -370,7 +370,10 @@ fn parse_deployment_policy_record(
             };
             let mut packages = Vec::with_capacity(raw_packages.len());
             for (index, value) in raw_packages.iter().enumerate() {
-                let Some(package) = value.as_str().map(str::trim).filter(|value| !value.is_empty())
+                let Some(package) = value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
                 else {
                     warn!(
                         "Skipping require_packages policy '{}' ({}): config.packages[{}] must be a non-empty string",
@@ -722,7 +725,8 @@ async fn load_policies_by_configuration_for_eval(
     }
 
     let policy_version_ids = policy_version_ids.into_iter().collect::<Vec<_>>();
-    let policies_by_version = get_deployment_policies_by_versions(pool, &policy_version_ids).await?;
+    let policies_by_version =
+        get_deployment_policies_by_versions(pool, &policy_version_ids).await?;
 
     let mut map: PoliciesByConfiguration = BTreeMap::new();
     // A configuration can be evaluated once only when the Nix-evaluation
@@ -1524,7 +1528,10 @@ async fn process_pending_commits(
                         "Failed to load per-configuration policies for flake {} (commit {})",
                         flake.id, commit.git_commit_hash,
                     ));
-                    warn!("{:#}; continuing flake evaluation without compliance gates", e);
+                    warn!(
+                        "{:#}; continuing flake evaluation without compliance gates",
+                        e
+                    );
                     std::sync::Arc::new(PoliciesByConfiguration::new())
                 }
             };
@@ -1963,8 +1970,9 @@ mod tests {
     #[test]
     fn evaluation_policy_digest_is_real_for_an_empty_set() {
         assert_eq!(evaluation_policy_digest(&[]), evaluation_policy_digest(&[]));
-        assert_ne!(evaluation_policy_digest(&[]), evaluation_policy_digest(&[
-            AssignedPolicy {
+        assert_ne!(
+            evaluation_policy_digest(&[]),
+            evaluation_policy_digest(&[AssignedPolicy {
                 policy_id: Uuid::from_u128(1),
                 policy_name: "firewall".to_string(),
                 policy: DeploymentPolicy::CustomCheck {
@@ -1975,8 +1983,8 @@ mod tests {
                     rules: Vec::new(),
                     mode: RuleMode::All,
                 },
-            },
-        ]));
+            },])
+        );
     }
 
     #[test]
@@ -2001,7 +2009,9 @@ mod tests {
 
         assert_ne!(
             evaluation_policy_digest(&[make_policy("cfg.config.networking.firewall.enable")]),
-            evaluation_policy_digest(&[make_policy("cfg.config.networking.firewall.allowedTCPPorts != []")]),
+            evaluation_policy_digest(&[make_policy(
+                "cfg.config.networking.firewall.allowedTCPPorts != []"
+            )]),
         );
     }
 

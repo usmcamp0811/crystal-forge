@@ -60,16 +60,33 @@ pub struct ImportedCustomCheckRule {
     pub strict: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ImportedEvidenceRequirement {
-    Command { command: String, expected_output: String },
-    File { path: String, expected_content: String },
-    UnitState { unit: String, state: String },
-    Log { source: String, unit: Option<String>, pattern: String },
-    Attestation { description: String },
+    Command {
+        command: String,
+        expected_output: String,
+    },
+    File {
+        path: String,
+        expected_content: String,
+    },
+    UnitState {
+        unit: String,
+        state: String,
+    },
+    Log {
+        source: String,
+        unit: Option<String>,
+        pattern: String,
+    },
+    Attestation {
+        description: String,
+    },
 }
 
 /// Metadata for the draft bundle created during import.
@@ -417,6 +434,23 @@ impl ImportedPolicyRecord {
         let fixes: Vec<serde_json::Value> =
             rule.fix.iter().map(|f| fix_content_to_json(f)).collect();
 
+        // Derive curated normalised mapping arrays from structured identifiers.
+        // These supplement (do not replace) the generic `identifiers` array.
+        // Only values that begin with the canonical prefix are included; prose
+        // text such as VulnDiscussion is never scanned here.
+        let srg_ids: Vec<&str> = rule
+            .identifiers
+            .iter()
+            .map(|id| id.value.as_str())
+            .filter(|v| v.to_ascii_uppercase().starts_with("SRG-"))
+            .collect();
+        let cci_ids: Vec<&str> = rule
+            .identifiers
+            .iter()
+            .map(|id| id.value.as_str())
+            .filter(|v| v.to_ascii_uppercase().starts_with("CCI-"))
+            .collect();
+
         serde_json::json!({
             "source_rule_id": rule.id,
             "source_group_id": rule.group_id,
@@ -428,22 +462,32 @@ impl ImportedPolicyRecord {
             "references": references,
             "checks": checks,
             "fixes": fixes,
+            "srg_ids": srg_ids,
+            "cci_ids": cci_ids,
         })
     }
 }
 
 fn check_content_to_json(c: &CheckContent) -> serde_json::Value {
-    let body_parts: Vec<serde_json::Value> = c.body_parts.iter().map(|part| match part {
-        crate::compliance::xccdf::models::CheckBodyPart::Inline { content } => serde_json::json!({
-            "type": "inline",
-            "content": content,
-        }),
-        crate::compliance::xccdf::models::CheckBodyPart::Reference { href, name } => serde_json::json!({
-            "type": "reference",
-            "href": href,
-            "name": name,
-        }),
-    }).collect();
+    let body_parts: Vec<serde_json::Value> = c
+        .body_parts
+        .iter()
+        .map(|part| match part {
+            crate::compliance::xccdf::models::CheckBodyPart::Inline { content } => {
+                serde_json::json!({
+                    "type": "inline",
+                    "content": content,
+                })
+            }
+            crate::compliance::xccdf::models::CheckBodyPart::Reference { href, name } => {
+                serde_json::json!({
+                    "type": "reference",
+                    "href": href,
+                    "name": name,
+                })
+            }
+        })
+        .collect();
     serde_json::json!({
         "system": c.system,
         "selector": c.selector,
