@@ -50,7 +50,7 @@ pub struct NixosOptionAssertionDraft {
 
 /// A literal NixOS option value supported by this inference engine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum NixosLiteralValue {
     Boolean(bool),
     Integer(i64),

@@ -554,6 +554,25 @@ impl ParserState {
                 self.parse_fix_start(&attrs);
                 ParseControl::Continue
             }
+            (ElementNamespace::Xccdf, b"fixtext") => {
+                // <fixtext fixref="F-..."> contains the human-readable remediation.
+                // XCCDF 1.1/1.2 STIGs typically use <fixtext> rather than <fix>
+                // for the prose remediation. Treat fixref as the id so it can be
+                // correlated with the companion empty <fix id="..."/> element.
+                let id = attr(&attrs, b"fixref").map(String::from);
+                // Only initialize if we don't already have a <fix> in progress;
+                // that preserves priority for a genuine script-bearing <fix>.
+                if self.current_fix.is_none() {
+                    self.current_fix = Some(FixContent {
+                        id,
+                        system: None,
+                        content: String::new(),
+                        complexity: None,
+                        disruption: None,
+                    });
+                }
+                ParseControl::Continue
+            }
             (ElementNamespace::Xccdf, b"ident") => {
                 let system = attr(&attrs, b"system").unwrap_or("").to_string();
                 self.current_ident = Some(StandardIdentifier {
@@ -800,12 +819,34 @@ impl ParserState {
                 }
                 let fix = self.current_fix.take();
                 if let Some(ref mut rule) = self.current_rule {
-                    rule.fix = fix;
+                    // Only replace an existing fix (from <fixtext>) when this <fix>
+                    // element actually carries content. This prevents an empty
+                    // <fix id="..."/> companion element from clearing the prose
+                    // already extracted from <fixtext>.
+                    match (&rule.fix, &fix) {
+                        (Some(_), Some(f)) if f.content.is_empty() => {
+                            // Empty <fix> — keep the existing fixtext content.
+                        }
+                        _ => rule.fix = fix,
+                    }
                 }
             }
             (ElementNamespace::Xccdf, b"fixtext") => {
                 if let Some(ref mut fix) = self.current_fix {
                     fix.content = self.current_text.clone();
+                }
+                // Commit fixtext to rule.fix when no <fix> element has done so yet.
+                // A subsequent empty <fix id="..."/> will overwrite only if it has
+                // actual content (checked in the </fix> handler).
+                let fix = self.current_fix.take();
+                if let Some(ref mut rule) = self.current_rule {
+                    if rule.fix.is_none() {
+                        rule.fix = fix;
+                    } else {
+                        // Already have a fix from a <fix> element — restore current_fix
+                        // so the </fix> handler can still reach it if needed.
+                        self.current_fix = fix;
+                    }
                 }
             }
             (ElementNamespace::Xccdf, b"ident") => {

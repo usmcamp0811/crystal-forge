@@ -6783,6 +6783,10 @@ mod tests {
     /// This fixture reproduces the namespace, element structure, and
     /// auxiliary-file layout without the copyrighted content.
     fn nixos_stig_xccdf_1_1() -> Vec<u8> {
+        // Fixture derived from U_Anduril_NixOS_V1R1_STIG V-268078 (firewall rule).
+        // The description uses the real STIG XML-escaped sub-element format.
+        // The fixtext contains the real NixOS option assignment so that
+        // `infer_nixos_assertions` can produce a testable result.
         let xccdf = r#"<?xml version="1.0" encoding="utf-8"?><?xml-stylesheet type='text/xsl' href='STIG_unclass.xsl'?>
 <Benchmark xmlns:dc="http://purl.org/dc/elements/1.1/"
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -6794,27 +6798,51 @@ mod tests {
     xmlns="http://checklists.nist.gov/xccdf/1.1">
   <status date="2025-08-19">accepted</status>
   <title>Anduril NixOS Security Technical Implementation Guide (Reduced Fixture)</title>
-  <description>Reduced fixture derived from U_Anduril_NixOS_V1R2_STIG for CI testing.</description>
+  <description>Reduced fixture derived from U_Anduril_NixOS_V1R1_STIG for CI testing.</description>
   <notice id="terms-of-use" xml:lang="en"/>
   <reference href="https://cyber.mil">
     <dc:publisher>DISA</dc:publisher>
     <dc:source>STIG.DOD.MIL</dc:source>
   </reference>
-  <plain-text id="release-info">Release: 2 Benchmark Date: 01 Oct 2025</plain-text>
+  <plain-text id="release-info">Release: 1 Benchmark Date: 25 Oct 2024</plain-text>
   <version>1</version>
   <Profile id="MAC-1_Classified">
     <title>I - Mission Critical Classified</title>
-    <select idref="SV-268078r1_rule" selected="true"/>
+    <select idref="SV-268078r1039119_rule" selected="true"/>
   </Profile>
   <Group id="V-268078">
-    <title>GEN000000-fixture</title>
-    <Rule id="SV-268078r1_rule" severity="medium">
-      <title>The NixOS operating system must be configured correctly.</title>
-      <description>Without proper configuration, information cannot be protected.</description>
-      <check system="C-268078r1_chk">
-        <check-content>Verify the NixOS configuration as required.</check-content>
+    <title>SRG-OS-000480-GPOS-00227</title>
+    <description>&lt;GroupDescription&gt;&lt;/GroupDescription&gt;</description>
+    <Rule id="SV-268078r1039119_rule" weight="10.0" severity="medium">
+      <version>ANIX-00-000010</version>
+      <title>NixOS must enable the built-in firewall.</title>
+      <description>&lt;VulnDiscussion&gt;Without a host-based firewall, the system is exposed to network-based attacks. Enabling the built-in NixOS firewall mitigates this risk.&lt;/VulnDiscussion&gt;&lt;FalsePositives&gt;&lt;/FalsePositives&gt;&lt;FalseNegatives&gt;&lt;/FalseNegatives&gt;&lt;Documentable&gt;false&lt;/Documentable&gt;&lt;Mitigations&gt;&lt;/Mitigations&gt;&lt;SeverityOverrideGuidance&gt;&lt;/SeverityOverrideGuidance&gt;&lt;PotentialImpacts&gt;&lt;/PotentialImpacts&gt;&lt;ThirdPartyTools&gt;&lt;/ThirdPartyTools&gt;&lt;MitigationControl&gt;&lt;/MitigationControl&gt;&lt;Responsibility&gt;&lt;/Responsibility&gt;&lt;IAControls&gt;&lt;/IAControls&gt;</description>
+      <reference>
+        <dc:title>DPMS Target Anduril NixOS</dc:title>
+        <dc:publisher>DISA</dc:publisher>
+        <dc:type>DPMS Target</dc:type>
+        <dc:subject>Anduril NixOS</dc:subject>
+        <dc:identifier>5658</dc:identifier>
+      </reference>
+      <ident system="http://cyber.mil/cci">CCI-000366</ident>
+      <fixtext fixref="F-71905r1039121_fix">Configure /etc/nixos/configuration.nix to enforce firewall rules by adding the following configuration settings:
+
+ networking.firewall.enable = true;
+
+Rebuild the system with the following command:
+
+$ sudo nixos-rebuild switch</fixtext>
+      <fix id="F-71905r1039121_fix"/>
+      <check system="C-72002r1039120_chk">
+        <check-content-ref href="Anduril_NixOS_STIG.xml" name="M"/>
+        <check-content>Verify NixOS has the network firewall enabled with the following command:
+
+$ grep firewall.enable /etc/nixos/configuration.nix
+
+ networking.firewall.enable = true;
+
+If "networking.firewall.enable" is not set to "true", is commented out, or is missing, this is a finding.</check-content>
       </check>
-      <fix id="F-268078r1_fix">Apply the required configuration.</fix>
     </Rule>
   </Group>
 </Benchmark>"#;
@@ -6917,6 +6945,75 @@ mod tests {
 
         // Original ZIP sha256 differs from the inner XML sha256.
         assert_ne!(json["sha256"], source["selected_xml_sha256"]);
+
+        // All rules: description must never contain raw <VulnDiscussion> XML tags.
+        let rules = json["rules"].as_array().expect("rules array");
+        for rule in rules.iter() {
+            let desc = rule["description"].as_str().unwrap_or("");
+            assert!(
+                !desc.contains("<VulnDiscussion>"),
+                "rule {} description must not contain raw XML tags",
+                rule["id"].as_str().unwrap_or("?")
+            );
+        }
+
+        // Find V-268078 specifically (the firewall rule).
+        // The rule ID in the real V1R1 STIG is SV-268078r1039119_rule; the
+        // group_id is V-268078.
+        let v268078 = rules.iter().find(|r| {
+            r["group_id"].as_str().unwrap_or("") == "V-268078"
+                || r["id"].as_str().unwrap_or("").contains("268078")
+        });
+
+        if let Some(rule) = v268078 {
+            // Title must be preserved.
+            let title = rule["title"].as_str().unwrap_or("");
+            assert!(
+                title.contains("firewall") || title.contains("NixOS"),
+                "V-268078 title should mention firewall, got: {title}"
+            );
+
+            // Fix content must be the full text, not truncated at 200 chars.
+            let fix = &rule["fix"];
+            let fix_content = fix["content"].as_str().unwrap_or("");
+            assert!(
+                fix_content.contains("networking.firewall.enable = true;"),
+                "V-268078 fix content must include the NixOS option assignment, got: {fix_content}"
+            );
+            // Backward-compat field must also be full text.
+            assert_eq!(
+                fix["preview"].as_str().unwrap_or(""),
+                fix_content,
+                "fix.preview must equal fix.content (no truncation)"
+            );
+
+            // Check content must survive intact.
+            let has_check_content = rule["checks"].as_array().map(|checks| {
+                checks.iter().any(|c| {
+                    c["body_parts"].as_array().map(|parts| {
+                        parts.iter().any(|p| {
+                            p["type"] == "inline"
+                                && p["content"].as_str().unwrap_or("").contains("networking.firewall.enable")
+                        })
+                    }).unwrap_or(false)
+                })
+            }).unwrap_or(false);
+            assert!(has_check_content, "V-268078 check-content must contain firewall check text");
+
+            // Inferred assertions: exactly one boolean assertion for the firewall option.
+            let inferred = rule["inferred_assertions"].as_array().expect("inferred_assertions");
+            assert_eq!(inferred.len(), 1, "exactly one assertion inferred for V-268078");
+            assert_eq!(inferred[0]["option_path"], "networking.firewall.enable");
+            assert_eq!(
+                inferred[0]["nix_expression"],
+                "cfg.config.networking.firewall.enable == true"
+            );
+        } else {
+            // When using the minimal fixture (no real ZIP), V-268078 is in the fixture
+            // with the full firewall fix text — verify the fixture rule is present.
+            let fixture_rule = rules.iter().find(|r| r["id"].as_str().unwrap_or("").contains("268078"));
+            assert!(fixture_rule.is_some(), "fixture should contain a V-268078 rule");
+        }
     }
 
     // ── Export endpoint helpers ───────────────────────────────────────────────
