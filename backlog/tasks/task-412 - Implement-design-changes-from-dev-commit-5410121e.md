@@ -1369,6 +1369,13 @@ Parity pass for Refine Policy Modal against ImportStigModal.jsx. Root causes: (1
 3. Enrich cards from existing version, mapping, rule, state, and system-count data; add a revision footer that opens the detail drawer directly on Revisions without changing assignment or publication state.
 4. Rebuild the drawer presentation around identity/actions, five stable stat cells, Details/Revisions navigation, revision rows, styled rule cards, exact revision mappings, conditional usage text, and collapsed raw definition. Do not fabricate owner, rationale, evidence, or named systems; render `—`/conditional omissions as appropriate.
 5. Add/adjust focused web-ui coverage if existing harness data permits, then run web-ui tests, cargo fmt, git diff --check, and the Nix web-ui check. Commit and push this UI pass before addressing the separately requested P0 lifecycle/digest fixes.
+
+### P0 remediation: canonical policy JSON/TOML interchange
+1. Define one typed policy-interchange representation that carries every persisted semantic field required by the canonical policy-version model: compliance metadata, dependencies, opaque XML, and default-enabled state in addition to identity/version fields.
+2. Build its semantic digest exclusively through `PolicyVersionCanonical`; use that same construction for JSON/TOML export, preview/import validation, and imported-row persistence.
+3. Add regression tests proving export-shaped documents verify with the authoritative digest and that changes to the previously omitted semantic fields are both retained and digest-sensitive.
+4. Run focused server formatting/tests/checks; explicitly skip `nix build .#checks.x86_64-linux.web-ui --no-link` per user instruction and leave it to CI.
+5. Commit/push this isolated digest/interchange fix before starting the separate draft/publication-lifecycle P0 remediation.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -1381,6 +1388,8 @@ Implemented a local, uncommitted first pass of the `0c92fdf2` modal structure: s
 2026-08-09: Ownership transferred by the user to @gpt-5.6-terra for a narrowly scoped Policies view and policy-detail drawer visual/information-architecture parity pass. Backend correctness findings quoted in the request are recorded for review but are not part of this pass unless explicitly expanded.
 
 2026-08-09 research: existing list DTO exposes policy `updated_at` and revisions' `created_at`, but not owner, persisted ATO evidence, or system membership details. This UI pass will show real modified data where mapped; it will not fabricate unavailable data. Named system membership and evidence require later API/persistence work.
+
+2026-08-09: Policies presentation pass is committed and pushed as `1ced5e95`; no current tracked changes in TASK-412 worktree. Beginning the first backend P0 from review: policy JSON/TOML export/import currently omits `compliance_metadata`, `dependencies`, `opaque_xml`, and `enabled_by_default`, while import computes a reduced non-authoritative digest.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
