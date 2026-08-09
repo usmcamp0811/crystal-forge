@@ -251,6 +251,18 @@ pub async fn delete_compliance_bundle(
             }),
         )
             .into_response(),
+        Ok(BundleDeleteOutcome::BlockedBySourceMappings { mapping_count }) => (
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "bundle_referenced".to_string(),
+                message: "This compliance bundle has immutable source mappings and cannot be permanently deleted.".to_string(),
+                details: Some(serde_json::json!({
+                    "bundle_id": bundle_id,
+                    "mapping_count": mapping_count,
+                })),
+            }),
+        )
+            .into_response(),
         Ok(BundleDeleteOutcome::BlockedByAssignments { assignment_count }) => (
             StatusCode::CONFLICT,
             Json(ApiError {

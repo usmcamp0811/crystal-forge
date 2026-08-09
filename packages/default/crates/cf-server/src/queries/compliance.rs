@@ -1113,6 +1113,7 @@ pub enum BundleDeleteOutcome {
     Deleted,
     NotFound,
     BlockedByImmutableHistory { version_ids: Vec<Uuid> },
+    BlockedBySourceMappings { mapping_count: i64 },
     BlockedByAssignments { assignment_count: i64 },
 }
 
@@ -1154,10 +1155,12 @@ pub async fn delete_bundle(pool: &PgPool, bundle_id: Uuid) -> Result<BundleDelet
         });
     }
 
-    // Only active assignment rows block deletion. Inactive historical rows
-    // belong to the disposable unpublished lineage and may cascade with it.
+    // Assignment lineage and version rows are immutable. Even inactive
+    // assignments retain a RESTRICT reference to the bundle lineage, so they
+    // must be reported as blockers rather than reaching the final DELETE and
+    // surfacing as an FK error.
     let assignment_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM compliance_bundle_assignments a JOIN compliance_bundle_versions v ON v.id = a.bundle_version_id WHERE v.bundle_id = $1 AND COALESCE(a.active, true)",
+        "SELECT COUNT(*) FROM compliance_bundle_assignments WHERE bundle_id = $1",
     )
     .bind(bundle_id)
     .fetch_one(&mut *tx)
@@ -1167,6 +1170,24 @@ pub async fn delete_bundle(pool: &PgPool, bundle_id: Uuid) -> Result<BundleDelet
     if assignment_count > 0 {
         tx.rollback().await.ok();
         return Ok(BundleDeleteOutcome::BlockedByAssignments { assignment_count });
+    }
+
+    let mapping_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM compliance_source_object_mappings m
+        JOIN compliance_bundle_versions v ON v.id = m.bundle_version_id
+        WHERE v.bundle_id = $1
+        "#,
+    )
+    .bind(bundle_id)
+    .fetch_one(&mut *tx)
+    .await
+    .context("Failed to check compliance bundle source mappings")?;
+
+    if mapping_count > 0 {
+        tx.rollback().await.ok();
+        return Ok(BundleDeleteOutcome::BlockedBySourceMappings { mapping_count });
     }
 
     // Keep the trigger in place as defense in depth against publication races.

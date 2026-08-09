@@ -645,6 +645,14 @@ pub async fn delete_deployment_policy(
             JOIN deployment_policy_versions pv
               ON pv.id = o.policy_version_id
             WHERE pv.policy_id = $1
+
+            UNION ALL
+
+            SELECT m.policy_version_id
+            FROM compliance_source_object_mappings m
+            JOIN deployment_policy_versions pv
+              ON pv.id = m.policy_version_id
+            WHERE pv.policy_id = $1
         ) AS policy_refs
         "#,
     )
