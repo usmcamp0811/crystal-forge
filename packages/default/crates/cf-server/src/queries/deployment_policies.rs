@@ -452,7 +452,7 @@ pub async fn update_deployment_policy(
     // so that updating the lineage cannot erase imported semantics (P1 #4).
     // Ensure a mutable draft exists (creates a derived draft from the published
     // version when needed). (P1 #2)
-    let _draft_version_id = ensure_policy_draft(&mut tx, *policy_id, actor_id)
+    let _draft_version_id = ensure_policy_draft(&mut tx, *policy_id, actor_id, None)
         .await
         .context("Failed to ensure policy draft version exists")?;
 

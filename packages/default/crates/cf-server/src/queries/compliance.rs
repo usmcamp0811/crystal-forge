@@ -5,8 +5,9 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::compliance::digest::{
-    BundleMembershipEntry, BundleVersionCanonical, load_bundle_membership,
+    BundleMembershipEntry, BundleVersionCanonical, PolicyVersionCanonical, load_bundle_membership,
     write_assignment_effective_set_digest, write_bundle_version_digest,
+    write_policy_version_digest,
 };
 use crate::compliance::resolver::{
     ResolutionOutcome, resolve_system_effective_policies,
@@ -240,6 +241,8 @@ pub async fn ensure_bundle_draft(
         .bind(pa.id)
         .execute(&mut **tx)
         .await?;
+
+        write_assignment_effective_set_digest(tx, new_assignment_id).await?;
     }
 
     // Update the lineage pointer (integrity trigger fires and validates).
@@ -248,6 +251,17 @@ pub async fn ensure_bundle_draft(
         .bind(bundle_id)
         .execute(&mut **tx)
         .await?;
+
+    let canonical = BundleVersionCanonical {
+        name: pub_ver.name,
+        framework: pub_ver.framework,
+        framework_version: pub_ver.framework_version,
+        description: pub_ver.description,
+        layer: pub_ver.layer,
+        owner: pub_ver.owner,
+        members: load_bundle_membership(tx, new_draft_id).await?,
+    };
+    write_bundle_version_digest(tx, bundle_id, &canonical).await?;
 
     Ok(new_draft_id)
 }
@@ -259,6 +273,7 @@ pub async fn ensure_policy_draft(
     tx: &mut Transaction<'_, Postgres>,
     policy_id: Uuid,
     actor_id: Option<Uuid>,
+    requested_version: Option<&str>,
 ) -> Result<Uuid> {
     #[derive(sqlx::FromRow)]
     struct PolicyPointers {
@@ -322,7 +337,10 @@ pub async fn ensure_policy_draft(
     .fetch_one(&mut **tx)
     .await?;
 
-    let new_version = format!("{}-draft", pub_ver.version);
+    let new_version = requested_version
+        .filter(|version| !version.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{}-draft", pub_ver.version));
 
     let new_draft_id: Uuid = sqlx::query_scalar(
         r#"
@@ -357,6 +375,20 @@ pub async fn ensure_policy_draft(
         .bind(policy_id)
         .execute(&mut **tx)
         .await?;
+
+    let canonical = PolicyVersionCanonical {
+        name: pub_ver.name,
+        description: pub_ver.description,
+        policy_type: pub_ver.policy_type,
+        implementation_state: pub_ver.implementation_state,
+        execution_phase: pub_ver.execution_phase,
+        config: pub_ver.config,
+        compliance_metadata: pub_ver.compliance_metadata,
+        dependencies: pub_ver.dependencies,
+        opaque_xml_digest: PolicyVersionCanonical::digest_opaque_xml(pub_ver.opaque_xml.as_deref()),
+        enabled_by_default: pub_ver.enabled_by_default,
+    };
+    write_policy_version_digest(tx, policy_id, &canonical).await?;
 
     Ok(new_draft_id)
 }

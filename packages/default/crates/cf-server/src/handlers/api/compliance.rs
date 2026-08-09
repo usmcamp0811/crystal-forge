@@ -36,9 +36,9 @@ use crate::compliance::xccdf::xml_writer::{XccdfWriterError, write_bundle_xccdf_
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
     BundleDeleteOutcome, BundleValidationError, create_bundle as create_bundle_row,
-    delete_bundle as delete_bundle_row, get_system_evidence, list_bundle_systems,
-    list_bundle_systems_for_version, list_bundle_version_policy_membership, list_bundles,
-    list_system_bundles, update_bundle as update_bundle_row,
+    delete_bundle as delete_bundle_row, ensure_policy_draft, get_system_evidence,
+    list_bundle_systems, list_bundle_systems_for_version, list_bundle_version_policy_membership,
+    list_bundles, list_system_bundles, update_bundle as update_bundle_row,
 };
 use crate::queries::compliance_interchange;
 
@@ -582,7 +582,7 @@ pub async fn create_policy_draft(
 ) -> impl IntoResponse {
     use crate::api::models::CreatePolicyDraftResponse;
 
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
 
@@ -590,101 +590,73 @@ pub async fn create_policy_draft(
         return forbidden();
     }
 
-    // Load the current published version — description is nullable
-    let published_result = sqlx::query_as::<_, (Uuid, String, Option<String>, String, serde_json::Value, serde_json::Value, serde_json::Value, String, String, String)>(
-        r#"SELECT id, name, description, policy_type, config, compliance_metadata, dependencies, semantic_digest, implementation_state, version
-           FROM deployment_policy_versions
-           WHERE policy_id = $1 AND publication_state = 'accepted'
-           ORDER BY published_at DESC LIMIT 1"#,
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::error!(error = %error, %policy_id, "failed to begin policy draft transaction");
+            return internal_error("Failed to create policy draft");
+        }
+    };
+    let draft_id = match ensure_policy_draft(
+        &mut tx,
+        policy_id,
+        Some(user_id),
+        _payload.new_version.as_deref(),
     )
-    .bind(policy_id)
-    .fetch_optional(&pool)
-    .await;
-
-    let (
-        published_id,
-        name,
-        description,
-        policy_type,
-        config,
-        compliance_metadata,
-        dependencies,
-        published_digest,
-        implementation_state,
-        published_version,
-    ) = match published_result {
-        Ok(Some(v)) => v,
-        Ok(None) => {
+    .await
+    {
+        Ok(id) => id,
+        Err(error) => {
+            let _ = tx.rollback().await;
+            tracing::error!(error = %error, %policy_id, "failed to derive policy draft");
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(serde_json::json!({
-                    "error": "No published version",
-                    "message": "Policy has no published version to derive from",
+                    "error": "Unable to create policy draft",
+                    "message": "Policy has no mutable draft and no published version to derive from",
                     "code": "NO_PUBLISHED_VERSION"
                 })),
             )
                 .into_response();
         }
-        Err(_) => return internal_error("Failed to load published policy version"),
     };
-
-    // Build a new version string derived from the published version
-    let new_version_id = uuid::Uuid::new_v4();
-    // Derive version string: "1.0.0" → "1.0.0-draft-1"
-    let new_version_string = if let Some(v) = &_payload.new_version {
-        v.clone()
-    } else {
-        format!("{}-draft-1", published_version)
-    };
-
-    let create_result = sqlx::query_as::<_, (Uuid, String)>(
-        r#"INSERT INTO deployment_policy_versions
-           (id, policy_id, version, name, description, policy_type, config,
-            compliance_metadata, dependencies, semantic_digest, publication_state,
-            derived_from_version_id, implementation_state, trust_state)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'draft', $11, $12, 'untrusted')
-           RETURNING id, version"#,
+    let draft = match sqlx::query_as::<_, (String, Option<Uuid>)>(
+        r#"
+        SELECT dpv.version,
+               COALESCE(dpv.derived_from_version_id, dp.current_published_version_id)
+        FROM deployment_policy_versions dpv
+        JOIN deployment_policies dp ON dp.id = dpv.policy_id
+        WHERE dpv.id = $1
+        "#,
     )
-    .bind(new_version_id)
-    .bind(policy_id)
-    .bind(&new_version_string)
-    .bind(&name)
-    .bind(&description)
-    .bind(&policy_type)
-    .bind(&config)
-    .bind(&compliance_metadata)
-    .bind(&dependencies)
-    .bind(&published_digest)
-    .bind(published_id)
-    .bind(&implementation_state)
-    .fetch_optional(&pool)
-    .await;
-
-    match create_result {
-        Ok(Some((new_id, new_version))) => {
-            // Update the current_draft_version_id pointer
-            let _update_pointer = sqlx::query(
-                r#"UPDATE deployment_policies SET current_draft_version_id = $1 WHERE id = $2"#,
-            )
-            .bind(new_id)
-            .bind(policy_id)
-            .execute(&pool)
-            .await;
-
-            let response = CreatePolicyDraftResponse {
-                version_id: new_id,
-                version: new_version,
-                publication_state: "draft".to_string(),
-                derived_from_version_id: published_id,
-            };
-            (StatusCode::CREATED, Json(response)).into_response()
+    .bind(draft_id)
+    .fetch_one(&mut *tx)
+    .await
+    {
+        Ok(draft) => draft,
+        Err(error) => {
+            let _ = tx.rollback().await;
+            tracing::error!(error = %error, %draft_id, "failed to load derived policy draft");
+            return internal_error("Failed to create policy draft");
         }
-        Ok(None) => internal_error("Failed to create draft (no row returned)"),
-        Err(e) => {
-            tracing::error!("Failed to create policy draft: {e}");
-            internal_error("Failed to create policy draft")
-        }
+    };
+    let Some(derived_from_version_id) = draft.1 else {
+        let _ = tx.rollback().await;
+        tracing::error!(%draft_id, "derived policy draft has no published source");
+        return internal_error("Failed to create policy draft");
+    };
+    if let Err(error) = tx.commit().await {
+        tracing::error!(error = %error, %draft_id, "failed to commit policy draft");
+        return internal_error("Failed to create policy draft");
     }
+
+    let response = CreatePolicyDraftResponse {
+        version_id: draft_id,
+        version: draft.0,
+        publication_state: "draft".to_string(),
+        derived_from_version_id,
+    };
+    (StatusCode::CREATED, Json(response)).into_response()
 }
 
 /// `POST /api/v1/compliance/bundle-versions/:version_id/publish`
