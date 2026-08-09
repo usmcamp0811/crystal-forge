@@ -1345,6 +1345,13 @@ Remaining correctness gap: extend the existing set-based system effective-policy
 Focused test pass in the existing cf-server unit-test modules: exercise exact bundle-version membership inputs and resolver precedence/conflict behavior with deterministic UUIDs, and exercise effective compliance rollups for exclusions, additions, report-only overlays, and value overrides. Avoid new live-DB coverage because the pure helpers already expose the relevant semantics; retain the repository's existing ignored integration-test convention unchanged.
 
 Focused historical assignment fix: add an authenticated read-only bundle-version membership endpoint returning ordered exact policy-version DTOs from compliance_bundle_version_policies; add matching web-ui DTO/client function; load that membership for AssignmentCreatePanel and use exact policy version IDs for exclusions while retaining the existing policy catalog/version IDs for additions; keep the existing server-backed assignment preview unchanged. Verify with web-ui cargo check and inspect the final diff/status.
+
+### Modal design update (`0c92fdf2`)
+- Inspect the committed design delta and existing Dioxus refine/policy editor components plus their tests.
+- Keep server preview/XCCDF semantics unchanged; add presentation-only STIG discussion extraction and render prefix-classified SRG/CCI metadata from existing preview identifiers.
+- Refactor the existing refine and policy-editor bodies into accessible shared-CSS tab panels while retaining all action, validation, persistence, and delete behavior.
+- Add focused tests for discussion extraction, tabs/counts/state preservation/navigation reset; run the canonical affected web-ui tests and required formatting/checks.
+- Deploy only through the normal dev process and record any manual verification or blocker.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
