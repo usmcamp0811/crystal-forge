@@ -1362,6 +1362,13 @@ Focused historical assignment fix: add an authenticated read-only bundle-version
 - Add PostgreSQL-backed query/API regression tests and run the deployed runtime matrix before reporting this slice complete.
 
 Parity pass for Refine Policy Modal against ImportStigModal.jsx. Root causes: (1) cf-modal-tabs and cf-modal-tab-panel are independent bordered siblings; design wraps in one refine-tab-card. (2) refine-basics margin-bottom 4px vs design 14px. (3) Header gap 16px/icon 15px/progress margin-top 10px vs design 10px/14px/8px. (4) refine-source-card__body gap 10px vs design 14px. (5) refine-source-identifiers no margin-bottom vs design 6px. (6) refine-source-title 12.5px vs design 14px/600/1.4. (7) refine-source-copy 12px/1.5 vs design 12.5px/1.6. (8) refine-source-check pre needs 11.5px/1.6. (9) Enforcement tab and summary use raw .len() not filled assertion count. (10) No scroll containment for long content. Changes: refine_policy.rs: wrap tabs in div.refine-tab-card, group identifiers+title in div.refine-source-heading, fix icon size to 14, use filled assertion count. app.css: add .refine-tab-card rule, remove border/radius from .cf-modal-tabs and .cf-modal-tab-panel, update spacing/typography to design values, add overflow-y:auto scroll containment.
+
+### 2026-08-09 — Policies UI pass
+1. Consolidate UI-only inferred policy categories to Deployment, Pipeline gates, Rollout control, and Security & hardening; reuse the shared model in list/filter/card/drawer and editor category selection without persisting category.
+2. Port only policy-specific category/group CSS, then update Policies markup to use the corresponding semantic classes.
+3. Enrich cards from existing version, mapping, rule, state, and system-count data; add a revision footer that opens the detail drawer directly on Revisions without changing assignment or publication state.
+4. Rebuild the drawer presentation around identity/actions, five stable stat cells, Details/Revisions navigation, revision rows, styled rule cards, exact revision mappings, conditional usage text, and collapsed raw definition. Do not fabricate owner, rationale, evidence, or named systems; render `—`/conditional omissions as appropriate.
+5. Add/adjust focused web-ui coverage if existing harness data permits, then run web-ui tests, cargo fmt, git diff --check, and the Nix web-ui check. Commit and push this UI pass before addressing the separately requested P0 lifecycle/digest fixes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -1372,6 +1379,8 @@ Deletion lifecycle pass: inspected deployed service name crystal-forge-server.se
 Implemented a local, uncommitted first pass of the `0c92fdf2` modal structure: shared CSS tabs in STIG refinement and policy editor; source tab uses existing preview metadata, prefix-filtered/sorted SRG/CCI identifiers, clean `VulnDiscussion` presentation, official full check/fix; navigation resets refinement to Source; custom Nix editors use `code-editor`; lifecycle/action/payload code was not altered. Verification passed: `cargo check --manifest-path packages/web-ui/Cargo.toml`; full web UI Rust tests (144 passed, 1 ignored); both applicable fmt checks; `git diff --check`. Browser component/Playwright coverage and user-authorized dev deployment/manual testing remain required before review.
 
 2026-08-09: Ownership transferred by the user to @gpt-5.6-terra for a narrowly scoped Policies view and policy-detail drawer visual/information-architecture parity pass. Backend correctness findings quoted in the request are recorded for review but are not part of this pass unless explicitly expanded.
+
+2026-08-09 research: existing list DTO exposes policy `updated_at` and revisions' `created_at`, but not owner, persisted ATO evidence, or system membership details. This UI pass will show real modified data where mapped; it will not fabricate unavailable data. Named system membership and evidence require later API/persistence work.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
