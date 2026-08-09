@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-09 16:10'
+updated_date: '2026-08-09 16:16'
 labels:
   - design
   - frontend
@@ -1407,6 +1407,8 @@ Implemented a local, uncommitted first pass of the `0c92fdf2` modal structure: s
 2026-08-09: Pushed `499a905d fix(compliance): finalize derived version digests`. Policy draft endpoint now delegates to the transactional query service, retains optional caller version strings, copies all semantic fields, and finalizes digest before commit. Bundle draft derivation now finalizes membership-aware bundle digests and copied assignment-overlay digests in the same transaction. Focused compliance handler tests: 16 passed, 70 DB-dependent tests ignored; formatting and `cargo check -p cf-server` pass. Web-ui Nix check intentionally not run per user direction.
 
 2026-08-09 review correction: `499a905d` must be fixed forward. The explicit policy draft endpoint incorrectly reused an existing mutable draft through `ensure_policy_draft`; the bundle draft endpoint still has standalone non-transactional SQL; and the bundle helper currently duplicates active assignment lineages and creates immutable assignment snapshots with `pending` digests.
+
+2026-08-09 safety constraint: all live PostgreSQL regression tests for this task must use the repository's isolated process-compose database (`nix develop` → `db-only up` / repository scripts). Do not connect to or mutate the system PostgreSQL on port 5432. Verify the repository-provided connection settings before running DB tests.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
