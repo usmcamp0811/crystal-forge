@@ -1231,6 +1231,27 @@ pub struct DeploymentPolicySummary {
     pub policy_type: String,
     pub config: serde_json::Value,
     pub enabled: bool,
+    /// Policy category from current version's compliance_metadata
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Framework from current version's compliance_metadata
+    #[serde(default)]
+    pub framework: Option<String>,
+    /// Severity from current version's compliance_metadata
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// NIST 800-53 control family
+    #[serde(default)]
+    pub control_family: Option<String>,
+    /// CMMC 2.0 level
+    #[serde(default)]
+    pub cmmc_level: Option<i32>,
+    /// CIS Benchmark section
+    #[serde(default)]
+    pub cis_section: Option<String>,
+    /// Human-readable rationale
+    #[serde(default)]
+    pub rationale: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1287,6 +1308,27 @@ pub struct DeploymentPolicyVersionSummary {
     /// CCI IDs for this exact revision (from compliance_metadata).
     #[serde(default)]
     pub cci_ids: Vec<String>,
+    /// Policy category: "deployment", "pipeline", "rollout", "security"
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Framework string, e.g. "DISA STIG", "NIST 800-53", "CMMC 2.0", "CIS Benchmark", or custom
+    #[serde(default)]
+    pub framework: Option<String>,
+    /// Severity: "high", "medium", "low" — None means unrated
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// NIST 800-53 control family, e.g. "AC", "AU", "CM", "IA", "SC", "SI", "MP"
+    #[serde(default)]
+    pub control_family: Option<String>,
+    /// CMMC 2.0 maturity level: 1, 2, or 3
+    #[serde(default)]
+    pub cmmc_level: Option<i32>,
+    /// CIS Benchmark section, e.g. "5.2.3"
+    #[serde(default)]
+    pub cis_section: Option<String>,
+    /// Human-readable rationale for this control
+    #[serde(default)]
+    pub rationale: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

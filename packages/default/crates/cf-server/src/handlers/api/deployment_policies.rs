@@ -19,7 +19,8 @@ use uuid::Uuid;
 use crate::api::models::DeploymentPolicyVersionSummary;
 use crate::auth::extractors::{RequireAdmin, RequireAuth, RequireOperator};
 use crate::compliance::mappings::{
-    extract_cci_ids, extract_srg_ids, normalise_cci_ids, normalise_srg_ids,
+    extract_cci_ids, extract_classification, extract_srg_ids, infer_legacy_category,
+    normalise_cci_ids, normalise_srg_ids,
 };
 use crate::handlers::agent_request::CFState;
 use crate::models::deployment_policies::{
@@ -607,6 +608,11 @@ pub async fn list_deployment_policies(
                             .copied()
                             .unwrap_or((None, None));
                         let compliance_meta = &row.14;
+                        let (cat, fw, sev, cf, cmmc, cis, rat) =
+                            extract_classification(compliance_meta);
+                        let inferred_category = cat.clone().unwrap_or_else(|| {
+                            infer_legacy_category(&row.11, compliance_meta).to_string()
+                        });
                         DeploymentPolicyVersionSummary {
                             id: row.0,
                             policy_id: row.1,
@@ -626,6 +632,13 @@ pub async fn list_deployment_policies(
                             enabled: row.13,
                             srg_ids: extract_srg_ids(compliance_meta),
                             cci_ids: extract_cci_ids(compliance_meta),
+                            category: Some(inferred_category),
+                            framework: fw,
+                            severity: sev,
+                            control_family: cf,
+                            cmmc_level: cmmc,
+                            cis_section: cis,
+                            rationale: rat,
                         }
                     })
                     .collect(),

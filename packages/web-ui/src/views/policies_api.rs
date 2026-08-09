@@ -63,13 +63,25 @@ fn policy_record_to_definition_with_count(
     }))
     .unwrap_or_else(|_| "{}".to_string());
 
-    // Extract SRG/CCI from the current version before consuming `record.versions`.
+    // Extract SRG/CCI and classification from the current version before consuming `record.versions`.
     let current_version_id = record.current_version_id;
-    let (current_srg_ids, current_cci_ids) = record
+    let (current_srg_ids, current_cci_ids, current_category, current_framework,
+         current_severity, current_control_family, current_cmmc_level,
+         current_cis_section, current_rationale) = record
         .versions
         .iter()
         .find(|v| Some(v.id) == current_version_id)
-        .map(|v| (v.srg_ids.clone(), v.cci_ids.clone()))
+        .map(|v| (
+            v.srg_ids.clone(),
+            v.cci_ids.clone(),
+            v.category.clone(),
+            v.framework.clone(),
+            v.severity.clone(),
+            v.control_family.clone(),
+            v.cmmc_level,
+            v.cis_section.clone(),
+            v.rationale.clone(),
+        ))
         .unwrap_or_default();
 
     let revision = record.versions.first().map(|v| v.version.clone());
@@ -103,6 +115,13 @@ fn policy_record_to_definition_with_count(
             enabled: v.enabled,
             srg_ids: v.srg_ids,
             cci_ids: v.cci_ids,
+            category: v.category,
+            framework: v.framework,
+            severity: v.severity,
+            control_family: v.control_family,
+            cmmc_level: v.cmmc_level,
+            cis_section: v.cis_section,
+            rationale: v.rationale,
         })
         .collect();
 
@@ -125,5 +144,12 @@ fn policy_record_to_definition_with_count(
         system_count,
         srg_ids: current_srg_ids,
         cci_ids: current_cci_ids,
+        category: current_category,
+        framework: current_framework,
+        severity: current_severity,
+        control_family: current_control_family,
+        cmmc_level: current_cmmc_level,
+        cis_section: current_cis_section,
+        rationale: current_rationale,
     }
 }

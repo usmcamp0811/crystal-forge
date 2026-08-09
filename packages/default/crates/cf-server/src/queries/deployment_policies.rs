@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::compliance::digest::{PolicyVersionCanonical, write_policy_version_digest};
-use crate::compliance::mappings::{initial_policy_metadata, merge_policy_mappings};
+use crate::compliance::mappings::{
+    initial_policy_metadata, merge_classification_into_metadata, merge_policy_mappings,
+};
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
 };
@@ -408,8 +410,19 @@ pub async fn create_deployment_policy(
     } else {
         Some(&request.cci_ids)
     };
-    let compliance_metadata = initial_policy_metadata(srg_ids_opt, cci_ids_opt)
+    let base_metadata = initial_policy_metadata(srg_ids_opt, cci_ids_opt)
         .context("Failed to build compliance metadata for new policy")?;
+    // Merge classification fields into the initial metadata.
+    let compliance_metadata = merge_classification_into_metadata(
+        &base_metadata,
+        request.category.as_deref(),
+        request.framework.as_deref(),
+        request.severity.as_deref(),
+        request.control_family.as_deref(),
+        request.cmmc_level,
+        request.cis_section.as_deref(),
+        request.rationale.as_deref(),
+    );
 
     let canonical = PolicyVersionCanonical {
         name: policy.name.clone(),
@@ -538,8 +551,19 @@ pub async fn update_deployment_policy(
         // all other metadata keys (source fidelity, rationale, checks, etc.).
         let srg_opt = request.srg_ids.as_deref();
         let cci_opt = request.cci_ids.as_deref();
-        let merged_meta = merge_policy_mappings(&existing_meta, srg_opt, cci_opt)
+        let srg_cci_merged = merge_policy_mappings(&existing_meta, srg_opt, cci_opt)
             .context("Failed to merge SRG/CCI mappings")?;
+        // Merge classification fields into the already-merged metadata.
+        let merged_meta = merge_classification_into_metadata(
+            &srg_cci_merged,
+            request.category.as_deref(),
+            request.framework.as_deref(),
+            request.severity.as_deref(),
+            request.control_family.as_deref(),
+            request.cmmc_level,
+            request.cis_section.as_deref(),
+            request.rationale.as_deref(),
+        );
 
         let canonical = PolicyVersionCanonical {
             name: p.name.clone(),

@@ -709,6 +709,13 @@ fn PolicyDrawer(
                 // Use the selected revision's exact mappings (not the lineage current).
                 srg_ids: revision.srg_ids.clone(),
                 cci_ids: revision.cci_ids.clone(),
+                category: revision.category.clone(),
+                framework: revision.framework.clone(),
+                severity: revision.severity.clone(),
+                control_family: revision.control_family.clone(),
+                cmmc_level: revision.cmmc_level,
+                cis_section: revision.cis_section.clone(),
+                rationale: revision.rationale.clone(),
             }
         },
     );

@@ -36,6 +36,20 @@ pub struct PolicyDefinition {
     pub srg_ids: Vec<String>,
     /// CCI IDs from the current version's compliance_metadata. Persisted.
     pub cci_ids: Vec<String>,
+    /// Policy category from the current version's compliance_metadata.
+    pub category: Option<String>,
+    /// Framework string from the current version's compliance_metadata.
+    pub framework: Option<String>,
+    /// Severity from the current version's compliance_metadata.
+    pub severity: Option<String>,
+    /// NIST 800-53 control family from the current version's compliance_metadata.
+    pub control_family: Option<String>,
+    /// CMMC 2.0 maturity level from the current version's compliance_metadata.
+    pub cmmc_level: Option<i32>,
+    /// CIS Benchmark section from the current version's compliance_metadata.
+    pub cis_section: Option<String>,
+    /// Human-readable rationale from the current version's compliance_metadata.
+    pub rationale: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -57,6 +71,20 @@ pub struct PolicyRevisionSummary {
     pub srg_ids: Vec<String>,
     /// CCI IDs specific to this revision. Selecting this revision shows these.
     pub cci_ids: Vec<String>,
+    /// Policy category for this revision.
+    pub category: Option<String>,
+    /// Framework string for this revision.
+    pub framework: Option<String>,
+    /// Severity for this revision.
+    pub severity: Option<String>,
+    /// NIST 800-53 control family for this revision.
+    pub control_family: Option<String>,
+    /// CMMC 2.0 maturity level for this revision.
+    pub cmmc_level: Option<i32>,
+    /// CIS Benchmark section for this revision.
+    pub cis_section: Option<String>,
+    /// Human-readable rationale for this revision.
+    pub rationale: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

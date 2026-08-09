@@ -600,6 +600,15 @@ pub async fn list_deployment_policies(pool: &PgPool) -> Result<Vec<DeploymentPol
             policy_type: r.policy_type,
             config: r.config,
             enabled: r.enabled,
+            // Classification metadata not loaded in this lightweight path.
+            // Callers needing classification should use the versioned policy API.
+            category: None,
+            framework: None,
+            severity: None,
+            control_family: None,
+            cmmc_level: None,
+            cis_section: None,
+            rationale: None,
         })
         .collect())
 }

@@ -270,7 +270,271 @@ pub fn initial_policy_metadata(
     merge_policy_mappings(&serde_json::json!({}), srg_ids, cci_ids)
 }
 
+// ─── Classification helpers ───────────────────────────────────────────────────
+
+/// Extract semantic classification fields from a `compliance_metadata` JSON value.
+///
+/// Returns a tuple of `(category, framework, severity, control_family, cmmc_level, cis_section, rationale)`.
+/// All fields are `None` when absent from the metadata object.
+pub fn extract_classification(
+    metadata: &serde_json::Value,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i32>,
+    Option<String>,
+    Option<String>,
+) {
+    let obj = metadata.as_object();
+    let get_str = |key: &str| {
+        obj.and_then(|m| m.get(key))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    let category = get_str("category");
+    let framework = get_str("framework");
+    let severity = get_str("severity");
+    let control_family = get_str("control_family");
+    let cmmc_level = obj
+        .and_then(|m| m.get("cmmc_level"))
+        .and_then(|v| v.as_i64())
+        .map(|n| n as i32);
+    let cis_section = get_str("cis_section");
+    let rationale = get_str("rationale");
+    (
+        category,
+        framework,
+        severity,
+        control_family,
+        cmmc_level,
+        cis_section,
+        rationale,
+    )
+}
+
+/// Merge semantic classification fields into an existing `compliance_metadata` JSON object.
+///
+/// Only keys supplied as `Some(...)` are updated; `None` values leave the existing key unchanged.
+/// All other keys in the existing object survive unchanged.
+pub fn merge_classification_into_metadata(
+    existing: &serde_json::Value,
+    category: Option<&str>,
+    framework: Option<&str>,
+    severity: Option<&str>,
+    control_family: Option<&str>,
+    cmmc_level: Option<i32>,
+    cis_section: Option<&str>,
+    rationale: Option<&str>,
+) -> serde_json::Value {
+    let mut obj = existing.as_object().cloned().unwrap_or_default();
+    if let Some(v) = category {
+        obj.insert("category".into(), serde_json::json!(v));
+    }
+    if let Some(v) = framework {
+        obj.insert("framework".into(), serde_json::json!(v));
+    }
+    if let Some(v) = severity {
+        obj.insert("severity".into(), serde_json::json!(v));
+    }
+    if let Some(v) = control_family {
+        obj.insert("control_family".into(), serde_json::json!(v));
+    }
+    if let Some(v) = cmmc_level {
+        obj.insert("cmmc_level".into(), serde_json::json!(v));
+    }
+    if let Some(v) = cis_section {
+        obj.insert("cis_section".into(), serde_json::json!(v));
+    }
+    if let Some(v) = rationale {
+        obj.insert("rationale".into(), serde_json::json!(v));
+    }
+    serde_json::Value::Object(obj)
+}
+
+/// Infer the policy category for policies that have no stored `"category"` key
+/// in `compliance_metadata`.
+///
+/// Priority:
+/// 1. Explicit `"category"` key in `compliance_metadata` (already stored).
+/// 2. Known `policy_type` values that imply a category.
+/// 3. SRG/CCI presence implies `"security"`.
+/// 4. Default: `"deployment"`.
+pub fn infer_legacy_category(
+    policy_type: &str,
+    compliance_metadata: &serde_json::Value,
+) -> &'static str {
+    // Check compliance_metadata first
+    if let Some(cat) = compliance_metadata.get("category").and_then(|v| v.as_str()) {
+        return match cat {
+            "security" => "security",
+            "pipeline" => "pipeline",
+            "rollout" => "rollout",
+            "deployment" => "deployment",
+            _ => "deployment",
+        };
+    }
+    // Infer from policy_type
+    match policy_type {
+        "require_cve_check" | "cve_threshold" => "pipeline",
+        "time_window" | "require_approvals" | "canary_rollout" => "rollout",
+        _ => {
+            // Check SRG/CCI presence for security
+            let has_srg = compliance_metadata
+                .get("srg_ids")
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
+            let has_cci = compliance_metadata
+                .get("cci_ids")
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
+            if has_srg || has_cci {
+                "security"
+            } else {
+                "deployment"
+            }
+        }
+    }
+}
+
 // ─── Unit tests ──────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn cve_policy_is_pipeline() {
+        assert_eq!(
+            infer_legacy_category("require_cve_check", &json!({})),
+            "pipeline"
+        );
+        assert_eq!(
+            infer_legacy_category("cve_threshold", &json!({})),
+            "pipeline"
+        );
+    }
+
+    #[test]
+    fn rollout_policies_are_rollout() {
+        assert_eq!(infer_legacy_category("time_window", &json!({})), "rollout");
+        assert_eq!(
+            infer_legacy_category("require_approvals", &json!({})),
+            "rollout"
+        );
+        assert_eq!(
+            infer_legacy_category("canary_rollout", &json!({})),
+            "rollout"
+        );
+    }
+
+    #[test]
+    fn srg_cci_policy_is_security() {
+        let meta = json!({ "srg_ids": ["SRG-OS-000001"] });
+        assert_eq!(infer_legacy_category("custom_check", &meta), "security");
+        let meta = json!({ "cci_ids": ["CCI-000001"] });
+        assert_eq!(infer_legacy_category("custom_check", &meta), "security");
+    }
+
+    #[test]
+    fn explicit_category_wins() {
+        let meta = json!({ "category": "rollout", "srg_ids": ["SRG-OS-000001"] });
+        assert_eq!(infer_legacy_category("custom_check", &meta), "rollout");
+    }
+
+    #[test]
+    fn unknown_custom_is_deployment() {
+        assert_eq!(
+            infer_legacy_category("custom_check", &json!({})),
+            "deployment"
+        );
+    }
+
+    #[test]
+    fn cmmc_level_not_inferred_from_severity() {
+        // CMMC level must come from explicit cmmc_level key only, never from severity
+        let meta = json!({ "severity": "high", "category": "security" });
+        let cmmc = meta.get("cmmc_level").and_then(|v| v.as_i64());
+        assert!(
+            cmmc.is_none(),
+            "CMMC level must not be inferred from severity"
+        );
+    }
+
+    #[test]
+    fn extract_classification_reads_all_fields() {
+        let meta = json!({
+            "category": "security",
+            "framework": "DISA STIG",
+            "severity": "high",
+            "control_family": "AC",
+            "cmmc_level": 2,
+            "cis_section": "5.2.3",
+            "rationale": "Must enable firewall",
+        });
+        let (cat, fw, sev, cf, cmmc, cis, rat) = extract_classification(&meta);
+        assert_eq!(cat.as_deref(), Some("security"));
+        assert_eq!(fw.as_deref(), Some("DISA STIG"));
+        assert_eq!(sev.as_deref(), Some("high"));
+        assert_eq!(cf.as_deref(), Some("AC"));
+        assert_eq!(cmmc, Some(2));
+        assert_eq!(cis.as_deref(), Some("5.2.3"));
+        assert_eq!(rat.as_deref(), Some("Must enable firewall"));
+    }
+
+    #[test]
+    fn extract_classification_returns_none_for_absent_fields() {
+        let (cat, fw, sev, cf, cmmc, cis, rat) = extract_classification(&json!({}));
+        assert!(cat.is_none());
+        assert!(fw.is_none());
+        assert!(sev.is_none());
+        assert!(cf.is_none());
+        assert!(cmmc.is_none());
+        assert!(cis.is_none());
+        assert!(rat.is_none());
+    }
+
+    #[test]
+    fn merge_classification_preserves_existing_keys() {
+        let existing = json!({ "srg_ids": ["SRG-OS-000001"], "cci_ids": ["CCI-000001"] });
+        let merged = merge_classification_into_metadata(
+            &existing,
+            Some("security"),
+            None,
+            Some("high"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(merged["category"], "security");
+        assert_eq!(merged["severity"], "high");
+        // Existing SRG/CCI keys preserved
+        assert_eq!(merged["srg_ids"], json!(["SRG-OS-000001"]));
+        assert_eq!(merged["cci_ids"], json!(["CCI-000001"]));
+        // framework not set — should be absent
+        assert!(merged.get("framework").is_none());
+    }
+
+    #[test]
+    fn merge_classification_sets_cmmc_level() {
+        let merged = merge_classification_into_metadata(
+            &json!({}),
+            None,
+            None,
+            None,
+            None,
+            Some(3),
+            None,
+            None,
+        );
+        assert_eq!(merged["cmmc_level"], 3);
+    }
+}
 
 #[cfg(test)]
 mod tests {

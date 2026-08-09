@@ -1358,6 +1358,27 @@ pub struct CreateDeploymentPolicyRequest {
     /// Normalised and validated server-side; stored in compliance_metadata.
     #[serde(default)]
     pub cci_ids: Vec<String>,
+    /// Policy category: "deployment", "pipeline", "rollout", "security"
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Framework string, e.g. "DISA STIG", "NIST 800-53", "CMMC 2.0", "CIS Benchmark", or custom
+    #[serde(default)]
+    pub framework: Option<String>,
+    /// Severity: "high", "medium", "low"
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// NIST 800-53 control family, e.g. "AC", "AU", "CM", "IA", "SC", "SI", "MP"
+    #[serde(default)]
+    pub control_family: Option<String>,
+    /// CMMC 2.0 maturity level: 1, 2, or 3
+    #[serde(default)]
+    pub cmmc_level: Option<i32>,
+    /// CIS Benchmark section, e.g. "5.2.3"
+    #[serde(default)]
+    pub cis_section: Option<String>,
+    /// Human-readable rationale for this control
+    #[serde(default)]
+    pub rationale: Option<String>,
 }
 
 /// Request to update an existing deployment policy
@@ -1376,6 +1397,27 @@ pub struct UpdateDeploymentPolicyRequest {
     /// When `None`, the existing value is preserved.
     #[serde(default)]
     pub cci_ids: Option<Vec<String>>,
+    /// When `Some`, replace the category; `None` preserves existing.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// When `Some`, replace the framework; `None` preserves existing.
+    #[serde(default)]
+    pub framework: Option<String>,
+    /// When `Some`, replace the severity; `None` preserves existing.
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// When `Some`, replace the control_family; `None` preserves existing.
+    #[serde(default)]
+    pub control_family: Option<String>,
+    /// When `Some`, replace the cmmc_level; `None` preserves existing.
+    #[serde(default)]
+    pub cmmc_level: Option<i32>,
+    /// When `Some`, replace the cis_section; `None` preserves existing.
+    #[serde(default)]
+    pub cis_section: Option<String>,
+    /// When `Some`, replace the rationale; `None` preserves existing.
+    #[serde(default)]
+    pub rationale: Option<String>,
 }
 
 // ============================================================================
