@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-09 23:47'
+updated_date: '2026-08-09 23:51'
 labels:
   - design
   - frontend
@@ -1399,6 +1399,13 @@ Parity pass for Refine Policy Modal against ImportStigModal.jsx. Root causes: (1
 - Add additive migration, typed DTOs, query functions, authenticated GET and admin-only POST/PUT/DELETE routes at `/api/v1/compliance/grouping-schemes`.
 - Normalize and validate bounded queries, names, IDs, and policy UUID lists without resolving policy lineages; exclusion IDs take precedence over pinned IDs.
 - Cover normalization and route authorization behavior with focused server tests; run `cargo fmt --all --check`, `SQLX_OFFLINE=true cargo check -p cf-server`, and the focused tests only.
+
+### Phase 3: policy grouping schemes
+- Add web-ui DTOs and CSRF-aware CRUD client methods for the existing authenticated/admin grouping-scheme endpoints.
+- Load schemes alongside policies; add them to the Security grouping selector without impacting built-in group behavior on errors or empty results.
+- Provide an admin-only modal using established modal classes to create, update/select/delete schemes and edit group query, descriptions, lineage-ID pins, and exclusions.
+- Apply custom matching after existing filters: case-insensitive searchable metadata substring, pins first, exclusions win, first configured group owns a control, and remaining security controls appear in Ungrouped.
+- Add pure matching tests and run cargo fmt, offline web-ui cargo check, and focused tests. Do not run the web-ui Nix build per user instruction.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
