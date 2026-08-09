@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-09 16:16'
+updated_date: '2026-08-09 16:57'
 labels:
   - design
   - frontend
@@ -1409,6 +1409,8 @@ Implemented a local, uncommitted first pass of the `0c92fdf2` modal structure: s
 2026-08-09 review correction: `499a905d` must be fixed forward. The explicit policy draft endpoint incorrectly reused an existing mutable draft through `ensure_policy_draft`; the bundle draft endpoint still has standalone non-transactional SQL; and the bundle helper currently duplicates active assignment lineages and creates immutable assignment snapshots with `pending` digests.
 
 2026-08-09 safety constraint: all live PostgreSQL regression tests for this task must use the repository's isolated process-compose database (`nix develop` → `db-only up` / repository scripts). Do not connect to or mutate the system PostgreSQL on port 5432. Verify the repository-provided connection settings before running DB tests.
+
+2026-08-09: Pushed `45e1a797 fix(compliance): correct explicit draft derivation`. Explicit policy/bundle draft endpoints now use transactional derivation services, accept requested versions, return typed 422/409/500 lifecycle outcomes, and do not silently reuse mutable drafts. Bundle draft derivation copies no assignment lineages, so active assignments remain on accepted versions and inactive assignments are not resurrected. No immutable assignment snapshot is created with `pending` by bundle derivation. Isolated process-compose PostgreSQL was verified at 127.0.0.1:3042 (not system port 5432). Live tests passed: policy no-published 422, policy derivation, bundle derivation, and 68/70 ignored compliance tests. Two full-suite failures were unrelated fixture/database contamination: duplicate generated policy UUID in `all_consumers_agree_on_effective_set_digest_and_specificity`, and a test system insert missing required public_key in `assignment_list_contract_and_deactivation_safety`. Web-ui Nix check not run.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
