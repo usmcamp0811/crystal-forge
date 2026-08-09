@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-09 23:21'
+updated_date: '2026-08-09 23:26'
 labels:
   - design
   - frontend
@@ -1419,6 +1419,8 @@ Implemented a local, uncommitted first pass of the `0c92fdf2` modal structure: s
 2026-08-09: Pushed `45e1a797 fix(compliance): correct explicit draft derivation`. Explicit policy/bundle draft endpoints now use transactional derivation services, accept requested versions, return typed 422/409/500 lifecycle outcomes, and do not silently reuse mutable drafts. Bundle draft derivation copies no assignment lineages, so active assignments remain on accepted versions and inactive assignments are not resurrected. No immutable assignment snapshot is created with `pending` by bundle derivation. Isolated process-compose PostgreSQL was verified at 127.0.0.1:3042 (not system port 5432). Live tests passed: policy no-published 422, policy derivation, bundle derivation, and 68/70 ignored compliance tests. Two full-suite failures were unrelated fixture/database contamination: duplicate generated policy UUID in `all_consumers_agree_on_effective_set_digest_and_specificity`, and a test system insert missing required public_key in `assignment_list_contract_and_deactivation_safety`. Web-ui Nix check not run.
 
 Implemented six P1 review fixes in the TASK-412 worktree: trust gates for policy/bundle publication and effective assignment paths, selected-only baseline and publication handling, persisted assignment addition order, order-independent override canonicalization/application, and inactive assignment effective-resolution rejection. Verification: cargo fmt --all --check; nix develop --command cargo check -p cf-server; nix develop --command cargo test -p cf-server compliance:: --lib (333 passed, 72 ignored).
+
+Implemented the requested Policies domain-model delta in `packages/web-ui/src/views/policies.rs`: accessible Platform/Security tabs, lineage counts, platform-only category controls, retained security grouping selection, predefined metadata pivots and fallbacks, historical revision metadata search, and pure remediation classification with a focused unit test. Verification: `cargo fmt --all --check` from `packages/web-ui` passed; `SQLX_OFFLINE=true cargo check --manifest-path packages/web-ui/Cargo.toml` passed (existing warnings); `SQLX_OFFLINE=true cargo test --manifest-path packages/web-ui/Cargo.toml remediation_status_uses_only_rule_mechanisms` passed (1 test). The requested web-ui Nix check was not run. No commit or push was made.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
