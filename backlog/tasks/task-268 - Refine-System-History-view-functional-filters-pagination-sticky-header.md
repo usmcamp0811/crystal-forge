@@ -1,10 +1,10 @@
 ---
 id: TASK-268
 title: 'Refine System History view: functional filters, pagination, sticky header'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-14 01:16'
-updated_date: '2026-06-10 02:53'
+updated_date: '2026-08-09 15:36'
 labels:
   - ui
   - systems
