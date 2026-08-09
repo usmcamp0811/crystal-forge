@@ -1352,6 +1352,12 @@ Focused historical assignment fix: add an authenticated read-only bundle-version
 - Refactor the existing refine and policy-editor bodies into accessible shared-CSS tab panels while retaining all action, validation, persistence, and delete behavior.
 - Add focused tests for discussion extraction, tabs/counts/state preservation/navigation reset; run the canonical affected web-ui tests and required formatting/checks.
 - Deploy only through the normal dev process and record any manual verification or blocker.
+
+### Deletion failure reproduction and lifecycle completion
+- Reproduce bundle and policy deletion against the deployed development service before changing queries; record HTTP response, journal output, SQLSTATE, and FK/trigger name.
+- Map actual FK/trigger ownership for bundle/policy lineages and version children from migrations/schema; distinguish disposable owned children from external/history blockers.
+- Implement only the transactionally required owned-child deletion order; retain external references and immutable history as typed conflicts.
+- Add PostgreSQL-backed query/API regression tests and run the deployed runtime matrix before reporting this slice complete.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
