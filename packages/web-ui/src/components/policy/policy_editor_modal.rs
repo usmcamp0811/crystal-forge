@@ -727,9 +727,9 @@ pub fn PolicyEditorModal(
                     // ── Body ────────────────────────────────────────────────────
                     div { class: "modal-body", style: "overflow-y:auto;",
                         div { class: "cf-modal-tabs", role: "tablist", aria_label: "Policy editor sections",
-                            PolicyEditorTabButton { tab: PolicyEditorTab::Details, active: *active_tab.read(), label: "Details", on_select: move |_| active_tab.set(PolicyEditorTab::Details) }
-                            PolicyEditorTabButton { tab: PolicyEditorTab::Enforcement, active: *active_tab.read(), label: format!("Enforcement · {rule_count}"), on_select: move |_| active_tab.set(PolicyEditorTab::Enforcement) }
-                            PolicyEditorTabButton { tab: PolicyEditorTab::Evidence, active: *active_tab.read(), label: format!("Evidence · {evidence_count}"), on_select: move |_| active_tab.set(PolicyEditorTab::Evidence) }
+                            PolicyEditorTabButton { tab: PolicyEditorTab::Details, active: *active_tab.read(), label: "Details", test_id: "policy-editor-tab-details", on_select: move |_| active_tab.set(PolicyEditorTab::Details) }
+                            PolicyEditorTabButton { tab: PolicyEditorTab::Enforcement, active: *active_tab.read(), label: format!("Enforcement · {rule_count}"), test_id: "policy-editor-tab-enforcement", on_select: move |_| active_tab.set(PolicyEditorTab::Enforcement) }
+                            PolicyEditorTabButton { tab: PolicyEditorTab::Evidence, active: *active_tab.read(), label: format!("Evidence · {evidence_count}"), test_id: "policy-editor-tab-evidence", on_select: move |_| active_tab.set(PolicyEditorTab::Evidence) }
                         }
                         div { class: "cf-modal-tab-panel",
                         if *active_tab.read() == PolicyEditorTab::Details {
@@ -1151,6 +1151,7 @@ fn PolicyEditorTabButton(
     tab: PolicyEditorTab,
     active: PolicyEditorTab,
     label: String,
+    test_id: String,
     on_select: EventHandler<()>,
 ) -> Element {
     let selected = tab == active;
@@ -1159,7 +1160,7 @@ fn PolicyEditorTabButton(
         PolicyEditorTab::Enforcement => "enforcement",
         PolicyEditorTab::Evidence => "evidence",
     };
-    rsx! { button { class: if selected { format!("cf-modal-tab cf-modal-tab--active cf-modal-tab--{class}") } else { format!("cf-modal-tab cf-modal-tab--{class}") }, role: "tab", aria_selected: if selected { "true" } else { "false" }, onclick: move |_| on_select.call(()), "{label}" } }
+    rsx! { button { class: if selected { format!("cf-modal-tab cf-modal-tab--active cf-modal-tab--{class}") } else { format!("cf-modal-tab cf-modal-tab--{class}") }, role: "tab", aria_selected: if selected { "true" } else { "false" }, "data-testid": "{test_id}", onclick: move |_| on_select.call(()), "{label}" } }
 }
 
 #[component]

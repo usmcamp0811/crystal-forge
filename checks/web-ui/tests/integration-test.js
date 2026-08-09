@@ -6023,15 +6023,18 @@ const steps = [
       await newPolicyBtn.waitFor({ timeout: 5000 });
       await newPolicyBtn.click();
       await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
-      // Unified design form sections (no Basic/Advanced toggle, no raw JSON editor).
+      // Details is the default tab; the other editor groups are deliberately hidden.
       await assertHidden(page.getByRole("button", { name: "Advanced" }), "Advanced toggle should not exist in unified modal");
+      await assertAttribute(page.getByTestId("policy-editor-tab-details"), "aria-selected", "true", "Expected Details to be the default tab");
       await assertVisible(page.getByText("Category", { exact: false }).first(), "Expected Category section");
       await assertVisible(page.getByText("Severity", { exact: false }).first(), "Expected Severity section");
       await assertVisible(page.getByText("Rationale", { exact: false }).first(), "Expected Rationale section");
-      await assertVisible(page.getByText("Assertions & gate rules", { exact: false }).first(), "Expected assertions/gate rules builder");
-      await assertVisible(page.getByText("Evidence for ATO", { exact: false }).first(), "Expected evidence-for-ATO builder");
       // UI-only / not-persisted markers are visible for unsupported fields.
       await assertVisible(page.getByText("UI only — not persisted yet").first(), "Expected UI-only/not-persisted markers");
+      await page.getByTestId("policy-editor-tab-enforcement").click();
+      await assertVisible(page.getByText("Assertions & gate rules", { exact: false }).first(), "Expected assertions/gate rules builder in Enforcement");
+      await page.getByTestId("policy-editor-tab-evidence").click();
+      await assertVisible(page.getByText("Evidence for ATO", { exact: false }).first(), "Expected evidence-for-ATO builder in Evidence");
     },
   },
   {
@@ -6043,6 +6046,7 @@ const steps = [
       await newPolicyBtn.waitFor({ timeout: 5000 });
       await newPolicyBtn.click();
       await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
+      await page.getByTestId("policy-editor-tab-enforcement").click();
       // Add a CVE gate rule through the design's rule dropdown.
       const addRule = page.locator("select").filter({ hasText: "Add assertion / rule" }).first();
       await addRule.waitFor({ timeout: 5000 });
