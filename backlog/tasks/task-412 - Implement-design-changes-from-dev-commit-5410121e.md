@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-09 17:27'
+updated_date: '2026-08-09 23:21'
 labels:
   - design
   - frontend
@@ -1387,6 +1387,12 @@ Parity pass for Refine Policy Modal against ImportStigModal.jsx. Root causes: (1
 3. Do not clone assignment lineages when deriving a bundle draft. Active lineages remain bound to their currently accepted bundle version; inactive lineages remain inactive.
 4. Refactor assignment snapshot construction so a canonical overlay digest is calculated from copied overlay content before inserting any immutable assignment-version row; the version and current lineage projection receive the same final digest.
 5. Add/run the requested live PostgreSQL regression tests, including no-published policy behavior, draft conflict/version behavior, canonical field preservation, bundle atomicity, assignment invariants, and failure rollback. Skip the unrelated web-ui Nix check.
+
+### TASK-412 Policies domain-model delta (MR !313)
+- Limit implementation to `packages/web-ui/src/views/policies.rs` and its existing unit tests; leave shared components, CSS, API DTOs, and excluded untracked assets untouched.
+- Replace category stat cards with accessible Platform/Security tabs. Derive domain strictly from `category`, preserving platform category filtering and security grouping selection across tab changes.
+- Pivot security lineages with pure helpers for predefined metadata groupings, historical-revision metadata search, and remediation classification from the version config; retain fallback groups so controls are never omitted.
+- Reuse `PolicyCard` callbacks and selection state for every resulting group. Verify `cargo fmt --all` and `SQLX_OFFLINE=true cargo check --manifest-path packages/web-ui/Cargo.toml`; do not run the web-ui Nix check or commit/push.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
