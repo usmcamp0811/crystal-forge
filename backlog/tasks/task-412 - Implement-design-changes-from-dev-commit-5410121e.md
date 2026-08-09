@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-09 23:26'
+updated_date: '2026-08-09 23:39'
 labels:
   - design
   - frontend
@@ -1393,6 +1393,12 @@ Parity pass for Refine Policy Modal against ImportStigModal.jsx. Root causes: (1
 - Replace category stat cards with accessible Platform/Security tabs. Derive domain strictly from `category`, preserving platform category filtering and security grouping selection across tab changes.
 - Pivot security lineages with pure helpers for predefined metadata groupings, historical-revision metadata search, and remediation classification from the version config; retain fallback groups so controls are never omitted.
 - Reuse `PolicyCard` callbacks and selection state for every resulting group. Verify `cargo fmt --all` and `SQLX_OFFLINE=true cargo check --manifest-path packages/web-ui/Cargo.toml`; do not run the web-ui Nix check or commit/push.
+
+### Custom compliance grouping schemes
+- Add server-wide durable grouping schemes because the server has no organization settings scope.
+- Add additive migration, typed DTOs, query functions, authenticated GET and admin-only POST/PUT/DELETE routes at `/api/v1/compliance/grouping-schemes`.
+- Normalize and validate bounded queries, names, IDs, and policy UUID lists without resolving policy lineages; exclusion IDs take precedence over pinned IDs.
+- Cover normalization and route authorization behavior with focused server tests; run `cargo fmt --all --check`, `SQLX_OFFLINE=true cargo check -p cf-server`, and the focused tests only.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
