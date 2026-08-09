@@ -5,9 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-09 23:37'
-updated_date: '2026-08-09 04:40'
-updated_date: '2026-08-09 14:58'
+updated_date: '2026-08-09 15:43'
 labels:
   - design
   - frontend
@@ -1376,6 +1374,12 @@ Parity pass for Refine Policy Modal against ImportStigModal.jsx. Root causes: (1
 3. Add regression tests proving export-shaped documents verify with the authoritative digest and that changes to the previously omitted semantic fields are both retained and digest-sensitive.
 4. Run focused server formatting/tests/checks; explicitly skip `nix build .#checks.x86_64-linux.web-ui --no-link` per user instruction and leave it to CI.
 5. Commit/push this isolated digest/interchange fix before starting the separate draft/publication-lifecycle P0 remediation.
+
+### P0 remediation: transactional draft derivation
+1. Replace the handler-local policy draft INSERT/pointer update with the query-layer derivation service so one transactional path copies all semantic fields.
+2. Extend that service only as needed to preserve an explicitly requested draft version, recompute the `PolicyVersionCanonical` digest after the new draft pointer is set, and fail/roll back on any digest error.
+3. Complete the bundle derivation path by recomputing its membership-aware bundle digest and each copied assignment-overlay digest before return/commit.
+4. Add focused lifecycle tests for copied semantic fields and absence of `pending` digests, then commit/push separately.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
