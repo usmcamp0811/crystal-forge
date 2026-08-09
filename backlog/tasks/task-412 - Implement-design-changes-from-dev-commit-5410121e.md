@@ -1390,6 +1390,8 @@ Implemented a local, uncommitted first pass of the `0c92fdf2` modal structure: s
 2026-08-09 research: existing list DTO exposes policy `updated_at` and revisions' `created_at`, but not owner, persisted ATO evidence, or system membership details. This UI pass will show real modified data where mapped; it will not fabricate unavailable data. Named system membership and evidence require later API/persistence work.
 
 2026-08-09: Policies presentation pass is committed and pushed as `1ced5e95`; no current tracked changes in TASK-412 worktree. Beginning the first backend P0 from review: policy JSON/TOML export/import currently omits `compliance_metadata`, `dependencies`, `opaque_xml`, and `enabled_by_default`, while import computes a reduced non-authoritative digest.
+
+2026-08-09: Pushed `e1e36c75 fix(compliance): preserve policy interchange semantics`. JSON/TOML policy export and exact-version export now include compliance metadata, dependencies, opaque XML, and enabled-by-default. Import persists those fields and computes/verifies digest only through `PolicyVersionCanonical`. Focused parser tests and `cargo check -p cf-server` pass; web-ui Nix check intentionally not run per user direction.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
