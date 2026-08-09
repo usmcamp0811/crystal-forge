@@ -1,10 +1,10 @@
 ---
 id: TASK-268
 title: 'Refine System History view: functional filters, pagination, sticky header'
-status: In Progress
+status: To Do
 assignee: []
 created_date: '2026-04-14 01:16'
-updated_date: '2026-08-09 15:36'
+updated_date: '2026-08-09 15:37'
 labels:
   - ui
   - systems
@@ -86,3 +86,13 @@ Medium (user-facing UX + possible data-query pagination changes).
 - [ ] #6 #6 Revert events are visually identifiable in timeline entries
 - [ ] #7 #7 web-ui verification includes checks for filter functionality and sticky navigation
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: @gpt-5.6-terra
+created: 2026-08-09 15:37
+---
+Accidentally moved to In Progress during an incorrect task selection; immediately restored to To Do without implementation changes.
+---
+<!-- COMMENTS:END -->
