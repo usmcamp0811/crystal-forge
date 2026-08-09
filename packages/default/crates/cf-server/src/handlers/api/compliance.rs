@@ -2589,6 +2589,10 @@ struct NormalizedPolicyImport {
     implementation_state: String,
     execution_phase: String,
     config: serde_json::Value,
+    compliance_metadata: serde_json::Value,
+    dependencies: serde_json::Value,
+    opaque_xml: Option<String>,
+    enabled_by_default: Option<bool>,
     semantic_digest: String,
 }
 
@@ -3960,13 +3964,19 @@ pub async fn policy_interchange_export(
         implementation_state: String,
         execution_phase: String,
         config: serde_json::Value,
+        compliance_metadata: serde_json::Value,
+        dependencies: serde_json::Value,
+        opaque_xml: Option<String>,
+        enabled_by_default: bool,
         semantic_digest: String,
     }
 
     let rows: Result<Vec<PvRow>, _> = sqlx::query_as::<_, PvRow>(
         r#"SELECT pv.id, pv.policy_id, pv.version, pv.publication_state,
                   pv.name, pv.description, pv.policy_type, pv.implementation_state,
-                  pv.execution_phase, pv.config, pv.semantic_digest
+                   pv.execution_phase, pv.config, pv.compliance_metadata,
+                   pv.dependencies, pv.opaque_xml, pv.enabled_by_default,
+                   pv.semantic_digest
            FROM deployment_policy_versions pv
            WHERE pv.id = ANY($1)
            ORDER BY array_position($1::uuid[], pv.id)"#,
@@ -4018,6 +4028,10 @@ pub async fn policy_interchange_export(
                 "implementation_state": pv.implementation_state,
                 "execution_phase": pv.execution_phase,
                 "config": pv.config,
+                "compliance_metadata": pv.compliance_metadata,
+                "dependencies": pv.dependencies,
+                "opaque_xml": pv.opaque_xml,
+                "enabled_by_default": pv.enabled_by_default,
                 "semantic_digest": pv.semantic_digest,
                 "canonicalization_version": "cf-model-json-1",
             })
@@ -4109,12 +4123,17 @@ pub async fn policy_version_interchange_export(
             String,
             String,
             serde_json::Value,
+            serde_json::Value,
+            serde_json::Value,
+            Option<String>,
+            bool,
             String,
         ),
     >(
         r#"SELECT id, policy_id, version, publication_state, name, description,
-                  policy_type, implementation_state, execution_phase, config,
-                  semantic_digest
+                   policy_type, implementation_state, execution_phase, config,
+                   compliance_metadata, dependencies, opaque_xml,
+                   enabled_by_default, semantic_digest
            FROM deployment_policy_versions
            WHERE id = $1"#,
     )
@@ -4133,6 +4152,10 @@ pub async fn policy_version_interchange_export(
         implementation_state,
         execution_phase,
         config,
+        compliance_metadata,
+        dependencies,
+        opaque_xml,
+        enabled_by_default,
         semantic_digest,
     )) = (match row {
         Ok(row) => row,
@@ -4156,6 +4179,10 @@ pub async fn policy_version_interchange_export(
         "implementation_state": implementation_state,
         "execution_phase": execution_phase,
         "config": config,
+        "compliance_metadata": compliance_metadata,
+        "dependencies": dependencies,
+        "opaque_xml": opaque_xml,
+        "enabled_by_default": enabled_by_default,
         "semantic_digest": semantic_digest,
         "canonicalization_version": "cf-model-json-1",
     });
@@ -4401,7 +4428,7 @@ pub async fn policy_interchange_import(
         }
 
         if let Err(error) = sqlx::query(
-            "INSERT INTO deployment_policy_versions (id, policy_id, version, publication_state, name, description, policy_type, implementation_state, execution_phase, config, semantic_digest, created_by) VALUES ($1, $2, $3, 'draft', $4, $5, $6, $7, $8, $9, $10, $11)",
+            "INSERT INTO deployment_policy_versions (id, policy_id, version, publication_state, name, description, policy_type, implementation_state, execution_phase, config, compliance_metadata, dependencies, opaque_xml, enabled_by_default, semantic_digest, created_by) VALUES ($1, $2, $3, 'draft', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
         )
         .bind(policy.version_id)
         .bind(policy.lineage_id)
@@ -4412,6 +4439,10 @@ pub async fn policy_interchange_import(
         .bind(&policy.implementation_state)
         .bind(&policy.execution_phase)
         .bind(&policy.config)
+        .bind(&policy.compliance_metadata)
+        .bind(&policy.dependencies)
+        .bind(&policy.opaque_xml)
+        .bind(policy.enabled_by_default)
         .bind(&policy.semantic_digest)
         .bind(user_id)
         .execute(&mut *tx)
@@ -4615,16 +4646,36 @@ fn normalize_policy_import(raw: serde_json::Value) -> Result<NormalizedPolicyImp
         .and_then(serde_json::Value::as_str)
         .unwrap_or("nix-evaluation")
         .to_string();
-    let canonical = serde_json::json!({
-        "canonicalization_version": "cf-model-json-1",
-        "config": config,
-        "description": description.clone().unwrap_or_default(),
-        "execution_phase": execution_phase,
-        "implementation_state": implementation_state,
-        "name": name,
-        "policy_type": policy_type,
-    });
-    let computed_digest = crate::compliance::canonical::semantic_digest(&canonical);
+    let compliance_metadata = object
+        .get("compliance_metadata")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let dependencies = object
+        .get("dependencies")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let opaque_xml = object
+        .get("opaque_xml")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let enabled_by_default = object
+        .get("enabled_by_default")
+        .and_then(serde_json::Value::as_bool);
+    let canonical = crate::compliance::digest::PolicyVersionCanonical {
+        name: name.clone(),
+        description: description.clone(),
+        policy_type: policy_type.clone(),
+        implementation_state: implementation_state.clone(),
+        execution_phase: execution_phase.clone(),
+        config: config.clone(),
+        compliance_metadata: compliance_metadata.clone(),
+        dependencies: dependencies.clone(),
+        opaque_xml_digest: crate::compliance::digest::PolicyVersionCanonical::digest_opaque_xml(
+            opaque_xml.as_deref(),
+        ),
+        enabled_by_default,
+    };
+    let computed_digest = canonical.compute_digest();
     if let Some(expected) = object
         .get("semantic_digest")
         .and_then(serde_json::Value::as_str)
@@ -4643,6 +4694,10 @@ fn normalize_policy_import(raw: serde_json::Value) -> Result<NormalizedPolicyImp
         implementation_state,
         execution_phase,
         config,
+        compliance_metadata,
+        dependencies,
+        opaque_xml,
+        enabled_by_default,
         semantic_digest: computed_digest,
     })
 }
@@ -10244,6 +10299,88 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
             "semantic_digest": "not-the-canonical-digest"
         }))
         .expect_err("tampered digest must be rejected");
+
+        assert!(error.contains("semantic_digest"));
+    }
+
+    #[test]
+    fn policy_import_uses_the_authoritative_digest_for_all_semantic_fields() {
+        let lineage_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        let policy = serde_json::json!({
+            "lineage_id": lineage_id,
+            "version_id": version_id,
+            "version": "1.2.3",
+            "name": "opaque imported policy",
+            "description": "Preserves external check details",
+            "policy_type": "custom_check",
+            "implementation_state": "opaque",
+            "execution_phase": "post-build",
+            "config": {"mode": "all", "rules": []},
+            "compliance_metadata": {"srg_ids": ["SRG-OS-000001"]},
+            "dependencies": [{"module": "example-module"}],
+            "opaque_xml": "<check system=\"urn:example\">opaque</check>",
+            "enabled_by_default": true,
+        });
+        let canonical = crate::compliance::digest::PolicyVersionCanonical {
+            name: "opaque imported policy".to_string(),
+            description: Some("Preserves external check details".to_string()),
+            policy_type: "custom_check".to_string(),
+            implementation_state: "opaque".to_string(),
+            execution_phase: "post-build".to_string(),
+            config: serde_json::json!({"mode": "all", "rules": []}),
+            compliance_metadata: serde_json::json!({"srg_ids": ["SRG-OS-000001"]}),
+            dependencies: serde_json::json!([{"module": "example-module"}]),
+            opaque_xml_digest: crate::compliance::digest::PolicyVersionCanonical::digest_opaque_xml(
+                Some("<check system=\"urn:example\">opaque</check>"),
+            ),
+            enabled_by_default: Some(true),
+        };
+        let mut policy = policy;
+        policy["semantic_digest"] = serde_json::json!(canonical.compute_digest());
+
+        let normalized =
+            normalize_policy_import(policy).expect("canonical policy should normalize");
+
+        assert_eq!(normalized.lineage_id, lineage_id);
+        assert_eq!(normalized.version_id, version_id);
+        assert_eq!(
+            normalized.compliance_metadata["srg_ids"][0],
+            "SRG-OS-000001"
+        );
+        assert_eq!(normalized.dependencies[0]["module"], "example-module");
+        assert_eq!(
+            normalized.opaque_xml.as_deref(),
+            Some("<check system=\"urn:example\">opaque</check>")
+        );
+        assert_eq!(normalized.enabled_by_default, Some(true));
+        assert_eq!(normalized.semantic_digest, canonical.compute_digest());
+    }
+
+    #[test]
+    fn policy_import_rejects_digest_when_previously_omitted_field_changes() {
+        let canonical = crate::compliance::digest::PolicyVersionCanonical {
+            name: "metadata-sensitive".to_string(),
+            description: None,
+            policy_type: "custom_check".to_string(),
+            implementation_state: "native".to_string(),
+            execution_phase: "nix-evaluation".to_string(),
+            config: serde_json::json!({"expression": "true"}),
+            compliance_metadata: serde_json::json!({"cci_ids": ["CCI-000001"]}),
+            dependencies: serde_json::json!([]),
+            opaque_xml_digest: None,
+            enabled_by_default: Some(false),
+        };
+        let error = normalize_policy_import(serde_json::json!({
+            "name": "metadata-sensitive",
+            "policy_type": "custom_check",
+            "config": {"expression": "true"},
+            "compliance_metadata": {"cci_ids": ["CCI-000002"]},
+            "dependencies": [],
+            "enabled_by_default": false,
+            "semantic_digest": canonical.compute_digest(),
+        }))
+        .expect_err("changing compliance metadata must invalidate the digest");
 
         assert!(error.contains("semantic_digest"));
     }
