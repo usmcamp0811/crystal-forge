@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-09 15:54'
+updated_date: '2026-08-09 16:10'
 labels:
   - design
   - frontend
@@ -1380,6 +1380,13 @@ Parity pass for Refine Policy Modal against ImportStigModal.jsx. Root causes: (1
 2. Extend that service only as needed to preserve an explicitly requested draft version, recompute the `PolicyVersionCanonical` digest after the new draft pointer is set, and fail/roll back on any digest error.
 3. Complete the bundle derivation path by recomputing its membership-aware bundle digest and each copied assignment-overlay digest before return/commit.
 4. Add focused lifecycle tests for copied semantic fields and absence of `pending` digests, then commit/push separately.
+
+### Review correction for `499a905d`
+1. Split explicit policy-draft derivation from `ensure_policy_draft`: explicit POST validates a published source and either creates the requested draft or returns a typed conflict for an existing mutable draft; mutation paths retain reuse semantics.
+2. Replace the bundle POST handler's standalone SQL with an explicit transactional derivation service accepting actor and requested version.
+3. Do not clone assignment lineages when deriving a bundle draft. Active lineages remain bound to their currently accepted bundle version; inactive lineages remain inactive.
+4. Refactor assignment snapshot construction so a canonical overlay digest is calculated from copied overlay content before inserting any immutable assignment-version row; the version and current lineage projection receive the same final digest.
+5. Add/run the requested live PostgreSQL regression tests, including no-published policy behavior, draft conflict/version behavior, canonical field preservation, bundle atomicity, assignment invariants, and failure rollback. Skip the unrelated web-ui Nix check.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -1398,6 +1405,8 @@ Implemented a local, uncommitted first pass of the `0c92fdf2` modal structure: s
 2026-08-09: Pushed `e1e36c75 fix(compliance): preserve policy interchange semantics`. JSON/TOML policy export and exact-version export now include compliance metadata, dependencies, opaque XML, and enabled-by-default. Import persists those fields and computes/verifies digest only through `PolicyVersionCanonical`. Focused parser tests and `cargo check -p cf-server` pass; web-ui Nix check intentionally not run per user direction.
 
 2026-08-09: Pushed `499a905d fix(compliance): finalize derived version digests`. Policy draft endpoint now delegates to the transactional query service, retains optional caller version strings, copies all semantic fields, and finalizes digest before commit. Bundle draft derivation now finalizes membership-aware bundle digests and copied assignment-overlay digests in the same transaction. Focused compliance handler tests: 16 passed, 70 DB-dependent tests ignored; formatting and `cargo check -p cf-server` pass. Web-ui Nix check intentionally not run per user direction.
+
+2026-08-09 review correction: `499a905d` must be fixed forward. The explicit policy draft endpoint incorrectly reused an existing mutable draft through `ensure_policy_draft`; the bundle draft endpoint still has standalone non-transactional SQL; and the bundle helper currently duplicates active assignment lineages and creates immutable assignment snapshots with `pending` digests.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
