@@ -11,10 +11,12 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::api::models::{
-    ApiError, AssignmentResponse, CreateBundleDraftRequest, CreateComplianceBundleRequest,
+    ApiError, AssignmentResponse, ComplianceGroupingScheme, ComplianceGroupingSchemeGroup,
+    ComplianceGroupingSchemeRequest, CreateBundleDraftRequest, CreateComplianceBundleRequest,
     CreatePolicyDraftRequest, PolicyValueOverride, PublishBundleVersionRequest,
     PublishPolicyVersionRequest, SystemComplianceBundle, SystemComplianceBundlesResponse,
     TrustBundleVersionRequest, TrustPolicyVersionRequest, UpdateComplianceBundleRequest,
@@ -37,12 +39,220 @@ use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
     BundleDeleteOutcome, BundleDraftDerivationError, BundleDraftIntent, BundleValidationError,
     PolicyDraftDerivationError, PolicyDraftIntent, create_bundle as create_bundle_row,
-    delete_bundle as delete_bundle_row, ensure_bundle_draft, ensure_policy_draft,
-    get_system_evidence, list_bundle_systems, list_bundle_systems_for_version,
-    list_bundle_version_policy_membership, list_bundles, list_system_bundles,
-    update_bundle as update_bundle_row,
+    create_grouping_scheme, delete_bundle as delete_bundle_row, delete_grouping_scheme,
+    ensure_bundle_draft, ensure_policy_draft, get_system_evidence, list_bundle_systems,
+    list_bundle_systems_for_version, list_bundle_version_policy_membership, list_bundles,
+    list_grouping_schemes, list_system_bundles, update_bundle as update_bundle_row,
+    update_grouping_scheme,
 };
 use crate::queries::compliance_interchange;
+
+const MAX_GROUPING_SCHEME_NAME_BYTES: usize = 255;
+const MAX_GROUPING_GROUP_ID_BYTES: usize = 128;
+const MAX_GROUPING_GROUP_NAME_BYTES: usize = 255;
+const MAX_GROUPING_DESCRIPTION_BYTES: usize = 4_096;
+const MAX_GROUPING_QUERY_BYTES: usize = 4_096;
+
+/// `GET /api/v1/compliance/grouping-schemes`
+pub async fn list_compliance_grouping_schemes(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if authenticated_user_roles(&pool, &headers).await.is_none() {
+        return forbidden();
+    }
+
+    match list_grouping_schemes(&pool).await {
+        Ok(schemes) => (StatusCode::OK, Json(schemes)).into_response(),
+        Err(_) => internal_error("Failed to load compliance grouping schemes"),
+    }
+}
+
+/// `POST /api/v1/compliance/grouping-schemes`
+pub async fn create_compliance_grouping_scheme(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Json(request): Json<ComplianceGroupingSchemeRequest>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !has_admin_role(&roles) {
+        return forbidden();
+    }
+
+    let scheme = match normalize_grouping_scheme(Uuid::new_v4(), request) {
+        Ok(scheme) => scheme,
+        Err(message) => return bad_request(&message),
+    };
+    match create_grouping_scheme(&pool, scheme, user_id).await {
+        Ok(scheme) => (StatusCode::CREATED, Json(scheme)).into_response(),
+        Err(error) if is_unique_violation(&error) => {
+            bad_request("Grouping scheme name already exists")
+        }
+        Err(_) => internal_error("Failed to create compliance grouping scheme"),
+    }
+}
+
+/// `PUT /api/v1/compliance/grouping-schemes/:id`
+pub async fn update_compliance_grouping_scheme(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(request): Json<ComplianceGroupingSchemeRequest>,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !has_admin_role(&roles) {
+        return forbidden();
+    }
+
+    let scheme = match normalize_grouping_scheme(id, request) {
+        Ok(scheme) => scheme,
+        Err(message) => return bad_request(&message),
+    };
+    match update_grouping_scheme(&pool, scheme).await {
+        Ok(Some(scheme)) => (StatusCode::OK, Json(scheme)).into_response(),
+        Ok(None) => not_found(),
+        Err(error) if is_unique_violation(&error) => {
+            bad_request("Grouping scheme name already exists")
+        }
+        Err(_) => internal_error("Failed to update compliance grouping scheme"),
+    }
+}
+
+/// `DELETE /api/v1/compliance/grouping-schemes/:id`
+pub async fn delete_compliance_grouping_scheme(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !has_admin_role(&roles) {
+        return forbidden();
+    }
+
+    match delete_grouping_scheme(&pool, id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => not_found(),
+        Err(_) => internal_error("Failed to delete compliance grouping scheme"),
+    }
+}
+
+fn normalize_grouping_scheme(
+    id: Uuid,
+    request: ComplianceGroupingSchemeRequest,
+) -> Result<ComplianceGroupingScheme, String> {
+    let name = normalize_required(request.name, MAX_GROUPING_SCHEME_NAME_BYTES, "Scheme name")?;
+    let description = normalize_optional(
+        request.description,
+        MAX_GROUPING_DESCRIPTION_BYTES,
+        "Scheme description",
+    )?;
+    if request.groups.is_empty() {
+        return Err("Grouping scheme must contain at least one group".to_string());
+    }
+
+    let mut group_ids = HashSet::with_capacity(request.groups.len());
+    let mut group_names = HashSet::with_capacity(request.groups.len());
+    let groups = request
+        .groups
+        .into_iter()
+        .map(|group| normalize_group(group, &mut group_ids, &mut group_names))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(ComplianceGroupingScheme {
+        id,
+        name,
+        description,
+        groups,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    })
+}
+
+fn normalize_group(
+    group: ComplianceGroupingSchemeGroup,
+    group_ids: &mut HashSet<String>,
+    group_names: &mut HashSet<String>,
+) -> Result<ComplianceGroupingSchemeGroup, String> {
+    let id = normalize_required(group.id, MAX_GROUPING_GROUP_ID_BYTES, "Group ID")?;
+    let name = normalize_required(group.name, MAX_GROUPING_GROUP_NAME_BYTES, "Group name")?;
+    if !group_ids.insert(id.clone()) {
+        return Err(format!("Duplicate group ID: {id}"));
+    }
+    if !group_names.insert(name.to_lowercase()) {
+        return Err(format!("Duplicate group name: {name}"));
+    }
+    if group.query.len() > MAX_GROUPING_QUERY_BYTES {
+        return Err(format!(
+            "Group query must not exceed {MAX_GROUPING_QUERY_BYTES} bytes"
+        ));
+    }
+
+    let excluded_policy_ids = dedupe_ids(group.excluded_policy_ids);
+    let excluded = excluded_policy_ids.iter().copied().collect::<HashSet<_>>();
+    let pinned_policy_ids = dedupe_ids(group.pinned_policy_ids)
+        .into_iter()
+        .filter(|policy_id| !excluded.contains(policy_id))
+        .collect();
+
+    Ok(ComplianceGroupingSchemeGroup {
+        id,
+        name,
+        description: normalize_optional(
+            group.description,
+            MAX_GROUPING_DESCRIPTION_BYTES,
+            "Group description",
+        )?,
+        query: group.query.trim().to_string(),
+        pinned_policy_ids,
+        excluded_policy_ids,
+    })
+}
+
+fn normalize_required(value: String, limit: usize, label: &str) -> Result<String, String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err(format!("{label} must not be empty"));
+    }
+    if value.len() > limit {
+        return Err(format!("{label} must not exceed {limit} bytes"));
+    }
+    Ok(value)
+}
+
+fn normalize_optional(
+    value: Option<String>,
+    limit: usize,
+    label: &str,
+) -> Result<Option<String>, String> {
+    let value = value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if value.as_ref().is_some_and(|value| value.len() > limit) {
+        return Err(format!("{label} must not exceed {limit} bytes"));
+    }
+    Ok(value)
+}
+
+fn dedupe_ids(ids: Vec<Uuid>) -> Vec<Uuid> {
+    let mut seen = HashSet::with_capacity(ids.len());
+    ids.into_iter().filter(|id| seen.insert(*id)).collect()
+}
+
+fn is_unique_violation(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<sqlx::Error>(),
+            Some(sqlx::Error::Database(database_error))
+                if database_error.code().as_deref() == Some("23505")
+        )
+    })
+}
 
 /// `GET /api/v1/compliance/bundles`
 pub async fn list_compliance_bundles(
@@ -5143,6 +5353,86 @@ mod tests {
     use chrono::Utc;
 
     const BOUNDARY: &str = "XCFTESTBOUNDARY";
+
+    fn grouping_group(
+        id: &str,
+        name: &str,
+        query: &str,
+        pinned_policy_ids: Vec<Uuid>,
+        excluded_policy_ids: Vec<Uuid>,
+    ) -> ComplianceGroupingSchemeGroup {
+        ComplianceGroupingSchemeGroup {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: Some(" group description ".to_string()),
+            query: query.to_string(),
+            pinned_policy_ids,
+            excluded_policy_ids,
+        }
+    }
+
+    #[test]
+    fn grouping_scheme_normalization_deduplicates_ids_and_prefers_exclusions() {
+        let pinned = Uuid::new_v4();
+        let excluded = Uuid::new_v4();
+        let scheme = normalize_grouping_scheme(
+            Uuid::new_v4(),
+            ComplianceGroupingSchemeRequest {
+                name: "  By control family  ".to_string(),
+                description: Some("  Custom groups  ".to_string()),
+                groups: vec![grouping_group(
+                    "  access-control  ",
+                    "  Access Control  ",
+                    "  category = access-control  ",
+                    vec![pinned, excluded, pinned],
+                    vec![excluded, excluded],
+                )],
+            },
+        )
+        .expect("scheme should normalize");
+
+        assert_eq!(scheme.name, "By control family");
+        assert_eq!(scheme.description.as_deref(), Some("Custom groups"));
+        assert_eq!(scheme.groups[0].id, "access-control");
+        assert_eq!(scheme.groups[0].name, "Access Control");
+        assert_eq!(scheme.groups[0].query, "category = access-control");
+        assert_eq!(scheme.groups[0].pinned_policy_ids, vec![pinned]);
+        assert_eq!(scheme.groups[0].excluded_policy_ids, vec![excluded]);
+    }
+
+    #[test]
+    fn grouping_scheme_normalization_rejects_duplicate_or_invalid_groups() {
+        let request = ComplianceGroupingSchemeRequest {
+            name: "Scheme".to_string(),
+            description: None,
+            groups: vec![
+                grouping_group("same", "One", "", vec![], vec![]),
+                grouping_group("same", "one", "", vec![], vec![]),
+            ],
+        };
+        assert_eq!(
+            normalize_grouping_scheme(Uuid::new_v4(), request),
+            Err("Duplicate group ID: same".to_string())
+        );
+
+        let request = ComplianceGroupingSchemeRequest {
+            name: "Scheme".to_string(),
+            description: None,
+            groups: vec![grouping_group(
+                "group",
+                "Group",
+                &"x".repeat(MAX_GROUPING_QUERY_BYTES + 1),
+                vec![],
+                vec![],
+            )],
+        };
+        assert_eq!(
+            normalize_grouping_scheme(Uuid::new_v4(), request),
+            Err(format!(
+                "Group query must not exceed {MAX_GROUPING_QUERY_BYTES} bytes"
+            ))
+        );
+    }
 
     #[test]
     fn export_group_projection_preserves_nested_source_order() {

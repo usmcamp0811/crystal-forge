@@ -1406,6 +1406,40 @@ pub struct EnvironmentPolicyMapEntry {
 // Compliance DTOs — /api/v1/compliance/*
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// A custom, server-managed group of compliance policies. Policy references are
+/// intentionally not resolved so a scheme can retain stale policy lineages.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComplianceGroupingSchemeGroup {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub query: String,
+    #[serde(default)]
+    pub pinned_policy_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub excluded_policy_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComplianceGroupingScheme {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub groups: Vec<ComplianceGroupingSchemeGroup>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceGroupingSchemeRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub groups: Vec<ComplianceGroupingSchemeGroup>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComplianceBundleSummary {
     pub id: uuid::Uuid,

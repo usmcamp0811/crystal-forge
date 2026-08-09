@@ -412,6 +412,16 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/policies", get(environments::list_policies_handler))
         .route(
+            "/api/v1/compliance/grouping-schemes",
+            get(compliance::list_compliance_grouping_schemes)
+                .post(compliance::create_compliance_grouping_scheme),
+        )
+        .route(
+            "/api/v1/compliance/grouping-schemes/:id",
+            put(compliance::update_compliance_grouping_scheme)
+                .delete(compliance::delete_compliance_grouping_scheme),
+        )
+        .route(
             "/api/v1/compliance/bundles",
             get(compliance::list_compliance_bundles).post(compliance::create_compliance_bundle),
         )

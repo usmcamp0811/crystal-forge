@@ -4,6 +4,7 @@ use serde_json::Value;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::api::models::ComplianceGroupingScheme;
 use crate::compliance::digest::{
     BundleVersionCanonical, PolicyVersionCanonical, load_bundle_membership,
     write_assignment_effective_set_digest, write_bundle_version_digest,
@@ -13,6 +14,86 @@ use crate::compliance::resolver::{
     ResolutionOutcome, resolve_system_effective_policies,
     resolve_systems_effective_policies_for_bundle_version_batch,
 };
+
+pub async fn list_grouping_schemes(pool: &PgPool) -> Result<Vec<ComplianceGroupingScheme>> {
+    let rows: Vec<(Uuid, String, Option<String>, Value, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT id, name, description, groups, created_at, updated_at FROM compliance_grouping_schemes ORDER BY name, id",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|(id, name, description, groups, created_at, updated_at)| {
+            let groups = serde_json::from_value(groups)
+                .context("stored compliance grouping scheme has invalid groups")?;
+            Ok(ComplianceGroupingScheme {
+                id,
+                name,
+                description,
+                groups,
+                created_at,
+                updated_at,
+            })
+        })
+        .collect()
+}
+
+pub async fn create_grouping_scheme(
+    pool: &PgPool,
+    scheme: ComplianceGroupingScheme,
+    actor_id: Uuid,
+) -> Result<ComplianceGroupingScheme> {
+    let groups = serde_json::to_value(&scheme.groups)?;
+    let (created_at, updated_at): (DateTime<Utc>, DateTime<Utc>) = sqlx::query_as(
+        "INSERT INTO compliance_grouping_schemes (id, name, description, groups, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING created_at, updated_at",
+    )
+    .bind(scheme.id)
+    .bind(&scheme.name)
+    .bind(&scheme.description)
+    .bind(groups)
+    .bind(actor_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(ComplianceGroupingScheme {
+        created_at,
+        updated_at,
+        ..scheme
+    })
+}
+
+pub async fn update_grouping_scheme(
+    pool: &PgPool,
+    scheme: ComplianceGroupingScheme,
+) -> Result<Option<ComplianceGroupingScheme>> {
+    let groups = serde_json::to_value(&scheme.groups)?;
+    let timestamps: Option<(DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+        "UPDATE compliance_grouping_schemes SET name = $2, description = $3, groups = $4, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING created_at, updated_at",
+    )
+    .bind(scheme.id)
+    .bind(&scheme.name)
+    .bind(&scheme.description)
+    .bind(groups)
+    .fetch_optional(pool)
+    .await?;
+    Ok(
+        timestamps.map(|(created_at, updated_at)| ComplianceGroupingScheme {
+            created_at,
+            updated_at,
+            ..scheme
+        }),
+    )
+}
+
+pub async fn delete_grouping_scheme(pool: &PgPool, id: Uuid) -> Result<bool> {
+    Ok(
+        sqlx::query("DELETE FROM compliance_grouping_schemes WHERE id = $1")
+            .bind(id)
+            .execute(pool)
+            .await?
+            .rows_affected()
+            == 1,
+    )
+}
 
 // ─── Draft-lifecycle helpers ──────────────────────────────────────────────────
 
