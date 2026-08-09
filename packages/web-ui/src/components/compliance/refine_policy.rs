@@ -335,17 +335,24 @@ pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
     let rule = props.rules.read()[index].clone();
     let source_id = source_identity(&rule.source);
     let percent = ((position + 1) as f32 / selected.len().max(1) as f32 * 100.0).round();
+    let filled_assertion_count = rule.draft.assertions.iter().filter(|a| assertion_filled(a)).count();
+    let enforcement_label = format!("Enforcement · {filled_assertion_count}");
+    let evidence_label = format!("Evidence · {}", rule.draft.evidence_requirements.len());
+    let ev_count = rule.draft.evidence_requirements.len();
+    let enforcement_word = if filled_assertion_count == 1 { "rule" } else { "rules" };
+    let evidence_word = if ev_count == 1 { "item" } else { "items" };
     rsx! {
         div { class: "modal-head refine-modal-head",
-            div { class: "refine-header", h2 { style: "display:flex;gap:8px;align-items:center;min-width:0;white-space:nowrap;", Icon { name: IconName::Shield, size: 15 }, "Refine policy {position + 1} of {selected.len()}" }, span { class: "mono refine-source-id", title: "{source_id}", "{source_id}" } }
+            div { class: "refine-header", h2 { style: "display:flex;gap:6px;align-items:center;min-width:0;white-space:nowrap;", Icon { name: IconName::Shield, size: 14 }, "Refine policy {position + 1} of {selected.len()}" }, span { class: "mono refine-source-id", title: "{source_id}", "{source_id}" } }
             div { class: "refine-progress", "data-testid": "xccdf-refine-progress", div { class: "refine-progress__value", style: "width:{percent}%;" } }
         }
         div { class: "modal-body refine-modal-body",
             div { class: "refine-basics", div { class: "field", label { "Policy name" }, input { class: "input focus-ring mono", "data-testid": "xccdf-policy-name", value: "{rule.draft.local_name}", oninput: move |e| { props.rules.write()[index].draft.local_name = e.value(); } } }, div { class: "field", label { "Severity" }, div { class: "seg refine-severity", for (value, label) in [("high","CAT I"),("medium","CAT II"),("low","CAT III")] { button { class: if rule.draft.local_severity == value { format!("active severity-{value}") } else { String::new() }, onclick: move |_| { props.rules.write()[index].draft.local_severity = value.into(); }, "{label}" } } } } }
+            div { class: "refine-tab-card",
             div { class: "cf-modal-tabs", role: "tablist", aria_label: "Policy refinement sections",
                 RefineTabButton { tab: RefineTab::Source, active: *active_tab.read(), label: "From the STIG", test_id: "xccdf-refine-tab-source", on_select: move |_| active_tab.set(RefineTab::Source) }
-                RefineTabButton { tab: RefineTab::Enforcement, active: *active_tab.read(), label: format!("Enforcement · {}", rule.draft.assertions.len()), test_id: "xccdf-refine-tab-enforcement", on_select: move |_| active_tab.set(RefineTab::Enforcement) }
-                RefineTabButton { tab: RefineTab::Evidence, active: *active_tab.read(), label: format!("Evidence · {}", rule.draft.evidence_requirements.len()), test_id: "xccdf-refine-tab-evidence", on_select: move |_| active_tab.set(RefineTab::Evidence) }
+                RefineTabButton { tab: RefineTab::Enforcement, active: *active_tab.read(), label: enforcement_label.clone(), test_id: "xccdf-refine-tab-enforcement", on_select: move |_| active_tab.set(RefineTab::Enforcement) }
+                RefineTabButton { tab: RefineTab::Evidence, active: *active_tab.read(), label: evidence_label.clone(), test_id: "xccdf-refine-tab-evidence", on_select: move |_| active_tab.set(RefineTab::Evidence) }
             }
             div { class: "cf-modal-tab-panel",
                 match *active_tab.read() {
@@ -354,7 +361,8 @@ pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
                     RefineTab::Evidence => rsx! { if !matches!(rule.draft.action, RefinedRuleAction::Existing(_) | RefinedRuleAction::Opaque) { EvidenceSection { rules: props.rules, index } } else { div { class: "sd-callout sd-callout-info", "This mapped or opaque control has no local evidence requirements to edit." } } },
                 }
             }
-            div { class: "sd-callout sd-callout-info refine-summary", Icon { name: IconName::Check, size: 13 } div { "On import this becomes a standard CF security policy — " strong { "{rule.draft.assertions.len()} enforcement rules" } " (checked at build time) and " strong { "{rule.draft.evidence_requirements.len()} evidence items" } " for ATO. Editable later from the Policies view." } }
+            } // end refine-tab-card
+            div { class: "sd-callout sd-callout-info refine-summary", Icon { name: IconName::Check, size: 13 } div { "On import this becomes a standard CF security policy — " strong { "{filled_assertion_count} enforcement {enforcement_word}" } " (checked at build time) and " strong { "{ev_count} evidence {evidence_word}" } " for ATO. Editable later from the Policies view." } }
             details { class: "refine-advanced", summary { "Advanced import options" }, div { class: "refine-advanced-body", ImplementationChoice { rules: props.rules, index, existing_policies: props.existing_policies.clone() } if matches!(rule.draft.action, RefinedRuleAction::Unbound) { div { class: "sd-callout sd-callout-info", "This requirement will be imported without a Crystal Forge implementation unless you add an assertion or evidence source." } } if matches!(rule.draft.action, RefinedRuleAction::Opaque) { div { class: "sd-callout sd-callout-info", "The original XCCDF rule and check content will be preserved without execution." } } textarea { class: "input focus-ring", rows: 2, placeholder: "Description", value: "{rule.draft.local_description}", oninput: move |e| { props.rules.write()[index].draft.local_description = e.value(); } } textarea { class: "input focus-ring", rows: 2, placeholder: "Rationale", value: "{rule.draft.local_rationale}", oninput: move |e| { props.rules.write()[index].draft.local_rationale = e.value(); } } textarea { class: "input focus-ring", rows: 2, placeholder: "Implementation note", value: "{rule.draft.implementation_note}", oninput: move |e| { props.rules.write()[index].draft.implementation_note = e.value(); } } } }
         }
         div { class: "modal-foot refine-modal-foot", div { class: "refine-footer-actions", button { class: "btn btn-ghost focus-ring", "data-testid": "xccdf-refine-back", onclick: move |_| { active_tab.set(RefineTab::Source); if position == 0 { props.on_back.call(()) } else { props.cursor.set(position - 1) } }, Icon { name: IconName::ArrowLeft, size: 13 }, if position == 0 { " Back to list" } else { " Previous" } }, button { class: "btn btn-ghost focus-ring refine-exclude", title: "Exclude this control from the bundle", "data-testid": "xccdf-refine-exclude", onclick: move |_| { active_tab.set(RefineTab::Source); let mut remaining = selected.len().saturating_sub(1); props.rules.write()[index].selected = false; if remaining == 0 { props.on_back.call(()); } else { if position >= remaining { remaining = remaining.saturating_sub(1); } props.cursor.set(position.min(remaining)); } }, "Exclude" } }, div { class: "refine-footer-progress", span { class: "refine-position", "data-testid": "xccdf-refine-position", "{position + 1} / {selected.len()}" }, if position + 1 < selected.len() { button { class: "btn btn-primary focus-ring", "data-testid": "xccdf-refine-next", onclick: move |_| { active_tab.set(RefineTab::Source); props.cursor.set(position + 1) }, "Next ", Icon { name: IconName::ChevronRight, size: 13 } } } else { button { class: "btn btn-primary focus-ring", disabled: !props.rules.read().iter().filter(|r| r.selected).all(RefinedStigRule::is_valid), onclick: move |_| props.on_review.call(()), "Review import ", Icon { name: IconName::ChevronRight, size: 13 } } } } }
@@ -385,6 +393,18 @@ fn tab_class(tab: RefineTab) -> &'static str {
         RefineTab::Source => "source",
         RefineTab::Enforcement => "enforcement",
         RefineTab::Evidence => "evidence",
+    }
+}
+
+/// Mirror of the design's `assertFilled` predicate: an assertion only counts
+/// toward the tab badge and summary when it has meaningful content.
+fn assertion_filled(assertion: &PolicyAssertionDraft) -> bool {
+    match assertion {
+        PolicyAssertionDraft::NixosOption { path, .. } => !path.trim().is_empty(),
+        PolicyAssertionDraft::PackagesInstalled { packages, .. } => !packages.is_empty(),
+        PolicyAssertionDraft::CustomExpression { expression, .. } => {
+            !expression.trim().is_empty()
+        }
     }
 }
 
@@ -519,13 +539,15 @@ fn SourceStigCard(rule: SourceStigRule) -> Element {
     rsx! {
         div { class: "refine-source-card", "data-testid": "xccdf-source-details",
             div { class: "refine-source-card__body",
-                div { class: "refine-source-identifiers",
-                    span { class: "refine-cat severity-{severity}", "{cat}" }
-                    span { class: "mono refine-source-card__id", "{stig_id}" }
-                    for srg in srg_ids { span { class: "mono refine-identifier", "{srg}" } }
-                    for cci in cci_ids { span { class: "chip chip-unknown mono refine-identifier", "{cci}" } }
+                div { class: "refine-source-heading",
+                    div { class: "refine-source-identifiers",
+                        span { class: "refine-cat severity-{severity}", "{cat}" }
+                        span { class: "mono refine-source-card__id", "{stig_id}" }
+                        for srg in srg_ids { span { class: "mono refine-identifier", "{srg}" } }
+                        for cci in cci_ids { span { class: "chip chip-unknown mono refine-identifier", "{cci}" } }
+                    }
+                    div { class: "refine-source-title", "{title}" }
                 }
-                div { class: "refine-source-title", "{title}" }
                 if let Some(discussion) = discussion { div { div { class: "refine-source-section-label", "Discussion" } div { class: "refine-source-copy", "{discussion}" } } }
                 if let Some(fix) = fix_text { div { div { class: "refine-source-section-label", "Official fix" } div { class: "refine-source-copy", "{fix}" } } }
                 if !check_text.is_empty() { div { div { class: "refine-source-section-label", "Official check" } pre { class: "mono refine-source-copy refine-source-check", "{check_text}" } } }

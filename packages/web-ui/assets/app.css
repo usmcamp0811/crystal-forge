@@ -5478,7 +5478,7 @@ tr.attention-flash {
   border-radius: 999px;
   overflow: hidden;
   background: var(--cf-divider);
-  margin-top: 10px;
+  margin-top: 8px;
 }
 
 .refine-progress__value {
@@ -5491,7 +5491,7 @@ tr.attention-flash {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 10px;
 }
 
 .refine-modal-head {
@@ -5500,14 +5500,15 @@ tr.attention-flash {
 
 .refine-modal-body {
   gap: 0;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1 1 auto;
 }
 
 .cf-modal-tabs {
   display: flex;
-  overflow: hidden;
-  border: 1px solid var(--cf-divider);
-  border-radius: 10px 10px 0 0;
   background: var(--cf-subtle-bg);
+  border-bottom: 1px solid var(--cf-divider);
 }
 
 .cf-modal-tab {
@@ -5531,7 +5532,15 @@ tr.attention-flash {
 .cf-modal-tab--active.cf-modal-tab--evidence { color: #60a5fa; border-bottom-color: #60a5fa; }
 .cf-modal-tab--active.cf-modal-tab--source { border-bottom-color: var(--cf-text-primary); }
 .cf-modal-tab:focus-visible { outline: 2px solid var(--cf-brand-purple); outline-offset: -2px; }
-.cf-modal-tab-panel { padding: 16px; border: 1px solid var(--cf-divider); border-top: 0; border-radius: 0 0 10px 10px; }
+.cf-modal-tab-panel { padding: 16px; }
+
+/* Unified tab card: one bordered container that wraps the tab header and panel */
+.refine-tab-card {
+  border: 1px solid var(--cf-divider);
+  border-radius: 10px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
 
 .code-editor { background: var(--cf-input-bg); line-height: 1.7; padding: 10px 12px; white-space: pre-wrap; word-break: break-word; tab-size: 2; }
 .code-editor:focus { border-color: var(--cf-brand-purple); }
@@ -5551,7 +5560,7 @@ tr.attention-flash {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   align-items: end;
-  margin-bottom: 4px;
+  margin-bottom: 14px;
 }
 
 .refine-identity-row {
@@ -5627,8 +5636,15 @@ tr.attention-flash {
 .refine-source-card__body {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 14px;
   padding: 0;
+}
+
+/* Groups the identifier row and title so they are visually one heading unit */
+.refine-source-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
 }
 
 .refine-source-identifiers {
@@ -5636,6 +5652,7 @@ tr.attention-flash {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  margin-bottom: 6px;
 }
 
 .refine-identifier {
@@ -5644,25 +5661,26 @@ tr.attention-flash {
 }
 
 .refine-source-title {
-  font-size: 12.5px;
+  font-size: 14px;
   font-weight: 600;
-  line-height: 1.45;
+  line-height: 1.4;
 }
 
 .refine-source-section-label {
-  margin-bottom: 3px;
+  margin-bottom: 4px;
   font-size: 9.5px;
 }
 
 .refine-source-copy {
   color: var(--cf-text-secondary);
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: 12.5px;
+  line-height: 1.6;
   white-space: pre-wrap;
 }
 
 .refine-source-copy.mono {
-  font-size: 11px;
+  font-size: 11.5px;
+  line-height: 1.6;
 }
 
 .refine-source-check {
