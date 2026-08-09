@@ -5,7 +5,7 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::compliance::digest::{
-    BundleMembershipEntry, BundleVersionCanonical, PolicyVersionCanonical, load_bundle_membership,
+    BundleVersionCanonical, PolicyVersionCanonical, load_bundle_membership,
     write_assignment_effective_set_digest, write_bundle_version_digest,
     write_policy_version_digest,
 };
@@ -70,7 +70,7 @@ impl std::error::Error for PolicyDraftDerivationError {}
 ///
 /// If `current_draft_version_id` is already set and mutable, returns it.
 /// If the lineage has only a published version, creates a new draft derived from
-/// it (copies metadata, membership, assignments+overlays), sets
+/// it (copies metadata and exact membership), sets
 /// `derived_from_version_id`, records `actor_id` as the creating user,
 /// updates the pointer, and returns the new version id.
 /// Returns an error if neither pointer exists.
@@ -103,16 +103,14 @@ pub async fn ensure_bundle_draft(
     .fetch_one(&mut **tx)
     .await?;
 
-    // If a mutable draft already exists, use it.
-    if let Some(draft_id) = pointers.current_draft_version_id {
-        let state = pointers.draft_publication_state.as_deref().unwrap_or("");
-        if matches!(state, "incomplete" | "draft" | "interim") {
-            return match intent {
-                BundleDraftIntent::EnsureMutable => Ok(draft_id),
-                BundleDraftIntent::CreateExplicit => {
-                    Err(BundleDraftDerivationError::MutableDraftExists(draft_id).into())
-                }
-            };
+    // EnsureMutable may reuse a mutable draft. CreateExplicit must first prove
+    // that a published source exists, so draft-only lineages return 422.
+    if intent == BundleDraftIntent::EnsureMutable {
+        if let Some(draft_id) = pointers.current_draft_version_id {
+            let state = pointers.draft_publication_state.as_deref().unwrap_or("");
+            if matches!(state, "incomplete" | "draft" | "interim") {
+                return Ok(draft_id);
+            }
         }
     }
 
@@ -120,6 +118,13 @@ pub async fn ensure_bundle_draft(
     let published_id = pointers
         .current_published_version_id
         .ok_or(BundleDraftDerivationError::NoPublishedSource)?;
+
+    if let Some(draft_id) = pointers.current_draft_version_id {
+        let state = pointers.draft_publication_state.as_deref().unwrap_or("");
+        if matches!(state, "incomplete" | "draft" | "interim") {
+            return Err(BundleDraftDerivationError::MutableDraftExists(draft_id).into());
+        }
+    }
 
     #[derive(sqlx::FromRow)]
     struct PublishedBundleVersion {

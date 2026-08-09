@@ -6468,7 +6468,7 @@ mod tests {
         let draft_r = client
             .post(format!("{base}/api/v1/policies/{policy_id}/drafts"))
             .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .json(&serde_json::json!({}))
+            .json(&serde_json::json!({"new_version": "2.0.0-draft"}))
             .send()
             .await
             .expect("draft send");
@@ -6491,6 +6491,7 @@ mod tests {
         assert_ne!(new_id, version_id, "new version ID must differ");
         assert_eq!(derived_from, version_id, "must point to published ancestor");
         assert_eq!(body["publication_state"], "draft");
+        assert_eq!(body["version"], "2.0.0-draft");
 
         // DB assertions
         let (new_pub_state, lineage, dfv, new_trust): (String, Uuid, Option<Uuid>, String) =
@@ -6507,6 +6508,56 @@ mod tests {
         assert_eq!(lineage, policy_id, "lineage preserved");
         assert_eq!(dfv, Some(version_id), "derived_from_version_id correct");
         assert_eq!(new_trust, "untrusted", "new draft defaults to untrusted");
+
+        let (
+            name,
+            description,
+            policy_type,
+            implementation_state,
+            execution_phase,
+            config,
+            compliance_metadata,
+            dependencies,
+            opaque_xml,
+            enabled_by_default,
+            semantic_digest,
+        ): (
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            serde_json::Value,
+            serde_json::Value,
+            serde_json::Value,
+            Option<String>,
+            Option<bool>,
+            String,
+        ) = sqlx::query_as(
+            "SELECT name, description, policy_type, implementation_state, execution_phase,
+                    config, compliance_metadata, dependencies, opaque_xml, enabled_by_default,
+                    semantic_digest FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(new_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch derived semantic fields");
+        let canonical = crate::compliance::digest::PolicyVersionCanonical {
+            name,
+            description,
+            policy_type,
+            implementation_state,
+            execution_phase,
+            config,
+            compliance_metadata,
+            dependencies,
+            opaque_xml_digest: crate::compliance::digest::PolicyVersionCanonical::digest_opaque_xml(
+                opaque_xml.as_deref(),
+            ),
+            enabled_by_default,
+        };
+        assert_ne!(semantic_digest, "pending");
+        assert_eq!(semantic_digest, canonical.compute_digest());
 
         // Published ancestor unchanged
         let (anc_state,): (String,) = sqlx::query_as(
@@ -6540,6 +6591,17 @@ mod tests {
         .await
         .expect("fetch pub pointer");
         assert_eq!(pub_ptr, Some(version_id), "published pointer unchanged");
+
+        let second = client
+            .post(format!("{base}/api/v1/policies/{policy_id}/drafts"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({"new_version": "3.0.0-draft"}))
+            .send()
+            .await
+            .expect("second draft send");
+        assert_eq!(second.status().as_u16(), 409);
+        let second_body: serde_json::Value = second.json().await.expect("second json");
+        assert_eq!(second_body["code"], "MUTABLE_DRAFT_EXISTS");
     }
 
     #[tokio::test]
@@ -6554,7 +6616,7 @@ mod tests {
         let resp = reqwest::Client::new()
             .post(format!("{base}/api/v1/policies/{policy_id}/drafts"))
             .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .json(&serde_json::json!({}))
+            .json(&serde_json::json!({"new_version": "2.0.0-draft"}))
             .send()
             .await
             .expect("send");
@@ -6908,7 +6970,7 @@ mod tests {
                 "{base}/api/v1/compliance/bundles/{bundle_id}/drafts"
             ))
             .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .json(&serde_json::json!({}))
+            .json(&serde_json::json!({"new_version": "2.0.0-draft"}))
             .send()
             .await
             .expect("draft");
@@ -6931,6 +6993,7 @@ mod tests {
         assert_ne!(new_bv_id, bv_id, "new version must differ");
         assert_eq!(derived_from, bv_id, "derived_from must point to published");
         assert_eq!(body["publication_state"], "draft");
+        assert_eq!(body["version"], "2.0.0-draft");
 
         // DB: new draft has correct lineage
         let (new_state, new_lineage, dfv): (String, Uuid, Option<Uuid>) = sqlx::query_as(
@@ -6946,6 +7009,23 @@ mod tests {
         assert_eq!(new_lineage, bundle_id, "lineage preserved");
         assert_eq!(dfv, Some(bv_id));
 
+        let (new_digest, name, framework, framework_version, description, layer, owner): (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+        ) = sqlx::query_as(
+            "SELECT semantic_digest, name, framework, framework_version, description,
+                    layer, owner FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(new_bv_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch derived bundle fields");
+
         // Membership copied exactly
         let new_members: Vec<(Uuid, i32)> = sqlx::query_as(
             "SELECT policy_version_id, policy_order \
@@ -6957,6 +7037,20 @@ mod tests {
         .await
         .expect("membership");
         assert_eq!(new_members, vec![(pv_id, 0)], "membership copied exactly");
+        let canonical = crate::compliance::digest::BundleVersionCanonical {
+            name,
+            framework,
+            framework_version,
+            description,
+            layer,
+            owner,
+            members: vec![crate::compliance::digest::BundleMembershipEntry {
+                policy_version_id: pv_id,
+                selected: true,
+            }],
+        };
+        assert_ne!(new_digest, "pending");
+        assert_eq!(new_digest, canonical.compute_digest());
 
         // Published ancestor unchanged
         let (anc_state,): (String,) = sqlx::query_as(
@@ -6979,6 +7073,50 @@ mod tests {
         .expect("pointers");
         assert_eq!(draft_ptr, Some(new_bv_id), "draft pointer updated");
         assert_eq!(pub_ptr, Some(bv_id), "published pointer unchanged");
+
+        let second = client
+            .post(format!(
+                "{base}/api/v1/compliance/bundles/{bundle_id}/drafts"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({"new_version": "3.0.0-draft"}))
+            .send()
+            .await
+            .expect("second bundle draft send");
+        assert_eq!(second.status().as_u16(), 409);
+        let second_body: serde_json::Value = second.json().await.expect("second bundle json");
+        assert_eq!(second_body["code"], "MUTABLE_DRAFT_EXISTS");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn bundle_draft_no_published_version_returns_422() {
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (_policy_id, policy_version_id, _) = make_draft_policy(
+            &pool,
+            &format!("bundle-no-pub-policy-{}", Uuid::new_v4().simple()),
+        )
+        .await;
+        let (bundle_id, _, _) = make_draft_bundle(
+            &pool,
+            &format!("bundle-no-pub-{}", Uuid::new_v4().simple()),
+            &[policy_version_id],
+        )
+        .await;
+        let base = spawn_phase1_server(pool.clone()).await;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{base}/api/v1/compliance/bundles/{bundle_id}/drafts"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({"new_version": "2.0.0-draft"}))
+            .send()
+            .await
+            .expect("bundle draft send");
+        assert_eq!(response.status().as_u16(), 422);
+        let body: serde_json::Value = response.json().await.expect("bundle error json");
+        assert_eq!(body["code"], "NO_PUBLISHED_VERSION");
     }
 
     // ────────────────────────────────────────────────────────────────────────────
