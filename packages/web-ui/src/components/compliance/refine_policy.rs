@@ -357,13 +357,32 @@ pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
             div { class: "cf-modal-tab-panel",
                 match *active_tab.read() {
                     RefineTab::Source => rsx! { SourceStigCard { rule: rule.source.clone() } },
-                    RefineTab::Enforcement => rsx! { if !matches!(rule.draft.action, RefinedRuleAction::Existing(_) | RefinedRuleAction::Opaque) { AssertionSection { rules: props.rules, index } } else { div { class: "sd-callout sd-callout-info", "This mapped or opaque control has no local enforcement rules to edit." } } },
+                    RefineTab::Enforcement => rsx! { 
+                        if !matches!(rule.draft.action, RefinedRuleAction::Existing(_) | RefinedRuleAction::Opaque) { 
+                            AssertionSection { rules: props.rules, index } 
+                        } else { 
+                            div { class: "sd-callout sd-callout-info", "This mapped or opaque control has no local enforcement rules to edit." } 
+                        }
+                        details { class: "refine-advanced", summary { "Advanced import options" },
+                            div { class: "refine-advanced-body",
+                                ImplementationChoice { rules: props.rules, index, existing_policies: props.existing_policies.clone() }
+                                if matches!(rule.draft.action, RefinedRuleAction::Unbound) { 
+                                    div { class: "sd-callout sd-callout-info", "This requirement will be imported without a Crystal Forge implementation unless you add an assertion or evidence source." } 
+                                }
+                                if matches!(rule.draft.action, RefinedRuleAction::Opaque) { 
+                                    div { class: "sd-callout sd-callout-info", "The original XCCDF rule and check content will be preserved without execution." } 
+                                }
+                                textarea { class: "input focus-ring", rows: 2, placeholder: "Description", value: "{rule.draft.local_description}", oninput: move |e| { props.rules.write()[index].draft.local_description = e.value(); } }
+                                textarea { class: "input focus-ring", rows: 2, placeholder: "Rationale", value: "{rule.draft.local_rationale}", oninput: move |e| { props.rules.write()[index].draft.local_rationale = e.value(); } }
+                                textarea { class: "input focus-ring", rows: 2, placeholder: "Implementation note", value: "{rule.draft.implementation_note}", oninput: move |e| { props.rules.write()[index].draft.implementation_note = e.value(); } }
+                            }
+                        }
+                    },
                     RefineTab::Evidence => rsx! { if !matches!(rule.draft.action, RefinedRuleAction::Existing(_) | RefinedRuleAction::Opaque) { EvidenceSection { rules: props.rules, index } } else { div { class: "sd-callout sd-callout-info", "This mapped or opaque control has no local evidence requirements to edit." } } },
                 }
             }
             } // end refine-tab-card
             div { class: "sd-callout sd-callout-info refine-summary", Icon { name: IconName::Check, size: 13 } div { "On import this becomes a standard CF security policy — " strong { "{filled_assertion_count} enforcement {enforcement_word}" } " (checked at build time) and " strong { "{ev_count} evidence {evidence_word}" } " for ATO. Editable later from the Policies view." } }
-            details { class: "refine-advanced", summary { "Advanced import options" }, div { class: "refine-advanced-body", ImplementationChoice { rules: props.rules, index, existing_policies: props.existing_policies.clone() } if matches!(rule.draft.action, RefinedRuleAction::Unbound) { div { class: "sd-callout sd-callout-info", "This requirement will be imported without a Crystal Forge implementation unless you add an assertion or evidence source." } } if matches!(rule.draft.action, RefinedRuleAction::Opaque) { div { class: "sd-callout sd-callout-info", "The original XCCDF rule and check content will be preserved without execution." } } textarea { class: "input focus-ring", rows: 2, placeholder: "Description", value: "{rule.draft.local_description}", oninput: move |e| { props.rules.write()[index].draft.local_description = e.value(); } } textarea { class: "input focus-ring", rows: 2, placeholder: "Rationale", value: "{rule.draft.local_rationale}", oninput: move |e| { props.rules.write()[index].draft.local_rationale = e.value(); } } textarea { class: "input focus-ring", rows: 2, placeholder: "Implementation note", value: "{rule.draft.implementation_note}", oninput: move |e| { props.rules.write()[index].draft.implementation_note = e.value(); } } } }
         }
         div { class: "modal-foot refine-modal-foot", div { class: "refine-footer-actions", button { class: "btn btn-ghost focus-ring", "data-testid": "xccdf-refine-back", onclick: move |_| { active_tab.set(RefineTab::Source); if position == 0 { props.on_back.call(()) } else { props.cursor.set(position - 1) } }, Icon { name: IconName::ArrowLeft, size: 13 }, if position == 0 { " Back to list" } else { " Previous" } }, button { class: "btn btn-ghost focus-ring refine-exclude", title: "Exclude this control from the bundle", "data-testid": "xccdf-refine-exclude", onclick: move |_| { active_tab.set(RefineTab::Source); let mut remaining = selected.len().saturating_sub(1); props.rules.write()[index].selected = false; if remaining == 0 { props.on_back.call(()); } else { if position >= remaining { remaining = remaining.saturating_sub(1); } props.cursor.set(position.min(remaining)); } }, "Exclude" } }, div { class: "refine-footer-progress", span { class: "refine-position", "data-testid": "xccdf-refine-position", "{position + 1} / {selected.len()}" }, if position + 1 < selected.len() { button { class: "btn btn-primary focus-ring", "data-testid": "xccdf-refine-next", onclick: move |_| { active_tab.set(RefineTab::Source); props.cursor.set(position + 1) }, "Next ", Icon { name: IconName::ChevronRight, size: 13 } } } else { button { class: "btn btn-primary focus-ring", disabled: !props.rules.read().iter().filter(|r| r.selected).all(RefinedStigRule::is_valid), onclick: move |_| props.on_review.call(()), "Review import ", Icon { name: IconName::ChevronRight, size: 13 } } } } }
     }
