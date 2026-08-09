@@ -19,7 +19,7 @@ use crate::api::models::{
 use crate::components::compliance::{
     BundleCatalog, BundleHeader, EvidenceDrawer, ImportReview, RefinePolicyStep,
     RefinedPolicyDraft, RefinedRuleAction, RefinedStigRule, ScoreStrip, SourceCheck,
-    SourceStigRule, SystemsMatrix, action_to_import,
+    SourceCheckBodyPart, SourceStigRule, SystemsMatrix, action_to_import,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::components::io_menu::{IOMenu, IOMenuItem};
@@ -1555,33 +1555,43 @@ struct StigRule {
     mapped_policy_version_id: Option<uuid::Uuid>,
 }
 
-/// Extract the inline check-content text from a check JSON object.
-///
-/// The server sends checks with a `body_parts` array. Each part is either
-/// `{ "type": "inline", "content": "..." }` or `{ "type": "reference", ... }`.
-/// We extract the first inline part and also accept legacy `inline_content`/`content`
-/// keys for forward and backward compatibility.
-fn extract_check_inline_content(check: &serde_json::Value) -> Option<String> {
-    // New format: body_parts array
-    if let Some(parts) = check.get("body_parts").and_then(|v| v.as_array()) {
-        for part in parts {
-            if part.get("type").and_then(|v| v.as_str()) == Some("inline") {
-                if let Some(text) = part.get("content").and_then(|v| v.as_str()) {
-                    return Some(text.to_string());
+/// Convert the server's ordered source check parts without changing the XCCDF
+/// representation held by the import plan.
+fn source_check_body_parts(check: &serde_json::Value) -> Vec<SourceCheckBodyPart> {
+    let parts = check.get("body_parts").and_then(|value| value.as_array());
+    let Some(parts) = parts else {
+        return check
+            .get("inline_content")
+            .or_else(|| check.get("content"))
+            .and_then(|value| value.as_str())
+            .map(|content| vec![SourceCheckBodyPart::Inline(content.to_string())])
+            .unwrap_or_default();
+    };
+
+    parts
+        .iter()
+        .filter_map(
+            |part| match part.get("type").and_then(|value| value.as_str()) {
+                Some("inline") => part
+                    .get("content")
+                    .or_else(|| part.get("preview"))
+                    .and_then(|value| value.as_str())
+                    .map(|content| SourceCheckBodyPart::Inline(content.to_string())),
+                Some("reference") => {
+                    part.get("href")
+                        .and_then(|value| value.as_str())
+                        .map(|href| SourceCheckBodyPart::Reference {
+                            href: href.to_string(),
+                            name: part
+                                .get("name")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string),
+                        })
                 }
-                // Also accept "preview" for backward compatibility
-                if let Some(text) = part.get("preview").and_then(|v| v.as_str()) {
-                    return Some(text.to_string());
-                }
-            }
-        }
-    }
-    // Legacy fallback: top-level content/inline_content fields
-    check
-        .get("inline_content")
-        .or_else(|| check.get("content"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
+                _ => None,
+            },
+        )
+        .collect()
 }
 
 fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
@@ -1648,7 +1658,7 @@ fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
                                 .collect()
                         })
                         .unwrap_or_default(),
-                    inline_content: extract_check_inline_content(check),
+                    body_parts: source_check_body_parts(check),
                 })
                 .collect::<Vec<_>>();
 
@@ -1825,7 +1835,7 @@ fn refined_rules_from_rules(rules: &[StigRule]) -> Vec<RefinedStigRule> {
             source_severity: Some(rule.severity.clone()),
             fix_text: (!rule.fixtext.is_empty()).then(|| rule.fixtext.clone()),
             checks: if rule.checks.is_empty() && !rule.check.is_empty() {
-                vec![SourceCheck { system: String::new(), selector: None, references: Vec::new(), inline_content: Some(rule.check.clone()) }]
+                vec![SourceCheck { system: String::new(), selector: None, references: Vec::new(), body_parts: vec![SourceCheckBodyPart::Inline(rule.check.clone())] }]
             } else {
                 rule.checks.clone()
             },
@@ -3816,4 +3826,32 @@ fn toggle_uuid(signal: &mut Signal<Vec<uuid::Uuid>>, id: uuid::Uuid) {
         next.push(id);
     }
     signal.set(next);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_all_ordered_preview_check_body_parts() {
+        let check = serde_json::json!({
+            "body_parts": [
+                { "type": "inline", "content": "first inline" },
+                { "type": "inline", "content": "second inline" },
+                { "type": "reference", "href": "https://example.test/check", "name": "Vendor check" }
+            ]
+        });
+
+        assert_eq!(
+            source_check_body_parts(&check),
+            vec![
+                SourceCheckBodyPart::Inline("first inline".into()),
+                SourceCheckBodyPart::Inline("second inline".into()),
+                SourceCheckBodyPart::Reference {
+                    href: "https://example.test/check".into(),
+                    name: Some("Vendor check".into()),
+                },
+            ]
+        );
+    }
 }

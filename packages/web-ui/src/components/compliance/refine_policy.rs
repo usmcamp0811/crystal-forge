@@ -11,7 +11,15 @@ pub struct SourceCheck {
     pub system: String,
     pub selector: Option<String>,
     pub references: Vec<String>,
-    pub inline_content: Option<String>,
+    /// Ordered source check body parts. This is a presentation adapter over the
+    /// server preview; it must not discard later inline/reference parts.
+    pub body_parts: Vec<SourceCheckBodyPart>,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum SourceCheckBodyPart {
+    Inline(String),
+    Reference { href: String, name: Option<String> },
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -464,12 +472,20 @@ fn SourceStigCard(rule: SourceStigRule) -> Element {
     let check_text = rule
         .checks
         .iter()
-        .filter_map(|check| {
-            check
-                .inline_content
-                .clone()
-                .or_else(|| check.selector.clone())
-                .or_else(|| (!check.system.is_empty()).then(|| check.system.clone()))
+        .flat_map(|check| {
+            let mut parts = check
+                .body_parts
+                .iter()
+                .filter_map(source_check_part_text)
+                .collect::<Vec<_>>();
+            if parts.is_empty() {
+                if let Some(selector) = check.selector.as_ref() {
+                    parts.push(selector.clone());
+                } else if !check.system.is_empty() {
+                    parts.push(check.system.clone());
+                }
+            }
+            parts
         })
         .collect::<Vec<_>>()
         .join("\n\n");
@@ -493,6 +509,13 @@ fn SourceStigCard(rule: SourceStigRule) -> Element {
         .collect::<Vec<_>>();
     srg_ids.sort();
     cci_ids.sort();
+    let generic_ids = rule
+        .identifiers
+        .iter()
+        .filter(|id| !id.starts_with("SRG-") && !id.starts_with("CCI-") && id.as_str() != stig_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let generic_identifiers = generic_ids.join(", ");
     rsx! {
         div { class: "refine-source-card", "data-testid": "xccdf-source-details",
             div { class: "refine-source-card__body",
@@ -506,8 +529,23 @@ fn SourceStigCard(rule: SourceStigRule) -> Element {
                 if let Some(discussion) = discussion { div { div { class: "refine-source-section-label", "Discussion" } div { class: "refine-source-copy", "{discussion}" } } }
                 if let Some(fix) = fix_text { div { div { class: "refine-source-section-label", "Official fix" } div { class: "refine-source-copy", "{fix}" } } }
                 if !check_text.is_empty() { div { div { class: "refine-source-section-label", "Official check" } pre { class: "mono refine-source-copy refine-source-check", "{check_text}" } } }
-                if !references.is_empty() || !platforms.is_empty() || rule.identifiers.iter().any(|id| !id.starts_with("SRG-") && !id.starts_with("CCI-")) { details { class: "refine-source-more", summary { "Additional source metadata" } if !references.is_empty() { p { class: "mono", "References: {references}" } } if !platforms.is_empty() { p { "Platforms: {platforms}" } } } }
+                if !references.is_empty() || !platforms.is_empty() || !generic_ids.is_empty() { details { class: "refine-source-more", summary { "Additional source metadata" } if !generic_ids.is_empty() { p { class: "mono", "Identifiers: {generic_identifiers}" } } if !references.is_empty() { p { class: "mono", "References: {references}" } } if !platforms.is_empty() { p { "Platforms: {platforms}" } } } }
             }
+        }
+    }
+}
+
+fn source_check_part_text(part: &SourceCheckBodyPart) -> Option<String> {
+    match part {
+        SourceCheckBodyPart::Inline(content) => {
+            (!content.trim().is_empty()).then(|| content.clone())
+        }
+        SourceCheckBodyPart::Reference { href, name } => {
+            let label = name
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(href);
+            (!href.trim().is_empty()).then(|| format!("Reference: {label}\n{href}"))
         }
     }
 }
@@ -889,5 +927,19 @@ mod tests {
     #[test]
     fn omits_blank_discussion() {
         assert_eq!(extract_stig_discussion(" \n "), None);
+    }
+    #[test]
+    fn formats_all_check_part_types_without_omission() {
+        assert_eq!(
+            source_check_part_text(&SourceCheckBodyPart::Inline("first inline".into())),
+            Some("first inline".into())
+        );
+        assert_eq!(
+            source_check_part_text(&SourceCheckBodyPart::Reference {
+                href: "https://example.test/check".into(),
+                name: Some("Vendor check".into()),
+            }),
+            Some("Reference: Vendor check\nhttps://example.test/check".into())
+        );
     }
 }

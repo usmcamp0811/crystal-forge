@@ -714,6 +714,16 @@ body {
   border-color: var(--cf-card-border) !important;
 }
 
+.cf-policy-modal-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.cf-policy-modal-body > .cf-modal-tabs,
+.cf-policy-modal-body > .cf-modal-tab-panel {
+  flex-shrink: 0;
+}
+
 .cf-policy-modal-field {
   background-color: rgba(3, 7, 18, 0.72) !important;
   border-color: #1f2937 !important;

@@ -9,8 +9,8 @@ use crate::components::icon::{Icon, IconName};
 pub mod refine_policy;
 pub use refine_policy::{
     EvidenceRequirementDraft, ImportReview, PolicyAssertionDraft, RefinePolicyStep,
-    RefinedPolicyDraft, RefinedRuleAction, RefinedStigRule, SourceCheck, SourceStigRule,
-    action_to_import,
+    RefinedPolicyDraft, RefinedRuleAction, RefinedStigRule, SourceCheck, SourceCheckBodyPart,
+    SourceStigRule, action_to_import,
 };
 
 // ─── Bundle catalog left rail ────────────────────────────────────────────────
