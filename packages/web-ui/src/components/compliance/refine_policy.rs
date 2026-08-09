@@ -312,6 +312,7 @@ pub struct RefinePolicyStepProps {
 
 #[component]
 pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
+    let mut active_tab = use_signal(|| RefineTab::Source);
     let selected: Vec<usize> = props
         .rules
         .read()
@@ -325,12 +326,6 @@ pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
     };
     let rule = props.rules.read()[index].clone();
     let source_id = source_identity(&rule.source);
-    let source_srg = rule
-        .source
-        .identifiers
-        .iter()
-        .find(|identifier| identifier.starts_with("SRG-"))
-        .cloned();
     let percent = ((position + 1) as f32 / selected.len().max(1) as f32 * 100.0).round();
     rsx! {
         div { class: "modal-head refine-modal-head",
@@ -338,14 +333,50 @@ pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
             div { class: "refine-progress", "data-testid": "xccdf-refine-progress", div { class: "refine-progress__value", style: "width:{percent}%;" } }
         }
         div { class: "modal-body refine-modal-body",
-            div { class: "refine-identity-row", span { class: "chip chip-info", "Security & hardening" }, if let Some(srg) = source_srg.as_ref() { span { class: "mono refine-srg", "{srg}" } }, span { class: "refine-identity-spacer" }, span { class: "refine-policy-id", "policy id: " span { class: "mono", "stig-{slugify(&source_id)}" } } }
-            SourceStigCard { rule: rule.source.clone() }
             div { class: "refine-basics", div { class: "field", label { "Policy name" }, input { class: "input focus-ring mono", "data-testid": "xccdf-policy-name", value: "{rule.draft.local_name}", oninput: move |e| { props.rules.write()[index].draft.local_name = e.value(); } } }, div { class: "field", label { "Severity" }, div { class: "seg refine-severity", for (value, label) in [("high","CAT I"),("medium","CAT II"),("low","CAT III")] { button { class: if rule.draft.local_severity == value { format!("active severity-{value}") } else { String::new() }, onclick: move |_| { props.rules.write()[index].draft.local_severity = value.into(); }, "{label}" } } } } }
-            if !matches!(rule.draft.action, RefinedRuleAction::Existing(_) | RefinedRuleAction::Opaque) { AssertionSection { rules: props.rules, index } EvidenceSection { rules: props.rules, index } }
-            div { class: "sd-callout sd-callout-info refine-summary", Icon { name: IconName::Check, size: 13 } div { "On import this becomes a standard CF security policy — " strong { "{rule.draft.assertions.len()} config assertions" } " and " strong { "{rule.draft.evidence_requirements.len()} evidence items" } " for ATO. Editable later from the Policies view." } }
+            div { class: "cf-modal-tabs", role: "tablist", aria_label: "Policy refinement sections",
+                RefineTabButton { tab: RefineTab::Source, active: *active_tab.read(), label: "From the STIG", test_id: "xccdf-refine-tab-source", on_select: move |_| active_tab.set(RefineTab::Source) }
+                RefineTabButton { tab: RefineTab::Enforcement, active: *active_tab.read(), label: format!("Enforcement · {}", rule.draft.assertions.len()), test_id: "xccdf-refine-tab-enforcement", on_select: move |_| active_tab.set(RefineTab::Enforcement) }
+                RefineTabButton { tab: RefineTab::Evidence, active: *active_tab.read(), label: format!("Evidence · {}", rule.draft.evidence_requirements.len()), test_id: "xccdf-refine-tab-evidence", on_select: move |_| active_tab.set(RefineTab::Evidence) }
+            }
+            div { class: "cf-modal-tab-panel",
+                match *active_tab.read() {
+                    RefineTab::Source => rsx! { SourceStigCard { rule: rule.source.clone() } },
+                    RefineTab::Enforcement => rsx! { if !matches!(rule.draft.action, RefinedRuleAction::Existing(_) | RefinedRuleAction::Opaque) { AssertionSection { rules: props.rules, index } } else { div { class: "sd-callout sd-callout-info", "This mapped or opaque control has no local enforcement rules to edit." } } },
+                    RefineTab::Evidence => rsx! { if !matches!(rule.draft.action, RefinedRuleAction::Existing(_) | RefinedRuleAction::Opaque) { EvidenceSection { rules: props.rules, index } } else { div { class: "sd-callout sd-callout-info", "This mapped or opaque control has no local evidence requirements to edit." } } },
+                }
+            }
+            div { class: "sd-callout sd-callout-info refine-summary", Icon { name: IconName::Check, size: 13 } div { "On import this becomes a standard CF security policy — " strong { "{rule.draft.assertions.len()} enforcement rules" } " (checked at build time) and " strong { "{rule.draft.evidence_requirements.len()} evidence items" } " for ATO. Editable later from the Policies view." } }
             details { class: "refine-advanced", summary { "Advanced import options" }, div { class: "refine-advanced-body", ImplementationChoice { rules: props.rules, index, existing_policies: props.existing_policies.clone() } if matches!(rule.draft.action, RefinedRuleAction::Unbound) { div { class: "sd-callout sd-callout-info", "This requirement will be imported without a Crystal Forge implementation unless you add an assertion or evidence source." } } if matches!(rule.draft.action, RefinedRuleAction::Opaque) { div { class: "sd-callout sd-callout-info", "The original XCCDF rule and check content will be preserved without execution." } } textarea { class: "input focus-ring", rows: 2, placeholder: "Description", value: "{rule.draft.local_description}", oninput: move |e| { props.rules.write()[index].draft.local_description = e.value(); } } textarea { class: "input focus-ring", rows: 2, placeholder: "Rationale", value: "{rule.draft.local_rationale}", oninput: move |e| { props.rules.write()[index].draft.local_rationale = e.value(); } } textarea { class: "input focus-ring", rows: 2, placeholder: "Implementation note", value: "{rule.draft.implementation_note}", oninput: move |e| { props.rules.write()[index].draft.implementation_note = e.value(); } } } }
         }
-        div { class: "modal-foot refine-modal-foot", div { class: "refine-footer-actions", button { class: "btn btn-ghost focus-ring", "data-testid": "xccdf-refine-back", onclick: move |_| if position == 0 { props.on_back.call(()) } else { props.cursor.set(position - 1) }, Icon { name: IconName::ArrowLeft, size: 13 }, if position == 0 { " Back to list" } else { " Previous" } }, button { class: "btn btn-ghost focus-ring refine-exclude", title: "Exclude this control from the bundle", "data-testid": "xccdf-refine-exclude", onclick: move |_| { let mut remaining = selected.len().saturating_sub(1); props.rules.write()[index].selected = false; if remaining == 0 { props.on_back.call(()); } else { if position >= remaining { remaining = remaining.saturating_sub(1); } props.cursor.set(position.min(remaining)); } }, "Exclude" } }, div { class: "refine-footer-progress", span { class: "refine-position", "data-testid": "xccdf-refine-position", "{position + 1} / {selected.len()}" }, if position + 1 < selected.len() { button { class: "btn btn-primary focus-ring", "data-testid": "xccdf-refine-next", onclick: move |_| props.cursor.set(position + 1), "Next ", Icon { name: IconName::ChevronRight, size: 13 } } } else { button { class: "btn btn-primary focus-ring", disabled: !props.rules.read().iter().filter(|r| r.selected).all(RefinedStigRule::is_valid), onclick: move |_| props.on_review.call(()), "Review import ", Icon { name: IconName::ChevronRight, size: 13 } } } } }
+        div { class: "modal-foot refine-modal-foot", div { class: "refine-footer-actions", button { class: "btn btn-ghost focus-ring", "data-testid": "xccdf-refine-back", onclick: move |_| { active_tab.set(RefineTab::Source); if position == 0 { props.on_back.call(()) } else { props.cursor.set(position - 1) } }, Icon { name: IconName::ArrowLeft, size: 13 }, if position == 0 { " Back to list" } else { " Previous" } }, button { class: "btn btn-ghost focus-ring refine-exclude", title: "Exclude this control from the bundle", "data-testid": "xccdf-refine-exclude", onclick: move |_| { active_tab.set(RefineTab::Source); let mut remaining = selected.len().saturating_sub(1); props.rules.write()[index].selected = false; if remaining == 0 { props.on_back.call(()); } else { if position >= remaining { remaining = remaining.saturating_sub(1); } props.cursor.set(position.min(remaining)); } }, "Exclude" } }, div { class: "refine-footer-progress", span { class: "refine-position", "data-testid": "xccdf-refine-position", "{position + 1} / {selected.len()}" }, if position + 1 < selected.len() { button { class: "btn btn-primary focus-ring", "data-testid": "xccdf-refine-next", onclick: move |_| { active_tab.set(RefineTab::Source); props.cursor.set(position + 1) }, "Next ", Icon { name: IconName::ChevronRight, size: 13 } } } else { button { class: "btn btn-primary focus-ring", disabled: !props.rules.read().iter().filter(|r| r.selected).all(RefinedStigRule::is_valid), onclick: move |_| props.on_review.call(()), "Review import ", Icon { name: IconName::ChevronRight, size: 13 } } } } }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum RefineTab {
+    Source,
+    Enforcement,
+    Evidence,
+}
+
+#[component]
+fn RefineTabButton(
+    tab: RefineTab,
+    active: RefineTab,
+    label: String,
+    test_id: String,
+    on_select: EventHandler<()>,
+) -> Element {
+    let selected = tab == active;
+    rsx! { button { class: if selected { format!("cf-modal-tab cf-modal-tab--active cf-modal-tab--{}", tab_class(tab)) } else { format!("cf-modal-tab cf-modal-tab--{}", tab_class(tab)) }, role: "tab", aria_selected: if selected { "true" } else { "false" }, "data-testid": "{test_id}", onclick: move |_| on_select.call(()), "{label}" } }
+}
+
+fn tab_class(tab: RefineTab) -> &'static str {
+    match tab {
+        RefineTab::Source => "source",
+        RefineTab::Enforcement => "enforcement",
+        RefineTab::Evidence => "evidence",
     }
 }
 
@@ -443,23 +474,71 @@ fn SourceStigCard(rule: SourceStigRule) -> Element {
         .collect::<Vec<_>>()
         .join("\n\n");
     let references = rule.references.join(", ");
+    let platforms = rule.platforms.join(", ");
+    let discussion = rule
+        .description
+        .as_deref()
+        .and_then(extract_stig_discussion);
+    let mut srg_ids = rule
+        .identifiers
+        .iter()
+        .filter(|id| id.starts_with("SRG-"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut cci_ids = rule
+        .identifiers
+        .iter()
+        .filter(|id| id.starts_with("CCI-"))
+        .cloned()
+        .collect::<Vec<_>>();
+    srg_ids.sort();
+    cci_ids.sort();
     rsx! {
         div { class: "refine-source-card", "data-testid": "xccdf-source-details",
-            div { class: "refine-source-card__head",
-                Icon { name: IconName::Shield, size: 12 }
-                span { class: "refine-source-label", "From the STIG" }
-                span { class: "mono refine-source-card__id", "{stig_id}" }
-                span { class: "refine-identity-spacer" }
-                span { class: "refine-cat severity-{severity}", "{cat}" }
-            }
             div { class: "refine-source-card__body",
+                div { class: "refine-source-identifiers",
+                    span { class: "refine-cat severity-{severity}", "{cat}" }
+                    span { class: "mono refine-source-card__id", "{stig_id}" }
+                    for srg in srg_ids { span { class: "mono refine-identifier", "{srg}" } }
+                    for cci in cci_ids { span { class: "chip chip-unknown mono refine-identifier", "{cci}" } }
+                }
                 div { class: "refine-source-title", "{title}" }
+                if let Some(discussion) = discussion { div { div { class: "refine-source-section-label", "Discussion" } div { class: "refine-source-copy", "{discussion}" } } }
                 if let Some(fix) = fix_text { div { div { class: "refine-source-section-label", "Official fix" } div { class: "refine-source-copy", "{fix}" } } }
-                if !check_text.is_empty() { div { div { class: "refine-source-section-label", "Official check" } div { class: "mono refine-source-copy", "{check_text}" } } }
-                if let Some(description) = rule.description { details { class: "refine-source-more", summary { "Additional source metadata" } p { "{description}" } if !references.is_empty() { p { class: "mono", "References: {references}" } } } }
+                if !check_text.is_empty() { div { div { class: "refine-source-section-label", "Official check" } pre { class: "mono refine-source-copy refine-source-check", "{check_text}" } } }
+                if !references.is_empty() || !platforms.is_empty() || rule.identifiers.iter().any(|id| !id.starts_with("SRG-") && !id.starts_with("CCI-")) { details { class: "refine-source-more", summary { "Additional source metadata" } if !references.is_empty() { p { class: "mono", "References: {references}" } } if !platforms.is_empty() { p { "Platforms: {platforms}" } } } }
             }
         }
     }
+}
+
+/// Extract presentation prose without changing the preserved XCCDF description.
+fn extract_stig_discussion(description: &str) -> Option<String> {
+    if let Some(start) = description.find("<VulnDiscussion>") {
+        let after_start = &description[start + "<VulnDiscussion>".len()..];
+        let content = after_start
+            .split("</VulnDiscussion>")
+            .next()
+            .unwrap_or(after_start);
+        normalize_source_text(content).or_else(|| normalize_source_text(description))
+    } else {
+        normalize_source_text(description)
+    }
+}
+
+fn normalize_source_text(value: &str) -> Option<String> {
+    let mut text = String::with_capacity(value.len());
+    let mut in_tag = false;
+    for character in value.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => text.push(character),
+            _ => {}
+        }
+    }
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!normalized.is_empty()).then_some(normalized)
 }
 
 #[component]
@@ -505,9 +584,9 @@ fn AssertionSection(rules: Signal<Vec<RefinedStigRule>>, index: usize) -> Elemen
     let count = rules.read()[index].draft.assertions.len();
     rsx! {
         section { class: "refine-section",
-            div { class: "refine-section-label", "NixOS config assertions" span { class: "refine-eval-badge", "EVAL-TIME" } }
-            p { class: "refine-helper", "Asserted against the rendered config during " span { class: "mono", "nix flake check" } " — fails the build before it deploys. These become the policy's rules. " if count == 0 { "Nothing was inferred for this control — add the assertion that proves it." } else { "Inferred from the STIG; review before importing." } }
-            if count == 0 { div { class: "refine-assertion-empty", Icon { name: IconName::Warn, size: 13 } div { "No assertion could be inferred from this STIG control. Add one — assert a NixOS option value, assert a package is installed, or write a custom nix expression — or leave empty to rely on runtime evidence alone." } } }
+            div { class: "refine-section-label", "Enforcement rules" span { class: "refine-eval-badge", "CHECKED AT BUILD TIME" } }
+            p { class: "refine-helper", "The condition Crystal Forge checks against the rendered config during " span { class: "mono", "nix flake check" } " — a failing rule blocks the build before it ever deploys. " if count == 0 { "No rule could be inferred from this STIG control." } else { "Inferred from the STIG; review before importing." } }
+            if count == 0 { div { class: "refine-assertion-empty", Icon { name: IconName::Warn, size: 13 } div { "No rule could be inferred from this STIG control. Add one — check a NixOS option value, check a package is installed, or write a custom nix expression — or leave empty to rely on runtime evidence alone." } } }
             for (assertion_index, assertion) in rules.read()[index].draft.assertions.iter().cloned().enumerate() {
                 AssertionEditor { rules, index, assertion_index, assertion }
             }
@@ -524,9 +603,9 @@ fn AssertionSection(rules: Signal<Vec<RefinedStigRule>>, index: usize) -> Elemen
                     all_rules[index].draft.action = RefinedRuleAction::Native;
                     all_rules[index].draft.assertions.push(draft);
                 },
-                option { value: "", "＋ Add assertion…" }
-                option { value: "option", "Assert a NixOS option value" }
-                option { value: "packages", "Assert packages installed" }
+                option { value: "", "＋ Add rule…" }
+                option { value: "option", "Check a NixOS option value" }
+                option { value: "packages", "Check packages installed" }
                 option { value: "custom", "Custom nix expression" }
             }
         }
@@ -618,7 +697,7 @@ fn AssertionEditor(props: AssertionEditorProps) -> Element {
                 },
                 PolicyAssertionDraft::CustomExpression { expression, .. } => rsx! {
                     div { class: "refine-editor-title", Icon { name: IconName::Terminal, size: 11 } " Custom nix expression (must evaluate to " span { class: "mono", "true" } ")" }
-                    textarea { class: "input focus-ring mono", rows: 2, placeholder: "cfg.config.networking.firewall.enable == true", value: "{expression}", oninput: move |e| { if let PolicyAssertionDraft::CustomExpression { expression, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expression = e.value(); } } }
+                    textarea { class: "input focus-ring mono code-editor", rows: 3, placeholder: "cfg.config.networking.firewall.enable == true", value: "{expression}", oninput: move |e| { if let PolicyAssertionDraft::CustomExpression { expression, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expression = e.value(); } } }
                     input { class: "input focus-ring refine-failure", placeholder: "Failure message shown when assertion fails", value: "{failure}", oninput: move |e| { set_assertion_failure(&mut rules, index, assertion_index, e.value()); } }
                 },
             } }
@@ -779,5 +858,36 @@ mod tests {
         let rule = assertion.to_rule(1);
         assert!(rule.expression.contains("[ \"openssh\" \"auditd\" ]"));
         assert!(rule.expression.contains("builtins.all (required:"));
+    }
+    #[test]
+    fn extracts_only_vuln_discussion() {
+        assert_eq!(
+            extract_stig_discussion("<VulnDiscussion>foo</VulnDiscussion>"),
+            Some("foo".into())
+        );
+    }
+    #[test]
+    fn excludes_other_stig_description_sections() {
+        assert_eq!(
+            extract_stig_discussion(
+                "<VulnDiscussion>foo</VulnDiscussion><FalsePositives>no</FalsePositives><FalseNegatives>no</FalseNegatives>"
+            ),
+            Some("foo".into())
+        );
+    }
+    #[test]
+    fn normalizes_plain_and_whitespace_discussion() {
+        assert_eq!(
+            extract_stig_discussion("  plain\n\n prose  "),
+            Some("plain prose".into())
+        );
+        assert_eq!(
+            extract_stig_discussion("<VulnDiscussion>\n foo   bar\n</VulnDiscussion>"),
+            Some("foo bar".into())
+        );
+    }
+    #[test]
+    fn omits_blank_discussion() {
+        assert_eq!(extract_stig_discussion(" \n "), None);
     }
 }

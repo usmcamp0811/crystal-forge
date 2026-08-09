@@ -183,6 +183,13 @@ const EVIDENCE_OPTIONS: [(&str, &str); 6] = [
     ("attestation", "Signed attestation"),
 ];
 
+#[derive(Clone, Copy, PartialEq)]
+enum PolicyEditorTab {
+    Details,
+    Enforcement,
+    Evidence,
+}
+
 fn rule_label(kind: &str) -> &'static str {
     RULE_OPTIONS
         .iter()
@@ -597,6 +604,7 @@ pub fn PolicyEditorModal(
     let mut evidence: Signal<Vec<PolicyEvidence>> = use_signal(Vec::new);
     let mut add_rule_kind = use_signal(String::new);
     let mut add_evidence_kind = use_signal(String::new);
+    let mut active_tab = use_signal(|| PolicyEditorTab::Details);
 
     let mut save_error = use_signal(String::new);
     let mut is_saving = use_signal(|| false);
@@ -718,6 +726,13 @@ pub fn PolicyEditorModal(
 
                     // ── Body ────────────────────────────────────────────────────
                     div { class: "modal-body", style: "overflow-y:auto;",
+                        div { class: "cf-modal-tabs", role: "tablist", aria_label: "Policy editor sections",
+                            PolicyEditorTabButton { tab: PolicyEditorTab::Details, active: *active_tab.read(), label: "Details", on_select: move |_| active_tab.set(PolicyEditorTab::Details) }
+                            PolicyEditorTabButton { tab: PolicyEditorTab::Enforcement, active: *active_tab.read(), label: format!("Enforcement · {rule_count}"), on_select: move |_| active_tab.set(PolicyEditorTab::Enforcement) }
+                            PolicyEditorTabButton { tab: PolicyEditorTab::Evidence, active: *active_tab.read(), label: format!("Evidence · {evidence_count}"), on_select: move |_| active_tab.set(PolicyEditorTab::Evidence) }
+                        }
+                        div { class: "cf-modal-tab-panel",
+                        if *active_tab.read() == PolicyEditorTab::Details {
                         div { style: "display:grid;grid-template-columns:1fr;gap:14px;",
                             div { class: "field",
                                 label { "Name" }
@@ -858,8 +873,10 @@ pub fn PolicyEditorModal(
                                 "Comma-separated CCI mappings, if applicable. Persisted to policy version compliance metadata."
                             }
                         }
+                        }
 
                         // Assertions & gate rules builder
+                        if *active_tab.read() == PolicyEditorTab::Enforcement {
                         div { style: "margin-top:6px;",
                             div { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;",
                                 label { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);", "Assertions & gate rules ({rule_count})" }
@@ -919,8 +936,10 @@ pub fn PolicyEditorModal(
                                 }
                             }
                         }
+                        }
 
                         // Evidence for ATO builder (UI-only / not persisted)
+                        if *active_tab.read() == PolicyEditorTab::Evidence {
                         div { style: "margin-top:6px;",
                             div { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;",
                                 label { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);",
@@ -981,6 +1000,9 @@ pub fn PolicyEditorModal(
                                     }
                                 }
                             }
+                        }
+                        }
+
                         }
 
                         if is_editing {
@@ -1125,6 +1147,22 @@ pub fn PolicyEditorModal(
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[component]
+fn PolicyEditorTabButton(
+    tab: PolicyEditorTab,
+    active: PolicyEditorTab,
+    label: String,
+    on_select: EventHandler<()>,
+) -> Element {
+    let selected = tab == active;
+    let class = match tab {
+        PolicyEditorTab::Details => "source",
+        PolicyEditorTab::Enforcement => "enforcement",
+        PolicyEditorTab::Evidence => "evidence",
+    };
+    rsx! { button { class: if selected { format!("cf-modal-tab cf-modal-tab--active cf-modal-tab--{class}") } else { format!("cf-modal-tab cf-modal-tab--{class}") }, role: "tab", aria_selected: if selected { "true" } else { "false" }, onclick: move |_| on_select.call(()), "{label}" } }
+}
+
+#[component]
 fn RuleEditorRow(index: usize, rule: PolicyRule, rules: Signal<Vec<PolicyRule>>) -> Element {
     let kind = rule.kind.clone();
     let persisted = rule.is_persisted();
@@ -1212,9 +1250,9 @@ fn RuleEditorRow(index: usize, rule: PolicyRule, rules: Signal<Vec<PolicyRule>>)
                 },
                 "custom_eval" => rsx! {
                     textarea {
-                        class: "input focus-ring mono",
-                        rows: "2",
-                        style: "font-size:11px;padding:6px 8px;resize:vertical;",
+                        class: "input focus-ring mono code-editor",
+                        rows: "3",
+                        style: "font-size:12px;resize:vertical;",
                         placeholder: "config.networking.firewall.enable == true",
                         value: "{rule.expr}",
                         oninput: move |event| set_rule_field!(expr, event.value()),
