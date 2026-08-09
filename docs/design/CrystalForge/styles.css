@@ -156,6 +156,8 @@ body {
   width: 100%;
 }
 .input::placeholder { color: var(--cf-text-muted); }
+.code-editor { background: var(--cf-input-bg); line-height: 1.7; padding: 10px 12px; white-space: pre-wrap; word-break: break-word; tab-size: 2; }
+.code-editor:focus { border-color: var(--cf-brand-purple); }
 
 /* Card */
 .card {

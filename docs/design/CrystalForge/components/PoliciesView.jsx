@@ -778,6 +778,7 @@ function PolicyFormModal({ mode, policy, onClose }) {
     evidence: [],
   });
   const [confirmDelete, setConfirmDelete] = React.useState(false);
+  const [tab, setTab] = React.useState("details");
   const set = (k,v) => setForm(p => ({ ...p, [k]: v }));
 
   const addRule = (kind) => {
@@ -853,7 +854,28 @@ function PolicyFormModal({ mode, policy, onClose }) {
               </h2>
               <p>{isEdit ? "Update the rules and rationale." : "Compose a policy from gate rules. Systems can be assigned this policy from their edit dialog."}</p>
             </div>
-            <div className="modal-body" style={{ overflowY:"auto" }}>
+            <div className="modal-body" style={{ overflowY:"auto", display:"flex", flexDirection:"column" }}>
+              <div style={{ border:"1px solid var(--cf-divider)", borderRadius:10, overflow:"hidden", flexShrink:0 }}>
+                <div style={{ display:"flex", borderBottom:"1px solid var(--cf-divider)", background:"var(--cf-subtle-bg)" }}>
+                  {[
+                    { id:"details",    label:"Details", color:"var(--cf-text-primary)" },
+                    { id:"rule",       label:`Enforcement · ${form.rules.length}`, color:"var(--cf-brand-purple)" },
+                    { id:"evidence",   label:`Evidence · ${form.evidence.length}`, color:"#60a5fa" },
+                  ].map(t => (
+                    <button key={t.id} type="button" onClick={()=>setTab(t.id)} className="focus-ring"
+                      style={{ all:"unset", cursor:"pointer", flex:1, textAlign:"center", padding:"10px 8px", fontSize:12, fontWeight:600,
+                        color: tab===t.id ? t.color : "var(--cf-text-muted)",
+                        background: tab===t.id ? "var(--cf-card-bg)" : "transparent",
+                        borderBottom: tab===t.id ? `2px solid ${t.color}` : "2px solid transparent",
+                        marginBottom:-1 }}>
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ padding:16 }}>
+
+              {tab === "details" && (
+              <>
               <div style={{ display:"grid", gridTemplateColumns:"1fr", gap:14 }}>
                 <div className="field">
                   <label>Name</label>
@@ -933,9 +955,13 @@ function PolicyFormModal({ mode, policy, onClose }) {
                   placeholder="CCI-000205, CCI-000196"/>
                 <div className="help">Comma-separated CCI mappings, if applicable.</div>
               </div>
+              </>
+              )}
 
+              {tab === "rule" && (
+              <>
               {/* Rules */}
-              <div style={{ marginTop:6 }}>
+              <div>
                 <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:8 }}>
                   <label style={{ fontSize:12, fontWeight:600 }}>Assertions &amp; gate rules ({form.rules.length})</label>
                   <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>All must hold — each compiles to a nix-eval-job check.</span>
@@ -973,9 +999,13 @@ function PolicyFormModal({ mode, policy, onClose }) {
                   </select>
                 </div>
               </div>
+              </>
+              )}
 
+              {tab === "evidence" && (
+              <>
               {/* Evidence */}
-              <div style={{ marginTop:6 }}>
+              <div>
                 <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:8 }}>
                   <label style={{ fontSize:12, fontWeight:600 }}>Evidence for ATO ({form.evidence.length})</label>
                   <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>Artifacts collected to prove compliance to an assessor.</span>
@@ -1008,6 +1038,11 @@ function PolicyFormModal({ mode, policy, onClose }) {
                     <option value="eval_attr">Nix eval attribute</option>
                     <option value="attestation">Signed attestation</option>
                   </select>
+                </div>
+              </div>
+              </>
+              )}
+
                 </div>
               </div>
 
@@ -1195,8 +1230,8 @@ function RuleEditor({ rule, onChange }) {
             <Icon name="terminal" size={11} style={{ color:"var(--cf-brand-purple)", verticalAlign:"text-bottom" }}/>
             Custom nix expression (must evaluate to <span className="mono">true</span>)
           </span>
-          <textarea className="input focus-ring mono" rows={2} value={rule.expr} onChange={e=>onChange({ expr:e.target.value })}
-            placeholder="config.networking.firewall.enable == true" style={{ fontSize:11, padding:"6px 8px", resize:"vertical" }}/>
+          <textarea className="input focus-ring mono code-editor" rows={3} value={rule.expr} onChange={e=>onChange({ expr:e.target.value })}
+            placeholder="config.networking.firewall.enable == true" style={{ fontSize:12, resize:"vertical" }}/>
           <input className="input focus-ring" value={rule.message} onChange={e=>onChange({ message:e.target.value })}
             placeholder="Failure message shown when assertion fails" style={{ fontSize:11, padding:"5px 8px" }}/>
         </div>

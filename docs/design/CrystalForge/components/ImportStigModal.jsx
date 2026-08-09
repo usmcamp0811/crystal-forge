@@ -48,14 +48,22 @@ function parseXccdf(text) {
     const vEl = _byLocal(r, "version")[0];
     const stigId = _text(vEl) || r.getAttribute("id") || "";
     const checkEl = _firstLocal(r, "check-content");
+    const idents = _byLocal(r, "ident");
+    const ccis = idents.filter(id => /cci/i.test(id.getAttribute("system") || "")).map(_text);
+    const srgIdent = idents.find(id => /srg/i.test(id.getAttribute("system") || "") || /^SRG-/.test(_text(id)));
+    const rawDesc = (_firstLocal(r, "description") || {}).textContent || "";
+    const discMatch = rawDesc.match(/<VulnDiscussion>([\s\S]*?)<\/VulnDiscussion>/i);
+    const discussion = (discMatch ? discMatch[1] : rawDesc).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
     return {
       ruleId: r.getAttribute("id") || stigId,
       stigId,
       severity: ["high","medium","low"].includes(sev) ? sev : "medium",
       title: _text(_firstLocal(r, "title")),
+      discussion,
       fixtext: _text(_firstLocal(r, "fixtext")),
       check: _text(checkEl),
-      srg: (_text(_firstLocal(r, "ident")) || "").trim(),
+      srg: (srgIdent ? _text(srgIdent) : (idents[0] ? _text(idents[0]) : "")).trim(),
+      ccis,
       selected: true,
     };
   }).filter(r => r.title);
@@ -69,22 +77,22 @@ const SAMPLE_STIG = {
   version: "v1 (r2)",
   sample: true,
   rules: [
-    { stigId:"V-268089", severity:"high",   title:"NixOS must implement DOD-approved encryption to protect the confidentiality of remote access sessions.",                                   srg:"SRG-OS-000033", fixtext:"Configure SSH to use only FIPS-validated algorithms; set services.openssh.settings.Ciphers to approved values in configuration.nix.", check:"Verify FIPS-approved ciphers: sshd -T | grep -i ciphers", assert:[{ kind:"custom_eval", expr:"config.services.openssh.settings.Ciphers != null && builtins.all (c: builtins.elem c FIPS_APPROVED_CIPHERS) config.services.openssh.settings.Ciphers", message:"SSH must use only FIPS-validated ciphers" }] },
-    { stigId:"V-268130", severity:"high",   title:"NixOS must store only encrypted representations of passwords.",                                                                            srg:"SRG-OS-000112", fixtext:"Ensure PAM uses yescrypt or sha512 hashing for all local accounts.", check:"Verify /etc/shadow contains only hashed passwords: awk -F: '($2!~/^\\$/) {print $1}' /etc/shadow", assert:[{ kind:"custom_eval", expr:"builtins.elem config.security.pam.hashAlgorithm [ \"yescrypt\" \"sha512\" ]", message:"Password hash must be yescrypt or sha512" }] },
-    { stigId:"V-268131", severity:"high",   title:"NixOS must not have the telnet package installed.",                                                                                        srg:"SRG-OS-000095", fixtext:"Remove telnet from environment.systemPackages and rebuild: nixos-rebuild switch.", check:"Verify telnet is not installed: which telnet && echo FAIL || echo PASS", assert:[{ kind:"custom_eval", expr:"!builtins.elem pkgs.telnet config.environment.systemPackages", message:"telnet must not be installed" }] },
-    { stigId:"V-268144", severity:"high",   title:"NixOS must protect the confidentiality and integrity of all information at rest.",                                                         srg:"SRG-OS-000185", fixtext:"Enable full-disk encryption via boot.initrd.luks.devices in configuration.nix.", check:"Verify LUKS encryption on data partitions: lsblk -o NAME,TYPE,MOUNTPOINT | grep crypt", assert:[{ kind:"custom_eval", expr:"config.boot.initrd.luks.devices != {}", message:"Data partitions must be LUKS-encrypted" }] },
-    { stigId:"V-268168", severity:"high",   title:"NixOS must implement NIST FIPS-validated cryptography for digital signatures, cryptographic hashes, and confidentiality protection.",     srg:"SRG-OS-000478", fixtext:"Enable FIPS mode: set security.enableFIPSMode = true in configuration.nix and rebuild.", check:"Verify FIPS mode is enabled: cat /proc/sys/crypto/fips_enabled", assert:[{ kind:"nixos_option", path:"security.enableFIPSMode", op:"==", value:"true" }] },
-    { stigId:"V-268172", severity:"high",   title:"NixOS must not allow an unattended or automatic logon to the system via the console.",                                                     srg:"SRG-OS-000480", fixtext:"Ensure services.getty.autologinUser is not set in configuration.nix.", check:"Verify no autologin is configured: grep -r autologinUser /etc/nixos/", assert:[{ kind:"nixos_option", path:"services.getty.autologinUser", op:"==", value:"null" }] },
-    { stigId:"V-268078", severity:"medium", title:"NixOS must enable the built-in firewall.",                                                                                                 srg:"SRG-OS-000298", fixtext:"Set networking.firewall.enable = true in configuration.nix and define allowedTCPPorts.", check:"Verify firewall is active: nixos-option networking.firewall.enable", assert:[{ kind:"nixos_option", path:"networking.firewall.enable", op:"==", value:"true" }] },
-    { stigId:"V-268080", severity:"medium", title:"NixOS must enable the audit daemon.",                                                                                                      srg:"SRG-OS-000004", fixtext:"Set security.audit.enable = true and configure audit rules in configuration.nix.", check:"Verify auditd is running: systemctl is-active auditd", assert:[{ kind:"nixos_option", path:"security.audit.enable", op:"==", value:"true" }, { kind:"custom_eval", expr:"config.security.audit.rules != []", message:"Audit rules must be configured" }] },
-    { stigId:"V-268081", severity:"medium", title:"NixOS must enforce the limit of three consecutive invalid logon attempts by a user during a 15-minute time period.",                      srg:"SRG-OS-000021", fixtext:"Configure pam_faillock via custom PAM text with deny=3 unlock_time=900.", check:"Verify faillock configuration: faillock --user root", assert:[{ kind:"custom_eval", expr:"builtins.match \".*deny=3.*\" config.security.pam.services.login.text != null", message:"faillock must deny after 3 attempts" }] },
-    { stigId:"V-268082", severity:"medium", title:"NixOS must display the Standard Mandatory DOD Notice and Consent Banner before granting local or remote access via command line logon.",  srg:"SRG-OS-000023", fixtext:"Set services.openssh.banner and /etc/issue to the DoD consent banner text in configuration.nix.", check:"Verify banner is configured: cat /etc/issue", assert:[{ kind:"nixos_option", path:"services.openssh.banner", op:"!=", value:"null" }] },
-    { stigId:"V-268134", severity:"medium", title:"NixOS must enforce a minimum 15-character password length.",                                                                               srg:"SRG-OS-000078", fixtext:"Configure pam_pwquality with minlen = 15 via security.pam.services in configuration.nix.", check:"Verify minimum password length: grep minlen /etc/security/pwquality.conf", assert:[{ kind:"nixos_option", path:"security.pam.pwquality.minlen", op:">=", value:"15" }] },
-    { stigId:"V-268137", severity:"medium", title:"NixOS must not allow direct login to the root account via SSH.",                                                                           srg:"SRG-OS-000109", fixtext:"Set services.openssh.settings.PermitRootLogin = \"no\" in configuration.nix.", check:"Verify root SSH login is disabled: sshd -T | grep permitrootlogin", assert:[{ kind:"nixos_option", path:"services.openssh.settings.PermitRootLogin", op:"==", value:"\"no\"" }] },
-    { stigId:"V-268139", severity:"medium", title:"NixOS must enable USBguard.",                                                                                                              srg:"SRG-OS-000114", fixtext:"Set services.usbguard.enable = true and configure an allow-list policy in configuration.nix.", check:"Verify USBguard is active: systemctl is-active usbguard", assert:[{ kind:"nixos_option", path:"services.usbguard.enable", op:"==", value:"true" }, { kind:"packages_installed", packages:["usbguard"] }] },
-    { stigId:"V-268142", severity:"medium", title:"NixOS must terminate all SSH connections after 10 minutes of becoming unresponsive.",                                                      srg:"SRG-OS-000163", fixtext:"Set services.openssh.settings.ClientAliveInterval = 600 and ClientAliveCountMax = 0 in configuration.nix.", check:"Verify SSH idle timeout: sshd -T | grep clientaliveinterval", assert:[{ kind:"nixos_option", path:"services.openssh.settings.ClientAliveInterval", op:"==", value:"600" }, { kind:"nixos_option", path:"services.openssh.settings.ClientAliveCountMax", op:"==", value:"0" }] },
-    { stigId:"V-268149", severity:"medium", title:"NixOS must compare internal clocks at least every 24 hours with an authoritative time server.",                                            srg:"SRG-OS-000355", fixtext:"Enable services.chrony.enable = true and set servers to approved USNO/DOD NTP sources in configuration.nix.", check:"Verify NTP is synchronized: chronyc tracking", assert:[{ kind:"nixos_option", path:"services.chrony.enable", op:"==", value:"true" }] },
-    { stigId:"V-268086", severity:"low",    title:"NixOS must initiate a session lock after a 10-minute period of inactivity for graphical user logon.",                                     srg:"SRG-OS-000029", fixtext:"Configure GNOME screen lock timeout via services.xserver.desktopManager.gnome.extraGSettingsOverrides with lock-delay=600.", check:"Verify screen lock timeout: gsettings get org.gnome.desktop.session idle-delay", assert:[{ kind:"custom_eval", expr:"config.services.xserver.desktopManager.gnome.extraGSettingsOverrides != null", message:"GNOME idle lock must be configured" }] },
+    { stigId:"V-268089", severity:"high",   title:"NixOS must implement DOD-approved encryption to protect the confidentiality of remote access sessions.",                                   srg:"SRG-OS-000033", ccis:["CCI-000068"], discussion:"Without confidentiality protections, remote access sessions can be intercepted, allowing an attacker to view or capture sensitive information in transit. DOD requires FIPS-validated cryptography for this purpose.", fixtext:"Configure SSH to use only FIPS-validated algorithms; set services.openssh.settings.Ciphers to approved values in configuration.nix.", check:"Verify FIPS-approved ciphers: sshd -T | grep -i ciphers", assert:[{ kind:"custom_eval", expr:"config.services.openssh.settings.Ciphers != null && builtins.all (c: builtins.elem c FIPS_APPROVED_CIPHERS) config.services.openssh.settings.Ciphers", message:"SSH must use only FIPS-validated ciphers" }] },
+    { stigId:"V-268130", severity:"high",   title:"NixOS must store only encrypted representations of passwords.",                                                                            srg:"SRG-OS-000112", ccis:["CCI-000196"], discussion:"Passwords stored in plaintext or with a weak/reversible hash are vulnerable to compromise if the shadow file is disclosed. A strong one-way hash bounds the damage of such a disclosure.", fixtext:"Ensure PAM uses yescrypt or sha512 hashing for all local accounts.", check:"Verify /etc/shadow contains only hashed passwords: awk -F: '($2!~/^\\$/) {print $1}' /etc/shadow", assert:[{ kind:"custom_eval", expr:"builtins.elem config.security.pam.hashAlgorithm [ \"yescrypt\" \"sha512\" ]", message:"Password hash must be yescrypt or sha512" }] },
+    { stigId:"V-268131", severity:"high",   title:"NixOS must not have the telnet package installed.",                                                                                        srg:"SRG-OS-000095", discussion:"Telnet transmits credentials and session data in cleartext. Its presence on a system provides an unencrypted remote access path that bypasses more secure channels.", fixtext:"Remove telnet from environment.systemPackages and rebuild: nixos-rebuild switch.", check:"Verify telnet is not installed: which telnet && echo FAIL || echo PASS", assert:[{ kind:"custom_eval", expr:"!builtins.elem pkgs.telnet config.environment.systemPackages", message:"telnet must not be installed" }] },
+    { stigId:"V-268144", severity:"high",   title:"NixOS must protect the confidentiality and integrity of all information at rest.",                                                         srg:"SRG-OS-000185", ccis:["CCI-001199"], discussion:"Without encryption of data at rest, a lost or stolen disk exposes all information stored on it. Full-disk encryption ensures the data remains protected even if physical media is removed from the system.", fixtext:"Enable full-disk encryption via boot.initrd.luks.devices in configuration.nix.", check:"Verify LUKS encryption on data partitions: lsblk -o NAME,TYPE,MOUNTPOINT | grep crypt", assert:[{ kind:"custom_eval", expr:"config.boot.initrd.luks.devices != {}", message:"Data partitions must be LUKS-encrypted" }] },
+    { stigId:"V-268168", severity:"high",   title:"NixOS must implement NIST FIPS-validated cryptography for digital signatures, cryptographic hashes, and confidentiality protection.",     srg:"SRG-OS-000478", ccis:["CCI-002450"], discussion:"Unapproved cryptographic modules may not implement algorithms correctly, may contain known weaknesses, or may not be validated against a recognized standard, undermining confidence in the protections they claim to provide.", fixtext:"Enable FIPS mode: set security.enableFIPSMode = true in configuration.nix and rebuild.", check:"Verify FIPS mode is enabled: cat /proc/sys/crypto/fips_enabled", assert:[{ kind:"nixos_option", path:"security.enableFIPSMode", op:"==", value:"true" }] },
+    { stigId:"V-268172", severity:"high",   title:"NixOS must not allow an unattended or automatic logon to the system via the console.",                                                     srg:"SRG-OS-000480", discussion:"Failure to require identification and authentication allows unauthorized individuals to access the system console and any resources reachable from it without accountability.", fixtext:"Ensure services.getty.autologinUser is not set in configuration.nix.", check:"Verify no autologin is configured: grep -r autologinUser /etc/nixos/", assert:[{ kind:"nixos_option", path:"services.getty.autologinUser", op:"==", value:"null" }] },
+    { stigId:"V-268078", severity:"medium", title:"NixOS must enable the built-in firewall.",                                                                                                 srg:"SRG-OS-000298", discussion:"Failure to restrict network traffic to only what is required for mission functions increases the attack surface exposed to the network and can allow lateral movement following a compromise.", fixtext:"Set networking.firewall.enable = true in configuration.nix and define allowedTCPPorts.", check:"Verify firewall is active: nixos-option networking.firewall.enable", assert:[{ kind:"nixos_option", path:"networking.firewall.enable", op:"==", value:"true" }] },
+    { stigId:"V-268080", severity:"medium", title:"NixOS must enable the audit daemon.",                                                                                                      srg:"SRG-OS-000004", ccis:["CCI-000018"], discussion:"Without a running audit capability, security-relevant events go unrecorded, preventing detection of unauthorized activity and eliminating the evidence trail needed for incident response.", fixtext:"Set security.audit.enable = true and configure audit rules in configuration.nix.", check:"Verify auditd is running: systemctl is-active auditd", assert:[{ kind:"nixos_option", path:"security.audit.enable", op:"==", value:"true" }, { kind:"custom_eval", expr:"config.security.audit.rules != []", message:"Audit rules must be configured" }] },
+    { stigId:"V-268081", severity:"medium", title:"NixOS must enforce the limit of three consecutive invalid logon attempts by a user during a 15-minute time period.",                      srg:"SRG-OS-000021", discussion:"Without an account lockout after repeated failed attempts, an attacker can perform unlimited password guesses against a valid account, undermining any password complexity requirement.", fixtext:"Configure pam_faillock via custom PAM text with deny=3 unlock_time=900.", check:"Verify faillock configuration: faillock --user root", assert:[{ kind:"custom_eval", expr:"builtins.match \".*deny=3.*\" config.security.pam.services.login.text != null", message:"faillock must deny after 3 attempts" }] },
+    { stigId:"V-268082", severity:"medium", title:"NixOS must display the Standard Mandatory DOD Notice and Consent Banner before granting local or remote access via command line logon.",  srg:"SRG-OS-000023", ccis:["CCI-000048"], discussion:"Failure to display the required notice and consent banner before granting access can weaken the legal standing for monitoring users and prosecuting unauthorized use.", fixtext:"Set services.openssh.banner and /etc/issue to the DoD consent banner text in configuration.nix.", check:"Verify banner is configured: cat /etc/issue", assert:[{ kind:"nixos_option", path:"services.openssh.banner", op:"!=", value:"null" }] },
+    { stigId:"V-268134", severity:"medium", title:"NixOS must enforce a minimum 15-character password length.",                                                                               srg:"SRG-OS-000078", ccis:["CCI-000205"], discussion:"Short passwords are more susceptible to brute-force and dictionary attacks. A longer minimum length increases the computational cost of guessing a valid password.", fixtext:"Configure pam_pwquality with minlen = 15 via security.pam.services in configuration.nix.", check:"Verify minimum password length: grep minlen /etc/security/pwquality.conf", assert:[{ kind:"nixos_option", path:"security.pam.pwquality.minlen", op:">=", value:"15" }] },
+    { stigId:"V-268137", severity:"medium", title:"NixOS must not allow direct login to the root account via SSH.",                                                                           srg:"SRG-OS-000109", ccis:["CCI-000770"], discussion:"Direct root login prevents individual accountability for actions taken with root privileges, since actions cannot be tied back to a specific user. Requiring login as an individual user followed by privilege escalation preserves an audit trail.", fixtext:"Set services.openssh.settings.PermitRootLogin = \"no\" in configuration.nix.", check:"Verify root SSH login is disabled: sshd -T | grep permitrootlogin", assert:[{ kind:"nixos_option", path:"services.openssh.settings.PermitRootLogin", op:"==", value:"\"no\"" }] },
+    { stigId:"V-268139", severity:"medium", title:"NixOS must enable USBguard.",                                                                                                              srg:"SRG-OS-000114", ccis:["CCI-001958"], discussion:"Unrestricted USB device access provides a path for data exfiltration and for the introduction of malicious peripherals. An allow-list policy limits the system to only known, approved devices.", fixtext:"Set services.usbguard.enable = true and configure an allow-list policy in configuration.nix.", check:"Verify USBguard is active: systemctl is-active usbguard", assert:[{ kind:"nixos_option", path:"services.usbguard.enable", op:"==", value:"true" }, { kind:"packages_installed", packages:["usbguard"] }] },
+    { stigId:"V-268142", severity:"medium", title:"NixOS must terminate all SSH connections after 10 minutes of becoming unresponsive.",                                                      srg:"SRG-OS-000163", ccis:["CCI-001133"], discussion:"Unattended, idle sessions left open indefinitely increase the risk that an unauthorized individual gains access to an authenticated session left unlocked at a workstation.", fixtext:"Set services.openssh.settings.ClientAliveInterval = 600 and ClientAliveCountMax = 0 in configuration.nix.", check:"Verify SSH idle timeout: sshd -T | grep clientaliveinterval", assert:[{ kind:"nixos_option", path:"services.openssh.settings.ClientAliveInterval", op:"==", value:"600" }, { kind:"nixos_option", path:"services.openssh.settings.ClientAliveCountMax", op:"==", value:"0" }] },
+    { stigId:"V-268149", severity:"medium", title:"NixOS must compare internal clocks at least every 24 hours with an authoritative time server.",                                            srg:"SRG-OS-000355", discussion:"Inaccurate timestamps make it difficult to correlate events across systems during an investigation, and can invalidate the sequencing of log entries used as evidence.", fixtext:"Enable services.chrony.enable = true and set servers to approved USNO/DOD NTP sources in configuration.nix.", check:"Verify NTP is synchronized: chronyc tracking", assert:[{ kind:"nixos_option", path:"services.chrony.enable", op:"==", value:"true" }] },
+    { stigId:"V-268086", severity:"low",    title:"NixOS must initiate a session lock after a 10-minute period of inactivity for graphical user logon.",                                     srg:"SRG-OS-000029", discussion:"A system left unattended and unlocked provides an opportunity for an unauthorized individual with physical access to view or tamper with an authenticated session.", fixtext:"Configure GNOME screen lock timeout via services.xserver.desktopManager.gnome.extraGSettingsOverrides with lock-delay=600.", check:"Verify screen lock timeout: gsettings get org.gnome.desktop.session idle-delay", assert:[{ kind:"custom_eval", expr:"config.services.xserver.desktopManager.gnome.extraGSettingsOverrides != null", message:"GNOME idle lock must be configured" }] },
   ].map(r => ({ ...r, ruleId:r.stigId, selected:true })),
 };
 
@@ -179,6 +187,7 @@ function ImportStigModal({ onClose, onComplete }) {
   const [envs, setEnvs] = React.useState(["production"]);
   const [created, setCreated] = React.useState(null);
   const [cursor, setCursor] = React.useState(0);
+  const [refineTab, setRefineTab] = React.useState("source");
   const fileRef = React.useRef(null);
 
   const allEnvs = (typeof ENVIRONMENTS !== "undefined" ? ENVIRONMENTS : []);
@@ -392,7 +401,7 @@ function ImportStigModal({ onClose, onComplete }) {
                 </button>
                 <button className="btn btn-primary focus-ring" disabled={!selectedRules.length || !bundleName.trim() || !envs.length}
                   style={(!selectedRules.length || !bundleName.trim() || !envs.length) ? { opacity:0.5, cursor:"not-allowed" } : null}
-                  onClick={()=>{ setCursor(0); setStep("refine"); }}>
+                  onClick={()=>{ setCursor(0); setRefineTab("source"); setStep("refine"); }}>
                   Refine {selectedRules.length} {selectedRules.length === 1 ? "policy" : "policies"} <Icon name="chevron-right" size={13}/>
                 </button>
               </div>
@@ -438,47 +447,13 @@ function ImportStigModal({ onClose, onComplete }) {
                 </div>
               </div>
               <div className="modal-body" style={{ overflowY:"auto" }}>
-                <div style={{ display:"flex", gap:8, alignItems:"center", marginBottom:12 }}>
-                  <span className="chip chip-info">Security &amp; hardening</span>
-                  {rule.srg && <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{rule.srg}</span>}
-                  <span style={{ flex:1 }}/>
-                  <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>policy id: <span className="mono">stig-{_slug(rule.stigId || rule.name)}</span></span>
-                </div>
-
-                {/* ---- From the STIG: the ubiquitous, read-only control text ---- */}
-                <div style={{ border:"1px solid var(--cf-divider)", borderRadius:10, overflow:"hidden", marginBottom:18 }}>
-                  <div style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 12px", background:"var(--cf-subtle-bg)", borderBottom:"1px solid var(--cf-divider)" }}>
-                    <Icon name="shield" size={12} style={{ color:"var(--cf-text-muted)" }}/>
-                    <span style={{ fontSize:10, textTransform:"uppercase", letterSpacing:"0.08em", fontWeight:700, color:"var(--cf-text-muted)" }}>From the STIG</span>
-                    <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{rule.stigId}</span>
-                    <span style={{ flex:1 }}/>
-                    <span style={{ fontSize:10, fontWeight:700, padding:"2px 6px", borderRadius:4, color:CAT[rule.severity].color, background:`color-mix(in oklab, ${CAT[rule.severity].color} 14%, transparent)` }}>{CAT[rule.severity].cat}</span>
-                  </div>
-                  <div style={{ padding:"11px 12px", display:"flex", flexDirection:"column", gap:10 }}>
-                    <div style={{ fontSize:12.5, fontWeight:600, lineHeight:1.45 }}>{rule.title}</div>
-                    {rule.fixtext && (
-                      <div>
-                        <div style={{ fontSize:9.5, textTransform:"uppercase", letterSpacing:"0.07em", fontWeight:700, color:"var(--cf-text-muted)", marginBottom:3 }}>Official fix</div>
-                        <div style={{ fontSize:12, color:"var(--cf-text-secondary)", lineHeight:1.5 }}>{rule.fixtext}</div>
-                      </div>
-                    )}
-                    {rule.check && (
-                      <div>
-                        <div style={{ fontSize:9.5, textTransform:"uppercase", letterSpacing:"0.07em", fontWeight:700, color:"var(--cf-text-muted)", marginBottom:3 }}>Official check</div>
-                        <div className="mono" style={{ fontSize:11, color:"var(--cf-text-secondary)", lineHeight:1.5 }}>{rule.check}</div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* ---- Policy basics ---- */}
-                <div style={{ display:"flex", gap:12, marginBottom:4 }}>
-                  <div className="field" style={{ flex:1 }}>
+                <div style={{ display:"flex", gap:12, alignItems:"flex-end", marginBottom:14 }}>
+                  <div className="field" style={{ flex:1, marginBottom:0 }}>
                     <label>Policy name</label>
                     <input className="input focus-ring mono" value={rule.name || `${rule.stigId} · ${rule.title}`}
                       onChange={e=>editRule(rule.ruleId, { name: e.target.value })}/>
                   </div>
-                  <div className="field">
+                  <div className="field" style={{ marginBottom:0 }}>
                     <label>Severity</label>
                     <div className="seg" style={{ width:"fit-content" }}>
                       {["high","medium","low"].map(s => (
@@ -492,16 +467,66 @@ function ImportStigModal({ onClose, onComplete }) {
                   </div>
                 </div>
 
-                {/* ---- Config assertions (eval-time rules), mirroring the policy editor ---- */}
-                <div className="field">
-                  <label style={{ display:"flex", alignItems:"center", gap:8 }}>
-                    NixOS config assertions
+                <div style={{ border:"1px solid var(--cf-divider)", borderRadius:10, overflow:"hidden", flexShrink:0 }}>
+                  <div style={{ display:"flex", borderBottom:"1px solid var(--cf-divider)", background:"var(--cf-subtle-bg)" }}>
+                    {[
+                      { id:"source",  label:"From the STIG", color:"var(--cf-text-primary)" },
+                      { id:"rule",    label:`Enforcement · ${asserts.filter(assertFilled).length}`, color:"var(--cf-brand-purple)" },
+                      { id:"evidence",label:`Evidence · ${evlist.length}`, color:"#60a5fa" },
+                    ].map(t => (
+                      <button key={t.id} onClick={()=>setRefineTab(t.id)} className="focus-ring"
+                        style={{ all:"unset", cursor:"pointer", flex:1, textAlign:"center", padding:"10px 8px", fontSize:12, fontWeight:600,
+                          color: refineTab===t.id ? t.color : "var(--cf-text-muted)",
+                          background: refineTab===t.id ? "var(--cf-card-bg)" : "transparent",
+                          borderBottom: refineTab===t.id ? `2px solid ${t.color}` : "2px solid transparent",
+                          marginBottom:-1 }}>
+                        {t.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div style={{ padding:16 }}>
+
+                {refineTab === "source" && (
+                <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+                  <div>
+                    <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6 }}>
+                      <span style={{ fontSize:10, fontWeight:700, padding:"2px 7px", borderRadius:4, color:CAT[rule.severity].color, background:`color-mix(in oklab, ${CAT[rule.severity].color} 14%, transparent)` }}>{CAT[rule.severity].cat}</span>
+                      <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{rule.stigId}</span>
+                      {rule.srg && <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{rule.srg}</span>}
+                      {(rule.ccis||[]).map(c => <span key={c} className="chip chip-unknown mono" style={{ fontSize:9 }}>{c}</span>)}
+                    </div>
+                    <div style={{ fontSize:14, fontWeight:600, lineHeight:1.4 }}>{rule.title}</div>
+                  </div>
+                  {rule.discussion && (
+                    <div>
+                      <div style={{ fontSize:9.5, textTransform:"uppercase", letterSpacing:"0.07em", fontWeight:700, color:"var(--cf-text-muted)", marginBottom:4 }}>Discussion</div>
+                      <div style={{ fontSize:12.5, color:"var(--cf-text-secondary)", lineHeight:1.6 }}>{rule.discussion}</div>
+                    </div>
+                  )}
+                  {rule.fixtext && (
+                    <div>
+                      <div style={{ fontSize:9.5, textTransform:"uppercase", letterSpacing:"0.07em", fontWeight:700, color:"var(--cf-text-muted)", marginBottom:4 }}>Official fix</div>
+                      <div style={{ fontSize:12.5, color:"var(--cf-text-secondary)", lineHeight:1.6 }}>{rule.fixtext}</div>
+                    </div>
+                  )}
+                  {rule.check && (
+                    <div>
+                      <div style={{ fontSize:9.5, textTransform:"uppercase", letterSpacing:"0.07em", fontWeight:700, color:"var(--cf-text-muted)", marginBottom:4 }}>Official check</div>
+                      <div className="mono" style={{ fontSize:11.5, color:"var(--cf-text-secondary)", lineHeight:1.6, background:"var(--cf-subtle-bg)", padding:"9px 11px", borderRadius:8 }}>{rule.check}</div>
+                    </div>
+                  )}
+                </div>
+                )}
+
+                {refineTab === "rule" && (
+                <div>
+                  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
                     <span className="chip" style={{ fontSize:9.5, fontWeight:700, padding:"1px 6px", borderRadius:4,
                       color:"var(--cf-brand-purple)", background:"color-mix(in oklab, var(--cf-brand-purple) 14%, transparent)",
-                      border:"1px solid color-mix(in oklab, var(--cf-brand-purple) 40%, transparent)" }}>EVAL-TIME</span>
-                  </label>
-                  <div style={{ fontSize:11, color:"var(--cf-text-muted)", margin:"0 0 9px", lineHeight:1.5 }}>
-                    Asserted against the rendered config during <span className="mono">nix flake check</span> — fails the build before it deploys. These become the policy's rules. {asserts.length === 0 ? "Nothing was inferred for this control — add the assertion that proves it." : "Inferred from the STIG; review before importing."}
+                      border:"1px solid color-mix(in oklab, var(--cf-brand-purple) 40%, transparent)" }}>CHECKED AT BUILD TIME</span>
+                  </div>
+                  <div style={{ fontSize:11.5, color:"var(--cf-text-muted)", margin:"0 0 12px", lineHeight:1.5 }}>
+                    The condition Crystal Forge checks against the rendered config during <span className="mono">nix flake check</span> — a failing rule blocks the build before it ever deploys. {asserts.length === 0 ? "Nothing was inferred for this control — add the rule that proves it." : "Inferred from the STIG; review before importing."}
                   </div>
 
                   {asserts.length === 0 && (
@@ -510,7 +535,7 @@ function ImportStigModal({ onClose, onComplete }) {
                       background:"color-mix(in oklab, #fbbf24 7%, var(--cf-card-bg))" }}>
                       <Icon name="warn" size={13} style={{ color:"#fbbf24", marginTop:1, flexShrink:0 }}/>
                       <div style={{ fontSize:12, color:"var(--cf-text-secondary)", lineHeight:1.5 }}>
-                        No assertion could be inferred from this STIG control. Add one — assert a NixOS option value, assert a package is installed, or write a custom nix expression — or leave empty to rely on runtime evidence alone.
+                        No rule could be inferred from this STIG control. Add one — check a NixOS option value, check a package is installed, or write a custom nix expression — or leave empty to rely on runtime evidence alone.
                       </div>
                     </div>
                   )}
@@ -518,8 +543,11 @@ function ImportStigModal({ onClose, onComplete }) {
                   {asserts.length > 0 && (
                     <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
                       {asserts.map((a, i) => (
-                        <div key={i} style={{ padding:"8px 10px", borderRadius:8, background:"var(--cf-subtle-bg)",
-                          border: a.inferred ? "1px solid color-mix(in oklab, var(--cf-brand-purple) 28%, transparent)" : "1px solid transparent" }}>
+                        <div key={i} style={{ padding:"8px 10px 8px 12px", borderRadius:8, background:"color-mix(in oklab, var(--cf-brand-purple) 5%, var(--cf-subtle-bg))",
+                          borderLeft: "3px solid var(--cf-brand-purple)",
+                          borderTop: a.inferred ? "1px solid color-mix(in oklab, var(--cf-brand-purple) 28%, transparent)" : "1px solid transparent",
+                          borderRight: a.inferred ? "1px solid color-mix(in oklab, var(--cf-brand-purple) 28%, transparent)" : "1px solid transparent",
+                          borderBottom: a.inferred ? "1px solid color-mix(in oklab, var(--cf-brand-purple) 28%, transparent)" : "1px solid transparent" }}>
                           {a.inferred && (
                             <div style={{ marginBottom:6 }}>
                               <span style={{ fontSize:9, fontWeight:700, padding:"1px 6px", borderRadius:4, color:"var(--cf-brand-purple)", background:"color-mix(in oklab, var(--cf-brand-purple) 13%, transparent)" }}>inferred · review</span>
@@ -527,7 +555,7 @@ function ImportStigModal({ onClose, onComplete }) {
                           )}
                           <div style={{ display:"grid", gridTemplateColumns:"1fr auto", gap:8, alignItems:"center" }}>
                             <RuleEditor rule={a} onChange={patch=>patchAssert(i, { ...patch, inferred:false })}/>
-                            <button className="btn-icon focus-ring" onClick={()=>rmAssert(i)} aria-label="Remove assertion" title="Remove"><Icon name="x" size={13}/></button>
+                            <button className="btn-icon focus-ring" onClick={()=>rmAssert(i)} aria-label="Remove rule" title="Remove"><Icon name="x" size={13}/></button>
                           </div>
                         </div>
                       ))}
@@ -538,24 +566,22 @@ function ImportStigModal({ onClose, onComplete }) {
                     <select className="input focus-ring" defaultValue=""
                       onChange={e=>{ if (e.target.value) { addAssert(e.target.value); e.target.value = ""; } }}
                       style={{ maxWidth:280, fontSize:12 }}>
-                      <option value="" disabled>+ Add assertion…</option>
-                      <option value="nixos_option">Assert a NixOS option value</option>
-                      <option value="packages_installed">Assert packages installed</option>
+                      <option value="" disabled>+ Add rule…</option>
+                      <option value="nixos_option">Check a NixOS option value</option>
+                      <option value="packages_installed">Check packages installed</option>
                       <option value="custom_eval">Custom nix expression</option>
                     </select>
                   </div>
                 </div>
+                )}
 
-                {/* ---- Evidence for ATO ---- */}
-                <div className="field">
-                  <label style={{ display:"flex", alignItems:"center", gap:8 }}>
-                    Evidence for ATO <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· {evlist.length}</span>
-                  </label>
-                  <div style={{ fontSize:11, color:"var(--cf-text-muted)", margin:"0 0 9px", lineHeight:1.5 }}>
+                {refineTab === "evidence" && (
+                <div>
+                  <div style={{ fontSize:11.5, color:"var(--cf-text-muted)", margin:"0 0 12px", lineHeight:1.5 }}>
                     Artifacts collected at deploy and runtime to prove the control to an assessor. Seeded from the STIG check.
                   </div>
                   {evlist.map((ev, i) => (
-                    <div key={i} style={{ border:"1px solid var(--cf-divider)", borderRadius:8, padding:"10px 11px", marginBottom:8, background:"var(--cf-card-bg)" }}>
+                    <div key={i} style={{ border:"1px solid var(--cf-divider)", borderLeft:"3px solid #60a5fa", borderRadius:8, padding:"10px 11px", marginBottom:8, background:"color-mix(in oklab, #60a5fa 4%, var(--cf-card-bg))" }}>
                       <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
                         <span className="chip chip-unknown" style={{ fontSize:9 }}>{ev.kind.replace("_"," ")}</span>
                         <span style={{ flex:1 }}/>
@@ -572,17 +598,21 @@ function ImportStigModal({ onClose, onComplete }) {
                     ))}
                   </div>
                 </div>
+                )}
 
-                <div className="sd-callout sd-callout-info">
+                  </div>
+                </div>
+
+                <div className="sd-callout sd-callout-info" style={{ marginTop:14 }}>
                   <Icon name="check" size={13}/>
                   <div style={{ fontSize:12 }}>
-                    On import this becomes a standard CF security policy — <strong>{asserts.filter(assertFilled).length} config {asserts.filter(assertFilled).length === 1 ? "assertion" : "assertions"}</strong> (eval-time rules) and <strong>{evlist.length} evidence {evlist.length === 1 ? "item" : "items"}</strong> for ATO. Editable later from the Policies view.
+                    On import this becomes a standard CF security policy — <strong>{asserts.filter(assertFilled).length} enforcement {asserts.filter(assertFilled).length === 1 ? "rule" : "rules"}</strong> (checked at build time) and <strong>{evlist.length} evidence {evlist.length === 1 ? "item" : "items"}</strong> for ATO. Editable later from the Policies view.
                   </div>
                 </div>
               </div>
               <div className="modal-foot" style={{ justifyContent:"space-between" }}>
                 <div style={{ display:"flex", gap:8 }}>
-                  <button className="btn btn-ghost focus-ring" onClick={()=> cursor === 0 ? setStep("review") : setCursor(c => c - 1)}>
+                  <button className="btn btn-ghost focus-ring" onClick={()=> { setRefineTab("source"); cursor === 0 ? setStep("review") : setCursor(c => c - 1); }}>
                     <Icon name="chevron-left" size={13}/> {cursor === 0 ? "Back to list" : "Previous"}
                   </button>
                   <button className="btn btn-ghost focus-ring" style={{ color:"#f87171" }}
@@ -602,7 +632,7 @@ function ImportStigModal({ onClose, onComplete }) {
                       <Icon name="check" size={13}/> Create bundle + {total} {total === 1 ? "policy" : "policies"}
                     </button>
                   ) : (
-                    <button className="btn btn-primary focus-ring" onClick={()=>setCursor(c => Math.min(total - 1, c + 1))}>
+                    <button className="btn btn-primary focus-ring" onClick={()=>{ setRefineTab("source"); setCursor(c => Math.min(total - 1, c + 1)); }}>
                       Next <Icon name="chevron-right" size={13}/>
                     </button>
                   )}
