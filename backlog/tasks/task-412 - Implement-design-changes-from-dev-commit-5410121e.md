@@ -6,6 +6,7 @@ assignee:
   - '@gpt-5.6-luna'
 created_date: '2026-08-01 01:04'
 updated_date: '2026-08-09 23:37'
+updated_date: '2026-08-09 04:40'
 labels:
   - design
   - frontend
@@ -1358,6 +1359,8 @@ Focused historical assignment fix: add an authenticated read-only bundle-version
 - Map actual FK/trigger ownership for bundle/policy lineages and version children from migrations/schema; distinguish disposable owned children from external/history blockers.
 - Implement only the transactionally required owned-child deletion order; retain external references and immutable history as typed conflicts.
 - Add PostgreSQL-backed query/API regression tests and run the deployed runtime matrix before reporting this slice complete.
+
+Parity pass for Refine Policy Modal against ImportStigModal.jsx. Root causes: (1) cf-modal-tabs and cf-modal-tab-panel are independent bordered siblings; design wraps in one refine-tab-card. (2) refine-basics margin-bottom 4px vs design 14px. (3) Header gap 16px/icon 15px/progress margin-top 10px vs design 10px/14px/8px. (4) refine-source-card__body gap 10px vs design 14px. (5) refine-source-identifiers no margin-bottom vs design 6px. (6) refine-source-title 12.5px vs design 14px/600/1.4. (7) refine-source-copy 12px/1.5 vs design 12.5px/1.6. (8) refine-source-check pre needs 11.5px/1.6. (9) Enforcement tab and summary use raw .len() not filled assertion count. (10) No scroll containment for long content. Changes: refine_policy.rs: wrap tabs in div.refine-tab-card, group identifiers+title in div.refine-source-heading, fix icon size to 14, use filled assertion count. app.css: add .refine-tab-card rule, remove border/radius from .cf-modal-tabs and .cf-modal-tab-panel, update spacing/typography to design values, add overflow-y:auto scroll containment.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
