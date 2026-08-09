@@ -3,10 +3,11 @@ id: TASK-412
 title: Implement CF-XCCDF bundle and policy interchange and design updates
 status: In Progress
 assignee:
-  - '@gpt-5.6-luna'
+  - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
 updated_date: '2026-08-09 23:37'
 updated_date: '2026-08-09 04:40'
+updated_date: '2026-08-09 14:58'
 labels:
   - design
   - frontend
@@ -1369,6 +1370,8 @@ Parity pass for Refine Policy Modal against ImportStigModal.jsx. Root causes: (1
 Deletion lifecycle pass: inspected deployed service name crystal-forge-server.service and recent logs; no delete request failures were present in the queried two-hour window. Live API reproduction was unavailable because the deployed OIDC endpoint/listening port is not accessible from this session. Implemented transactional bundle deletion outcomes for missing, disposable, immutable-history, and active-assignment cases with typed 409 ApiError responses; kept DB trigger defense-in-depth. Implemented transactional policy lineage deletion checks covering accepted/deprecated versions, legacy bundle/policy references, exact version bundle membership, assignment additions/exclusions/overrides, and legacy environment/system assignment. Added visible policy and bundle delete errors, busy-state duplicate-delete prevention, lifecycle-aware confirmation text, and bundle delete hiding/reason text for immutable history/known assignments. SQLX_OFFLINE=true cargo check and web-ui cargo check pass; DB-backed tests/runtime verification remain pending due unavailable local database/OIDC endpoint.
 
 Implemented a local, uncommitted first pass of the `0c92fdf2` modal structure: shared CSS tabs in STIG refinement and policy editor; source tab uses existing preview metadata, prefix-filtered/sorted SRG/CCI identifiers, clean `VulnDiscussion` presentation, official full check/fix; navigation resets refinement to Source; custom Nix editors use `code-editor`; lifecycle/action/payload code was not altered. Verification passed: `cargo check --manifest-path packages/web-ui/Cargo.toml`; full web UI Rust tests (144 passed, 1 ignored); both applicable fmt checks; `git diff --check`. Browser component/Playwright coverage and user-authorized dev deployment/manual testing remain required before review.
+
+2026-08-09: Ownership transferred by the user to @gpt-5.6-terra for a narrowly scoped Policies view and policy-detail drawer visual/information-architecture parity pass. Backend correctness findings quoted in the request are recorded for review but are not part of this pass unless explicitly expanded.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
