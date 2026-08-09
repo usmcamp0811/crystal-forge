@@ -35,6 +35,7 @@ pub fn PoliciesView() -> Element {
     let mut show_editor = use_signal(|| false);
     let mut show_import = use_signal(|| false);
     let mut drawer_policy = use_signal(|| None::<PolicyDefinition>);
+    let mut drawer_revisions = use_signal(|| false);
 
     use_effect(move || {
         spawn(async move {
@@ -498,17 +499,17 @@ pub fn PoliciesView() -> Element {
                 }
             } else {
                 for (category, items) in grouped_policies.iter() {
-                    section { class: "pol-group space-y-3",
-                        div { class: "pol-group-head flex items-start gap-3",
-                            span { class: "pol-group-icon", style: "width:28px;height:28px;border-radius:8px;display:grid;place-items:center;background:color-mix(in oklab, {category.color()} 16%, transparent);color:{category.color()};",
+                    section { class: "pol-group",
+                        div { class: "pol-group-head",
+                            span { class: "pol-group-icon", style: "background:color-mix(in oklab, {category.color()} 16%, transparent);color:{category.color()};",
                                 svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
                                     path { d: "M9 12l2 2 4-4" }
                                     path { d: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z" }
                                 }
                             }
                             div { style: "min-width:0;",
-                                h2 { class: "text-sm font-semibold text-white", "{category.label()} " span { class: "text-xs text-gray-500", "{items.len()}" } }
-                                div { class: "text-xs text-gray-500", "{category.blurb()}" }
+                                h2 { class: "pol-group-title", "{category.label()} " span { class: "pol-group-count", "{items.len()}" } }
+                                div { class: "pol-group-blurb", "{category.blurb()}" }
                             }
                         }
 
@@ -518,6 +519,11 @@ pub fn PoliciesView() -> Element {
                                     key: "{policy.id}",
                                     policy: policy.clone(),
                                     on_open: move |p: PolicyDefinition| {
+                                        drawer_revisions.set(false);
+                                        drawer_policy.set(Some(p));
+                                    },
+                                    on_open_revisions: move |p: PolicyDefinition| {
+                                        drawer_revisions.set(true);
                                         drawer_policy.set(Some(p));
                                     },
                                     highlighted: focused_policy_name.read().as_ref() == Some(&policy.name),
@@ -586,6 +592,7 @@ pub fn PoliciesView() -> Element {
                 PolicyDrawer {
                     policy,
                     is_admin: is_admin_user,
+                    initial_revisions: drawer_revisions(),
                     on_close: move |_| drawer_policy.set(None),
                     on_export: export_single_policy,
                     on_edit: move |policy: PolicyDefinition| {
@@ -659,13 +666,16 @@ pub fn PoliciesView() -> Element {
 fn PolicyDrawer(
     policy: PolicyDefinition,
     is_admin: bool,
+    initial_revisions: bool,
     on_close: EventHandler<MouseEvent>,
     on_export: EventHandler<(PolicyDefinition, String)>,
     on_edit: EventHandler<PolicyDefinition>,
 ) -> Element {
     let mut selected_version_id = use_signal(|| policy.version_id);
+    let mut show_revisions = use_signal(|| initial_revisions);
     let policy_version_id = policy.version_id;
     use_effect(move || selected_version_id.set(policy_version_id));
+    use_effect(move || show_revisions.set(initial_revisions));
 
     let selected_revision = selected_version_id()
         .and_then(|id| policy.revisions.iter().find(|revision| revision.id == id));
@@ -694,6 +704,7 @@ fn PolicyDrawer(
                 format: policy.format,
                 body,
                 policy_type: Some(revision.policy_type.clone()),
+                updated_at: policy.updated_at.clone(),
                 system_count: policy.system_count,
                 // Use the selected revision's exact mappings (not the lineage current).
                 srg_ids: revision.srg_ids.clone(),
@@ -710,6 +721,11 @@ fn PolicyDrawer(
     let mut action_status = use_signal(|| None::<String>);
 
     let version_id = displayed_policy.version_id;
+    let revision_count = policy.revisions.len();
+    let type_display = normalized_policy_type(&displayed_policy).replace('_', " ");
+    let modified_at = selected_revision
+        .map(|revision| revision.created_at.clone())
+        .unwrap_or_else(|| displayed_policy.updated_at.clone());
 
     rsx! {
         div {
@@ -724,6 +740,10 @@ fn PolicyDrawer(
                 class: "fl-tray-head",
                 div {
                     style: "display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1;",
+                    svg { width: "18", height: "18", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "flex-shrink:0;color:{category.color()};",
+                        path { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }
+                        polyline { points: "14 2 14 8 20 8" }
+                    }
                     div { style: "min-width: 0;",
                         div {
                             style: "display: flex; align-items: center; gap: 8px; flex-wrap: wrap;",
@@ -731,7 +751,7 @@ fn PolicyDrawer(
                             span {
                                 class: "chip",
                                 style: "color: {category.color()}; background: color-mix(in oklab, {category.color()} 14%, transparent);",
-                                "{category.label()}"
+                                "{category.short_label()}"
                             }
                             if is_core {
                                 span { class: "chip chip-info", "built-in" }
@@ -753,21 +773,15 @@ fn PolicyDrawer(
                             "Edit"
                         }
                     }
-                    button {
-                        class: "btn btn-ghost focus-ring xs",
-                        onclick: {
+                    IOMenu {
+                        id: "policy-drawer-export".to_string(),
+                        trigger_label: "Export".to_string(),
+                        trigger_class: "btn btn-ghost focus-ring xs".to_string(),
+                        items: vec![IOMenuItem::action("JSON"), IOMenuItem::action("TOML")],
+                        on_action: {
                             let policy = displayed_policy.clone();
-                            move |_| on_export.call((policy.clone(), "json".to_string()))
+                            move |index| on_export.call((policy.clone(), if index == 0 { "json".to_string() } else { "toml".to_string() }))
                         },
-                        "JSON"
-                    }
-                    button {
-                        class: "btn btn-ghost focus-ring xs",
-                        onclick: {
-                            let policy = displayed_policy.clone();
-                            move |_| on_export.call((policy.clone(), "toml".to_string()))
-                        },
-                        "TOML"
                     }
                     // ── Lifecycle controls (admin-only, requires version ID) ─
                     if is_admin && !is_core && version_id.is_some() {
@@ -845,86 +859,80 @@ fn PolicyDrawer(
                         crate::components::icon::Icon { name: crate::components::icon::IconName::X, size: 16 }
                     }
                 }
-                if !policy.revisions.is_empty() {
-                    div { class: "policy-revision-strip", style: "padding: 10px 16px; border-top: 1px solid var(--cf-border); border-bottom: 1px solid var(--cf-border);",
-                        div { style: "font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--cf-text-muted); margin-bottom: 7px;", "Revisions" }
-                        div { style: "display: flex; flex-direction: column; gap: 5px;",
-                            for revision in policy.revisions.iter().cloned() {
-                                {
-                                    let revision_id = revision.id;
-                                    let selected = selected_version_id() == Some(revision_id);
-                                    rsx! {
-                                        button {
-                                            class: "btn btn-ghost focus-ring",
-                                            style: if selected { "display:flex;justify-content:space-between;align-items:center;text-align:left;border-color:var(--cf-accent);background:color-mix(in oklab, var(--cf-accent) 12%, transparent);" } else { "display:flex;justify-content:space-between;align-items:center;text-align:left;" },
-                                            onclick: move |_| selected_version_id.set(Some(revision_id)),
-                                            span {
-                                                span { class: "mono", "v{revision.version}" }
-                                                span { style: "margin-left: 7px; color: var(--cf-text-muted);", "{revision.publication_state}" }
-                                            }
-                                            span { style: "display:flex;gap:5px;align-items:center;",
-                                                if revision.is_current_draft { span { class: "chip chip-info", "current draft" } }
-                                                if revision.is_current_published { span { class: "chip chip-healthy", "current" } }
-                                                if selected { span { class: "chip", "selected" } }
-                                            }
+            }
+            div { class: "ed-stats",
+                div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{displayed_policy.system_count}" } }
+                div { class: "ed-stat", div { class: "ed-stat-label", "Rules" } div { class: "ed-stat-val", "{rules.len()}" } }
+                div { class: "ed-stat", div { class: "ed-stat-label", "Type" } div { class: "ed-stat-val", style: "font-size:12px;", "{type_display}" } }
+                div { class: "ed-stat", div { class: "ed-stat-label", "Modified" } div { class: "ed-stat-val", style: "font-size:12px;", "{modified_at}" } }
+                div { class: "ed-stat", div { class: "ed-stat-label", "Owner" } div { class: "ed-stat-val", "—" } }
+            }
+            if revision_count > 1 {
+                div { class: "policy-drawer-tabs",
+                    button { class: if !show_revisions() { "btn btn-ghost xs focus-ring active" } else { "btn btn-ghost xs focus-ring" }, onclick: move |_| show_revisions.set(false), "Details" }
+                    button { class: if show_revisions() { "btn btn-ghost xs focus-ring active" } else { "btn btn-ghost xs focus-ring" }, onclick: move |_| show_revisions.set(true), "Revisions · {revision_count}" }
+                }
+            }
+            div {
+                class: "ed-body policy-drawer-body",
+                if show_revisions() && revision_count > 1 {
+                    div { class: "policy-revision-list",
+                        for revision in policy.revisions.iter().cloned() {
+                            {
+                                let revision_id = revision.id;
+                                let selected = selected_version_id() == Some(revision_id);
+                                rsx! {
+                                    button {
+                                        class: if selected { "policy-revision-row selected focus-ring" } else { "policy-revision-row focus-ring" },
+                                        onclick: move |_| selected_version_id.set(Some(revision_id)),
+                                        div {
+                                            div { class: "mono", style: "font-weight:700;", "v{revision.version}" }
+                                            if let Some(description) = revision.description.as_ref() { div { style: "margin-top:4px;font-size:12px;color:var(--cf-text-secondary);", "{description}" } }
+                                            div { style: "margin-top:6px;font-size:11px;color:var(--cf-text-muted);", "Created {revision.created_at}" }
+                                        }
+                                        div { style: "display:flex;flex-wrap:wrap;justify-content:flex-end;gap:5px;",
+                                            span { class: "chip chip-unknown", "{revision.publication_state}" }
+                                            if revision.is_current_draft { span { class: "chip chip-info", "current draft" } }
+                                            if revision.is_current_published { span { class: "chip chip-healthy", "current" } }
+                                            if selected { span { class: "chip", "selected" } }
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                }
-            }
-            div {
-                class: "ed-body",
-                div { style: "display: flex; flex-direction: column; gap: 16px;",
-                    div {
-                        h3 { style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin: 0 0 8px;", "Rules" }
-                        if rules.is_empty() {
-                            div { style: "font-size: 12px; color: var(--cf-text-muted);", "No automated rules — operator approves directly." }
-                        } else {
-                            div { style: "display: flex; flex-direction: column; gap: 8px;",
-                                for rule in rules {
-                                    div {
-                                        style: "font-size: 12px; color: var(--cf-text-primary);",
-                                        "{rule.label}"
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // SRG / CCI mapping — version-specific, PERSISTED.
-                    // Only rendered when the selected revision has mappings.
+                } else {
                     if !displayed_policy.srg_ids.is_empty() || !displayed_policy.cci_ids.is_empty() {
                         div {
-                            h3 { style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin: 0 0 8px;", "SRG / CCI mapping" }
-                            div { style: "display: flex; flex-wrap: wrap; gap: 6px;",
-                                for srg in displayed_policy.srg_ids.iter() {
-                                    span {
-                                        class: "chip",
-                                        style: "font-family: monospace; font-size: 11px; color: #60a5fa; background: color-mix(in oklab, #60a5fa 12%, transparent);",
-                                        "{srg}"
-                                    }
-                                }
-                                for cci in displayed_policy.cci_ids.iter() {
-                                    span {
-                                        class: "chip",
-                                        style: "font-family: monospace; font-size: 11px; color: #34d399; background: color-mix(in oklab, #34d399 12%, transparent);",
-                                        "{cci}"
+                            h3 { class: "policy-drawer-section-title", "SRG / CCI mapping" }
+                            div { style: "display: flex; flex-wrap: wrap; gap: 5px;",
+                                for srg in displayed_policy.srg_ids.iter() { span { class: "chip mono policy-mapping-srg", "{srg}" } }
+                                for cci in displayed_policy.cci_ids.iter() { span { class: "chip mono policy-mapping-cci", "{cci}" } }
+                            }
+                        }
+                    }
+                    div {
+                        h3 { class: "policy-drawer-section-title", "Rules" }
+                        if rules.is_empty() {
+                            div { class: "sd-callout sd-callout-info", "No automated rules are configured for this policy." }
+                        } else {
+                            div { style: "display:flex;flex-direction:column;gap:8px;",
+                                for rule in rules {
+                                    div { class: "policy-rule-card",
+                                        div { class: "policy-rule-title", "{rule.label}" }
+                                        div { class: "policy-rule-kind", "kind: {rule.kind}" }
                                     }
                                 }
                             }
                         }
                     }
-
                     div {
-                        h3 { style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin: 0 0 8px;", "Definition" }
-                        pre {
-                            class: "mono",
-                            style: "margin: 0; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; padding: 12px; border-radius: 8px; background: var(--cf-subtle-bg);",
-                             "{displayed_policy.body}"
-                        }
+                        h3 { class: "policy-drawer-section-title", "Systems using this policy · {displayed_policy.system_count}" }
+                        p { style: "margin:0;font-size:12px;color:var(--cf-text-muted);line-height:1.5;", "{displayed_policy.system_count} systems currently use this policy. Detailed system membership is not available from this endpoint." }
+                    }
+                    details { class: "policy-definition",
+                        summary { "Definition" }
+                        pre { class: "mono", "{displayed_policy.body}" }
                     }
                 }
             }

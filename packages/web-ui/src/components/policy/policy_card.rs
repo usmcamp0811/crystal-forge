@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use super::types::{
     PolicyDefinition, is_core_policy, is_policy_enabled, is_policy_version_editable,
-    normalized_policy_type, policy_category, policy_rule_summaries,
+    policy_rule_summaries,
 };
 
 /// Card component for displaying a policy definition with design-parity rule summaries.
@@ -13,6 +13,7 @@ use super::types::{
 pub fn PolicyCard(
     policy: PolicyDefinition,
     on_open: EventHandler<PolicyDefinition>,
+    on_open_revisions: EventHandler<PolicyDefinition>,
     on_edit: EventHandler<PolicyDefinition>,
     on_delete: EventHandler<Uuid>,
     #[props(default = false)] selection_mode: bool,
@@ -20,34 +21,30 @@ pub fn PolicyCard(
     #[props(default)] on_toggle_select: EventHandler<bool>,
     #[props(default = false)] highlighted: bool,
 ) -> Element {
-    let category = policy_category(&policy);
     let rules = policy_rule_summaries(&policy);
     let is_core = is_core_policy(&policy);
     let enabled = is_policy_enabled(&policy);
     let is_editable = is_policy_version_editable(&policy);
-    let policy_type = normalized_policy_type(&policy);
     let type_label = if is_core { "built-in" } else { "custom" };
     let type_chip = if is_core {
         "chip chip-info"
     } else {
         "chip chip-healthy"
     };
-    let category_color = category.color();
     let opacity = if enabled { "1" } else { "0.72" };
     let policy_for_open = policy.clone();
     let policy_for_edit = policy.clone();
     let policy_id = policy.id;
+    let policy_for_revisions = policy.clone();
 
     rsx! {
         div {
             class: "sys-card",
             onclick: move |_| on_open.call(policy_for_open.clone()),
             style: if highlighted {
-                format!(
-                    "--status-color: {category_color}; opacity: {opacity}; box-shadow: inset 0 0 0 1px color-mix(in oklab, {category_color} 55%, transparent), 0 0 0 2px color-mix(in oklab, {category_color} 22%, transparent); background: color-mix(in oklab, {category_color} 7%, var(--cf-card-bg));"
-                )
+                format!("--status-color: var(--cf-brand-purple); opacity: {opacity}; box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--cf-brand-purple) 55%, transparent), 0 0 0 2px color-mix(in oklab, var(--cf-brand-purple) 22%, transparent); background: color-mix(in oklab, var(--cf-brand-purple) 7%, var(--cf-card-bg));")
             } else {
-                format!("--status-color: {category_color}; opacity: {opacity}; cursor: pointer;")
+                format!("--status-color: var(--cf-brand-purple); opacity: {opacity}; cursor: pointer;")
             },
             "data-policy-card": "true",
             "data-policy-name": "{policy.name}",
@@ -76,10 +73,9 @@ pub fn PolicyCard(
                     div { class: "text-[11px] text-gray-400 line-clamp-2", "{policy.description}" }
                 }
                 div { style: "display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex-shrink:0;",
-                    span { class: "chip", style: "color: {category_color}; background: color-mix(in oklab, {category_color} 14%, transparent);", "{category.short_label()}" }
                     span { class: "{type_chip}", "{type_label}" }
-                    if policy_type == "require_cve_check" {
-                        span { class: "chip", style: "color:#fbbf24;background:rgba(251,191,36,0.14);", "CVE gate" }
+                    if let Some(state) = policy.publication_state.as_ref() {
+                        span { class: "chip chip-unknown", "{state}" }
                     }
                     if is_core {
                         span { class: "chip chip-info", "protected" }
@@ -112,6 +108,17 @@ pub fn PolicyCard(
                 }
             }
 
+            if !policy.srg_ids.is_empty() || !policy.cci_ids.is_empty() {
+                div { class: "policy-card-mappings",
+                    for srg in policy.srg_ids.iter() {
+                        span { class: "chip mono policy-mapping-srg", "{srg}" }
+                    }
+                    for cci in policy.cci_ids.iter() {
+                        span { class: "chip mono policy-mapping-cci", "{cci}" }
+                    }
+                }
+            }
+
             div { class: "sys-card-foot",
                 div { class: "flex items-center gap-2 text-[11px] text-gray-500",
                     svg { width: "11", height: "11", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
@@ -119,7 +126,7 @@ pub fn PolicyCard(
                         rect { x: "3", y: "14", width: "18", height: "6", rx: "2" }
                     }
                     span { class: "mono font-semibold text-gray-300", "{policy.system_count}" }
-                    span { "systems assigned" }
+                    span { "systems use this" }
                 }
                 if is_core {
                     span { class: "text-xs text-emerald-300", "Always on" }
@@ -145,6 +152,17 @@ pub fn PolicyCard(
                     }
                 } else {
                     span { class: "chip chip-unknown", "read-only" }
+                }
+            }
+            if policy.revisions.len() > 1 {
+                button {
+                    class: "policy-card-revisions focus-ring",
+                    onclick: move |event| {
+                        event.stop_propagation();
+                        on_open_revisions.call(policy_for_revisions.clone());
+                    },
+                    span { "{policy.revisions.len()} revisions" }
+                    span { "›" }
                 }
             }
         }

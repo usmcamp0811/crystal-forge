@@ -28,6 +28,8 @@ pub struct PolicyDefinition {
     /// The policy type (e.g., "require_cf_agent", "require_crystal_forge_agent", "require_packages", "custom_check").
     /// Optional for backward compatibility with mock/TOML policies that don't have this field.
     pub policy_type: Option<String>,
+    /// Last persisted modification time for this lineage, supplied by the API.
+    pub updated_at: String,
     /// Number of NixOS derivations (systems) this policy applies to.
     pub system_count: i64,
     /// SRG IDs from the current version's compliance_metadata. Persisted.
@@ -60,68 +62,78 @@ pub struct PolicyRevisionSummary {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PolicyCategory {
     Deployment,
-    Security,
-    Scanning,
+    Pipeline,
     Rollout,
+    Security,
 }
 
 impl PolicyCategory {
     pub fn id(self) -> &'static str {
         match self {
             Self::Deployment => "deployment",
-            Self::Security => "security",
-            Self::Scanning => "scanning",
+            Self::Pipeline => "pipeline",
             Self::Rollout => "rollout",
+            Self::Security => "security",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Deployment => "Deployment gates",
-            Self::Security => "Security baseline",
-            Self::Scanning => "Vulnerability gates",
-            Self::Rollout => "Rollout controls",
+            Self::Deployment => "Deployment",
+            Self::Pipeline => "Pipeline gates",
+            Self::Rollout => "Rollout control",
+            Self::Security => "Security & hardening",
         }
     }
 
     pub fn short_label(self) -> &'static str {
         match self {
             Self::Deployment => "deploy",
-            Self::Security => "secure",
-            Self::Scanning => "scan",
+            Self::Pipeline => "pipeline",
             Self::Rollout => "rollout",
+            Self::Security => "security",
         }
     }
 
     pub fn blurb(self) -> &'static str {
         match self {
-            Self::Deployment => "Criteria a system must satisfy before deploy.",
-            Self::Security => "Host configuration and hardening assertions.",
-            Self::Scanning => "CVE and scan-result blockers.",
-            Self::Rollout => "Approval, timing, and canary constraints.",
+            Self::Deployment => "Base strategy for how and when a system picks up a configuration.",
+            Self::Pipeline => "Eval, build, and CVE output gates before promotion.",
+            Self::Rollout => "Timing, approval, staged, and canary rollout controls.",
+            Self::Security => "Configuration-level assertions such as STIG and hardening controls.",
         }
     }
 
     pub fn color(self) -> &'static str {
         match self {
-            Self::Deployment => "#a78bfa",
-            Self::Security => "#60a5fa",
-            Self::Scanning => "#fbbf24",
-            Self::Rollout => "#34d399",
+            Self::Deployment => "#60a5fa",
+            Self::Pipeline => "#a78bfa",
+            Self::Rollout => "#fbbf24",
+            Self::Security => "#f87171",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Deployment => "deploy",
+            Self::Pipeline => "build",
+            Self::Rollout => "sync",
+            Self::Security => "shield",
         }
     }
 }
 
 pub const POLICY_CATEGORIES: [PolicyCategory; 4] = [
     PolicyCategory::Deployment,
-    PolicyCategory::Security,
-    PolicyCategory::Scanning,
+    PolicyCategory::Pipeline,
     PolicyCategory::Rollout,
+    PolicyCategory::Security,
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolicyRuleSummary {
     pub label: String,
+    pub kind: String,
 }
 
 pub fn is_core_policy(policy: &PolicyDefinition) -> bool {
@@ -150,7 +162,7 @@ pub fn policy_category(policy: &PolicyDefinition) -> PolicyCategory {
     let config = policy_config(policy).unwrap_or(serde_json::Value::Null);
 
     if policy_type == "require_cve_check" || config.get("max_critical").is_some() {
-        return PolicyCategory::Scanning;
+        return PolicyCategory::Pipeline;
     }
 
     if let Some(rules) = config.get("rules").and_then(|value| value.as_array()) {
@@ -207,6 +219,7 @@ pub fn policy_rule_summaries(policy: &PolicyDefinition) -> Vec<PolicyRuleSummary
     match policy_type.as_str() {
         "require_cf_agent" | "require_crystal_forge_agent" => vec![PolicyRuleSummary {
             label: "Crystal Forge agent must be enabled".to_string(),
+            kind: "require_cf_agent".to_string(),
         }],
         "require_packages" => {
             let packages = config
@@ -223,10 +236,12 @@ pub fn policy_rule_summaries(policy: &PolicyDefinition) -> Vec<PolicyRuleSummary
                 .unwrap_or_else(|| "required packages".to_string());
             vec![PolicyRuleSummary {
                 label: format!("Packages present: {packages}"),
+                kind: "require_packages".to_string(),
             }]
         }
         "require_cve_check" => vec![PolicyRuleSummary {
             label: cve_rule_label(&config),
+            kind: "require_cve_check".to_string(),
         }],
         "custom_check" => {
             let label = config
@@ -241,10 +256,14 @@ pub fn policy_rule_summaries(policy: &PolicyDefinition) -> Vec<PolicyRuleSummary
                         .map(|expression| format!("Custom Nix assertion: {expression}"))
                 })
                 .unwrap_or_else(|| "Custom Nix assertion must pass".to_string());
-            vec![PolicyRuleSummary { label }]
+            vec![PolicyRuleSummary {
+                label,
+                kind: "custom_check".to_string(),
+            }]
         }
         _ => vec![PolicyRuleSummary {
             label: format!("{} policy must pass", policy_type.replace('_', " ")),
+            kind: policy_type,
         }],
     }
 }
@@ -411,7 +430,10 @@ fn rule_summary_from_json(rule: &serde_json::Value) -> PolicyRuleSummary {
         _ => String::new(),
     };
 
-    PolicyRuleSummary { label }
+    PolicyRuleSummary {
+        label,
+        kind: kind.to_string(),
+    }
 }
 
 fn cve_rule_label(config: &serde_json::Value) -> String {

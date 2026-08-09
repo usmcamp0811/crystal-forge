@@ -335,11 +335,20 @@ pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
     let rule = props.rules.read()[index].clone();
     let source_id = source_identity(&rule.source);
     let percent = ((position + 1) as f32 / selected.len().max(1) as f32 * 100.0).round();
-    let filled_assertion_count = rule.draft.assertions.iter().filter(|a| assertion_filled(a)).count();
+    let filled_assertion_count = rule
+        .draft
+        .assertions
+        .iter()
+        .filter(|a| assertion_filled(a))
+        .count();
     let enforcement_label = format!("Enforcement · {filled_assertion_count}");
     let evidence_label = format!("Evidence · {}", rule.draft.evidence_requirements.len());
     let ev_count = rule.draft.evidence_requirements.len();
-    let enforcement_word = if filled_assertion_count == 1 { "rule" } else { "rules" };
+    let enforcement_word = if filled_assertion_count == 1 {
+        "rule"
+    } else {
+        "rules"
+    };
     let evidence_word = if ev_count == 1 { "item" } else { "items" };
     rsx! {
         div { class: "modal-head refine-modal-head",
@@ -357,20 +366,20 @@ pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
             div { class: "cf-modal-tab-panel",
                 match *active_tab.read() {
                     RefineTab::Source => rsx! { SourceStigCard { rule: rule.source.clone() } },
-                    RefineTab::Enforcement => rsx! { 
-                        if !matches!(rule.draft.action, RefinedRuleAction::Existing(_) | RefinedRuleAction::Opaque) { 
-                            AssertionSection { rules: props.rules, index } 
-                        } else { 
-                            div { class: "sd-callout sd-callout-info", "This mapped or opaque control has no local enforcement rules to edit." } 
+                    RefineTab::Enforcement => rsx! {
+                        if !matches!(rule.draft.action, RefinedRuleAction::Existing(_) | RefinedRuleAction::Opaque) {
+                            AssertionSection { rules: props.rules, index }
+                        } else {
+                            div { class: "sd-callout sd-callout-info", "This mapped or opaque control has no local enforcement rules to edit." }
                         }
                         details { class: "refine-advanced", summary { "Advanced import options" },
                             div { class: "refine-advanced-body",
                                 ImplementationChoice { rules: props.rules, index, existing_policies: props.existing_policies.clone() }
-                                if matches!(rule.draft.action, RefinedRuleAction::Unbound) { 
-                                    div { class: "sd-callout sd-callout-info", "This requirement will be imported without a Crystal Forge implementation unless you add an assertion or evidence source." } 
+                                if matches!(rule.draft.action, RefinedRuleAction::Unbound) {
+                                    div { class: "sd-callout sd-callout-info", "This requirement will be imported without a Crystal Forge implementation unless you add an assertion or evidence source." }
                                 }
-                                if matches!(rule.draft.action, RefinedRuleAction::Opaque) { 
-                                    div { class: "sd-callout sd-callout-info", "The original XCCDF rule and check content will be preserved without execution." } 
+                                if matches!(rule.draft.action, RefinedRuleAction::Opaque) {
+                                    div { class: "sd-callout sd-callout-info", "The original XCCDF rule and check content will be preserved without execution." }
                                 }
                                 textarea { class: "input focus-ring", rows: 2, placeholder: "Description", value: "{rule.draft.local_description}", oninput: move |e| { props.rules.write()[index].draft.local_description = e.value(); } }
                                 textarea { class: "input focus-ring", rows: 2, placeholder: "Rationale", value: "{rule.draft.local_rationale}", oninput: move |e| { props.rules.write()[index].draft.local_rationale = e.value(); } }
@@ -421,9 +430,7 @@ fn assertion_filled(assertion: &PolicyAssertionDraft) -> bool {
     match assertion {
         PolicyAssertionDraft::NixosOption { path, .. } => !path.trim().is_empty(),
         PolicyAssertionDraft::PackagesInstalled { packages, .. } => !packages.is_empty(),
-        PolicyAssertionDraft::CustomExpression { expression, .. } => {
-            !expression.trim().is_empty()
-        }
+        PolicyAssertionDraft::CustomExpression { expression, .. } => !expression.trim().is_empty(),
     }
 }
 
@@ -670,10 +677,16 @@ fn AssertionSection(rules: Signal<Vec<RefinedStigRule>>, index: usize) -> Elemen
                 AssertionEditor { rules, index, assertion_index, assertion }
             }
             select {
+                key: "add-assertion-{count}",
                 class: "input focus-ring refine-add-assertion",
+                "data-testid": "xccdf-add-assertion",
                 value: "",
                 onchange: move |e| {
-                    let draft = match e.value().as_str() {
+                    let selected_kind = e.value();
+                    if selected_kind.is_empty() {
+                        return;
+                    }
+                    let draft = match selected_kind.as_str() {
                         "option" => PolicyAssertionDraft::NixosOption { path: String::new(), operator: ComparisonOperator::Equal, expected_value: TypedPolicyValue::String(String::new()), failure_message: "Option assertion failed".into(), strict: true },
                         "packages" => PolicyAssertionDraft::PackagesInstalled { packages: vec![], failure_message: "Required package is not installed".into(), strict: true },
                         _ => PolicyAssertionDraft::CustomExpression { field_name: format!("customAssertion{}", count + 1), expression: String::new(), failure_message: "Custom assertion failed".into(), strict: true },

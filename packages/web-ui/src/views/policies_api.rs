@@ -121,6 +121,7 @@ fn policy_record_to_definition_with_count(
         format: PolicyFormat::Json,
         body,
         policy_type: Some(record.policy_type),
+        updated_at: record.updated_at.to_rfc3339(),
         system_count,
         srg_ids: current_srg_ids,
         cci_ids: current_cci_ids,

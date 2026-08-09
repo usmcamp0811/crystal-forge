@@ -26,7 +26,7 @@ use crate::api::client::{
 use crate::api::models::{CreateDeploymentPolicyRequest, UpdateDeploymentPolicyRequest};
 use crate::views::policies_api;
 
-use super::types::{PolicyDefinition, PolicyFormat};
+use super::types::{POLICY_CATEGORIES, PolicyDefinition, PolicyFormat};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Rule + evidence model (mirrors the design example)
@@ -130,37 +130,6 @@ impl PolicyEvidence {
         }
     }
 }
-
-const CATEGORIES: [(&str, &str, &str, &str, &str); 4] = [
-    (
-        "deployment",
-        "Deployment",
-        "#60a5fa",
-        "deploy",
-        "Base strategy — how and when a system picks up a new configuration.",
-    ),
-    (
-        "pipeline",
-        "Pipeline gates",
-        "#a78bfa",
-        "build",
-        "Gates on pipeline output — eval, build, and CVE results must pass before promotion.",
-    ),
-    (
-        "rollout",
-        "Rollout control",
-        "#fbbf24",
-        "sync",
-        "Govern the timing, approvals, and staging of a rollout.",
-    ),
-    (
-        "security",
-        "Security & hardening",
-        "#f87171",
-        "shield",
-        "Config-level assertions — STIG / hardening controls a system must satisfy.",
-    ),
-];
 
 const RULE_OPTIONS: [(&str, &str, bool); 9] = [
     ("packages_installed", "Packages installed", true),
@@ -764,7 +733,14 @@ pub fn PolicyEditorModal(
                                 span { class: "cf-policy-ui-only-badge", "UI only — not persisted yet" }
                             }
                             div { role: "radiogroup", style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;",
-                                for (id, label, color, icon, blurb) in CATEGORIES {
+                                for policy_category in POLICY_CATEGORIES {
+                                    {
+                                        let id = policy_category.id();
+                                        let label = policy_category.label();
+                                        let color = policy_category.color();
+                                        let icon = policy_category.icon();
+                                        let blurb = policy_category.blurb();
+                                        rsx! {
                                     button {
                                         key: "{id}",
                                         r#type: "button",
@@ -792,6 +768,8 @@ pub fn PolicyEditorModal(
                                         span { style: "min-width:0;",
                                             span { style: if category.read().as_str() == id { "display:block;font-size:12px;font-weight:600;color:{color};" } else { "display:block;font-size:12px;font-weight:600;color:var(--cf-text-primary);" }, "{label}" }
                                             span { style: "display:block;font-size:10.5px;color:var(--cf-text-muted);line-height:1.35;margin-top:2px;", "{blurb}" }
+                                        }
+                                    }
                                         }
                                     }
                                 }

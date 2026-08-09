@@ -3243,6 +3243,53 @@ html[data-theme="light"] .sd-nix {
   flex-direction: column;
 }
 
+/* Policies: category grouping and detail presentation */
+.pol-cat-stat {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.12s ease, box-shadow 0.12s ease, transform 0.06s ease;
+}
+
+.pol-cat-stat:hover { background: var(--cf-hover-bg); }
+.pol-cat-stat:active { transform: translateY(1px); }
+
+.pol-group { display: flex; flex-direction: column; gap: 12px; }
+.pol-group + .pol-group { margin-top: 6px; }
+.pol-group-head { display: flex; align-items: flex-start; gap: 11px; padding-bottom: 2px; }
+.pol-group-icon { flex-shrink: 0; width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; }
+.pol-group-title { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--cf-text-primary); font-size: 14px; font-weight: 700; letter-spacing: -0.01em; }
+.pol-group-count { padding: 1px 8px; border: 1px solid var(--cf-divider); border-radius: 999px; background: var(--cf-subtle-bg); color: var(--cf-text-muted); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.pol-group-blurb { margin-top: 2px; color: var(--cf-text-muted); font-size: 11.5px; line-height: 1.4; }
+.stat-strip.pol-cat-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+.policy-card-mappings { display: flex; flex-wrap: wrap; gap: 5px; }
+.policy-mapping-srg { color: #60a5fa; background: color-mix(in oklab, #60a5fa 12%, transparent); }
+.policy-mapping-cci { color: #34d399; background: color-mix(in oklab, #34d399 12%, transparent); }
+.policy-card-revisions { display: flex; width: calc(100% + 28px); margin: 2px -14px -14px; padding: 9px 14px; border: 0; border-top: 1px solid var(--cf-divider); background: var(--cf-subtle-bg); color: var(--cf-text-muted); cursor: pointer; font: inherit; font-size: 11px; font-weight: 600; justify-content: space-between; }
+.policy-card-revisions:hover { color: var(--cf-text-primary); background: var(--cf-hover-bg); }
+
+.policy-drawer-body { overflow: auto; padding: 18px 22px; gap: 18px; }
+.policy-drawer-tabs { display: flex; gap: 4px; padding: 10px 22px; border-bottom: 1px solid var(--cf-divider); }
+.policy-drawer-tabs .active { background: color-mix(in oklab, var(--cf-brand-purple) 14%, transparent); color: var(--cf-brand-purple); }
+.policy-drawer-section-title { margin: 0 0 8px; color: var(--cf-text-muted); font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+.policy-rule-card { padding: 10px 12px; border: 1px solid var(--cf-divider); border-radius: 8px; background: var(--cf-subtle-bg); }
+.policy-rule-title { color: var(--cf-text-primary); font-size: 12px; font-weight: 600; }
+.policy-rule-kind { margin-top: 4px; color: var(--cf-text-muted); font-family: var(--font-mono); font-size: 10px; }
+.policy-revision-list { display: flex; flex-direction: column; gap: 8px; }
+.policy-revision-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; width: 100%; padding: 12px; border: 1px solid var(--cf-divider); border-radius: 8px; background: var(--cf-card-bg); color: inherit; cursor: pointer; font: inherit; text-align: left; }
+.policy-revision-row:hover { background: var(--cf-hover-bg); }
+.policy-revision-row.selected { border-color: var(--cf-brand-purple); background: color-mix(in oklab, var(--cf-brand-purple) 8%, var(--cf-card-bg)); }
+.policy-definition summary { cursor: pointer; color: var(--cf-text-secondary); font-size: 12px; font-weight: 600; }
+.policy-definition pre { margin: 10px 0 0; padding: 12px; overflow: auto; border-radius: 8px; background: var(--cf-subtle-bg); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+
+@media (max-width: 900px) {
+  .stat-strip.pol-cat-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ed-stats { grid-template-columns: repeat(2, 1fr); }
+}
+
 /* Log diff view */
 .fl-diff {
   margin: 0;
