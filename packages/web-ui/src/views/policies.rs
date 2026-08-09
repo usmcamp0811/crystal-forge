@@ -8,9 +8,8 @@ use crate::api::client::{delete_deployment_policy, export_policy_versions};
 use crate::components::io_menu::{IOMenu, IOMenuItem};
 use crate::components::layout::Card;
 use crate::components::policy::{
-    POLICY_CATEGORIES, PolicyCard, PolicyCategory, PolicyDefinition, PolicyEditorModal,
-    PolicyFormat, is_core_policy, is_policy_version_editable, normalized_policy_type,
-    policy_category,
+    PolicyCard, PolicyCategory, PolicyDefinition, PolicyEditorModal, PolicyFormat, is_core_policy,
+    is_policy_version_editable, normalized_policy_type, policy_category,
 };
 use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 use crate::state::{app_state::AppState, auth};
@@ -62,6 +61,8 @@ pub fn PoliciesView() -> Element {
     let mut edit_cci_ids = use_signal(String::new);
     let mut search_query = use_signal(String::new);
     let mut category_filter = use_signal(|| "all".to_string());
+    let mut domain = use_signal(|| "platform".to_string());
+    let mut security_grouping = use_signal(|| "control-family".to_string());
     let mut type_filter = use_signal(|| "all".to_string());
     let mut delete_confirm: Signal<Option<Uuid>> = use_signal(|| None);
     let mut delete_busy = use_signal(|| false);
@@ -219,9 +220,25 @@ pub fn PoliciesView() -> Element {
         .count();
     let custom_count = policy_count.saturating_sub(built_in_count);
 
-    let filtered_policies = all_policies
+    let domain_policies = all_policies
         .iter()
-        .filter(|policy| policy_matches_filters(policy, &query, &selected_category, &selected_type))
+        .filter(|policy| policy_domain(policy) == domain())
+        .cloned()
+        .collect::<Vec<_>>();
+    let filtered_policies = domain_policies
+        .iter()
+        .filter(|policy| {
+            policy_matches_filters(
+                policy,
+                &query,
+                if domain() == "platform" {
+                    &selected_category
+                } else {
+                    "all"
+                },
+                &selected_type,
+            )
+        })
         .cloned()
         .collect::<Vec<_>>();
     let filtered_count = filtered_policies.len();
@@ -230,9 +247,11 @@ pub fn PoliciesView() -> Element {
     } else {
         "policies"
     };
-    let has_filters = selected_category != "all" || selected_type != "all" || !query.is_empty();
-    let category_counts = category_counts(&all_policies);
-    let grouped_policies = grouped_policies(&filtered_policies);
+    let has_filters = (domain() == "platform" && selected_category != "all")
+        || selected_type != "all"
+        || !query.is_empty();
+    let platform_category_counts = platform_category_counts(&all_policies);
+    let grouped_policies = grouped_policies(&filtered_policies, &domain(), &security_grouping());
     let mut selected_version_ids: Vec<Uuid> = selected_policy_ids
         .read()
         .iter()
@@ -374,33 +393,73 @@ pub fn PoliciesView() -> Element {
                 }
             }
 
-            div { class: "stat-strip pol-cat-strip",
-                for (category, count) in category_counts.iter().copied() {
+            div { class: "pol-domain-tabs", role: "tablist", "aria-label": "Policy domain",
+                for (domain_id, label, count, color, blurb) in [
+                    ("platform", "Platform", all_policies.iter().filter(|policy| policy_domain(policy) == "platform").count(), "#60a5fa", "Deployment modes, pipeline gates, and rollout controls."),
+                    ("security", "Security controls", all_policies.iter().filter(|policy| policy_domain(policy) == "security").count(), "#f87171", "Framework-owned controls for security and compliance."),
+                ] {
                     button {
-                        key: "{category.id()}",
-                        class: "stat pol-cat-stat focus-ring",
-                        title: "{category.blurb()}",
-                        style: if selected_category == category.id() {
-                            "background: color-mix(in oklab, {category.color()} 14%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklab, {category.color()} 45%, transparent);"
-                        } else {
-                            ""
-                        },
+                        key: "{domain_id}",
+                        role: "tab",
+                        "aria-selected": "{domain() == domain_id}",
+                        class: if domain() == domain_id { "pol-domain-tab active focus-ring" } else { "pol-domain-tab focus-ring" },
+                        title: "{blurb}",
+                        style: "--dc:{color};",
                         onclick: move |_| {
-                            if category_filter.read().as_str() == category.id() {
-                                category_filter.set("all".to_string());
-                            } else {
-                                category_filter.set(category.id().to_string());
-                            }
+                            domain.set(domain_id.to_string());
                         },
-                        span { class: "stat-accent", style: "--stat-color: {category.color()};" }
-                        div { class: "stat-label", "{category.label()}" }
-                        div { class: "stat-value", style: "color: {category.color()};", "{count}" }
-                        div { class: "stat-meta", "{category.blurb()}" }
+                        "{label} " span { class: "pol-domain-tab-count", "{count}" }
                     }
                 }
             }
 
-            div { class: "filterbar",
+            div { class: "pol-group-toolbar",
+                span { class: "pol-group-toolbar-label", if domain() == "platform" { "Category" } else { "Grouping" } }
+                if domain() == "platform" {
+                    div { class: "seg",
+                        button {
+                            class: if selected_category == "all" { "active" } else { "" },
+                            onclick: move |_| category_filter.set("all".to_string()),
+                            "all"
+                        }
+                        for (category, count) in platform_category_counts.iter().copied() {
+                            button {
+                                key: "seg-{category.id()}",
+                                class: if selected_category == category.id() { "active" } else { "" },
+                                title: "{category.blurb()}",
+                                onclick: move |_| category_filter.set(category.id().to_string()),
+                                span { style: "display:inline-flex;align-items:center;gap:5px;",
+                                    span { style: "width:6px;height:6px;border-radius:50%;background:{category.color()};flex-shrink:0;" }
+                                    "{category.short_label()} " span { class: "mono", style: "opacity:.6;font-size:10.5px;", "{count}" }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    select {
+                        class: "input focus-ring filter-select",
+                        style: "width:auto;font-size:12px;padding:6px 28px 6px 10px;",
+                        value: "{security_grouping}",
+                        onchange: move |event| security_grouping.set(event.value()),
+                        option { value: "control-family", "NIST 800-53 family" }
+                        option { value: "severity", "STIG severity (CAT)" }
+                        option { value: "cci", "CCI (Control Correlation Identifier)" }
+                        option { value: "srg-category", "SRG category" }
+                        option { value: "cmmc-level", "CMMC 2.0 level" }
+                        option { value: "cis-section", "CIS Benchmark section" }
+                        option { value: "remediation", "Remediation status" }
+                        option { value: "flat", "Flat list (no grouping)" }
+                    }
+                }
+                button {
+                    class: "btn btn-ghost focus-ring xs",
+                    style: if domain() == "security" { "margin-left:auto;" } else { "margin-left:auto;visibility:hidden;" },
+                    disabled: domain() != "security",
+                    "Manage groupings"
+                }
+            }
+
+            div { class: "filterbar", style: "min-height:42px;",
                 div { class: "filter-search", style: "max-width:280px;",
                     svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
                         circle { cx: "11", cy: "11", r: "8" }
@@ -411,26 +470,6 @@ pub fn PoliciesView() -> Element {
                         placeholder: "Search policies…",
                         value: "{search_query}",
                         oninput: move |event| search_query.set(event.value()),
-                    }
-                }
-
-                div { class: "seg",
-                    button {
-                        class: if selected_category == "all" { "active" } else { "" },
-                        onclick: move |_| category_filter.set("all".to_string()),
-                        "all"
-                    }
-                    for category in POLICY_CATEGORIES.iter().copied() {
-                        button {
-                            key: "seg-{category.id()}",
-                            class: if selected_category == category.id() { "active" } else { "" },
-                            title: "{category.blurb()}",
-                            onclick: move |_| category_filter.set(category.id().to_string()),
-                            span { style: "display:inline-flex;align-items:center;gap:5px;",
-                                span { style: "width:6px;height:6px;border-radius:50%;background:{category.color()};flex-shrink:0;" }
-                                "{category.short_label()}"
-                            }
-                        }
                     }
                 }
 
@@ -498,23 +537,23 @@ pub fn PoliciesView() -> Element {
                     }
                 }
             } else {
-                for (category, items) in grouped_policies.iter() {
+                for group in grouped_policies.iter() {
                     section { class: "pol-group",
                         div { class: "pol-group-head",
-                            span { class: "pol-group-icon", style: "background:color-mix(in oklab, {category.color()} 16%, transparent);color:{category.color()};",
+                            span { class: "pol-group-icon", style: "background:color-mix(in oklab, {group.color} 16%, transparent);color:{group.color};",
                                 svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
                                     path { d: "M9 12l2 2 4-4" }
                                     path { d: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z" }
                                 }
                             }
                             div { style: "min-width:0;",
-                                h2 { class: "pol-group-title", "{category.label()} " span { class: "pol-group-count", "{items.len()}" } }
-                                div { class: "pol-group-blurb", "{category.blurb()}" }
+                                h2 { class: "pol-group-title", "{group.label} " span { class: "pol-group-count", "{group.items.len()}" } }
+                                div { class: "pol-group-blurb", "{group.blurb}" }
                             }
                         }
 
                         div { class: "cards-grid",
-                            for policy in items.iter().cloned() {
+                            for policy in group.items.iter().cloned() {
                                 PolicyCard {
                                     key: "{policy.id}",
                                     policy: policy.clone(),
@@ -953,7 +992,7 @@ fn policy_matches_filters(
     selected_category: &str,
     selected_type: &str,
 ) -> bool {
-    if selected_category != "all" && policy_category(policy).id() != selected_category {
+    if selected_category != "all" && platform_category(policy).id() != selected_category {
         return false;
     }
 
@@ -971,37 +1010,34 @@ fn policy_matches_filters(
 
     let q = query.to_lowercase();
 
-    if policy.name.to_lowercase().contains(&q) {
-        return true;
-    }
-    if policy.description.to_lowercase().contains(&q) {
+    if metadata_matches(
+        &policy.name,
+        &policy.description,
+        policy.framework.as_deref(),
+        &policy.srg_ids,
+        &policy.cci_ids,
+        policy.control_family.as_deref(),
+        policy.cis_section.as_deref(),
+        policy.severity.as_deref(),
+        &q,
+    ) {
         return true;
     }
 
-    // Search across SRG/CCI mappings on ALL revisions (including historical).
-    // This ensures a search for "CCI-000205" or "000205" finds the lineage even
-    // when the mapping only existed on an older version.
+    // The endpoint returns one current definition per lineage. Match revision
+    // summaries too so metadata removed from the current version remains searchable.
     for revision in &policy.revisions {
-        for srg in &revision.srg_ids {
-            if srg.to_lowercase().contains(&q) {
-                return true;
-            }
-        }
-        for cci in &revision.cci_ids {
-            if cci.to_lowercase().contains(&q) {
-                return true;
-            }
-        }
-    }
-    // Also search the current lineage-level srg/cci (which may be derived from
-    // the current version if revisions list is empty for some reason).
-    for srg in &policy.srg_ids {
-        if srg.to_lowercase().contains(&q) {
-            return true;
-        }
-    }
-    for cci in &policy.cci_ids {
-        if cci.to_lowercase().contains(&q) {
+        if metadata_matches(
+            &revision.name,
+            revision.description.as_deref().unwrap_or_default(),
+            revision.framework.as_deref(),
+            &revision.srg_ids,
+            &revision.cci_ids,
+            revision.control_family.as_deref(),
+            revision.cis_section.as_deref(),
+            revision.severity.as_deref(),
+            &q,
+        ) {
             return true;
         }
     }
@@ -1009,37 +1045,273 @@ fn policy_matches_filters(
     false
 }
 
-fn category_counts(policies: &[PolicyDefinition]) -> Vec<(PolicyCategory, usize)> {
-    POLICY_CATEGORIES
-        .iter()
-        .copied()
-        .map(|category| {
-            let count = policies
-                .iter()
-                .filter(|policy| policy_category(policy) == category)
-                .count();
-            (category, count)
-        })
-        .collect()
+#[allow(clippy::too_many_arguments)]
+fn metadata_matches(
+    name: &str,
+    description: &str,
+    framework: Option<&str>,
+    srg_ids: &[String],
+    cci_ids: &[String],
+    control_family: Option<&str>,
+    cis_section: Option<&str>,
+    severity: Option<&str>,
+    query: &str,
+) -> bool {
+    [
+        Some(name),
+        Some(description),
+        framework,
+        control_family,
+        cis_section,
+        severity,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| value.to_lowercase().contains(query))
+        || srg_ids
+            .iter()
+            .chain(cci_ids)
+            .any(|value| value.to_lowercase().contains(query))
 }
 
-fn grouped_policies(policies: &[PolicyDefinition]) -> Vec<(PolicyCategory, Vec<PolicyDefinition>)> {
-    POLICY_CATEGORIES
-        .iter()
-        .copied()
+fn policy_domain(policy: &PolicyDefinition) -> &'static str {
+    if policy
+        .category
+        .as_deref()
+        .is_some_and(|category| category.eq_ignore_ascii_case("security"))
+    {
+        "security"
+    } else {
+        "platform"
+    }
+}
+
+fn platform_category(policy: &PolicyDefinition) -> PolicyCategory {
+    match policy
+        .category
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("pipeline") => PolicyCategory::Pipeline,
+        Some("rollout") => PolicyCategory::Rollout,
+        _ => PolicyCategory::Deployment,
+    }
+}
+
+fn platform_category_counts(policies: &[PolicyDefinition]) -> Vec<(PolicyCategory, usize)> {
+    [
+        PolicyCategory::Deployment,
+        PolicyCategory::Pipeline,
+        PolicyCategory::Rollout,
+    ]
+    .into_iter()
+    .map(|category| {
+        let count = policies
+            .iter()
+            .filter(|policy| {
+                policy_domain(policy) == "platform" && platform_category(policy) == category
+            })
+            .count();
+        (category, count)
+    })
+    .collect()
+}
+
+#[derive(Clone)]
+struct PolicyGroup {
+    label: String,
+    blurb: String,
+    color: &'static str,
+    items: Vec<PolicyDefinition>,
+}
+
+fn grouped_policies(
+    policies: &[PolicyDefinition],
+    domain: &str,
+    grouping: &str,
+) -> Vec<PolicyGroup> {
+    if domain == "platform" {
+        return [
+            PolicyCategory::Deployment,
+            PolicyCategory::Pipeline,
+            PolicyCategory::Rollout,
+        ]
+        .into_iter()
         .filter_map(|category| {
             let items = policies
                 .iter()
-                .filter(|policy| policy_category(policy) == category)
+                .filter(|policy| platform_category(policy) == category)
                 .cloned()
                 .collect::<Vec<_>>();
-            if items.is_empty() {
-                None
-            } else {
-                Some((category, items))
-            }
+            (!items.is_empty()).then(|| PolicyGroup {
+                label: category.label().to_string(),
+                blurb: category.blurb().to_string(),
+                color: category.color(),
+                items,
+            })
         })
-        .collect()
+        .collect();
+    }
+
+    if grouping == "flat" {
+        return (!policies.is_empty())
+            .then(|| PolicyGroup {
+                label: "All security controls".to_string(),
+                blurb: "Every control in this domain, ungrouped.".to_string(),
+                color: PolicyCategory::Security.color(),
+                items: policies.to_vec(),
+            })
+            .into_iter()
+            .collect();
+    }
+
+    let mut groups: Vec<PolicyGroup> = Vec::new();
+    for policy in policies {
+        let (label, blurb) = security_group_label(policy, grouping);
+        if let Some(group) = groups.iter_mut().find(|group| group.label == label) {
+            group.items.push(policy.clone());
+        } else {
+            groups.push(PolicyGroup {
+                label,
+                blurb,
+                color: PolicyCategory::Security.color(),
+                items: vec![policy.clone()],
+            });
+        }
+    }
+    groups
+}
+
+fn security_group_label(policy: &PolicyDefinition, grouping: &str) -> (String, String) {
+    match grouping {
+        "control-family" => policy
+            .control_family
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| (value.to_string(), "NIST 800-53 control family.".to_string()))
+            .unwrap_or_else(|| {
+                (
+                    "Ungrouped".to_string(),
+                    "No NIST family tag is set.".to_string(),
+                )
+            }),
+        "severity" => policy
+            .severity
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| {
+                (
+                    format!("CAT {}", value.to_ascii_uppercase()),
+                    "STIG severity.".to_string(),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    "Unrated".to_string(),
+                    "No severity is assigned.".to_string(),
+                )
+            }),
+        "cci" => policy
+            .cci_ids
+            .first()
+            .cloned()
+            .map(|value| (value, "Control Correlation Identifier.".to_string()))
+            .unwrap_or_else(|| {
+                (
+                    "Unmapped".to_string(),
+                    "No CCI mapping is assigned.".to_string(),
+                )
+            }),
+        "srg-category" => policy
+            .srg_ids
+            .first()
+            .and_then(|id| id.split('-').nth(1))
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| (value.to_ascii_uppercase(), "SRG category.".to_string()))
+            .unwrap_or_else(|| {
+                (
+                    "Unmapped".to_string(),
+                    "No SRG mapping is assigned.".to_string(),
+                )
+            }),
+        "cmmc-level" => policy
+            .cmmc_level
+            .map(|level| {
+                (
+                    format!("Level {level}"),
+                    "Explicit CMMC maturity level.".to_string(),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    "Unrated".to_string(),
+                    "No explicit CMMC level is assigned.".to_string(),
+                )
+            }),
+        "cis-section" => policy
+            .cis_section
+            .as_deref()
+            .and_then(|section| section.split('.').next())
+            .filter(|value| !value.trim().is_empty())
+            .map(|section| {
+                (
+                    format!("Section {section}"),
+                    "CIS Benchmark section.".to_string(),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    "Unmapped".to_string(),
+                    "No CIS section is assigned.".to_string(),
+                )
+            }),
+        "remediation" => remediation_status(policy),
+        _ => (
+            "Ungrouped".to_string(),
+            "No grouping is selected.".to_string(),
+        ),
+    }
+}
+
+fn remediation_status(policy: &PolicyDefinition) -> (String, String) {
+    let config = serde_json::from_str::<serde_json::Value>(&policy.body)
+        .ok()
+        .and_then(|value| value.get("config").cloned().or(Some(value)))
+        .unwrap_or(serde_json::Value::Null);
+    remediation_status_from_config(&config)
+}
+
+fn remediation_status_from_config(config: &serde_json::Value) -> (String, String) {
+    let kinds = config
+        .get("rules")
+        .and_then(|rules| rules.as_array())
+        .map(|rules| {
+            rules
+                .iter()
+                .filter_map(|rule| rule.get("kind").and_then(|kind| kind.as_str()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !kinds.is_empty() && kinds.iter().all(|kind| *kind == "nixos_option") {
+        (
+            "Automated".to_string(),
+            "All rules are declarative NixOS options.".to_string(),
+        )
+    } else if kinds
+        .iter()
+        .any(|kind| matches!(*kind, "nixos_option" | "custom_eval"))
+    {
+        (
+            "Semi-automated".to_string(),
+            "NixOS or custom evaluation requires a reviewed fix.".to_string(),
+        )
+    } else {
+        (
+            "Manual".to_string(),
+            "No automatable mechanism is configured.".to_string(),
+        )
+    }
 }
 
 fn sanitize_filename(value: &str) -> String {
@@ -1070,7 +1342,7 @@ fn sanitize_filename(value: &str) -> String {
 
 #[cfg(test)]
 mod interchange_tests {
-    use super::sanitize_filename;
+    use super::{remediation_status_from_config, sanitize_filename};
 
     #[test]
     fn export_filename_is_stable_and_safe() {
@@ -1080,6 +1352,31 @@ mod interchange_tests {
         );
         assert_eq!(sanitize_filename("  "), "policy");
         assert_eq!(sanitize_filename("bundle.v1"), "bundle.v1");
+    }
+
+    #[test]
+    fn remediation_status_uses_only_rule_mechanisms() {
+        assert_eq!(
+            remediation_status_from_config(&serde_json::json!({
+                "rules": [{ "kind": "nixos_option" }]
+            }))
+            .0,
+            "Automated"
+        );
+        assert_eq!(
+            remediation_status_from_config(&serde_json::json!({
+                "rules": [{ "kind": "nixos_option" }, { "kind": "custom_eval" }]
+            }))
+            .0,
+            "Semi-automated"
+        );
+        assert_eq!(
+            remediation_status_from_config(&serde_json::json!({
+                "rules": [{ "kind": "packages_installed" }]
+            }))
+            .0,
+            "Manual"
+        );
     }
 }
 
