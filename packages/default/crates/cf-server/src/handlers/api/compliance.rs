@@ -447,19 +447,37 @@ pub async fn publish_policy_version(
     }
 
     // Load the version to check current state and digest
-    let version_result = sqlx::query_as::<_, (Uuid, String, String, String)>(
-        r#"SELECT id, publication_state, semantic_digest, policy_type
+    let version_result = sqlx::query_as::<_, (Uuid, String, String, String, String, String)>(
+        r#"SELECT id, publication_state, semantic_digest, policy_type,
+                  implementation_state, trust_state
            FROM deployment_policy_versions WHERE id = $1"#,
     )
     .bind(version_id)
     .fetch_optional(&pool)
     .await;
 
-    let (_, publication_state, digest, _policy_type) = match version_result {
-        Ok(Some(v)) => v,
-        Ok(None) => return not_found(),
-        Err(_) => return internal_error("Failed to load policy version"),
-    };
+    let (_, publication_state, digest, _policy_type, implementation_state, trust_state) =
+        match version_result {
+            Ok(Some(v)) => v,
+            Ok(None) => return not_found(),
+            Err(_) => return internal_error("Failed to load policy version"),
+        };
+
+    if matches!(
+        implementation_state.as_str(),
+        "native" | "external" | "manual"
+    ) && trust_state != "trusted"
+    {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "Untrusted policy version",
+                "message": "Executable policy content must be trusted before publication",
+                "code": "POLICY_NOT_TRUSTED"
+            })),
+        )
+            .into_response();
+    }
 
     // Verify digest if provided
     if let Some(expected_digest) = &payload.expected_semantic_digest {
@@ -709,19 +727,32 @@ pub async fn publish_bundle_version(
     }
 
     // Load the bundle version
-    let bundle_result = sqlx::query_as::<_, (Uuid, Uuid, String, String, String)>(
-        r#"SELECT id, bundle_id, publication_state, semantic_digest, version
+    let bundle_result = sqlx::query_as::<_, (Uuid, Uuid, String, String, String, String)>(
+        r#"SELECT id, bundle_id, publication_state, semantic_digest, version, trust_state
            FROM compliance_bundle_versions WHERE id = $1"#,
     )
     .bind(version_id)
     .fetch_optional(&pool)
     .await;
 
-    let (_, bundle_id, publication_state, digest, _version) = match bundle_result {
-        Ok(Some(v)) => v,
-        Ok(None) => return not_found(),
-        Err(_) => return internal_error("Failed to load bundle version"),
-    };
+    let (_, bundle_id, publication_state, digest, _version, bundle_trust_state) =
+        match bundle_result {
+            Ok(Some(v)) => v,
+            Ok(None) => return not_found(),
+            Err(_) => return internal_error("Failed to load bundle version"),
+        };
+
+    if bundle_trust_state != "trusted" {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "Untrusted bundle version",
+                "message": "Bundle content must be trusted before publication",
+                "code": "BUNDLE_NOT_TRUSTED"
+            })),
+        )
+            .into_response();
+    }
 
     // Verify digest if provided
     if let Some(expected_digest) = &payload.expected_semantic_digest {
@@ -758,11 +789,11 @@ pub async fn publish_bundle_version(
     };
 
     // Verify all included policies are published or can be auto-published
-    let policies_result = sqlx::query_as::<_, (Uuid, String)>(
-        r#"SELECT pv.id, pv.publication_state
+    let policies_result = sqlx::query_as::<_, (Uuid, String, String, String)>(
+        r#"SELECT pv.id, pv.publication_state, pv.implementation_state, pv.trust_state
            FROM compliance_bundle_version_policies cbvp
            JOIN deployment_policy_versions pv ON cbvp.policy_version_id = pv.id
-           WHERE cbvp.bundle_version_id = $1"#,
+           WHERE cbvp.bundle_version_id = $1 AND cbvp.selected = TRUE"#,
     )
     .bind(version_id)
     .fetch_all(&mut *tx)
@@ -781,7 +812,24 @@ pub async fn publish_bundle_version(
 
     // Check and optionally auto-publish draft policies.
     // NOTE: In policies, `policy_id` below is the policy VERSION id, not the lineage id.
-    for (policy_version_id, state) in &policies {
+    for (policy_version_id, state, implementation_state, trust_state) in &policies {
+        if matches!(
+            implementation_state.as_str(),
+            "native" | "external" | "manual"
+        ) && trust_state != "trusted"
+        {
+            let _ = tx.rollback().await;
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": "Untrusted policy member",
+                    "message": "Executable bundle members must be trusted before publication",
+                    "code": "POLICY_NOT_TRUSTED",
+                    "policy_version_id": policy_version_id
+                })),
+            )
+                .into_response();
+        }
         if state == "accepted" {
             // Already published; nothing to do.
             continue;
@@ -1304,11 +1352,9 @@ async fn persist_assignment_inner(
     };
 
     let exclusions = payload.exclusions.clone().unwrap_or_default();
-    // The persistence schema intentionally has no insertion-order column for
-    // additions. Use stable portable identity order so equivalent requests do
-    // not depend on database insertion order.
-    let mut additions = payload.additions.clone().unwrap_or_default();
-    additions.sort();
+    // Preserve the caller-declared addition order. The assignment version is
+    // immutable, so this order is stable for its entire lifetime.
+    let additions = payload.additions.clone().unwrap_or_default();
     let overrides: Vec<PolicyOverride> = payload
         .value_overrides
         .clone()
@@ -1591,11 +1637,12 @@ async fn persist_assignment_inner(
 
     for (index, add) in additions.iter().enumerate() {
         if let Err(e) = sqlx::query(
-            "INSERT INTO compliance_assignment_additions (assignment_id, assignment_version_id, policy_version_id) VALUES ($1, $2, $3)",
+            "INSERT INTO compliance_assignment_additions (assignment_id, assignment_version_id, policy_version_id, addition_order) VALUES ($1, $2, $3, $4)",
         )
         .bind(assignment_id)
         .bind(assignment_version_id)
         .bind(add)
+        .bind(index as i32)
         .execute(&mut *tx)
         .await
         {
@@ -1891,7 +1938,7 @@ pub async fn get_assignment(
     };
 
     let additions: Vec<Uuid> = match sqlx::query_scalar(
-        "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)",
+        "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1) ORDER BY addition_order",
     )
     .bind(assignment_id)
     .fetch_all(&pool)
@@ -2163,7 +2210,7 @@ async fn list_assignments_for_scope(
         .fetch_all(pool)
         .await?;
         let additions: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_version_id = $1 ORDER BY policy_version_id",
+            "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_version_id = $1 ORDER BY addition_order",
         )
         .bind(current_version_id)
         .fetch_all(pool)
@@ -2319,19 +2366,31 @@ pub async fn get_assignment_effective_policies(
     }
 
     // Load assignment
-    let row = sqlx::query_as::<_, (Uuid, String, Option<Uuid>, Option<Uuid>, String)>(
-        "SELECT bundle_version_id, scope_type, environment_id, system_id, enforcement_mode \
+    let row = sqlx::query_as::<_, (Uuid, String, Option<Uuid>, Option<Uuid>, String, bool, Option<Uuid>)>(
+        "SELECT bundle_version_id, scope_type, environment_id, system_id, enforcement_mode, active, current_version_id \
          FROM compliance_bundle_assignments WHERE id = $1",
     )
     .bind(assignment_id)
     .fetch_optional(&pool)
     .await;
 
-    let (bv_id, scope_type, env_id, sys_id, mode) = match row {
+    let (bv_id, scope_type, env_id, sys_id, mode, active, current_version_id) = match row {
         Ok(Some(r)) => r,
         Ok(None) => return not_found(),
         Err(_) => return internal_error("Failed to load assignment"),
     };
+
+    if !active || current_version_id.is_none() {
+        return (
+            StatusCode::GONE,
+            Json(crate::api::models::ApiError {
+                error: "ASSIGNMENT_INACTIVE".into(),
+                message: "This assignment has been deactivated".into(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
 
     // Load overlay rows scoped to the current immutable assignment version.
     let exclusions: Vec<Uuid> = sqlx::query_scalar(
@@ -2345,7 +2404,8 @@ pub async fn get_assignment_effective_policies(
 
     let additions: Vec<Uuid> = sqlx::query_scalar(
         "SELECT policy_version_id FROM compliance_assignment_additions
-         WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)",
+         WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)
+         ORDER BY addition_order",
     )
     .bind(assignment_id)
     .fetch_all(&pool)

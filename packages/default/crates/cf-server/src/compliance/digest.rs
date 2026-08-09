@@ -155,7 +155,7 @@ pub struct AssignmentEffectiveSetCanonical {
     pub enforcement_mode: String,
     /// Sorted list of excluded policy version IDs.
     pub exclusions: Vec<Uuid>,
-    /// Sorted list of added policy version IDs.
+    /// Added policy version IDs in declared assignment order.
     pub additions: Vec<Uuid>,
     /// Value overrides sorted by (policy_version_id, value_path).
     pub value_overrides: Vec<(Uuid, String, Value)>,
@@ -167,13 +167,17 @@ impl AssignmentEffectiveSetCanonical {
     pub fn to_digest_value(&self) -> Value {
         let mut exclusions: Vec<String> = self.exclusions.iter().map(|id| id.to_string()).collect();
         exclusions.sort();
-        let mut additions: Vec<String> = self.additions.iter().map(|id| id.to_string()).collect();
-        additions.sort();
-        let overrides: Vec<Value> = self
+        let additions: Vec<String> = self.additions.iter().map(|id| id.to_string()).collect();
+        let mut overrides = self
             .value_overrides
             .iter()
+            .map(|(pid, path, val)| (pid.to_string(), path.clone(), val.clone()))
+            .collect::<Vec<_>>();
+        overrides.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+        let overrides: Vec<Value> = overrides
+            .into_iter()
             .map(|(pid, path, val)| {
-                json!({ "policy_version_id": pid.to_string(), "value_path": path, "value": val })
+                json!({ "policy_version_id": pid, "value_path": path, "value": val })
             })
             .collect();
         let effective: Vec<String> = self
@@ -442,7 +446,7 @@ pub async fn write_assignment_effective_set_digest(
 
     // Additions.
     let additions: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1) ORDER BY policy_version_id",
+        "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1) ORDER BY addition_order",
     )
     .bind(assignment_id)
     .fetch_all(&mut **tx)
@@ -469,7 +473,7 @@ pub async fn write_assignment_effective_set_digest(
 
     // Ordered assignment overlay policy set:
     //   selected baseline - exclusions (in policy_order)
-    //   + additions (sorted by policy_version_id for stability)
+    //   + additions (in declared assignment order)
     //
     // Uses a CTE with explicit source_rank so the UNION ALL can be
     // ORDER-ed correctly (bare ORDER BY inside UNION ALL operands is
@@ -911,6 +915,30 @@ mod tests {
             effective_policy_version_ids: vec![],
         };
         assert_ne!(a.compute_digest(), b.compute_digest());
+    }
+
+    #[test]
+    fn assignment_override_digest_is_order_independent() {
+        let first = Uuid::parse_str("11111111-0000-0000-0000-000000000001").unwrap();
+        let second = Uuid::parse_str("11111111-0000-0000-0000-000000000002").unwrap();
+        let a = AssignmentEffectiveSetCanonical {
+            enforcement_mode: "enforce".into(),
+            exclusions: vec![],
+            additions: vec![],
+            value_overrides: vec![
+                (second, "strict".into(), json!(false)),
+                (first, "count".into(), json!(1)),
+            ],
+            effective_policy_version_ids: vec![first, second],
+        };
+        let b = AssignmentEffectiveSetCanonical {
+            value_overrides: vec![
+                (first, "count".into(), json!(1)),
+                (second, "strict".into(), json!(false)),
+            ],
+            ..a.clone()
+        };
+        assert_eq!(a.compute_digest(), b.compute_digest());
     }
 
     #[test]

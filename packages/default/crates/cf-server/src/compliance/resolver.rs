@@ -429,8 +429,8 @@ async fn resolve_effective_policy_set_with_options(
     input: &EffectivePolicyResolutionInput,
 ) -> Result<ResolutionOutcome> {
     // ── Step 1: Load bundle version and ordered membership ────────────────────
-    let bundle_row = sqlx::query_as::<_, (String, String)>(
-        r#"SELECT publication_state, semantic_digest
+    let bundle_row = sqlx::query_as::<_, (String, String, String)>(
+        r#"SELECT publication_state, semantic_digest, trust_state
            FROM compliance_bundle_versions
            WHERE id = $1"#,
     )
@@ -439,8 +439,8 @@ async fn resolve_effective_policy_set_with_options(
     .await
     .context("load bundle version")?;
 
-    let (bundle_state, bundle_digest) = match bundle_row {
-        Some((state, digest)) => (state, digest),
+    let (bundle_state, bundle_digest, bundle_trust_state) = match bundle_row {
+        Some((state, digest, trust_state)) => (state, digest, trust_state),
         None => {
             return Ok(ResolutionOutcome::Conflict(vec![ResolutionConflict {
                 code: "ASSIGNMENT_BUNDLE_NOT_FOUND".to_string(),
@@ -469,27 +469,48 @@ async fn resolve_effective_policy_set_with_options(
         }]));
     }
 
+    if bundle_trust_state != "trusted" {
+        return Ok(ResolutionOutcome::Conflict(vec![ResolutionConflict {
+            code: "ASSIGNMENT_BUNDLE_UNTRUSTED".to_string(),
+            message: format!("Bundle version {} is not trusted", input.bundle_version_id),
+        }]));
+    }
+
     // Load ordered baseline membership with policy lineage info
-    let baseline_rows =
-        sqlx::query_as::<_, (Uuid, Uuid, String, String, String, serde_json::Value)>(
-            r#"SELECT cbvp.policy_version_id,
+    let baseline_rows = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            String,
+            String,
+            String,
+            serde_json::Value,
+            String,
+            String,
+        ),
+    >(
+        r#"SELECT cbvp.policy_version_id,
                   pv.policy_id,
                   pv.policy_type,
                   pv.publication_state,
                   pv.semantic_digest,
-                  pv.config
+                  pv.config,
+                  pv.implementation_state,
+                  pv.trust_state
            FROM compliance_bundle_version_policies cbvp
            JOIN deployment_policy_versions pv ON pv.id = cbvp.policy_version_id
            WHERE cbvp.bundle_version_id = $1
+             AND cbvp.selected = TRUE
            ORDER BY cbvp.policy_order"#,
-        )
-        .bind(input.bundle_version_id)
-        .fetch_all(&mut **tx)
-        .await
-        .context("load baseline membership")?;
+    )
+    .bind(input.bundle_version_id)
+    .fetch_all(&mut **tx)
+    .await
+    .context("load baseline membership")?;
 
     // Validate every baseline policy is accepted
-    for (pv_id, _, _, pv_state, _, _) in &baseline_rows {
+    for (pv_id, _, _, pv_state, _, _, implementation_state, trust_state) in &baseline_rows {
         if pv_state != "accepted" && pv_state != "deprecated" {
             return Ok(ResolutionOutcome::Conflict(vec![ResolutionConflict {
                 code: "ASSIGNMENT_POLICY_NOT_ACCEPTED".to_string(),
@@ -499,12 +520,22 @@ async fn resolve_effective_policy_set_with_options(
                 ),
             }]));
         }
+        if matches!(
+            implementation_state.as_str(),
+            "native" | "external" | "manual"
+        ) && trust_state != "trusted"
+        {
+            return Ok(ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                code: "ASSIGNMENT_POLICY_NOT_TRUSTED".to_string(),
+                message: format!("Baseline policy version {} is not trusted", pv_id),
+            }]));
+        }
     }
 
     // ── Step 2: Validate exclusions ───────────────────────────────────────────
     let baseline_version_ids: std::collections::HashSet<Uuid> = baseline_rows
         .iter()
-        .map(|(id, _, _, _, _, _)| *id)
+        .map(|(id, _, _, _, _, _, _, _)| *id)
         .collect();
 
     for excl in &input.exclusions {
@@ -526,9 +557,9 @@ async fn resolve_effective_policy_set_with_options(
     let mut effective: Vec<EffectivePolicy> = baseline_rows
         .iter()
         .enumerate()
-        .filter(|(_, (pv_id, _, _, _, _, _))| !exclusions_set.contains(pv_id))
+        .filter(|(_, (pv_id, _, _, _, _, _, _, _))| !exclusions_set.contains(pv_id))
         .map(
-            |(idx, (pv_id, lin_id, ptype, _, _, config))| EffectivePolicy {
+            |(idx, (pv_id, lin_id, ptype, _, _, config, _, _))| EffectivePolicy {
                 policy_version_id: *pv_id,
                 policy_lineage_id: *lin_id,
                 policy_type: ptype.clone(),
@@ -575,8 +606,20 @@ async fn resolve_effective_policy_set_with_options(
         }
 
         // Load the addition's policy version
-        let add_row = sqlx::query_as::<_, (Uuid, String, String, String, serde_json::Value)>(
+        let add_row = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                String,
+                String,
+                String,
+                serde_json::Value,
+                String,
+                String,
+            ),
+        >(
             r#"SELECT policy_id, policy_type, publication_state, semantic_digest, config
+                      , implementation_state, trust_state
                FROM deployment_policy_versions
                WHERE id = $1"#,
         )
@@ -585,7 +628,15 @@ async fn resolve_effective_policy_set_with_options(
         .await
         .context("load addition policy version")?;
 
-        let (add_lineage, add_type, add_state, add_digest, add_config) = match add_row {
+        let (
+            add_lineage,
+            add_type,
+            add_state,
+            add_digest,
+            add_config,
+            implementation_state,
+            trust_state,
+        ) = match add_row {
             Some(row) => row,
             None => {
                 return Ok(ResolutionOutcome::Conflict(vec![ResolutionConflict {
@@ -602,6 +653,17 @@ async fn resolve_effective_policy_set_with_options(
                     "Addition policy version {} is in '{}' state; must be 'accepted'",
                     add_id, add_state
                 ),
+            }]));
+        }
+
+        if matches!(
+            implementation_state.as_str(),
+            "native" | "external" | "manual"
+        ) && trust_state != "trusted"
+        {
+            return Ok(ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                code: "ASSIGNMENT_POLICY_UNTRUSTED".to_string(),
+                message: format!("Addition policy version {} is not trusted", add_id),
             }]));
         }
 
@@ -637,7 +699,12 @@ async fn resolve_effective_policy_set_with_options(
     let effective_version_ids: std::collections::HashSet<Uuid> =
         effective.iter().map(|p| p.policy_version_id).collect();
 
-    for ovr in &input.overrides {
+    let mut ordered_overrides = input.overrides.clone();
+    ordered_overrides.sort_by(|left, right| {
+        (left.policy_version_id, &left.value_path)
+            .cmp(&(right.policy_version_id, &right.value_path))
+    });
+    for ovr in &ordered_overrides {
         if exclusions_set.contains(&ovr.policy_version_id) {
             return Ok(ResolutionOutcome::Conflict(vec![ResolutionConflict {
                 code: "ASSIGNMENT_OVERRIDE_TARGET_MISSING".to_string(),
@@ -1089,11 +1156,11 @@ async fn resolve_systems_effective_policies_batch(
     }
 
     // ── Q4: Bulk load additions for all assignment versions ───────────────────
-    let raw_additions: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT assignment_version_id, policy_version_id
+    let raw_additions: Vec<(Uuid, Uuid, i32)> = sqlx::query_as(
+        "SELECT assignment_version_id, policy_version_id, addition_order
          FROM compliance_assignment_additions
          WHERE assignment_version_id = ANY($1)
-         ORDER BY assignment_version_id, policy_version_id",
+         ORDER BY assignment_version_id, addition_order",
     )
     .bind(&all_assignment_version_ids)
     .fetch_all(&mut *tx)
@@ -1102,7 +1169,7 @@ async fn resolve_systems_effective_policies_batch(
 
     let mut additions_by_av: std::collections::HashMap<Uuid, Vec<Uuid>> =
         std::collections::HashMap::new();
-    for (av_id, pv_id) in raw_additions {
+    for (av_id, pv_id, _) in raw_additions {
         additions_by_av.entry(av_id).or_default().push(pv_id);
     }
 
@@ -1129,10 +1196,16 @@ async fn resolve_systems_effective_policies_batch(
                 value: val,
             });
     }
+    for overrides in overrides_by_av.values_mut() {
+        overrides.sort_by(|left, right| {
+            (left.policy_version_id, &left.value_path)
+                .cmp(&(right.policy_version_id, &right.value_path))
+        });
+    }
 
     // ── Q6: Bulk load bundle version states ───────────────────────────────────
-    let raw_bundle_versions: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT id, publication_state, semantic_digest
+    let raw_bundle_versions: Vec<(Uuid, String, String, String)> = sqlx::query_as(
+        "SELECT id, publication_state, semantic_digest, trust_state
          FROM compliance_bundle_versions
          WHERE id = ANY($1)",
     )
@@ -1141,19 +1214,31 @@ async fn resolve_systems_effective_policies_batch(
     .await
     .context("batch load bundle versions")?;
 
-    let bundle_version_info: std::collections::HashMap<Uuid, (String, String)> =
+    let bundle_version_info: std::collections::HashMap<Uuid, (String, String, String)> =
         raw_bundle_versions
             .into_iter()
-            .map(|(id, state, digest)| (id, (state, digest)))
+            .map(|(id, state, digest, trust_state)| (id, (state, digest, trust_state)))
             .collect();
 
     // ── Q7: Bulk load baseline memberships for all bundle versions ────────────
-    let raw_baselines: Vec<(Uuid, Uuid, Uuid, String, i32, serde_json::Value)> = sqlx::query_as(
+    let raw_baselines: Vec<(
+        Uuid,
+        Uuid,
+        Uuid,
+        String,
+        String,
+        String,
+        String,
+        i32,
+        serde_json::Value,
+    )> = sqlx::query_as(
         r#"SELECT cbvp.bundle_version_id, cbvp.policy_version_id,
-                      pv.policy_id, pv.policy_type, cbvp.policy_order, pv.config
+                      pv.policy_id, pv.policy_type, pv.publication_state,
+                      pv.implementation_state, pv.trust_state, cbvp.policy_order, pv.config
                FROM compliance_bundle_version_policies cbvp
                JOIN deployment_policy_versions pv ON pv.id = cbvp.policy_version_id
                WHERE cbvp.bundle_version_id = ANY($1)
+                 AND cbvp.selected = TRUE
                ORDER BY cbvp.bundle_version_id, cbvp.policy_order"#,
     )
     .bind(&all_bundle_version_ids)
@@ -1164,13 +1249,30 @@ async fn resolve_systems_effective_policies_batch(
     // Group by bundle_version_id
     let mut baselines_by_bv: std::collections::HashMap<
         Uuid,
-        Vec<(Uuid, Uuid, String, i32, serde_json::Value)>,
+        Vec<(
+            Uuid,
+            Uuid,
+            String,
+            String,
+            String,
+            String,
+            i32,
+            serde_json::Value,
+        )>,
     > = std::collections::HashMap::new();
-    for (bv_id, pv_id, lin_id, ptype, order, config) in raw_baselines {
-        baselines_by_bv
-            .entry(bv_id)
-            .or_default()
-            .push((pv_id, lin_id, ptype, order, config));
+    for (bv_id, pv_id, lin_id, ptype, pv_state, implementation_state, trust_state, order, config) in
+        raw_baselines
+    {
+        baselines_by_bv.entry(bv_id).or_default().push((
+            pv_id,
+            lin_id,
+            ptype,
+            pv_state,
+            implementation_state,
+            trust_state,
+            order,
+            config,
+        ));
     }
 
     // ── Q8: Bulk load all addition policy versions ────────────────────────────
@@ -1213,7 +1315,9 @@ async fn resolve_systems_effective_policies_batch(
                JOIN deployment_policy_versions pv
                  ON pv.id = COALESCE(dp.current_published_version_id, dp.current_draft_version_id)
                WHERE ep.environment_id = ANY($1)
-                 AND dp.enabled = TRUE
+                  AND dp.enabled = TRUE
+                  AND (pv.implementation_state NOT IN ('native', 'external', 'manual')
+                       OR pv.trust_state = 'trusted')
                  AND (
                    pv.publication_state = 'accepted'
                    OR (dp.current_published_version_id IS NULL
@@ -1246,7 +1350,9 @@ async fn resolve_systems_effective_policies_batch(
                JOIN deployment_policy_versions pv
                  ON pv.id = COALESCE(dp.current_published_version_id, dp.current_draft_version_id)
                WHERE sp.system_id = ANY($1)
-                 AND dp.enabled = TRUE
+                  AND dp.enabled = TRUE
+                  AND (pv.implementation_state NOT IN ('native', 'external', 'manual')
+                       OR pv.trust_state = 'trusted')
                  AND (
                    pv.publication_state = 'accepted'
                    OR (dp.current_published_version_id IS NULL
@@ -1388,7 +1494,7 @@ async fn resolve_systems_effective_policies_batch(
             };
 
             // Validate bundle version state
-            let Some((bv_state, bv_digest)) = bundle_version_info.get(bv_id) else {
+            let Some((bv_state, bv_digest, bv_trust_state)) = bundle_version_info.get(bv_id) else {
                 results.insert(
                     sys_id,
                     ResolutionOutcome::Conflict(vec![ResolutionConflict {
@@ -1419,9 +1525,37 @@ async fn resolve_systems_effective_policies_batch(
                 );
                 continue 'system;
             }
+            if bv_trust_state != "trusted" {
+                results.insert(
+                    sys_id,
+                    ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                        code: "ASSIGNMENT_BUNDLE_UNTRUSTED".to_string(),
+                        message: format!("Bundle version {} is not trusted", bv_id),
+                    }]),
+                );
+                continue 'system;
+            }
 
             let empty_baseline = vec![];
             let baseline = baselines_by_bv.get(bv_id).unwrap_or(&empty_baseline);
+            if let Some((pv_id, _, _, _pv_state, _implementation_state, _trust_state, _, _)) =
+                baseline
+                    .iter()
+                    .find(|(_, _, _, state, implementation, trust, _, _)| {
+                        (state != "accepted" && state != "deprecated")
+                            || (matches!(implementation.as_str(), "native" | "external" | "manual")
+                                && trust != "trusted")
+                    })
+            {
+                results.insert(
+                    sys_id,
+                    ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                        code: "ASSIGNMENT_POLICY_NOT_READY".to_string(),
+                        message: format!("Policy version {} is not ready for assignment", pv_id),
+                    }]),
+                );
+                continue 'system;
+            }
             let exclusions = exclusions_by_av.get(av_id).cloned().unwrap_or_default();
             let additions = additions_by_av.get(av_id).cloned().unwrap_or_default();
             let overrides_for_av = overrides_by_av.get(av_id).cloned().unwrap_or_default();
@@ -1429,8 +1563,10 @@ async fn resolve_systems_effective_policies_batch(
             // Build exclusion set
             let exclusions_set: std::collections::HashSet<Uuid> =
                 exclusions.iter().copied().collect();
-            let baseline_version_ids: std::collections::HashSet<Uuid> =
-                baseline.iter().map(|(pv_id, _, _, _, _)| *pv_id).collect();
+            let baseline_version_ids: std::collections::HashSet<Uuid> = baseline
+                .iter()
+                .map(|(pv_id, _, _, _, _, _, _, _)| *pv_id)
+                .collect();
 
             // Validate exclusions
             for excl in &exclusions {
@@ -1452,22 +1588,24 @@ async fn resolve_systems_effective_policies_batch(
             // Build surviving baseline
             let mut assignment_effective: Vec<EffectivePolicy> = baseline
                 .iter()
-                .filter(|(pv_id, _, _, _, _)| !exclusions_set.contains(pv_id))
+                .filter(|(pv_id, _, _, _, _, _, _, _)| !exclusions_set.contains(pv_id))
                 .enumerate()
-                .map(|(idx, (pv_id, lin_id, ptype, _, config))| EffectivePolicy {
-                    policy_version_id: *pv_id,
-                    policy_lineage_id: *lin_id,
-                    policy_type: ptype.clone(),
-                    source: EffectivePolicySource::Baseline,
-                    specificity,
-                    baseline_order: Some(idx as i32),
-                    addition_order: None,
-                    overrides: Vec::new(),
-                    effective_config: config.clone(),
-                    assignment_mode: mode.clone(),
-                    effective_mode: mode.clone(),
-                    provenance: Vec::new(),
-                })
+                .map(
+                    |(idx, (pv_id, lin_id, ptype, _, _, _, _, config))| EffectivePolicy {
+                        policy_version_id: *pv_id,
+                        policy_lineage_id: *lin_id,
+                        policy_type: ptype.clone(),
+                        source: EffectivePolicySource::Baseline,
+                        specificity,
+                        baseline_order: Some(idx as i32),
+                        addition_order: None,
+                        overrides: Vec::new(),
+                        effective_config: config.clone(),
+                        assignment_mode: mode.clone(),
+                        effective_mode: mode.clone(),
+                        provenance: Vec::new(),
+                    },
+                )
                 .collect();
 
             // Validate and apply additions
@@ -1796,7 +1934,9 @@ async fn resolve_system_effective_policies_with_options(
                      dp.current_draft_version_id
                  )
                WHERE ep.environment_id = $1
-                 AND dp.enabled = TRUE
+                  AND dp.enabled = TRUE
+                  AND (pv.implementation_state NOT IN ('native', 'external', 'manual')
+                       OR pv.trust_state = 'trusted')
                  AND (
                      pv.publication_state = 'accepted'
                      OR (
@@ -1843,7 +1983,9 @@ async fn resolve_system_effective_policies_with_options(
                      dp.current_draft_version_id
                  )
                WHERE sp.system_id = $1
-                 AND dp.enabled = TRUE
+                  AND dp.enabled = TRUE
+                  AND (pv.implementation_state NOT IN ('native', 'external', 'manual')
+                       OR pv.trust_state = 'trusted')
                  AND (
                      pv.publication_state = 'accepted'
                      OR (
@@ -1913,7 +2055,7 @@ async fn resolve_system_effective_policies_with_options(
         .context("load assignment exclusions")?;
 
         let additions: Vec<Uuid> = sqlx::query_scalar(
-             "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_version_id = $1 ORDER BY policy_version_id",
+             "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_version_id = $1 ORDER BY addition_order",
         )
         .bind(assignment_version_id)
         .fetch_all(&mut *tx)
@@ -2111,7 +2253,9 @@ async fn resolve_legacy_system_policies(
                      dp.current_draft_version_id
                  )
                WHERE ep.environment_id = $1
-                 AND dp.enabled = TRUE
+                  AND dp.enabled = TRUE
+                  AND (pv.implementation_state NOT IN ('native', 'external', 'manual')
+                       OR pv.trust_state = 'trusted')
                  AND (
                      pv.publication_state = 'accepted'
                      OR (
@@ -2155,7 +2299,9 @@ async fn resolve_legacy_system_policies(
                  dp.current_draft_version_id
              )
            WHERE sp.system_id = $1
-             AND dp.enabled = TRUE
+                  AND dp.enabled = TRUE
+                  AND (pv.implementation_state NOT IN ('native', 'external', 'manual')
+                       OR pv.trust_state = 'trusted')
              AND (
                  pv.publication_state = 'accepted'
                  OR (
