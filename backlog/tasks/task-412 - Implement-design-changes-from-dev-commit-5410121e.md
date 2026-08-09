@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-09 15:43'
+updated_date: '2026-08-09 15:54'
 labels:
   - design
   - frontend
@@ -1396,6 +1396,8 @@ Implemented a local, uncommitted first pass of the `0c92fdf2` modal structure: s
 2026-08-09: Policies presentation pass is committed and pushed as `1ced5e95`; no current tracked changes in TASK-412 worktree. Beginning the first backend P0 from review: policy JSON/TOML export/import currently omits `compliance_metadata`, `dependencies`, `opaque_xml`, and `enabled_by_default`, while import computes a reduced non-authoritative digest.
 
 2026-08-09: Pushed `e1e36c75 fix(compliance): preserve policy interchange semantics`. JSON/TOML policy export and exact-version export now include compliance metadata, dependencies, opaque XML, and enabled-by-default. Import persists those fields and computes/verifies digest only through `PolicyVersionCanonical`. Focused parser tests and `cargo check -p cf-server` pass; web-ui Nix check intentionally not run per user direction.
+
+2026-08-09: Pushed `499a905d fix(compliance): finalize derived version digests`. Policy draft endpoint now delegates to the transactional query service, retains optional caller version strings, copies all semantic fields, and finalizes digest before commit. Bundle draft derivation now finalizes membership-aware bundle digests and copied assignment-overlay digests in the same transaction. Focused compliance handler tests: 16 passed, 70 DB-dependent tests ignored; formatting and `cargo check -p cf-server` pass. Web-ui Nix check intentionally not run per user direction.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
