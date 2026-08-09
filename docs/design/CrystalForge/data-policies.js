@@ -3,17 +3,136 @@
 // Category taxonomy — every policy is a criterion that must be met to deploy a system,
 // grouped by the KIND of criterion so the registry reads clearly.
 const POLICY_CATEGORIES = [
-  { id:"deployment", label:"Deployment",         short:"Deploy",    color:"#60a5fa", icon:"deploy",
+  { id:"deployment", label:"Deployment",         short:"Deploy",    color:"#60a5fa", icon:"deploy",    domain:"platform",
     blurb:"Base strategy — how and when a system picks up a new configuration." },
-  { id:"pipeline",   label:"Pipeline gates",     short:"Pipeline",  color:"#a78bfa", icon:"build",
+  { id:"pipeline",   label:"Pipeline gates",     short:"Pipeline",  color:"#a78bfa", icon:"build",     domain:"platform",
     blurb:"Gates on pipeline output — eval, build, and CVE results must pass before promotion." },
-  { id:"rollout",    label:"Rollout control",    short:"Rollout",   color:"#fbbf24", icon:"sync",
+  { id:"rollout",    label:"Rollout control",    short:"Rollout",   color:"#fbbf24", icon:"sync",      domain:"platform",
     blurb:"Govern the timing, approvals, and staging of a rollout." },
-  { id:"security",   label:"Security & hardening", short:"Security", color:"#f87171", icon:"shield",
+  { id:"security",   label:"Security & hardening", short:"Security", color:"#f87171", icon:"shield",   domain:"security",
     blurb:"Config-level assertions — STIG / hardening controls a system must satisfy." },
 ];
 function policyCategoryMeta(id) {
   return POLICY_CATEGORIES.find(c => c.id === id) || POLICY_CATEGORIES[0];
+}
+
+// Two audiences, two top-level domains. Platform = how devops/admins run the pipeline.
+// Security controls = what security/compliance people are accountable for against a
+// framework — this domain supports pluggable grouping schemes (below) instead of one
+// fixed taxonomy, since different orgs audit against different standards.
+const POLICY_DOMAINS = [
+  { id:"platform", label:"Platform", icon:"deploy", color:"#60a5fa",
+    blurb:"Deployment modes, pipeline gates, and rollout control — configured by whoever runs the pipeline." },
+  { id:"security",  label:"Security controls", icon:"shield", color:"#f87171",
+    blurb:"Controls security/compliance own against a framework — grouped however they audit, not by CF's internal categories." },
+];
+function policyDomain(p) {
+  return policyCategoryMeta(p.category || "deployment").domain || "platform";
+}
+
+// NIST 800-53 rev5 control families relevant to the STIG controls we model.
+const CONTROL_FAMILIES = {
+  AC: { id:"AC", label:"Access Control", blurb:"Who and what can authenticate, and what they're authorized to do once in." },
+  AU: { id:"AU", label:"Audit & Accountability", blurb:"Logging, review, and non-repudiation of system activity." },
+  CM: { id:"CM", label:"Configuration Management", blurb:"Baseline configs, change control, and inventory of what's running." },
+  IA: { id:"IA", label:"Identification & Authentication", blurb:"Verifying the identity of users, devices, and processes." },
+  SC: { id:"SC", label:"System & Communications Protection", blurb:"Protecting data in transit and isolating system boundaries." },
+  SI: { id:"SI", label:"System & Information Integrity", blurb:"Detecting and correcting flaws, malicious code, and unauthorized change." },
+  MP: { id:"MP", label:"Media Protection", blurb:"Controlling access to and sanitization of removable/physical media." },
+};
+
+// Predefined grouping schemes for the Security controls domain — a pivot over tags
+// already on each policy, so switching schemes never touches the underlying policy data.
+const GROUPING_SCHEMES = [
+  { id:"control-family", label:"NIST 800-53 family", builtin:true,
+    groupOf: (p) => p.controlFamily ? (CONTROL_FAMILIES[p.controlFamily]?.label || p.controlFamily) : "Ungrouped",
+    groupKeyOf: (p) => p.controlFamily || "ungrouped" },
+  { id:"severity", label:"STIG severity (CAT)", builtin:true,
+    groupOf: (p) => p.severity === "high" ? "CAT I — High" : p.severity === "medium" ? "CAT II — Medium" : p.severity === "low" ? "CAT III — Low" : "Unrated",
+    groupKeyOf: (p) => p.severity || "unrated" },
+  { id:"cci", label:"CCI (Control Correlation Identifier)", builtin:true,
+    groupOf: (p) => (p.cciIds && p.cciIds[0]) || "Unmapped",
+    groupKeyOf: (p) => (p.cciIds && p.cciIds[0]) || "unmapped" },
+  { id:"srg-category", label:"SRG category", builtin:true,
+    groupOf: (p) => srgCategoryOf(p), groupKeyOf: (p) => srgCategoryOf(p) },
+  { id:"cmmc-level", label:"CMMC 2.0 level", builtin:true,
+    groupOf: (p) => cmmcLevelOf(p).label, groupKeyOf: (p) => cmmcLevelOf(p).id },
+  { id:"cis-section", label:"CIS Benchmark section", builtin:true,
+    groupOf: (p) => p.cisSection ? `Section ${p.cisSection.split(".")[0]}` : "Unmapped",
+    groupKeyOf: (p) => p.cisSection ? p.cisSection.split(".")[0] : "unmapped" },
+  { id:"remediation", label:"Remediation status", builtin:true,
+    groupOf: (p) => remediationStatusOf(p).label, groupKeyOf: (p) => remediationStatusOf(p).id },
+  { id:"flat", label:"Flat list (no grouping)", builtin:true,
+    groupOf: () => null, groupKeyOf: () => "all" },
+];
+
+// SRG (Security Requirement Guide) category — the token right after "SRG-" in a
+// DISA SRG id (e.g. SRG-OS-000109 -> "OS"). Standard DISA taxonomy, no local mapping needed.
+const SRG_CATEGORY_LABELS = {
+  OS: "Operating System", APP: "Application", NET: "Network", DB: "Database",
+  ENCLAVE: "Enclave", MOB: "Mobile", VIRT: "Virtualization",
+};
+function srgCategoryOf(p) {
+  const first = (p.srgIds || [])[0];
+  if (!first) return "Unmapped";
+  const m = first.match(/^SRG-([A-Z]+)-/);
+  const tok = m ? m[1] : null;
+  return tok ? `SRG: ${SRG_CATEGORY_LABELS[tok] || tok}` : "Unmapped";
+}
+
+// CMMC 2.0 level — no official STIG-to-CMMC crosswalk is modeled here; this derives a
+// plausible level from STIG severity as a stand-in (higher-severity findings tend to back
+// higher-maturity practices) unless a policy carries an explicit cmmcLevel override.
+function cmmcLevelOf(p) {
+  if (p.cmmcLevel) return { id:`l${p.cmmcLevel}`, label:`Level ${p.cmmcLevel}` };
+  const lvl = p.severity === "high" ? 3 : p.severity === "medium" ? 2 : p.severity === "low" ? 1 : null;
+  return lvl ? { id:`l${lvl}`, label:`Level ${lvl}` } : { id:"unrated", label:"Unrated" };
+}
+
+// Remediation status — derived from what kind of rules a policy already carries, not a
+// separate data field: purely-declarative NixOS options are auto-remediated by the next
+// build; custom_eval assertions still need someone to write the fix; anything else is
+// manual/attestation-based.
+function remediationStatusOf(p) {
+  const kinds = new Set((p.rules || []).map(r => r.kind));
+  if (kinds.size === 0) return { id:"manual", label:"Manual verification only" };
+  if ([...kinds].every(k => k === "nixos_option")) return { id:"auto", label:"Automated (declarative)" };
+  if (kinds.has("nixos_option") || kinds.has("custom_eval")) return { id:"semi", label:"Semi-automated (custom eval)" };
+  return { id:"manual", label:"Manual verification only" };
+}
+
+// Custom/internal compliance frameworks — an org can define its own framework name
+// (e.g. "Acme Internal Baseline") to use on New Bundle instead of only DISA STIG/NIST/CMMC.
+// Persisted client-side like custom grouping schemes; each entry is just a label + id.
+const BUILTIN_FRAMEWORKS = ["DISA STIG", "NIST 800-53", "CMMC 2.0", "CIS Benchmark"];
+function loadCustomFrameworks() {
+  try { const raw = localStorage.getItem("cf.customFrameworks"); if (raw) return JSON.parse(raw); } catch {}
+  return [];
+}
+function saveCustomFrameworks(list) {
+  try { localStorage.setItem("cf.customFrameworks", JSON.stringify(list)); } catch {}
+}
+function allFrameworkOptions() {
+  return [...BUILTIN_FRAMEWORKS, ...loadCustomFrameworks().map(f => f.name)];
+}
+// Which id scheme(s) actually apply to each standard framework — SRG/CCI are DISA
+// identifiers and don't exist under CIS or CMMC; CIS has its own section numbering.
+const FRAMEWORK_ID_FIELDS = {
+  "DISA STIG": ["srgIds", "cciIds"],
+  "CIS Benchmark": ["cisSection"],
+  "NIST 800-53": [],
+  "CMMC 2.0": [],
+};
+
+// Custom grouping schemes an admin defines — e.g. an org-specific control catalog.
+// Persisted client-side; each scheme owns a list of named groups, each holding an
+// explicit list of policy ids (a manual pivot, since custom groups aren't tag-derived).
+function loadCustomGroupingSchemes() {
+  try { const raw = localStorage.getItem("cf.customGroupingSchemes"); if (raw) return JSON.parse(raw); } catch {}
+  return [];
+}
+function saveCustomGroupingSchemes(list) {
+  try { localStorage.setItem("cf.customGroupingSchemes", JSON.stringify(list)); } catch {}
 }
 
 const POLICY_BUILTIN = [
@@ -142,6 +261,7 @@ const POLICY_CUSTOM = [
     cciIds: ["CCI-000770","CCI-001133","CCI-000068"],
     name: "stig-ssh-hardening",
     category: "security",
+    controlFamily: "AC",
     description: "Anduril NixOS STIG: SSH daemon hardening — no root login, FIPS ciphers, 10-min idle timeout.",
     type: "custom",
     severity: "high",
@@ -173,6 +293,7 @@ const POLICY_CUSTOM = [
     cciIds: ["CCI-000018","CCI-000366"],
     name: "stig-audit-daemon",
     category: "security",
+    controlFamily: "AU",
     description: "Anduril NixOS STIG: audit daemon enabled with the firewall to enforce host logging and ingress control.",
     type: "custom",
     severity: "medium",
@@ -202,6 +323,7 @@ const POLICY_CUSTOM = [
     cciIds: ["CCI-000048"],
     name: "stig-consent-banner",
     category: "security",
+    controlFamily: "AC",
     description: "Anduril NixOS STIG: DoD Notice and Consent banner on all command-line logon paths.",
     type: "custom",
     severity: "medium",
@@ -229,6 +351,7 @@ const POLICY_CUSTOM = [
     cciIds: ["CCI-002450","CCI-001199"],
     name: "stig-fips-crypto",
     category: "security",
+    controlFamily: "SC",
     description: "Anduril NixOS STIG: FIPS-validated cryptography enabled and data-at-rest encrypted.",
     type: "custom",
     severity: "high",
@@ -257,6 +380,7 @@ const POLICY_CUSTOM = [
     cciIds: ["CCI-001958"],
     name: "stig-usbguard",
     category: "security",
+    controlFamily: "MP",
     description: "Anduril NixOS STIG: USBguard enabled with an allow-list policy to control peripheral access.",
     type: "custom",
     severity: "medium",
@@ -285,6 +409,7 @@ const POLICY_CUSTOM = [
     cciIds: ["CCI-000205","CCI-000196"],
     name: "stig-password-policy",
     category: "security",
+    controlFamily: "IA",
     description: "Anduril NixOS STIG: enforce 15-character minimum password length and encrypted password storage.",
     type: "custom",
     severity: "medium",
@@ -313,6 +438,7 @@ const POLICY_CUSTOM = [
     cciIds: ["CCI-000205"],
     name: "stig-password-policy",
     category: "security",
+    controlFamily: "IA",
     description: "Anduril NixOS STIG: enforce 12-character minimum password length.",
     type: "custom",
     severity: "medium",
@@ -339,6 +465,7 @@ const POLICY_CUSTOM = [
     cciIds: ["CCI-000205"],
     name: "stig-password-policy",
     category: "security",
+    controlFamily: "IA",
     description: "Anduril NixOS STIG: enforce 13-character minimum password length.",
     type: "custom",
     severity: "medium",
@@ -365,6 +492,7 @@ const POLICY_CUSTOM = [
     cciIds: ["CCI-000205","CCI-000196"],
     name: "stig-password-policy",
     category: "security",
+    controlFamily: "IA",
     description: "Anduril NixOS STIG: enforce 14-character minimum password length and encrypted password storage.",
     type: "custom",
     severity: "medium",
@@ -392,6 +520,7 @@ const POLICY_CUSTOM = [
     cciIds: ["CCI-000205"],
     name: "stig-password-policy",
     category: "security",
+    controlFamily: "IA",
     description: "Anduril NixOS STIG: enforce 10-character minimum password length (superseded by 15-char revision).",
     type: "custom",
     severity: "medium",
@@ -434,4 +563,4 @@ function policyUsage(policyId) {
   return { systems, count: systems.length, byEnv };
 }
 
-Object.assign(window, { POLICIES, POLICY_BUILTIN, POLICY_CUSTOM, POLICY_CATEGORIES, policyCategoryMeta, policyUsage, groupPoliciesByLineage });
+Object.assign(window, { POLICIES, POLICY_BUILTIN, POLICY_CUSTOM, POLICY_CATEGORIES, POLICY_DOMAINS, CONTROL_FAMILIES, GROUPING_SCHEMES, policyCategoryMeta, policyDomain, policyUsage, groupPoliciesByLineage, loadCustomGroupingSchemes, saveCustomGroupingSchemes, srgCategoryOf, cmmcLevelOf, remediationStatusOf, BUILTIN_FRAMEWORKS, loadCustomFrameworks, saveCustomFrameworks, allFrameworkOptions, FRAMEWORK_ID_FIELDS });

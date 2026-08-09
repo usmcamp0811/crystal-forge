@@ -372,19 +372,67 @@ function BundleDrilldown({ bundle, filter, setFilter, applicableSystems, onOpenS
 function ControlsEvidenceDrawer({ bundle, sys, onClose, onOpenSystem, showSystemLink, onOpenBundle }) {
   const [activeIdx, setActiveIdx] = React.useState(0);
   const assignment = resolveComplianceAssignment(sys, bundle.lineageId || bundle.id);
+  const evidenceList = bundle.policyIds.map(pid => evidenceForControl(bundle, pid, sys));
+  const active = evidenceList[activeIdx];
+
+  // Framework-aware grouping: different compliance frameworks organize controls
+  // differently, so pick the scheme that matches this bundle instead of always NIST family.
+  const frameworkScheme = (() => {
+    const f = (bundle.framework || "").toLowerCase();
+    if (f.includes("cmmc")) return "cmmc-level";
+    if (f.includes("cis")) return "cis-section";
+    if (f.includes("stig")) return "severity";
+    if (f.includes("800-53") || f.includes("nist")) return "control-family";
+    return "control-family";
+  })();
+  const familyOrder = [...Object.keys(typeof CONTROL_FAMILIES !== "undefined" ? CONTROL_FAMILIES : {}), "ungrouped"];
+  const navGroups = frameworkScheme === "severity" ? (() => {
+    const order = [["high","CAT I — High"],["medium","CAT II — Medium"],["low","CAT III — Low"],["unrated","Unrated"]];
+    return order.map(([sid,label]) => ({ fid:sid, label, indices: bundle.policyIds.map((pid,i)=>i).filter(i => (POLICIES.find(x=>x.id===bundle.policyIds[i])?.severity || "unrated") === sid) })).filter(g=>g.indices.length>0);
+  })() : frameworkScheme === "cmmc-level" ? (() => {
+    const order = [["l3","Level 3"],["l2","Level 2"],["l1","Level 1"],["unrated","Unrated"]];
+    return order.map(([sid,label]) => ({ fid:sid, label, indices: bundle.policyIds.map((pid,i)=>i).filter(i => { const p = POLICIES.find(x=>x.id===bundle.policyIds[i]); return p && cmmcLevelOf(p).id === sid; }) })).filter(g=>g.indices.length>0);
+  })() : frameworkScheme === "cis-section" ? (() => {
+    const bySection = new Map();
+    bundle.policyIds.forEach((pid, i) => {
+      const p = POLICIES.find(x=>x.id===pid);
+      const key = p?.cisSection ? `Section ${p.cisSection.split(".")[0]}` : "Unmapped";
+      if (!bySection.has(key)) bySection.set(key, []);
+      bySection.get(key).push(i);
+    });
+    return Array.from(bySection.entries()).map(([label,indices]) => ({ fid:label, label, indices })).sort((a,b)=>a.label.localeCompare(b.label));
+  })() : familyOrder.map(fid => {
+    const fam = (typeof CONTROL_FAMILIES !== "undefined" ? CONTROL_FAMILIES : {})[fid];
+    const indices = bundle.policyIds.map((pid, i) => i).filter(i => {
+      const p = POLICIES.find(x => x.id === bundle.policyIds[i]);
+      return (p?.controlFamily || "ungrouped") === fid;
+    });
+    return { fid, label: fam ? `${fam.id} — ${fam.label}` : "Ungrouped", indices };
+  }).filter(g => g.indices.length > 0);
+  const visualOrder = navGroups.flatMap(g => g.indices);
+  const [collapsed, setCollapsed] = React.useState({});
+  const toggleGroup = (fid) => setCollapsed(c => ({ ...c, [fid]: !c[fid] }));
+  const [navQuery, setNavQuery] = React.useState("");
+  const navQ = navQuery.trim().toLowerCase();
+  const navGroupsFiltered = navQ ? navGroups.map(g => ({
+    ...g,
+    indices: g.indices.filter(i => {
+      const ev = evidenceList[i];
+      return ev.policyName.toLowerCase().includes(navQ) || ev.status.toLowerCase().includes(navQ);
+    }),
+  })).filter(g => g.indices.length > 0) : navGroups;
 
   React.useEffect(() => {
     const onKey = (e) => {
       if (e.key === "Escape") onClose();
-      if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); setActiveIdx(i => Math.min(bundle.policyIds.length - 1, i + 1)); }
-      if (e.key === "k" || e.key === "ArrowUp")   { e.preventDefault(); setActiveIdx(i => Math.max(0, i - 1)); }
+      const pos = Math.max(0, visualOrder.indexOf(activeIdx));
+      if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); setActiveIdx(visualOrder[Math.min(visualOrder.length - 1, pos + 1)]); }
+      if (e.key === "k" || e.key === "ArrowUp")   { e.preventDefault(); setActiveIdx(visualOrder[Math.max(0, pos - 1)]); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [bundle.policyIds.length, onClose]);
+  }, [bundle.policyIds.length, onClose, activeIdx, visualOrder]);
 
-  const evidenceList = bundle.policyIds.map(pid => evidenceForControl(bundle, pid, sys));
-  const active = evidenceList[activeIdx];
 
   return (
     <>
@@ -420,32 +468,56 @@ function ControlsEvidenceDrawer({ bundle, sys, onClose, onOpenSystem, showSystem
         </header>
 
         <div style={{ display:"grid", gridTemplateColumns:"260px 1fr", flex:1, minHeight:0, overflow:"hidden" }}>
-          {/* Left: control nav */}
-          <nav style={{ borderRight:"1px solid var(--cf-divider)", overflowY:"auto", background:"color-mix(in oklab, var(--cf-page-bg) 30%, var(--cf-card-bg))" }}>
-            {evidenceList.map((ev, i) => {
-              const color = { pass:"#34d399", warn:"#fbbf24", fail:"#f87171", waiver:"#a78bfa" }[ev.status];
-              const isSel = i === activeIdx;
+          {/* Left: control nav — grouped by NIST family, filterable */}
+          <nav style={{ borderRight:"1px solid var(--cf-divider)", overflowY:"auto", background:"color-mix(in oklab, var(--cf-page-bg) 30%, var(--cf-card-bg))", display:"flex", flexDirection:"column" }}>
+            <div style={{ position:"sticky", top:0, zIndex:1, padding:8, background:"color-mix(in oklab, var(--cf-page-bg) 55%, var(--cf-card-bg))", borderBottom:"1px solid var(--cf-divider)" }}>
+              <div className="filter-search" style={{ margin:0 }}>
+                <Icon name="search" size={12}/>
+                <input className="input focus-ring" placeholder="Filter controls…" value={navQuery} onChange={e=>setNavQuery(e.target.value)} style={{ fontSize:11.5, padding:"6px 8px 6px 30px" }}/>
+              </div>
+            </div>
+            {navGroupsFiltered.length === 0 && (
+              <div style={{ padding:"20px 14px", fontSize:12, color:"var(--cf-text-muted)", textAlign:"center" }}>No controls match.</div>
+            )}
+            {(() => { let counter = 0; return navGroupsFiltered.map(grp => {
+              const isCollapsed = !!collapsed[grp.fid];
+              if (isCollapsed) counter += grp.indices.length;
               return (
-                <button key={ev.policyId}
-                  onClick={() => setActiveIdx(i)}
-                  className="focus-ring"
-                  style={{
-                    all:"unset", cursor:"pointer", display:"block",
-                    padding:"10px 14px", width:"100%", boxSizing:"border-box",
-                    borderLeft:`3px solid ${isSel ? "var(--cf-brand-purple)" : "transparent"}`,
-                    background: isSel ? "color-mix(in oklab, var(--cf-brand-purple) 8%, transparent)" : "transparent",
-                    borderBottom:"1px solid var(--cf-divider)",
-                  }}>
-                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:8 }}>
-                    <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{String(i+1).padStart(2,"0")}</span>
-                    <span style={{ width:8, height:8, borderRadius:"50%", background:color }}/>
-                  </div>
-                  <div style={{ fontSize:12, color:"var(--cf-text-primary)", marginTop:4, fontWeight: isSel ? 600 : 400, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                    {ev.policyName}
-                  </div>
+              <div key={grp.fid}>
+                <button onClick={() => toggleGroup(grp.fid)} className="focus-ring"
+                  style={{ all:"unset", cursor:"pointer", display:"flex", alignItems:"center", gap:6, width:"100%", boxSizing:"border-box", padding:"9px 14px 5px", fontSize:9.5, textTransform:"uppercase", letterSpacing:"0.06em", fontWeight:700, color:"var(--cf-text-muted)", position:"sticky", top:0, background:"color-mix(in oklab, var(--cf-page-bg) 55%, var(--cf-card-bg))" }}>
+                  <Icon name={isCollapsed ? "chevron-right" : "chevron-down"} size={10}/>
+                  <span style={{ flex:1, textAlign:"left" }}>{grp.label} <span className="mono" style={{ opacity:0.7 }}>· {grp.indices.length}</span></span>
                 </button>
+                {!isCollapsed && grp.indices.map(i => {
+                  const ev = evidenceList[i];
+                  const n = ++counter;
+                  const color = { pass:"#34d399", warn:"#fbbf24", fail:"#f87171", waiver:"#a78bfa" }[ev.status];
+                  const isSel = i === activeIdx;
+                  return (
+                    <button key={ev.policyId}
+                      onClick={() => setActiveIdx(i)}
+                      className="focus-ring"
+                      style={{
+                        all:"unset", cursor:"pointer", display:"block",
+                        padding:"10px 14px", width:"100%", boxSizing:"border-box",
+                        borderLeft:`3px solid ${isSel ? "var(--cf-brand-purple)" : "transparent"}`,
+                        background: isSel ? "color-mix(in oklab, var(--cf-brand-purple) 8%, transparent)" : "transparent",
+                        borderBottom:"1px solid var(--cf-divider)",
+                      }}>
+                      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:8 }}>
+                        <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{String(n).padStart(2,"0")}</span>
+                        <span style={{ width:8, height:8, borderRadius:"50%", background:color }}/>
+                      </div>
+                      <div style={{ fontSize:12, color:"var(--cf-text-primary)", marginTop:4, fontWeight: isSel ? 600 : 400, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                        {ev.policyName}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
               );
-            })}
+            }); })()}
           </nav>
 
           {/* Right: evidence detail */}
@@ -823,6 +895,23 @@ function NewBundleModal({ onClose, bundle: editBundle, onDelete }) {
   });
   const [query, setQuery] = React.useState("");
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
+  const [customFrameworks, setCustomFrameworks] = React.useState(() => loadCustomFrameworks());
+  const [newFrameworkOpen, setNewFrameworkOpen] = React.useState(false);
+  const [newFrameworkName, setNewFrameworkName] = React.useState("");
+  const onFrameworkChange = (v) => {
+    if (v === "__new__") { setNewFrameworkOpen(true); return; }
+    set("framework", v);
+  };
+  const saveNewFramework = () => {
+    const name = newFrameworkName.trim();
+    if (!name) return;
+    const next = [...customFrameworks, { id: `fw-${Date.now()}`, name }];
+    setCustomFrameworks(next);
+    saveCustomFrameworks(next);
+    set("framework", name);
+    setNewFrameworkOpen(false);
+    setNewFrameworkName("");
+  };
 
   const policies = (typeof POLICIES !== "undefined" ? POLICIES : []).filter(p => p.publicationState !== "deprecated");
   const filtered = policies.filter(p =>
@@ -862,23 +951,40 @@ function NewBundleModal({ onClose, bundle: editBundle, onDelete }) {
         </div>
         <div className="modal-body" style={{ overflowY:"auto" }}>
           <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr", gap:14 }}>
-            <div className="field">
+            <div className="field" style={{ marginTop:0 }}>
               <label>Bundle name</label>
               <input className="input focus-ring" value={form.name} onChange={e=>set("name",e.target.value)} placeholder="e.g. Anduril NixOS STIG (v1r2)"/>
             </div>
-            <div className="field">
+            <div className="field" style={{ marginTop:0 }}>
               <label>Version / revision</label>
               <input className="input focus-ring mono" value={form.version} onChange={e=>set("version",e.target.value)} placeholder="v1r5" style={{ fontSize:12 }}/>
             </div>
           </div>
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 2fr", gap:14 }}>
-            <div className="field">
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 2fr", gap:14, marginTop:14 }}>
+            <div className="field" style={{ marginTop:0 }}>
               <label>Framework</label>
-              <select className="input focus-ring" value={form.framework} onChange={e=>set("framework",e.target.value)}>
-                {["DISA STIG","NIST 800-53","CMMC","CIS Benchmark","Internal","Custom"].map(f => <option key={f}>{f}</option>)}
-              </select>
+              {newFrameworkOpen ? (
+                <div style={{ display:"flex", gap:6 }}>
+                  <input className="input focus-ring" autoFocus value={newFrameworkName} onChange={e=>setNewFrameworkName(e.target.value)}
+                    placeholder="e.g. Acme Internal Baseline" onKeyDown={e=>{ if(e.key==="Enter") saveNewFramework(); if(e.key==="Escape") setNewFrameworkOpen(false); }}/>
+                  <button className="btn btn-ghost focus-ring xs" onClick={saveNewFramework} disabled={!newFrameworkName.trim()}>Add</button>
+                  <button className="btn btn-ghost focus-ring xs" onClick={()=>setNewFrameworkOpen(false)}>Cancel</button>
+                </div>
+              ) : (
+                <select className="input focus-ring" value={form.framework} onChange={e=>onFrameworkChange(e.target.value)}>
+                  <optgroup label="Standard">
+                    {BUILTIN_FRAMEWORKS.map(f => <option key={f}>{f}</option>)}
+                  </optgroup>
+                  {customFrameworks.length > 0 && (
+                    <optgroup label="Custom">
+                      {customFrameworks.map(f => <option key={f.name}>{f.name}</option>)}
+                    </optgroup>
+                  )}
+                  <option value="__new__">+ Define new framework…</option>
+                </select>
+              )}
             </div>
-            <div className="field">
+            <div className="field" style={{ marginTop:0 }}>
               <label>Description</label>
               <input className="input focus-ring" value={form.description} onChange={e=>set("description",e.target.value)} placeholder="What this bundle verifies"/>
             </div>
