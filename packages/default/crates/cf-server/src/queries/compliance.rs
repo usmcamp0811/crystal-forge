@@ -547,7 +547,6 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
             COALESCE(p.control_count, 0)::bigint AS control_count,
             COALESCE(e.environment_count, 0)::bigint AS environment_count,
             COALESCE(a.active_assignment_count, 0)::bigint AS active_assignment_count,
-            COALESCE(a.active_assignment_count, 0)::bigint AS active_assignment_count,
             b.current_draft_version_id,
             b.current_published_version_id,
             dv.version AS current_draft_version,
@@ -571,14 +570,6 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
             JOIN environments e ON e.id = cbe.environment_id
             WHERE cbe.bundle_id = b.id
         ) e ON TRUE
-        LEFT JOIN LATERAL (
-            SELECT count(*)::bigint AS active_assignment_count
-            FROM compliance_bundle_assignments assignment
-            JOIN compliance_bundle_versions assignment_version
-              ON assignment_version.id = assignment.bundle_version_id
-            WHERE assignment_version.bundle_id = b.id
-              AND COALESCE(assignment.active, true)
-        ) a ON TRUE
         LEFT JOIN LATERAL (
             SELECT count(*)::bigint AS active_assignment_count
             FROM compliance_bundle_assignments assignment
@@ -802,6 +793,7 @@ pub async fn find_bundle(
             COALESCE(e.env_colors, ARRAY[]::text[]) AS env_colors,
             COALESCE(p.control_count, 0)::bigint AS control_count,
             COALESCE(e.environment_count, 0)::bigint AS environment_count,
+            COALESCE(a.active_assignment_count, 0)::bigint AS active_assignment_count,
             b.current_draft_version_id,
             b.current_published_version_id,
             dv.version AS current_draft_version,
@@ -822,6 +814,14 @@ pub async fn find_bundle(
             JOIN environments e ON e.id = cbe.environment_id
             WHERE cbe.bundle_id = b.id
         ) e ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT count(*)::bigint AS active_assignment_count
+            FROM compliance_bundle_assignments assignment
+            JOIN compliance_bundle_versions assignment_version
+              ON assignment_version.id = assignment.bundle_version_id
+            WHERE assignment_version.bundle_id = b.id
+              AND COALESCE(assignment.active, true)
+        ) a ON TRUE
         LEFT JOIN compliance_bundle_versions dv ON dv.id = b.current_draft_version_id
         LEFT JOIN compliance_bundle_versions pv ON pv.id = b.current_published_version_id
         WHERE b.id = $1
