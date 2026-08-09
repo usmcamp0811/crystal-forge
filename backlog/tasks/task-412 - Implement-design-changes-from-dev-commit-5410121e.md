@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-09 23:39'
+updated_date: '2026-08-09 23:47'
 labels:
   - design
   - frontend
@@ -1427,6 +1427,8 @@ Implemented a local, uncommitted first pass of the `0c92fdf2` modal structure: s
 Implemented six P1 review fixes in the TASK-412 worktree: trust gates for policy/bundle publication and effective assignment paths, selected-only baseline and publication handling, persisted assignment addition order, order-independent override canonicalization/application, and inactive assignment effective-resolution rejection. Verification: cargo fmt --all --check; nix develop --command cargo check -p cf-server; nix develop --command cargo test -p cf-server compliance:: --lib (333 passed, 72 ignored).
 
 Implemented the requested Policies domain-model delta in `packages/web-ui/src/views/policies.rs`: accessible Platform/Security tabs, lineage counts, platform-only category controls, retained security grouping selection, predefined metadata pivots and fallbacks, historical revision metadata search, and pure remediation classification with a focused unit test. Verification: `cargo fmt --all --check` from `packages/web-ui` passed; `SQLX_OFFLINE=true cargo check --manifest-path packages/web-ui/Cargo.toml` passed (existing warnings); `SQLX_OFFLINE=true cargo test --manifest-path packages/web-ui/Cargo.toml remediation_status_uses_only_rule_mechanisms` passed (1 test). The requested web-ui Nix check was not run. No commit or push was made.
+
+Implemented server-wide custom compliance grouping schemes in the TASK-412 worktree. Added migration `0209_compliance_grouping_schemes.sql`, typed DTOs, authenticated GET plus admin-only POST/PUT/DELETE routes, normalization (trim, nonempty unique group IDs/case-insensitive names, 4 KiB query bound, UUID-list dedupe, exclusions overriding pins), and focused tests. No policy lineage resolution or digest work was added. Verification passed: `cargo fmt --all --check`; `SQLX_OFFLINE=true cargo check -p cf-server`; `cargo test -p cf-server --lib grouping_scheme_normalization` (2 passed). The requested web-ui Nix check was not run.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
