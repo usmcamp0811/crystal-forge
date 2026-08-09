@@ -35,10 +35,12 @@ use crate::compliance::xccdf::reconciliation::NativeReconcileFailure;
 use crate::compliance::xccdf::xml_writer::{XccdfWriterError, write_bundle_xccdf_export};
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
-    BundleDeleteOutcome, BundleValidationError, create_bundle as create_bundle_row,
-    delete_bundle as delete_bundle_row, ensure_policy_draft, get_system_evidence,
-    list_bundle_systems, list_bundle_systems_for_version, list_bundle_version_policy_membership,
-    list_bundles, list_system_bundles, update_bundle as update_bundle_row,
+    BundleDeleteOutcome, BundleDraftDerivationError, BundleDraftIntent, BundleValidationError,
+    PolicyDraftDerivationError, PolicyDraftIntent, create_bundle as create_bundle_row,
+    delete_bundle as delete_bundle_row, ensure_bundle_draft, ensure_policy_draft,
+    get_system_evidence, list_bundle_systems, list_bundle_systems_for_version,
+    list_bundle_version_policy_membership, list_bundles, list_system_bundles,
+    update_bundle as update_bundle_row,
 };
 use crate::queries::compliance_interchange;
 
@@ -602,22 +604,51 @@ pub async fn create_policy_draft(
         policy_id,
         Some(user_id),
         _payload.new_version.as_deref(),
+        PolicyDraftIntent::CreateExplicit,
     )
     .await
     {
         Ok(id) => id,
-        Err(error) => {
+        Err(error)
+            if error
+                .downcast_ref::<PolicyDraftDerivationError>()
+                .is_some_and(|error| {
+                    matches!(error, PolicyDraftDerivationError::NoPublishedSource)
+                }) =>
+        {
             let _ = tx.rollback().await;
-            tracing::error!(error = %error, %policy_id, "failed to derive policy draft");
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(serde_json::json!({
-                    "error": "Unable to create policy draft",
-                    "message": "Policy has no mutable draft and no published version to derive from",
+                    "error": "No published version",
+                    "message": "Policy has no published version to derive from",
                     "code": "NO_PUBLISHED_VERSION"
                 })),
             )
                 .into_response();
+        }
+        Err(error)
+            if error
+                .downcast_ref::<PolicyDraftDerivationError>()
+                .is_some_and(|error| {
+                    matches!(error, PolicyDraftDerivationError::MutableDraftExists(_))
+                }) =>
+        {
+            let _ = tx.rollback().await;
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "Mutable draft already exists",
+                    "message": "Create or edit the existing mutable draft before requesting another draft.",
+                    "code": "MUTABLE_DRAFT_EXISTS"
+                })),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            tracing::error!(error = %error, %policy_id, "failed to derive policy draft");
+            return internal_error("Failed to create policy draft");
         }
     };
     let draft = match sqlx::query_as::<_, (String, Option<Uuid>)>(
@@ -906,11 +937,11 @@ pub async fn create_bundle_draft(
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(bundle_id): Path<Uuid>,
-    Json(_payload): Json<crate::api::models::CreateBundleDraftRequest>,
+    Json(payload): Json<crate::api::models::CreateBundleDraftRequest>,
 ) -> impl IntoResponse {
     use crate::api::models::CreateBundleDraftResponse;
 
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
 
@@ -918,30 +949,29 @@ pub async fn create_bundle_draft(
         return forbidden();
     }
 
-    // Load the current published bundle version — framework_version and description are nullable
-    let published_result = sqlx::query_as::<_, (Uuid, String, String, String, Option<String>, Option<String>, String, String, String)>(
-        r#"SELECT id, version, name, framework, framework_version, description, layer, owner, semantic_digest
-           FROM compliance_bundle_versions
-           WHERE bundle_id = $1 AND publication_state = 'accepted'
-           ORDER BY published_at DESC LIMIT 1"#,
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::error!(error = %error, %bundle_id, "failed to begin bundle draft transaction");
+            return internal_error("Failed to create bundle draft");
+        }
+    };
+    let draft_id = match ensure_bundle_draft(
+        &mut tx,
+        bundle_id,
+        Some(user_id),
+        payload.new_version.as_deref(),
+        BundleDraftIntent::CreateExplicit,
     )
-    .bind(bundle_id)
-    .fetch_optional(&pool)
-    .await;
-
-    let (
-        published_id,
-        published_version,
-        name,
-        framework,
-        framework_version,
-        description,
-        layer,
-        owner,
-        published_digest,
-    ) = match published_result {
-        Ok(Some(v)) => v,
-        Ok(None) => {
+    .await
+    {
+        Ok(id) => id,
+        Err(error)
+            if error
+                .downcast_ref::<BundleDraftDerivationError>()
+                .is_some_and(|e| matches!(e, BundleDraftDerivationError::NoPublishedSource)) =>
+        {
+            let _ = tx.rollback().await;
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(serde_json::json!({
@@ -952,79 +982,51 @@ pub async fn create_bundle_draft(
             )
                 .into_response();
         }
-        Err(e) => {
-            tracing::error!("Failed to load published bundle version: {e}");
-            return internal_error("Failed to load published bundle version");
+        Err(error)
+            if error
+                .downcast_ref::<BundleDraftDerivationError>()
+                .is_some_and(|e| {
+                    matches!(e, BundleDraftDerivationError::MutableDraftExists(_))
+                }) =>
+        {
+            let _ = tx.rollback().await;
+            return (StatusCode::CONFLICT, Json(serde_json::json!({
+                "error": "Mutable draft already exists",
+                "message": "Create or edit the existing mutable draft before requesting another draft.",
+                "code": "MUTABLE_DRAFT_EXISTS"
+            }))).into_response();
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            tracing::error!(error = %error, %bundle_id, "failed to derive bundle draft");
+            return internal_error("Failed to create bundle draft");
         }
     };
-
-    // Create a new draft bundle version
-    let new_version_id = uuid::Uuid::new_v4();
-    let new_version_string = if let Some(v) = &_payload.new_version {
-        v.clone()
-    } else {
-        format!("{}-draft-1", published_version)
-    };
-
-    let create_result = sqlx::query_as::<_, (Uuid, String)>(
-        r#"INSERT INTO compliance_bundle_versions
-           (id, bundle_id, version, name, framework, framework_version, description, layer, owner,
-            publication_state, derived_from_version_id, semantic_digest, trust_state)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'draft', $10, $11, 'untrusted')
-           RETURNING id, version"#,
+    let draft = match sqlx::query_as::<_, (String, Uuid)>(
+        "SELECT version, derived_from_version_id FROM compliance_bundle_versions WHERE id = $1",
     )
-    .bind(new_version_id)
-    .bind(bundle_id)
-    .bind(&new_version_string)
-    .bind(&name)
-    .bind(&framework)
-    .bind(&framework_version)
-    .bind(&description)
-    .bind(&layer)
-    .bind(&owner)
-    .bind(published_id)
-    .bind(&published_digest)
-    .fetch_optional(&pool)
-    .await;
-
-    match create_result {
-        Ok(Some((new_id, new_version))) => {
-            // Copy ordered membership from published version to new draft
-            let _copy_membership = sqlx::query(
-                r#"INSERT INTO compliance_bundle_version_policies
-                   (bundle_version_id, policy_version_id, policy_order, selected)
-                   SELECT $1, policy_version_id, policy_order, selected
-                   FROM compliance_bundle_version_policies
-                   WHERE bundle_version_id = $2"#,
-            )
-            .bind(new_id)
-            .bind(published_id)
-            .execute(&pool)
-            .await;
-
-            // Update the current_draft_version_id pointer
-            let _update_pointer = sqlx::query(
-                r#"UPDATE compliance_bundles SET current_draft_version_id = $1 WHERE id = $2"#,
-            )
-            .bind(new_id)
-            .bind(bundle_id)
-            .execute(&pool)
-            .await;
-
-            let response = CreateBundleDraftResponse {
-                version_id: new_id,
-                version: new_version,
-                publication_state: "draft".to_string(),
-                derived_from_version_id: published_id,
-            };
-            (StatusCode::CREATED, Json(response)).into_response()
+    .bind(draft_id)
+    .fetch_one(&mut *tx)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            let _ = tx.rollback().await;
+            tracing::error!(error = %error, %draft_id, "failed to load bundle draft");
+            return internal_error("Failed to create bundle draft");
         }
-        Ok(None) => internal_error("Failed to create bundle draft (no row returned)"),
-        Err(e) => {
-            tracing::error!("Failed to create bundle draft: {e}");
-            internal_error("Failed to create bundle draft")
-        }
+    };
+    if let Err(error) = tx.commit().await {
+        tracing::error!(error = %error, %draft_id, "failed to commit bundle draft");
+        return internal_error("Failed to create bundle draft");
     }
+    let response = CreateBundleDraftResponse {
+        version_id: draft_id,
+        version: draft.0,
+        publication_state: "draft".to_string(),
+        derived_from_version_id: draft.1,
+    };
+    (StatusCode::CREATED, Json(response)).into_response()
 }
 
 // ── Phase 2: Compliance Bundle Assignments ─────────────────────────────────

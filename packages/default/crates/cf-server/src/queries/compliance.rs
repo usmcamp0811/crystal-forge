@@ -16,6 +16,56 @@ use crate::compliance::resolver::{
 
 // ─── Draft-lifecycle helpers ──────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyDraftIntent {
+    EnsureMutable,
+    CreateExplicit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleDraftIntent {
+    EnsureMutable,
+    CreateExplicit,
+}
+
+#[derive(Debug)]
+pub enum BundleDraftDerivationError {
+    NoPublishedSource,
+    MutableDraftExists(Uuid),
+}
+
+impl std::fmt::Display for BundleDraftDerivationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoPublishedSource => {
+                f.write_str("bundle has no published version to derive from")
+            }
+            Self::MutableDraftExists(id) => write!(f, "bundle already has mutable draft {id}"),
+        }
+    }
+}
+
+impl std::error::Error for BundleDraftDerivationError {}
+
+#[derive(Debug)]
+pub enum PolicyDraftDerivationError {
+    NoPublishedSource,
+    MutableDraftExists(Uuid),
+}
+
+impl std::fmt::Display for PolicyDraftDerivationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoPublishedSource => {
+                f.write_str("policy has no published version to derive from")
+            }
+            Self::MutableDraftExists(id) => write!(f, "policy already has mutable draft {id}"),
+        }
+    }
+}
+
+impl std::error::Error for PolicyDraftDerivationError {}
+
 /// Ensure the bundle lineage has a mutable draft version.
 ///
 /// If `current_draft_version_id` is already set and mutable, returns it.
@@ -28,6 +78,8 @@ pub async fn ensure_bundle_draft(
     tx: &mut Transaction<'_, Postgres>,
     bundle_id: Uuid,
     actor_id: Option<Uuid>,
+    requested_version: Option<&str>,
+    intent: BundleDraftIntent,
 ) -> Result<Uuid> {
     #[derive(sqlx::FromRow)]
     struct BundlePointers {
@@ -55,16 +107,19 @@ pub async fn ensure_bundle_draft(
     if let Some(draft_id) = pointers.current_draft_version_id {
         let state = pointers.draft_publication_state.as_deref().unwrap_or("");
         if matches!(state, "incomplete" | "draft" | "interim") {
-            return Ok(draft_id);
+            return match intent {
+                BundleDraftIntent::EnsureMutable => Ok(draft_id),
+                BundleDraftIntent::CreateExplicit => {
+                    Err(BundleDraftDerivationError::MutableDraftExists(draft_id).into())
+                }
+            };
         }
     }
 
     // Load the published version to derive from.
-    let published_id = pointers.current_published_version_id.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Bundle {bundle_id} has no mutable draft and no published version to derive from"
-        )
-    })?;
+    let published_id = pointers
+        .current_published_version_id
+        .ok_or(BundleDraftDerivationError::NoPublishedSource)?;
 
     #[derive(sqlx::FromRow)]
     struct PublishedBundleVersion {
@@ -88,7 +143,10 @@ pub async fn ensure_bundle_draft(
     .await?;
 
     // Choose the next draft version string.
-    let new_version = format!("{}-draft", pub_ver.version);
+    let new_version = requested_version
+        .filter(|version| !version.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{}-draft", pub_ver.version));
 
     let new_draft_id: Uuid = sqlx::query_scalar(
         r#"
@@ -128,122 +186,10 @@ pub async fn ensure_bundle_draft(
     .execute(&mut **tx)
     .await?;
 
-    // Copy assignments (P1 #2): all existing assignments for the published version
-    // must be replicated on the new draft so unchanged environments retain their
-    // overlays (exclusions, additions, overrides, enforcement mode).
-    #[derive(sqlx::FromRow)]
-    struct PubAssignment {
-        id: Uuid,
-        scope_type: String,
-        environment_id: Option<Uuid>,
-        system_id: Option<Uuid>,
-        enforcement_mode: String,
-        provenance: serde_json::Value,
-    }
-    let pub_assignments: Vec<PubAssignment> = sqlx::query_as(
-        r#"
-        SELECT id, scope_type, environment_id, system_id,
-               enforcement_mode, provenance
-        FROM compliance_bundle_assignments
-        WHERE bundle_version_id = $1
-        "#,
-    )
-    .bind(published_id)
-    .fetch_all(&mut **tx)
-    .await?;
-
-    for pa in &pub_assignments {
-        let new_assignment_id: Uuid = sqlx::query_scalar(
-            r#"
-            INSERT INTO compliance_bundle_assignments
-                (bundle_id, bundle_version_id, scope_type, environment_id, system_id,
-                 enforcement_mode, provenance, assignment_overlay_digest,
-                 created_by, updated_by)
-            VALUES ((SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1),
-                    $1, $2, $3, $4, $5, $6, 'pending', $7, $7)
-            RETURNING id
-            "#,
-        )
-        .bind(new_draft_id)
-        .bind(&pa.scope_type)
-        .bind(pa.environment_id)
-        .bind(pa.system_id)
-        .bind(&pa.enforcement_mode)
-        .bind(&pa.provenance)
-        .bind(actor_id) // created_by / updated_by = the actor deriving the draft
-        .fetch_one(&mut **tx)
-        .await?;
-
-        let new_assignment_version_id: Uuid = sqlx::query_scalar(
-            r#"INSERT INTO compliance_bundle_assignment_versions
-               (assignment_id, version_number, bundle_version_id, enforcement_mode,
-                assignment_overlay_digest, provenance, created_by)
-               SELECT $1, 1, bundle_version_id, enforcement_mode,
-                      assignment_overlay_digest, provenance, created_by
-               FROM compliance_bundle_assignments WHERE id = $1
-               RETURNING id"#,
-        )
-        .bind(new_assignment_id)
-        .fetch_one(&mut **tx)
-        .await?;
-        sqlx::query(
-            "UPDATE compliance_bundle_assignments SET current_version_id = $2 WHERE id = $1",
-        )
-        .bind(new_assignment_id)
-        .bind(new_assignment_version_id)
-        .execute(&mut **tx)
-        .await?;
-
-        // Copy exclusions.
-        sqlx::query(
-            r#"
-            INSERT INTO compliance_assignment_exclusions
-                (assignment_id, assignment_version_id, policy_version_id)
-            SELECT $1, $2, policy_version_id
-            FROM compliance_assignment_exclusions
-            WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $3)
-            "#,
-        )
-        .bind(new_assignment_id)
-        .bind(new_assignment_version_id)
-        .bind(pa.id)
-        .execute(&mut **tx)
-        .await?;
-
-        // Copy additions.
-        sqlx::query(
-            r#"
-            INSERT INTO compliance_assignment_additions
-                (assignment_id, assignment_version_id, policy_version_id)
-            SELECT $1, $2, policy_version_id
-            FROM compliance_assignment_additions
-            WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $3)
-            "#,
-        )
-        .bind(new_assignment_id)
-        .bind(new_assignment_version_id)
-        .bind(pa.id)
-        .execute(&mut **tx)
-        .await?;
-
-        // Copy value overrides.
-        sqlx::query(
-            r#"
-            INSERT INTO compliance_assignment_value_overrides
-                (assignment_id, assignment_version_id, policy_version_id, value_path, value)
-            SELECT $1, $2, policy_version_id, value_path, value
-            FROM compliance_assignment_value_overrides
-            WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $3)
-            "#,
-        )
-        .bind(new_assignment_id)
-        .bind(new_assignment_version_id)
-        .bind(pa.id)
-        .execute(&mut **tx)
-        .await?;
-
-        write_assignment_effective_set_digest(tx, new_assignment_id).await?;
-    }
+    // Assignments are independent lineages scoped to a bundle lineage and target.
+    // A draft bundle version must not duplicate or reactivate an assignment lineage;
+    // active assignments remain bound to their accepted bundle version until an
+    // explicit assignment-version transition rebinds them.
 
     // Update the lineage pointer (integrity trigger fires and validates).
     sqlx::query("UPDATE compliance_bundles SET current_draft_version_id = $1 WHERE id = $2")
@@ -274,6 +220,7 @@ pub async fn ensure_policy_draft(
     policy_id: Uuid,
     actor_id: Option<Uuid>,
     requested_version: Option<&str>,
+    intent: PolicyDraftIntent,
 ) -> Result<Uuid> {
     #[derive(sqlx::FromRow)]
     struct PolicyPointers {
@@ -297,18 +244,25 @@ pub async fn ensure_policy_draft(
     .fetch_one(&mut **tx)
     .await?;
 
-    if let Some(draft_id) = pointers.current_draft_version_id {
-        let state = pointers.draft_publication_state.as_deref().unwrap_or("");
-        if matches!(state, "incomplete" | "draft" | "interim") {
-            return Ok(draft_id);
+    if intent == PolicyDraftIntent::EnsureMutable {
+        if let Some(draft_id) = pointers.current_draft_version_id {
+            let state = pointers.draft_publication_state.as_deref().unwrap_or("");
+            if matches!(state, "incomplete" | "draft" | "interim") {
+                return Ok(draft_id);
+            }
         }
     }
 
-    let published_id = pointers.current_published_version_id.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Policy {policy_id} has no mutable draft and no published version to derive from"
-        )
-    })?;
+    let published_id = pointers
+        .current_published_version_id
+        .ok_or(PolicyDraftDerivationError::NoPublishedSource)?;
+
+    if let Some(draft_id) = pointers.current_draft_version_id {
+        let state = pointers.draft_publication_state.as_deref().unwrap_or("");
+        if matches!(state, "incomplete" | "draft" | "interim") {
+            return Err(PolicyDraftDerivationError::MutableDraftExists(draft_id).into());
+        }
+    }
 
     #[derive(sqlx::FromRow)]
     struct PubPolicyVersion {
@@ -896,7 +850,14 @@ pub async fn update_bundle(
 
     // Ensure a mutable draft exists (creates a derived draft from the published
     // version when needed). (P1 #2)
-    let draft_version_id = ensure_bundle_draft(&mut tx, bundle_id, actor_id).await?;
+    let draft_version_id = ensure_bundle_draft(
+        &mut tx,
+        bundle_id,
+        actor_id,
+        None,
+        BundleDraftIntent::EnsureMutable,
+    )
+    .await?;
 
     // Load layer and owner from the current draft version (not from constants).
     let (stored_layer, stored_owner): (String, String) =

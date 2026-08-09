@@ -452,9 +452,15 @@ pub async fn update_deployment_policy(
     // so that updating the lineage cannot erase imported semantics (P1 #4).
     // Ensure a mutable draft exists (creates a derived draft from the published
     // version when needed). (P1 #2)
-    let _draft_version_id = ensure_policy_draft(&mut tx, *policy_id, actor_id, None)
-        .await
-        .context("Failed to ensure policy draft version exists")?;
+    let _draft_version_id = ensure_policy_draft(
+        &mut tx,
+        *policy_id,
+        actor_id,
+        None,
+        crate::queries::compliance::PolicyDraftIntent::EnsureMutable,
+    )
+    .await
+    .context("Failed to ensure policy draft version exists")?;
 
     // Load rich semantic fields from the current draft version row.
     // This is done AFTER ensure_policy_draft so the pointer is guaranteed valid.
