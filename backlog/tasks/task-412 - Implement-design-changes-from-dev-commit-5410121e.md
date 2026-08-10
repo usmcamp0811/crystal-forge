@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 00:38'
+updated_date: '2026-08-10 00:56'
 labels:
   - design
   - frontend
@@ -1415,6 +1415,14 @@ Phase 7 bundle framework UX: add a pure catalog in `packages/web-ui/src/views/co
 - Preserve full `compliance_metadata` values in the existing CF-native JSON/TOML and CF-XCCDF extension paths; add focused round-trip coverage including unknown keys.
 - Add a conservative foreign DISA/STIG classification projection only when benchmark source metadata identifies DISA/STIG, retaining parsed severity and existing SRG/CCI mappings without inferring unrelated classification fields.
 - Add explicit semantic-digest coverage for every classification key, then run Rust formatting, package checks, and focused server tests. Do not run the web-ui Nix check.
+
+### Evidence resolver increment (2026-08-10)
+- Replace synthesized health/CVE evidence in the system evidence endpoint with evidence resolved against the system's selected deployment target (`systems.desired_target` -> `derivations`).
+- Use persisted `derivations.policy_results.assigned` keyed by policy lineage for Nix-evaluated policies; missing or malformed values remain `not_checked` / `error`, never inferred from heartbeat health.
+- Use only the latest completed CVE scan for that derivation for `require_cve_check`; no completed scan remains `not_checked`.
+- Keep time-window, approvals, canary, manual, external, unbound, and opaque policies `not_checked` until their deployment-decision/manual-evidence context is durably available; do not manufacture a live read-time result.
+- Make evidence endpoint and affected rollups share resolved statuses, add unit tests for JSON result decoding/CVE mapping, and align missing web UI rollup fields.
+- Verify with focused server and web-ui Rust tests plus formatting; skip the user-directed web-ui Nix check.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
