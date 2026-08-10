@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 00:02'
+updated_date: '2026-08-10 00:09'
 labels:
   - design
   - frontend
@@ -1440,6 +1440,8 @@ Implemented the requested Policies domain-model delta in `packages/web-ui/src/vi
 Implemented server-wide custom compliance grouping schemes in the TASK-412 worktree. Added migration `0209_compliance_grouping_schemes.sql`, typed DTOs, authenticated GET plus admin-only POST/PUT/DELETE routes, normalization (trim, nonempty unique group IDs/case-insensitive names, 4 KiB query bound, UUID-list dedupe, exclusions overriding pins), and focused tests. No policy lineage resolution or digest work was added. Verification passed: `cargo fmt --all --check`; `SQLX_OFFLINE=true cargo check -p cf-server`; `cargo test -p cf-server --lib grouping_scheme_normalization` (2 passed). The requested web-ui Nix check was not run.
 
 Phase 3 grouping-scheme UI implemented in the TASK-412 worktree. Added web-ui DTOs and authenticated/admin CRUD client methods; Policies asynchronously loads schemes without blocking built-in grouping; admin modal supports create/select/update/delete and group query/descriptions/lineage-ID pins/exclusions. Custom groups preserve filters, assign first matching security control only, and render unmatched controls under Ungrouped; exclusion takes precedence over pins. Verification passed: `cargo fmt --all --check --manifest-path packages/default/Cargo.toml`; `SQLX_OFFLINE=true cargo check --manifest-path packages/web-ui/Cargo.toml`; `SQLX_OFFLINE=true cargo test --manifest-path packages/web-ui/Cargo.toml custom_group` (2 passed). The requested web-ui Nix build was intentionally not run. Preserved untracked `U_Anduril_NixOS_V1R1_STIG.zip` and `packages/web-ui/assets/tailwind.css`.
+
+Phase 4 policy editor classification wiring implemented in the dedicated worktree. Added category/framework/severity/control-family/CMMC/CIS/rationale fields to web-ui create/update DTOs; unified Details now has Platform/Security controls, framework-specific inputs, loaded-record custom framework suggestions, and persisted save mapping. Drawer renders the selected revision's classification/rationale; cards render only actual security severity. Verification: `SQLX_OFFLINE=true nix develop --command cargo check` in `packages/web-ui` passed; `nix develop --command cargo test custom_frameworks_excludes_standard_and_empty_values` passed (1 test). `cargo fmt --all --check` passed for `packages/default`, but the `packages/web-ui` workspace check fails on pre-existing formatting in `api/client.rs`, `components/policy/grouping_schemes_modal.rs`, `components/policy/mod.rs`, and two existing blocks in `views/policies.rs`; those unrelated diffs were intentionally not retained. Web-ui Nix build was not run per user instruction.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
