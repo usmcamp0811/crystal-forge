@@ -563,6 +563,8 @@ pub(crate) struct PolicyRow {
     pub policy_type: String,
     pub config: Value,
     pub enabled: bool,
+    #[sqlx(default)]
+    pub compliance_metadata: Value,
 }
 
 fn bundle_from_row(row: BundleRow) -> ComplianceBundleSummary {
@@ -1600,9 +1602,9 @@ pub async fn get_system_evidence(
     system_id: Uuid,
     bundle_version_id: Option<Uuid>,
 ) -> Result<Option<ComplianceEvidenceResponse>> {
-    if find_bundle(pool, bundle_id).await?.is_none() {
+    let Some(bundle) = find_bundle(pool, bundle_id).await? else {
         return Ok(None);
-    }
+    };
 
     // Use the same environment predicate as list_applicable_system_rows so that
     // requesting evidence for a system outside the bundle's environment scope
@@ -1621,18 +1623,18 @@ pub async fn get_system_evidence(
 
     let mut policies = match bundle_version_id {
         Some(version_id) => {
-            let belongs: Option<Uuid> = sqlx::query_scalar(
-                "SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1",
+            let version: Option<(Uuid, String)> = sqlx::query_as(
+                "SELECT bundle_id, framework FROM compliance_bundle_versions WHERE id = $1",
             )
             .bind(version_id)
             .fetch_optional(pool)
             .await?;
-            if belongs != Some(bundle_id) {
+            if version.as_ref().map(|(id, _)| *id) != Some(bundle_id) {
                 return Ok(None);
             }
             sqlx::query_as::<_, PolicyRow>(
                 r#"SELECT pv.policy_id AS id, $2 AS bundle_id, pv.name, pv.description,
-                          pv.policy_type, pv.config,
+                           pv.policy_type, pv.config, pv.compliance_metadata,
                           (dp.enabled AND pv.publication_state IN ('accepted', 'deprecated')) AS enabled
                    FROM compliance_bundle_version_policies cbvp
                    JOIN deployment_policy_versions pv ON pv.id = cbvp.policy_version_id
@@ -1665,21 +1667,24 @@ pub async fn get_system_evidence(
                 .iter()
                 .map(|policy| policy.policy_version_id)
                 .collect();
-            let names = sqlx::query_as::<_, (Uuid, String, Option<String>, bool)>(
-                "SELECT id, name, description, enabled FROM deployment_policy_versions WHERE id = ANY($1)",
+            let names = sqlx::query_as::<_, (Uuid, String, Option<String>, bool, Value)>(
+                "SELECT id, name, description, enabled, compliance_metadata FROM deployment_policy_versions WHERE id = ANY($1)",
             )
             .bind(&ids)
             .fetch_all(pool)
             .await?;
-            let names: std::collections::HashMap<Uuid, (String, Option<String>, bool)> = names
-                .into_iter()
-                .map(|(id, name, description, enabled)| (id, (name, description, enabled)))
-                .collect();
+            let names: std::collections::HashMap<Uuid, (String, Option<String>, bool, Value)> =
+                names
+                    .into_iter()
+                    .map(|(id, name, description, enabled, metadata)| {
+                        (id, (name, description, enabled, metadata))
+                    })
+                    .collect();
             policies = effective
                 .policies
                 .into_iter()
                 .filter_map(|policy| {
-                    let (name, description, enabled) =
+                    let (name, description, enabled, compliance_metadata) =
                         names.get(&policy.policy_version_id)?.clone();
                     Some(PolicyRow {
                         id: policy.policy_version_id,
@@ -1689,6 +1694,7 @@ pub async fn get_system_evidence(
                         policy_type: policy.policy_type,
                         config: policy.effective_config,
                         enabled,
+                        compliance_metadata,
                     })
                 })
                 .collect();
@@ -1706,6 +1712,15 @@ pub async fn get_system_evidence(
     Ok(Some(ComplianceEvidenceResponse {
         bundle_id,
         bundle_version_id,
+        framework: match bundle_version_id {
+            Some(version_id) => {
+                sqlx::query_scalar("SELECT framework FROM compliance_bundle_versions WHERE id = $1")
+                    .bind(version_id)
+                    .fetch_optional(pool)
+                    .await?
+            }
+            None => Some(bundle.framework),
+        },
         system_id,
         hostname: system.hostname,
         controls,
@@ -2115,13 +2130,22 @@ fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlE
         PolicyEval::Disabled | PolicyEval::Unsupported => ComplianceControlStatus::NotChecked,
     };
 
-    let severity = match status {
-        ComplianceControlStatus::Fail => "high",
-        ComplianceControlStatus::Warn | ComplianceControlStatus::Error => "medium",
-        ComplianceControlStatus::Pass | ComplianceControlStatus::Waiver => "low",
-        ComplianceControlStatus::NotChecked | ComplianceControlStatus::NotApplicable => "info",
-    }
-    .to_string();
+    let severity = policy
+        .compliance_metadata
+        .get("severity")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            match status {
+                ComplianceControlStatus::Fail => "high",
+                ComplianceControlStatus::Warn | ComplianceControlStatus::Error => "medium",
+                ComplianceControlStatus::Pass | ComplianceControlStatus::Waiver => "low",
+                ComplianceControlStatus::NotChecked | ComplianceControlStatus::NotApplicable => {
+                    "info"
+                }
+            }
+            .to_string()
+        });
 
     let summary = match &eval {
         PolicyEval::Evaluated(ComplianceControlStatus::Pass) => format!(
@@ -2204,6 +2228,21 @@ fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlE
             }),
         }],
         framework_mapping,
+        control_family: policy
+            .compliance_metadata
+            .get("control_family")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        cmmc_level: policy
+            .compliance_metadata
+            .get("cmmc_level")
+            .and_then(Value::as_i64)
+            .and_then(|level| i32::try_from(level).ok()),
+        cis_section: policy
+            .compliance_metadata
+            .get("cis_section")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     }
 }
 
@@ -2221,6 +2260,7 @@ mod tests {
             policy_type: policy_type.to_string(),
             config,
             enabled,
+            compliance_metadata: Value::Null,
         }
     }
 
@@ -2282,6 +2322,7 @@ mod tests {
             policy_type: "require_cf_agent".to_string(),
             config: serde_json::json!({}),
             enabled,
+            compliance_metadata: Value::Null,
         }
     }
 

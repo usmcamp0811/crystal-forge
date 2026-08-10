@@ -1598,6 +1598,9 @@ pub struct ComplianceEvidenceResponse {
     pub bundle_id: uuid::Uuid,
     #[serde(default)]
     pub bundle_version_id: Option<uuid::Uuid>,
+    /// Framework from the exact bundle version used to produce this evidence.
+    #[serde(default)]
+    pub framework: Option<String>,
     pub system_id: uuid::Uuid,
     pub hostname: String,
     pub controls: Vec<ComplianceControlEvidence>,
@@ -1614,6 +1617,13 @@ pub struct ComplianceControlEvidence {
     pub summary: String,
     pub evidence_items: Vec<ComplianceEvidenceItem>,
     pub framework_mapping: String,
+    /// Grouping metadata from the exact policy version used for this control.
+    #[serde(default)]
+    pub control_family: Option<String>,
+    #[serde(default)]
+    pub cmmc_level: Option<i32>,
+    #[serde(default)]
+    pub cis_section: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
