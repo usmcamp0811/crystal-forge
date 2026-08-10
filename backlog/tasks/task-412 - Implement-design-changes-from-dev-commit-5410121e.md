@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 01:25'
+updated_date: '2026-08-10 01:29'
 labels:
   - design
   - frontend
@@ -1430,6 +1430,8 @@ Phase 7 bundle framework UX: add a pure catalog in `packages/web-ui/src/views/co
 - Make no-version bundle-system reads select the same authoritative current version/assignment-aware semantics as versioned reads, including post-delete selection paths.
 - Add transaction-backed PostgreSQL coverage for multi-assignment overlays, precedence, report-only attribution, and drawer/matrix/system-rollup parity from persisted deployed Nix/CVE evidence.
 - Run requested fmt/check/live compliance tests using only the repository PostgreSQL instance; do not run the web-ui Nix check unless web-ui sources change.
+
+- Approved API representation decision (2026-08-10): add an optional `direct_policy_rollup` field to `SystemComplianceBundlesResponse`; bundle rows remain strictly bundle-scoped and direct environment/system policies are not attributed to any bundle.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
