@@ -38,11 +38,11 @@ use crate::compliance::xccdf::xml_writer::{XccdfWriterError, write_bundle_xccdf_
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
     BundleDeleteOutcome, BundleDraftDerivationError, BundleDraftIntent, BundleValidationError,
-    PolicyDraftDerivationError, PolicyDraftIntent, create_bundle as create_bundle_row,
-    create_grouping_scheme, delete_bundle as delete_bundle_row, delete_grouping_scheme,
-    ensure_bundle_draft, ensure_policy_draft, get_system_evidence, list_bundle_systems,
-    list_bundle_systems_for_version, list_bundle_version_policy_membership, list_bundles,
-    list_grouping_schemes, list_system_bundles, update_bundle as update_bundle_row,
+    PolicyDraftDerivationError, PolicyDraftIntent, bundle_deletion_eligibility,
+    create_bundle as create_bundle_row, create_grouping_scheme, delete_bundle as delete_bundle_row,
+    delete_grouping_scheme, ensure_bundle_draft, ensure_policy_draft, get_system_evidence,
+    list_bundle_systems, list_bundle_systems_for_version, list_bundle_version_policy_membership,
+    list_bundles, list_grouping_schemes, list_system_bundles, update_bundle as update_bundle_row,
     update_grouping_scheme,
 };
 use crate::queries::compliance_interchange;
@@ -435,6 +435,27 @@ pub async fn update_compliance_bundle(
 }
 
 /// `DELETE /api/v1/compliance/bundles/:id`
+pub async fn get_compliance_bundle_deletion_eligibility(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(bundle_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !has_admin_role(&roles) {
+        return forbidden();
+    }
+    match bundle_deletion_eligibility(&pool, bundle_id).await {
+        Ok(Some(eligibility)) => (StatusCode::OK, Json(eligibility)).into_response(),
+        Ok(None) => not_found(),
+        Err(error) => {
+            tracing::error!(%bundle_id, %error, "failed to load compliance bundle deletion eligibility");
+            internal_error("Failed to load compliance bundle deletion eligibility")
+        }
+    }
+}
+
 pub async fn delete_compliance_bundle(
     State(pool): State<PgPool>,
     headers: HeaderMap,

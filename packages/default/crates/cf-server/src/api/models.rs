@@ -1319,6 +1319,28 @@ pub struct DeploymentPolicySummary {
     pub rationale: Option<String>,
 }
 
+/// A retained record that prevents permanent deletion. These are returned by
+/// deletion preflight endpoints; DELETE reruns the same checks transactionally
+/// before it removes anything.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeletionBlocker {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub version_ids: Vec<Uuid>,
+}
+
+/// Whether a policy or bundle lineage can be permanently deleted without
+/// removing audit, source, publication, or assignment history.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeletionEligibility {
+    pub eligible: bool,
+    #[serde(default)]
+    pub blockers: Vec<DeletionBlocker>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentPolicyVersionSummary {
     pub id: Uuid,

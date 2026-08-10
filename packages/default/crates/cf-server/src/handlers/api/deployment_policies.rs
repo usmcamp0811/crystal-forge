@@ -16,7 +16,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-use crate::api::models::DeploymentPolicyVersionSummary;
+use crate::api::models::{DeletionEligibility, DeploymentPolicyVersionSummary};
 use crate::auth::extractors::{RequireAdmin, RequireAuth, RequireOperator};
 use crate::compliance::mappings::{
     extract_cci_ids, extract_classification, extract_srg_ids, infer_legacy_category,
@@ -1054,33 +1054,36 @@ pub async fn update_deployment_policy(
 /// Returns 404 if the policy does not exist.
 /// Returns typed 409 responses for immutable history, bundle/overlay references,
 /// or legacy environment/system assignments.
+pub async fn get_deployment_policy_deletion_eligibility(
+    RequireAdmin(_user): RequireAdmin,
+    State(state): State<CFState>,
+    Path(policy_id): Path<Uuid>,
+) -> Result<Json<DeletionEligibility>, axum::response::Response> {
+    match deployment_policies::policy_deletion_eligibility(&state.pool, &policy_id).await {
+        Ok(Some(eligibility)) => Ok(Json(eligibility)),
+        Ok(None) => Err(policy_delete_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Deployment policy not found",
+            None,
+        )),
+        Err(error) => {
+            tracing::error!(%policy_id, %error, "failed to load policy deletion eligibility");
+            Err(policy_delete_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to load deployment policy deletion eligibility",
+                None,
+            ))
+        }
+    }
+}
+
 pub async fn delete_deployment_policy(
     RequireAdmin(_user): RequireAdmin,
     State(state): State<CFState>,
     Path(policy_id): Path<Uuid>,
 ) -> Result<StatusCode, axum::response::Response> {
-    // Keep the core policy protection before the transactional deletion path.
-    if deployment_policies::get_deployment_policy_by_id(&state.pool, &policy_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(%policy_id, error = %e, "failed to load policy for deletion");
-            policy_delete_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                "Failed to retrieve deployment policy",
-                None,
-            )
-        })?
-        .is_some_and(|policy| policy.policy_type == "require_cf_agent")
-    {
-        return Err(policy_delete_error(
-            StatusCode::CONFLICT,
-            "policy_core",
-            "The core require_cf_agent policy cannot be permanently deleted.",
-            None,
-        ));
-    }
-
     let outcome = deployment_policies::delete_deployment_policy(&state.pool, &policy_id)
         .await
         .map_err(|e| {
@@ -1099,6 +1102,12 @@ pub async fn delete_deployment_policy(
             StatusCode::NOT_FOUND,
             "not_found",
             "Deployment policy not found",
+            None,
+        )),
+        PolicyDeleteOutcome::BlockedByCorePolicy => Err(policy_delete_error(
+            StatusCode::CONFLICT,
+            "policy_core",
+            "The core require_cf_agent policy cannot be permanently deleted.",
             None,
         )),
         PolicyDeleteOutcome::BlockedByImmutableHistory { version_ids } => Err(policy_delete_error(

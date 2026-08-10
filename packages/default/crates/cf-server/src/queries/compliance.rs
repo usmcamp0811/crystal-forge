@@ -4,7 +4,7 @@ use serde_json::Value;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::api::models::ComplianceGroupingScheme;
+use crate::api::models::{ComplianceGroupingScheme, DeletionEligibility};
 use crate::compliance::digest::{
     BundleVersionCanonical, PolicyVersionCanonical, load_bundle_membership,
     write_assignment_effective_set_digest, write_bundle_version_digest,
@@ -14,6 +14,7 @@ use crate::compliance::resolver::{
     ResolutionOutcome, resolve_system_effective_policies,
     resolve_systems_effective_policies_for_bundle_version_batch,
 };
+use crate::queries::deletion::{blocker, eligibility};
 
 pub async fn list_grouping_schemes(pool: &PgPool) -> Result<Vec<ComplianceGroupingScheme>> {
     let rows: Vec<(Uuid, String, Option<String>, Value, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
@@ -1198,6 +1199,71 @@ pub enum BundleDeleteOutcome {
     BlockedByAssignments { assignment_count: i64 },
 }
 
+async fn bundle_deletion_eligibility_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    bundle_id: Uuid,
+) -> Result<Option<DeletionEligibility>> {
+    let exists: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM compliance_bundles WHERE id = $1 FOR UPDATE")
+            .bind(bundle_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .context("Failed to lock compliance bundle")?;
+    if exists.is_none() {
+        return Ok(None);
+    }
+    let immutable_versions: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM compliance_bundle_versions WHERE bundle_id = $1 AND publication_state IN ('accepted', 'deprecated') ORDER BY created_at, id",
+    )
+    .bind(bundle_id)
+    .fetch_all(&mut **tx)
+    .await
+    .context("Failed to check compliance bundle immutable history")?;
+    let assignment_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM compliance_bundle_assignments WHERE bundle_id = $1",
+    )
+    .bind(bundle_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("Failed to check compliance bundle assignments")?;
+    let mapping_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM compliance_source_object_mappings m JOIN compliance_bundle_versions v ON v.id = m.bundle_version_id WHERE v.bundle_id = $1",
+    )
+    .bind(bundle_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("Failed to check compliance bundle source mappings")?;
+    let mut blockers = Vec::new();
+    if !immutable_versions.is_empty() {
+        blockers.push(blocker("bundle_immutable_history", "This compliance bundle has accepted or deprecated history and cannot be permanently deleted.", None, immutable_versions));
+    }
+    if mapping_count > 0 {
+        blockers.push(blocker("bundle_referenced", "This compliance bundle has immutable source mappings and cannot be permanently deleted.", Some(mapping_count), Vec::new()));
+    }
+    if assignment_count > 0 {
+        blockers.push(blocker(
+            "bundle_in_use",
+            "This compliance bundle is assigned and cannot be permanently deleted.",
+            Some(assignment_count),
+            Vec::new(),
+        ));
+    }
+    Ok(Some(eligibility(blockers)))
+}
+
+pub async fn bundle_deletion_eligibility(
+    pool: &PgPool,
+    bundle_id: Uuid,
+) -> Result<Option<DeletionEligibility>> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin compliance bundle deletion preflight")?;
+    let result = bundle_deletion_eligibility_in_transaction(&mut tx, bundle_id).await;
+    tx.rollback().await.ok();
+    result
+}
+
 /// Delete a bundle lineage only when it is disposable.
 ///
 /// The lineage row is locked before eligibility is checked and deleted. The
@@ -1209,66 +1275,24 @@ pub async fn delete_bundle(pool: &PgPool, bundle_id: Uuid) -> Result<BundleDelet
         .await
         .context("Failed to begin bundle deletion")?;
 
-    let exists: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM compliance_bundles WHERE id = $1 FOR UPDATE")
-            .bind(bundle_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .context("Failed to lock compliance bundle")?;
-
-    if exists.is_none() {
+    let Some(eligibility) = bundle_deletion_eligibility_in_transaction(&mut tx, bundle_id).await?
+    else {
         tx.rollback().await.ok();
         return Ok(BundleDeleteOutcome::NotFound);
-    }
-
-    let immutable_versions: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM compliance_bundle_versions WHERE bundle_id = $1 AND publication_state IN ('accepted', 'deprecated') ORDER BY created_at, id",
-    )
-    .bind(bundle_id)
-    .fetch_all(&mut *tx)
-    .await
-    .context("Failed to check compliance bundle immutable history")?;
-
-    if !immutable_versions.is_empty() {
+    };
+    if let Some(blocker) = eligibility.blockers.first() {
         tx.rollback().await.ok();
-        return Ok(BundleDeleteOutcome::BlockedByImmutableHistory {
-            version_ids: immutable_versions,
+        return Ok(match blocker.code.as_str() {
+            "bundle_immutable_history" => BundleDeleteOutcome::BlockedByImmutableHistory {
+                version_ids: blocker.version_ids.clone(),
+            },
+            "bundle_referenced" => BundleDeleteOutcome::BlockedBySourceMappings {
+                mapping_count: blocker.count.unwrap_or_default(),
+            },
+            _ => BundleDeleteOutcome::BlockedByAssignments {
+                assignment_count: blocker.count.unwrap_or_default(),
+            },
         });
-    }
-
-    // Assignment lineage and version rows are immutable. Even inactive
-    // assignments retain a RESTRICT reference to the bundle lineage, so they
-    // must be reported as blockers rather than reaching the final DELETE and
-    // surfacing as an FK error.
-    let assignment_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM compliance_bundle_assignments WHERE bundle_id = $1",
-    )
-    .bind(bundle_id)
-    .fetch_one(&mut *tx)
-    .await
-    .context("Failed to check compliance bundle assignments")?;
-
-    if assignment_count > 0 {
-        tx.rollback().await.ok();
-        return Ok(BundleDeleteOutcome::BlockedByAssignments { assignment_count });
-    }
-
-    let mapping_count: i64 = sqlx::query_scalar(
-        r#"
-        SELECT COUNT(*)
-        FROM compliance_source_object_mappings m
-        JOIN compliance_bundle_versions v ON v.id = m.bundle_version_id
-        WHERE v.bundle_id = $1
-        "#,
-    )
-    .bind(bundle_id)
-    .fetch_one(&mut *tx)
-    .await
-    .context("Failed to check compliance bundle source mappings")?;
-
-    if mapping_count > 0 {
-        tx.rollback().await.ok();
-        return Ok(BundleDeleteOutcome::BlockedBySourceMappings { mapping_count });
     }
 
     // Keep the trigger in place as defense in depth against publication races.

@@ -432,6 +432,10 @@ async fn main() -> anyhow::Result<()> {
                 .delete(compliance::delete_compliance_bundle),
         )
         .route(
+            "/api/v1/compliance/bundles/:id/deletion-eligibility",
+            get(compliance::get_compliance_bundle_deletion_eligibility),
+        )
+        .route(
             "/api/v1/compliance/bundles/:id/systems",
             get(compliance::get_compliance_bundle_systems),
         )
@@ -556,6 +560,10 @@ async fn main() -> anyhow::Result<()> {
             get(deployment_policies::get_deployment_policy)
                 .put(deployment_policies::update_deployment_policy)
                 .delete(deployment_policies::delete_deployment_policy),
+        )
+        .route(
+            "/api/v1/deployment-policies/:id/deletion-eligibility",
+            get(deployment_policies::get_deployment_policy_deletion_eligibility),
         )
         // Deployment policy workflow endpoints (approvals, rollout status)
         .route(
