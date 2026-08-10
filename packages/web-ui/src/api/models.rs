@@ -1028,6 +1028,39 @@ pub struct ComplianceBundleSummary {
     pub versions: Vec<ComplianceBundleVersionSummary>,
 }
 
+/// A server-backed arrangement of Security-domain policy controls.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceGroupingScheme {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub groups: Vec<ComplianceGroupingSchemeGroup>,
+}
+
+/// One named group in a custom grouping scheme. Policy IDs are lineages.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceGroupingSchemeGroup {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub pinned_policy_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub excluded_policy_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceGroupingSchemeRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub groups: Vec<ComplianceGroupingSchemeGroup>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ComplianceBundleVersionSummary {
     pub id: Uuid,

@@ -5,11 +5,13 @@
 
 mod policy_card;
 mod policy_editor_modal;
+mod grouping_schemes_modal;
 mod policy_interchange_modal;
 mod types;
 
 pub use policy_card::PolicyCard;
 pub use policy_editor_modal::PolicyEditorModal;
+pub use grouping_schemes_modal::GroupingSchemesModal;
 pub use policy_interchange_modal::PolicyInterchangeModal;
 pub use types::{
     POLICY_CATEGORIES, POLICY_TOML_SAMPLE, PolicyCategory, PolicyDefinition, PolicyFormat,

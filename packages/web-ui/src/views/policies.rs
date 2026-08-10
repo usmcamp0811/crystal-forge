@@ -4,12 +4,16 @@ use dioxus::prelude::*;
 use std::collections::HashSet;
 use uuid::Uuid;
 
-use crate::api::client::{delete_deployment_policy, export_policy_versions};
+use crate::api::client::{
+    delete_deployment_policy, export_policy_versions, fetch_compliance_grouping_schemes,
+};
+use crate::api::models::ComplianceGroupingScheme;
 use crate::components::io_menu::{IOMenu, IOMenuItem};
 use crate::components::layout::Card;
 use crate::components::policy::{
-    PolicyCard, PolicyCategory, PolicyDefinition, PolicyEditorModal, PolicyFormat, is_core_policy,
-    is_policy_version_editable, normalized_policy_type, policy_category,
+    GroupingSchemesModal, PolicyCard, PolicyCategory, PolicyDefinition, PolicyEditorModal,
+    PolicyFormat, is_core_policy, is_policy_version_editable, normalized_policy_type,
+    policy_category,
 };
 use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 use crate::state::{app_state::AppState, auth};
@@ -33,6 +37,8 @@ pub fn PoliciesView() -> Element {
     let mut policies_load_error: Signal<Option<String>> = use_signal(|| None);
     let mut show_editor = use_signal(|| false);
     let mut show_import = use_signal(|| false);
+    let mut show_grouping_schemes = use_signal(|| false);
+    let mut grouping_schemes: Signal<Vec<ComplianceGroupingScheme>> = use_signal(Vec::new);
     let mut drawer_policy = use_signal(|| None::<PolicyDefinition>);
     let mut drawer_revisions = use_signal(|| false);
 
@@ -72,9 +78,23 @@ pub fn PoliciesView() -> Element {
     let mut pending_policy_focus = use_signal(|| None::<NavigationFocus>);
     let app_state = use_context::<Signal<AppState>>();
     let is_admin_user = auth::is_admin(&app_state.read().auth);
+    let is_authenticated = auth::is_authenticated(&app_state.read().auth);
     let mut selection_mode = use_signal(|| false);
     let mut selected_policy_ids = use_signal(HashSet::<Uuid>::new);
     let mut export_error = use_signal(|| None::<String>);
+
+    use_effect(move || {
+        if !is_authenticated {
+            return;
+        }
+        spawn(async move {
+            // Grouping schemes are optional presentation data. A load failure must
+            // leave built-in grouping available.
+            if let Ok(schemes) = fetch_compliance_grouping_schemes().await {
+                grouping_schemes.set(schemes);
+            }
+        });
+    });
 
     let export_single_policy = {
         let mut export_error = export_error;
@@ -251,7 +271,13 @@ pub fn PoliciesView() -> Element {
         || selected_type != "all"
         || !query.is_empty();
     let platform_category_counts = platform_category_counts(&all_policies);
-    let grouped_policies = grouped_policies(&filtered_policies, &domain(), &security_grouping());
+    let current_grouping_schemes = grouping_schemes.read().clone();
+    let grouped_policies = grouped_policies(
+        &filtered_policies,
+        &domain(),
+        &security_grouping(),
+        &current_grouping_schemes,
+    );
     let mut selected_version_ids: Vec<Uuid> = selected_policy_ids
         .read()
         .iter()
@@ -449,13 +475,17 @@ pub fn PoliciesView() -> Element {
                         option { value: "cis-section", "CIS Benchmark section" }
                         option { value: "remediation", "Remediation status" }
                         option { value: "flat", "Flat list (no grouping)" }
+                        for scheme in current_grouping_schemes.iter() {
+                            option { value: "custom:{scheme.id}", "{scheme.name}" }
+                        }
                     }
                 }
-                button {
-                    class: "btn btn-ghost focus-ring xs",
-                    style: if domain() == "security" { "margin-left:auto;" } else { "margin-left:auto;visibility:hidden;" },
-                    disabled: domain() != "security",
-                    "Manage groupings"
+                if domain() == "platform" {
+                    button { class: "btn btn-ghost focus-ring xs", style: "margin-left:auto;visibility:hidden;", tabindex: "-1", "Manage groupings" }
+                } else if is_admin_user {
+                    button { class: "btn btn-ghost focus-ring xs", style: "margin-left:auto;", onclick: move |_| show_grouping_schemes.set(true), "Manage groupings" }
+                } else {
+                    span { style: "margin-left:auto;" }
                 }
             }
 
@@ -624,6 +654,17 @@ pub fn PoliciesView() -> Element {
                             }
                         });
                     },
+                }
+            }
+
+            if show_grouping_schemes() {
+                GroupingSchemesModal {
+                    schemes: current_grouping_schemes.clone(),
+                    policies: all_policies.clone(),
+                    selected_scheme_id: security_grouping().strip_prefix("custom:").and_then(|id| Uuid::parse_str(id).ok()),
+                    on_close: move |_| show_grouping_schemes.set(false),
+                    on_select: move |id: Option<Uuid>| security_grouping.set(id.map(|id| format!("custom:{id}")).unwrap_or_else(|| "control-family".to_string())),
+                    on_changed: move |schemes| grouping_schemes.set(schemes),
                 }
             }
 
@@ -1130,6 +1171,7 @@ fn grouped_policies(
     policies: &[PolicyDefinition],
     domain: &str,
     grouping: &str,
+    custom_schemes: &[ComplianceGroupingScheme],
 ) -> Vec<PolicyGroup> {
     if domain == "platform" {
         return [
@@ -1166,6 +1208,12 @@ fn grouped_policies(
             .collect();
     }
 
+    if let Some(scheme_id) = grouping.strip_prefix("custom:").and_then(|id| Uuid::parse_str(id).ok()) {
+        if let Some(scheme) = custom_schemes.iter().find(|scheme| scheme.id == scheme_id) {
+            return grouped_by_custom_scheme(policies, scheme);
+        }
+    }
+
     let mut groups: Vec<PolicyGroup> = Vec::new();
     for policy in policies {
         let (label, blurb) = security_group_label(policy, grouping);
@@ -1181,6 +1229,73 @@ fn grouped_policies(
         }
     }
     groups
+}
+
+fn grouped_by_custom_scheme(
+    policies: &[PolicyDefinition],
+    scheme: &ComplianceGroupingScheme,
+) -> Vec<PolicyGroup> {
+    let mut assigned = HashSet::new();
+    let mut groups = Vec::new();
+
+    for group in &scheme.groups {
+        let items = policies
+            .iter()
+            .filter(|policy| !assigned.contains(&policy.id))
+            .filter(|policy| custom_group_matches(policy, group))
+            .cloned()
+            .collect::<Vec<_>>();
+        assigned.extend(items.iter().map(|policy| policy.id));
+        if !items.is_empty() {
+            groups.push(PolicyGroup {
+                label: group.name.clone(),
+                blurb: group.description.clone().unwrap_or_else(|| "Custom grouping scheme.".to_string()),
+                color: PolicyCategory::Security.color(),
+                items,
+            });
+        }
+    }
+
+    let ungrouped = policies
+        .iter()
+        .filter(|policy| !assigned.contains(&policy.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !ungrouped.is_empty() {
+        groups.push(PolicyGroup {
+            label: "Ungrouped".to_string(),
+            blurb: "No custom group matched this control.".to_string(),
+            color: PolicyCategory::Security.color(),
+            items: ungrouped,
+        });
+    }
+    groups
+}
+
+fn custom_group_matches(
+    policy: &PolicyDefinition,
+    group: &crate::api::models::ComplianceGroupingSchemeGroup,
+) -> bool {
+    // Exclusions take precedence, including over an explicit pin.
+    if group.excluded_policy_ids.contains(&policy.id) {
+        return false;
+    }
+    if group.pinned_policy_ids.contains(&policy.id) {
+        return true;
+    }
+    let query = group.query.trim().to_ascii_lowercase();
+    !query.is_empty()
+        && metadata_matches(
+            &policy.name,
+            &policy.description,
+            policy.framework.as_deref(),
+            &policy.srg_ids,
+            &policy.cci_ids,
+            policy.control_family.as_deref(),
+            policy.cis_section.as_deref(),
+            policy.severity.as_deref(),
+            &query,
+        )
 }
 
 fn security_group_label(policy: &PolicyDefinition, grouping: &str) -> (String, String) {
@@ -1342,7 +1457,38 @@ fn sanitize_filename(value: &str) -> String {
 
 #[cfg(test)]
 mod interchange_tests {
-    use super::{remediation_status_from_config, sanitize_filename};
+    use super::{custom_group_matches, remediation_status_from_config, sanitize_filename};
+    use crate::api::models::ComplianceGroupingSchemeGroup;
+    use crate::components::policy::{PolicyDefinition, PolicyFormat};
+    use uuid::Uuid;
+
+    fn security_policy() -> PolicyDefinition {
+        PolicyDefinition {
+            id: Uuid::new_v4(),
+            lineage_id: Uuid::new_v4(),
+            version_id: None,
+            revision: None,
+            publication_state: None,
+            semantic_digest: None,
+            revisions: Vec::new(),
+            name: "SSH hardening".to_string(),
+            description: "Require a secure SSH configuration".to_string(),
+            format: PolicyFormat::Json,
+            body: "{}".to_string(),
+            policy_type: Some("custom_check".to_string()),
+            updated_at: String::new(),
+            system_count: 0,
+            srg_ids: vec!["SRG-OS-000001".to_string()],
+            cci_ids: vec!["CCI-000001".to_string()],
+            category: Some("security".to_string()),
+            framework: Some("NIST 800-53".to_string()),
+            severity: Some("high".to_string()),
+            control_family: Some("AC".to_string()),
+            cmmc_level: None,
+            cis_section: Some("5.2".to_string()),
+            rationale: None,
+        }
+    }
 
     #[test]
     fn export_filename_is_stable_and_safe() {
@@ -1377,6 +1523,34 @@ mod interchange_tests {
             .0,
             "Manual"
         );
+    }
+
+    #[test]
+    fn custom_group_query_searches_security_metadata() {
+        let policy = security_policy();
+        let group = ComplianceGroupingSchemeGroup {
+            id: "ssh".to_string(),
+            name: "SSH".to_string(),
+            description: None,
+            query: "cci-000001".to_string(),
+            pinned_policy_ids: Vec::new(),
+            excluded_policy_ids: Vec::new(),
+        };
+        assert!(custom_group_matches(&policy, &group));
+    }
+
+    #[test]
+    fn custom_group_exclusion_wins_over_pin() {
+        let policy = security_policy();
+        let group = ComplianceGroupingSchemeGroup {
+            id: "exception".to_string(),
+            name: "Exception".to_string(),
+            description: None,
+            query: "unrelated".to_string(),
+            pinned_policy_ids: vec![policy.id],
+            excluded_policy_ids: vec![policy.id],
+        };
+        assert!(!custom_group_matches(&policy, &group));
     }
 }
 

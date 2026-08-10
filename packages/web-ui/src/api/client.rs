@@ -1155,6 +1155,33 @@ pub async fn fetch_compliance_bundles() -> Result<Vec<ComplianceBundleSummary>, 
     fetch_json(&url).await
 }
 
+/// Fetch custom policy grouping schemes visible to the authenticated user.
+pub async fn fetch_compliance_grouping_schemes(
+) -> Result<Vec<ComplianceGroupingScheme>, ApiClientError> {
+    let url = format!("{}/compliance/grouping-schemes", base_url());
+    fetch_json(&url).await
+}
+
+pub async fn create_compliance_grouping_scheme(
+    request: &ComplianceGroupingSchemeRequest,
+) -> Result<ComplianceGroupingScheme, ApiClientError> {
+    let url = format!("{}/compliance/grouping-schemes", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+pub async fn update_compliance_grouping_scheme(
+    id: &Uuid,
+    request: &ComplianceGroupingSchemeRequest,
+) -> Result<ComplianceGroupingScheme, ApiClientError> {
+    let url = format!("{}/compliance/grouping-schemes/{}", base_url(), id);
+    send_json_with_csrf("PUT", &url, Some(request)).await
+}
+
+pub async fn delete_compliance_grouping_scheme(id: &Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/compliance/grouping-schemes/{}", base_url(), id);
+    send_empty_with_csrf("DELETE", &url, None::<&()>).await
+}
+
 /// Fetch the exact policy-version membership for one bundle revision.
 pub async fn fetch_bundle_version_policy_membership(
     bundle_version_id: &Uuid,
