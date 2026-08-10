@@ -1300,10 +1300,10 @@ pub async fn list_bundle_systems(
     let policies = list_bundle_policies(pool, bundle_id).await?;
     let systems = list_applicable_system_rows(pool, bundle_id).await?;
 
-    let rollups: Vec<_> = systems
-        .into_iter()
-        .map(|system| system_rollup(system, &policies))
-        .collect();
+    let mut rollups = Vec::with_capacity(systems.len());
+    for system in systems {
+        rollups.push(system_rollup_with_evidence(pool, system, &policies).await?);
+    }
     let totals = totals_for_rollups(&rollups);
 
     Ok(Some(ComplianceBundleSystemsResponse {
@@ -1392,13 +1392,13 @@ pub async fn list_bundle_systems_for_version(
         bundle_version_id,
     )
     .await?;
-    let rollups: Vec<_> = systems
-        .into_iter()
-        .map(|system| match effective.get(&system.id) {
+    let mut rollups = Vec::with_capacity(systems.len());
+    for system in systems {
+        let rollup = match effective.get(&system.id) {
             Some(ResolutionOutcome::Resolved(set))
                 if set.bundle_version_id == bundle_version_id =>
             {
-                effective_policy_rollup(&system, &set.policies)
+                effective_policy_rollup_with_evidence(pool, &system, &set.policies).await?
             }
             Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup(
                 system,
@@ -1411,8 +1411,9 @@ pub async fn list_bundle_systems_for_version(
             // Missing or mismatched resolution has no authoritative effective
             // set. Never substitute lineage/current membership for this view.
             _ => unresolved_system_rollup(system, policies.len() as i64, "not_applicable"),
-        })
-        .collect();
+        };
+        rollups.push(rollup);
+    }
     let totals = totals_for_rollups(&rollups);
     Ok(Some(ComplianceBundleSystemsResponse {
         bundle_id,
@@ -1528,16 +1529,22 @@ pub async fn list_system_bundles(
             .push(policy);
     }
 
-    // Compute legacy rollups first, then replace the assigned bundle's rollup
-    // with the authoritative resolver result. This preserves visibility of
-    // other applicable bundles while ensuring exclusions, additions, direct
-    // policies, and overrides are reflected for the effective assignment.
-    let mut result = assemble_system_compliance_bundles(
-        &system,
-        all_bundles,
-        &applicable_bundle_ids,
-        &policies_by_bundle,
-    );
+    // Resolve persisted evidence for each visible bundle. The synchronous
+    // assembler remains available for isolated unit tests, but production
+    // rollups must not infer policy outcomes from heartbeat health or view
+    // placeholders.
+    let mut result = Vec::new();
+    for bundle in all_bundles {
+        if !applicable_bundle_ids.contains(&bundle.id) {
+            continue;
+        }
+        let policies = policies_by_bundle
+            .get(&bundle.id)
+            .cloned()
+            .unwrap_or_default();
+        let rollup = system_rollup_with_evidence(pool, system.clone(), &policies).await?;
+        result.push((bundle, rollup));
+    }
 
     if let ResolutionOutcome::Resolved(effective) =
         resolve_system_effective_policies(pool, system_id).await?
@@ -1552,7 +1559,8 @@ pub async fn list_system_bundles(
                 .iter_mut()
                 .find(|(bundle, _)| bundle.id == resolved_bundle_id)
             {
-                *rollup = effective_policy_rollup(&system, &effective.policies);
+                *rollup = effective_policy_rollup_with_evidence(pool, &system, &effective.policies)
+                    .await?;
             }
         }
     }
@@ -1811,10 +1819,41 @@ async fn list_applicable_system_rows(pool: &PgPool, bundle_id: Uuid) -> Result<V
 }
 
 pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> ComplianceSystemRollup {
+    let statuses = policies
+        .iter()
+        .map(|policy| match evaluate_policy(&system, policy) {
+            PolicyEval::Evaluated(status) => status,
+            PolicyEval::Disabled | PolicyEval::Unsupported => ComplianceControlStatus::NotChecked,
+        })
+        .collect::<Vec<_>>();
+    rollup_from_statuses(system, &statuses, 0)
+}
+
+async fn system_rollup_with_evidence(
+    pool: &PgPool,
+    system: SystemRow,
+    policies: &[PolicyRow],
+) -> Result<ComplianceSystemRollup> {
+    let mut statuses = Vec::with_capacity(policies.len());
+    for policy in policies.iter().cloned() {
+        statuses.push(
+            resolve_control_evidence(pool, &system, policy)
+                .await?
+                .status,
+        );
+    }
+    Ok(rollup_from_statuses(system, &statuses, 0))
+}
+
+fn rollup_from_statuses(
+    system: SystemRow,
+    statuses: &[ComplianceControlStatus],
+    report_only: i64,
+) -> ComplianceSystemRollup {
     let mut pass = 0i64;
     let mut warn = 0i64;
     let mut fail = 0i64;
-    let waiver = 0i64;
+    let mut waiver = 0i64;
     let mut not_checked = 0i64;
     let mut not_applicable = 0i64;
     let mut error_count = 0i64;
@@ -1823,39 +1862,35 @@ pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> Compli
     // the denominator so they don't silently deflate the score.
     let mut evaluated_total = 0i64;
 
-    for policy in policies {
-        match evaluate_policy(&system, policy) {
-            PolicyEval::Evaluated(ComplianceControlStatus::Pass) => {
+    for status in statuses {
+        match status {
+            ComplianceControlStatus::Pass => {
                 pass += 1;
                 evaluated_total += 1;
             }
-            PolicyEval::Evaluated(ComplianceControlStatus::Warn) => {
+            ComplianceControlStatus::Warn => {
                 warn += 1;
                 evaluated_total += 1;
             }
-            PolicyEval::Evaluated(ComplianceControlStatus::Fail) => {
+            ComplianceControlStatus::Fail => {
                 fail += 1;
                 evaluated_total += 1;
             }
-            PolicyEval::Evaluated(ComplianceControlStatus::Waiver) => {
+            ComplianceControlStatus::Waiver => {
+                waiver += 1;
                 evaluated_total += 1;
             }
             // Canonical evidence states: each control maps to exactly one
             // bucket. warn + not_checked + not_applicable + error + pass +
             // fail + waiver == total. No double-counting.
-            PolicyEval::Evaluated(ComplianceControlStatus::NotChecked) => {
+            ComplianceControlStatus::NotChecked => {
                 not_checked += 1;
             }
-            PolicyEval::Evaluated(ComplianceControlStatus::NotApplicable) => {
+            ComplianceControlStatus::NotApplicable => {
                 not_applicable += 1;
             }
-            PolicyEval::Evaluated(ComplianceControlStatus::Error) => {
+            ComplianceControlStatus::Error => {
                 error_count += 1;
-            }
-            // Disabled or unsupported controls are selected but not evaluated.
-            // They surface as not_checked, not warn, preserving mutual exclusivity.
-            PolicyEval::Disabled | PolicyEval::Unsupported => {
-                not_checked += 1;
             }
         }
     }
@@ -1863,7 +1898,7 @@ pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> Compli
     // total = full bundle policy count (for UI display: "N of M controls evaluated").
     // evaluated_total = only the policies that were actually assessed; this is the
     // correct denominator for the score.
-    let total = policies.len() as i64;
+    let total = statuses.len() as i64;
     let score = if evaluated_total == 0 {
         0
     } else {
@@ -1884,7 +1919,7 @@ pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> Compli
         not_checked,
         not_applicable,
         error: error_count,
-        report_only: 0,
+        report_only,
         score,
         resolution_state: None,
     }
@@ -2029,6 +2064,74 @@ pub(crate) fn effective_policy_rollup(
     }
 }
 
+/// Resolve evidence for the exact version/configuration selected by the
+/// assignment resolver. This keeps assignment overlays and evidence views on
+/// the same policy set while avoiding heartbeat-derived results.
+pub(crate) async fn effective_policy_rollup_with_evidence(
+    pool: &PgPool,
+    system: &SystemRow,
+    effective_policies: &[crate::compliance::resolver::EffectivePolicy],
+) -> Result<ComplianceSystemRollup> {
+    let version_ids: Vec<Uuid> = effective_policies
+        .iter()
+        .map(|policy| policy.policy_version_id)
+        .collect();
+    let rows: Vec<(Uuid, String, Option<String>, bool, Value)> = sqlx::query_as(
+        r#"
+        SELECT pv.id, pv.name, pv.description,
+               (dp.enabled AND pv.publication_state IN ('accepted', 'deprecated')) AS enabled,
+               pv.compliance_metadata
+        FROM deployment_policy_versions pv
+        JOIN deployment_policies dp ON dp.id = pv.policy_id
+        WHERE pv.id = ANY($1)
+        "#,
+    )
+    .bind(&version_ids)
+    .fetch_all(pool)
+    .await?;
+    let rows = rows
+        .into_iter()
+        .map(|(id, name, description, enabled, compliance_metadata)| {
+            (id, (name, description, enabled, compliance_metadata))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+
+    let mut policies = Vec::with_capacity(effective_policies.len());
+    let mut report_only = 0;
+    for effective in effective_policies {
+        let Some((name, description, enabled, compliance_metadata)) =
+            rows.get(&effective.policy_version_id).cloned()
+        else {
+            bail!(
+                "effective policy version {} no longer exists",
+                effective.policy_version_id
+            );
+        };
+        if matches!(
+            effective.effective_mode,
+            crate::compliance::resolver::AssignmentMode::ReportOnly
+        ) {
+            report_only += 1;
+        }
+        policies.push(PolicyRow {
+            id: effective.policy_lineage_id,
+            bundle_id: Uuid::nil(),
+            name,
+            description,
+            policy_type: effective.policy_type.clone(),
+            config: effective.effective_config.clone(),
+            enabled,
+            compliance_metadata,
+        });
+    }
+
+    let mut statuses = Vec::with_capacity(policies.len());
+    for policy in policies {
+        statuses.push(resolve_control_evidence(pool, system, policy).await?.status);
+    }
+    Ok(rollup_from_statuses(system.clone(), &statuses, report_only))
+}
+
 pub(crate) fn totals_for_rollups(rollups: &[ComplianceSystemRollup]) -> ComplianceRollupTotals {
     let mut totals = ComplianceRollupTotals {
         system_count: rollups.len() as i64,
@@ -2145,6 +2248,8 @@ async fn assessment_context(pool: &PgPool, system_id: Uuid) -> Result<Option<Ass
         JOIN derivations d ON d.derivation_path = deployed.derivation_path
         WHERE s.id = $1
           AND d.derivation_type = 'nixos'
+        ORDER BY d.completed_at DESC NULLS LAST, d.id DESC
+        LIMIT 1
         "#,
     )
     .bind(system_id)

@@ -2547,8 +2547,21 @@ pub async fn get_system_effective_policies(
 
     match crate::compliance::resolver::resolve_system_effective_policies(&pool, system_id).await {
         Ok(ResolutionOutcome::Resolved(set)) => {
-            let rollup =
-                crate::queries::compliance::effective_policy_rollup(&system, &set.policies);
+            let rollup = match crate::queries::compliance::effective_policy_rollup_with_evidence(
+                &pool,
+                &system,
+                &set.policies,
+            )
+            .await
+            {
+                Ok(rollup) => rollup,
+                Err(err) => {
+                    tracing::error!(
+                        "System effective evidence resolution failed for {system_id}: {err:#}"
+                    );
+                    return internal_error("Evidence resolution failed");
+                }
+            };
             let totals = Some(crate::queries::compliance::totals_for_rollups(&[rollup]));
             let mut response = effective_set_to_response(set, None);
             response.rollup = totals;
