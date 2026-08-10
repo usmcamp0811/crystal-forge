@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 03:55'
+updated_date: '2026-08-10 03:57'
 labels:
   - design
   - frontend
@@ -1440,6 +1440,11 @@ Deletion correctness follow-up (server only): replace outcome-specific delete re
 Correction pass: classify source-object mappings exclusively from the publication states of every non-null referenced policy/bundle version. Update policy and bundle deletion preflight and cleanup predicates together, retain 0210's state-based trigger, and cover A-G nullable/draft/immutable reference combinations plus policy and bundle preflight/DELETE cleanup parity.
 
 2026-08-10 final correction scope approved by user: complete bulk initial environment-assignment loading, edit-modal load/error safety, deletion preflight failure UX, and multi-bundle rollup attribution. Conduct a design-authoritative pixel-alignment pass on the Edit Compliance Bundle modal using docs/design/CrystalForge/components/ComplianceView.jsx for labels, order, alignment, and spacing. Preserve existing assignment CAS/overlay behavior.
+
+### Server completion slice (2026-08-09)
+1. Extend `GET /api/v1/environments` summaries with active versioned assignment snapshots using fixed bulk queries keyed by visible environment IDs; include assignment/current version IDs, exact bundle version, enforcement mode, exclusions, additions, and overrides.
+2. Correct `list_system_bundles` attribution from the authoritative effective resolver: retain bundle identity in policy provenance, compute each bundle rollup from only its effective bundle members, compute direct-only and deduplicated overall rollups separately, and preserve assignment modes/config overlays/precedence.
+3. Add focused unit/API serialization coverage and run Rust formatting plus focused cf-server tests. Do not change web UI, commit, or push.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
