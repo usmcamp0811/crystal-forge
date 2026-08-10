@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 01:41'
+updated_date: '2026-08-10 02:14'
 labels:
   - design
   - frontend
@@ -1441,6 +1441,8 @@ Phase 7 bundle framework UX: add a pure catalog in `packages/web-ui/src/views/co
 - Restore only explicit, reviewed DISA NixOS STIG rule-ID mappings to typed native policy configuration during foreign XCCDF import. Do not reinstate prose/Nix heuristic inference; unmatched foreign controls remain non-executable.
 - Add importer tests proving mapped IDs create native typed policy configuration and unmapped Nix-looking prose remains unbound without assertions.
 - Run focused XCCDF importer tests, server check, formatting, then commit and push.
+
+Deletion lifecycle increment: centralize policy and bundle deletion eligibility (immutable history, retained source/reference records, assignments, and core-policy protection), expose read-only admin preflight/status APIs, make DELETE consume the same result transactionally, and surface preflight blockers in existing policy and bundle confirmation UI. Preserve all audit/source history; do not add a destructive bypass. Verify with focused server tests and formatting.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -1483,6 +1485,8 @@ Phase 9/10 classification integration completed locally. Foreign XCCDF imports n
 2026-08-10: Replaced the evidence endpoint's heartbeat/placeholder-CVE synthesis for Nix and `require_cve_check` policies. It now resolves only against the latest deployed system state and its matching derivation; Nix uses persisted per-lineage `policy_results`, CVE uses the newest completed derivation scan, and missing/malformed evidence maps to `not_checked`/`error`. Added coverage for lineage-keyed result decoding and aligned the web-ui rollup DTO fields. Focused server tests and web-ui cargo check passed. Full workspace formatting remains blocked by pre-existing formatting differences in previously changed web-ui grouping files; modified files pass direct rustfmt check.
 
 2026-08-10: Extended authoritative evidence use to bundle/system matrices and effective-assignment rollups. Assignment overlays retain their effective config and report-only count while outcome status comes from the same deployed Nix/CVE evidence resolver. The system effective-policy endpoint now returns an internal error rather than a synthetic score if evidence resolution fails. Focused server tests and web-ui cargo check passed.
+
+2026-08-09 deletion lifecycle increment started in /home/mcamp/code/crystal-forge/TASK-412-cf-xccdf-interchange. Preflight verified task branch/base and clean main/dev; the task worktree contains pre-existing unrelated untracked U_Anduril_NixOS_V1R1_STIG.zip and packages/web-ui/assets/tailwind.css, which will not be touched.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
