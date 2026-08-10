@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 00:32'
+updated_date: '2026-08-10 00:38'
 labels:
   - design
   - frontend
@@ -1451,6 +1451,8 @@ Phase 3 grouping-scheme UI implemented in the TASK-412 worktree. Added web-ui DT
 Phase 4 policy editor classification wiring implemented in the dedicated worktree. Added category/framework/severity/control-family/CMMC/CIS/rationale fields to web-ui create/update DTOs; unified Details now has Platform/Security controls, framework-specific inputs, loaded-record custom framework suggestions, and persisted save mapping. Drawer renders the selected revision's classification/rationale; cards render only actual security severity. Verification: `SQLX_OFFLINE=true nix develop --command cargo check` in `packages/web-ui` passed; `nix develop --command cargo test custom_frameworks_excludes_standard_and_empty_values` passed (1 test). `cargo fmt --all --check` passed for `packages/default`, but the `packages/web-ui` workspace check fails on pre-existing formatting in `api/client.rs`, `components/policy/grouping_schemes_modal.rs`, `components/policy/mod.rs`, and two existing blocks in `views/policies.rs`; those unrelated diffs were intentionally not retained. Web-ui Nix build was not run per user instruction.
 
 Phase 7 bundle framework UX implemented in `packages/web-ui/src/views/compliance.rs`: New and Edit bundle modals now share a Standard/Custom framework field sourced from loaded bundle and policy metadata, with modal-only new-framework entry, Enter/Add acceptance, Escape/Cancel discard, and legacy CMMC preservation. Added pure catalog/legacy alias tests. Verification: `nix develop -c env SQLX_OFFLINE=true cargo check --manifest-path packages/web-ui/Cargo.toml` passed (existing warnings); `nix develop -c env SQLX_OFFLINE=true cargo test --manifest-path packages/web-ui/Cargo.toml views::compliance::tests` passed (3 tests); `rustfmt --edition 2024 --check packages/web-ui/src/views/compliance.rs` passed; `git diff --check` passed. `cargo fmt --all --check` was run via the web-ui manifest but is blocked by unrelated existing formatting differences in `src/api/client.rs`, `src/components/policy/grouping_schemes_modal.rs`, `src/components/policy/mod.rs`, and `src/views/policies.rs`; this change is formatted. The web-ui Nix check was intentionally not run per user instruction.
+
+Phase 9/10 classification integration completed locally. Foreign XCCDF imports now capture Dublin Core publisher and project `category=security` / `framework=DISA STIG` only for foreign benchmarks whose publisher is DISA; severity and rationale are copied only from their standard source elements, and SRG/CCI behavior is retained. CF-native XCCDF plus JSON/TOML retain full `compliance_metadata`, including unknown keys. Added focused digest and round-trip tests. Verified with `cargo fmt --all --check`, `cargo check -p cf-server`, focused `cargo test -p cf-server ... --lib` filters, and `git diff --check`; repository pre-existing warnings remain. Did not run the web-ui Nix check. Preserved untracked `U_Anduril_NixOS_V1R1_STIG.zip` and `packages/web-ui/assets/tailwind.css`.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
