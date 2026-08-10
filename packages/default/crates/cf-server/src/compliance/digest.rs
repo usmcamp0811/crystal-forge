@@ -800,6 +800,30 @@ mod tests {
     }
 
     #[test]
+    fn policy_digest_changes_for_each_classification_metadata_key() {
+        let baseline = base_policy().compute_digest();
+        let classification_edits = [
+            ("category", json!("security")),
+            ("framework", json!("DISA STIG")),
+            ("severity", json!("high")),
+            ("control_family", json!("AC")),
+            ("cmmc_level", json!(2)),
+            ("cis_section", json!("4.1")),
+            ("rationale", json!("Required by the source control.")),
+        ];
+
+        for (key, value) in classification_edits {
+            let mut policy = base_policy();
+            policy.compliance_metadata = json!({key: value});
+            assert_ne!(
+                baseline,
+                policy.compute_digest(),
+                "{key} must affect the digest"
+            );
+        }
+    }
+
+    #[test]
     fn policy_digest_changes_when_dependencies_change() {
         let a = base_policy().compute_digest();
         let mut b = base_policy();

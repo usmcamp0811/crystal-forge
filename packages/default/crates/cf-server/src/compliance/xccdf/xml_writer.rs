@@ -3175,6 +3175,18 @@ mod tests {
     #[test]
     fn round_trip_native_payload_passes_reconciliation_validation() {
         let mut snap = full_test_snapshot();
+        let classification_metadata = json!({
+            "category": "security",
+            "framework": "DISA STIG",
+            "severity": "high",
+            "control_family": "AC",
+            "cmmc_level": 2,
+            "cis_section": "4.1",
+            "rationale": "Required by the source control.",
+            "vendor_extension": {"preserve": ["this", "unchanged"]},
+        });
+        let classified_policy_version_id = snap.policies[0].policy_version_id;
+        snap.policies[0].compliance_metadata = classification_metadata.clone();
         for policy in &mut snap.policies {
             let canonical = crate::compliance::digest::PolicyVersionCanonical {
                 name: policy.name.clone(),
@@ -3214,13 +3226,21 @@ mod tests {
         .compute_digest();
         let xml = write_bundle_xccdf_export(&snap).unwrap();
         let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
-        let result = crate::compliance::xccdf::importer::validate_cf_native_document(&parsed);
-        if let Err(error) = result {
-            panic!(
-                "native round trip should validate: {} ({})",
-                error.code, error.message
-            );
-        }
+        let (_, records) = crate::compliance::xccdf::importer::validate_cf_native_document(&parsed)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "native round trip should validate: {} ({})",
+                    error.code, error.message
+                )
+            });
+        let classified_record = records
+            .iter()
+            .find(|record| record.policy_version_id == classified_policy_version_id)
+            .expect("classified policy is preserved in the CF-native import");
+        assert_eq!(
+            classified_record.compliance_metadata,
+            classification_metadata
+        );
     }
 
     /// Round-trip: standard ident elements are preserved.

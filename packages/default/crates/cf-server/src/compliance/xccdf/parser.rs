@@ -933,6 +933,14 @@ impl ParserState {
                     meta.dependencies = serde_json::from_str(&self.current_text).ok();
                 }
             }
+            // DISA STIGs commonly place the benchmark publisher in Dublin
+            // Core metadata. Preserve this source fact without treating other
+            // foreign metadata as a CF extension or inferring classification.
+            (ElementNamespace::Other, b"publisher") => {
+                if let Some(benchmark) = self.benchmark.as_mut() {
+                    benchmark.publisher = Some(self.current_text.clone());
+                }
+            }
             _ => {}
         }
 
@@ -2203,6 +2211,13 @@ mod tests {
         assert_eq!(parsed.xccdf_namespace_version, Some("1.1"));
         // Structural content is preserved.
         assert!(parsed.benchmark.is_some());
+        assert_eq!(
+            parsed
+                .benchmark
+                .as_ref()
+                .and_then(|benchmark| benchmark.publisher.as_deref()),
+            Some("DISA")
+        );
         assert_eq!(parsed.rules.len(), 1);
         assert_eq!(parsed.rules[0].id, "SV-268078r1_rule");
         assert_eq!(parsed.profiles.len(), 1);

@@ -10876,6 +10876,45 @@ packages = ["git"]
         assert_eq!(toml_policies[0].config["packages"][0], "git");
     }
 
+    #[test]
+    fn policy_interchange_json_and_toml_roundtrip_preserve_classification_metadata() {
+        let metadata = serde_json::json!({
+            "category": "security",
+            "framework": "DISA STIG",
+            "severity": "high",
+            "control_family": "AC",
+            "cmmc_level": 2,
+            "cis_section": "4.1",
+            "rationale": "Required by the source control.",
+            "vendor_extension": {"preserve": ["this", "unchanged"]},
+        });
+        let policy = serde_json::json!({
+            "name": "classification-roundtrip",
+            "policy_type": "custom_check",
+            "config": {"expression": "true"},
+            "compliance_metadata": metadata,
+        });
+        let document = serde_json::json!({
+            "schema": "urn:crystal-forge:policy-set:1",
+            "policies": [policy],
+        });
+
+        let json_policies = parse_policy_interchange_upload(&MultipartUpload {
+            filename: Some("policies.json".to_string()),
+            bytes: serde_json::to_vec(&document).expect("serialize JSON policy set"),
+        })
+        .expect("parse JSON policy set");
+        assert_eq!(json_policies[0].compliance_metadata, metadata);
+
+        let toml = json_to_toml(&document).expect("serialize TOML policy set");
+        let toml_policies = parse_policy_interchange_upload(&MultipartUpload {
+            filename: Some("policies.toml".to_string()),
+            bytes: toml.into_bytes(),
+        })
+        .expect("parse TOML policy set");
+        assert_eq!(toml_policies[0].compliance_metadata, metadata);
+    }
+
     /// Contract test: list endpoint response deserializes using AssignmentListResponse
     /// wrapper, and deactivated assignments do not corrupt the list.
     #[tokio::test]

@@ -161,7 +161,7 @@ pub fn validate_cf_native_document(
         let compliance_metadata = meta
             .compliance_metadata
             .clone()
-            .unwrap_or_else(|| ImportedPolicyRecord::build_compliance_metadata(rule));
+            .unwrap_or_else(|| ImportedPolicyRecord::build_compliance_metadata(rule, false));
         let config = meta.config.clone().ok_or_else(|| {
             ImportPlanError::cf_native_invalid(
                 "CF_NATIVE_PAYLOAD_INVALID",
@@ -282,6 +282,7 @@ pub fn validate_cf_native_document(
             owner: Some(bundle_canonical.owner),
             description: bundle_canonical.description,
         },
+        is_disa_stig: false,
         rules_to_import: rules,
     };
     Ok((validated, records))
@@ -425,7 +426,7 @@ pub fn validate_import_plan(
 
     // ── Collect non-excluded rules in document order ───────────────────────
     let selected_set = &seen_selected;
-    let mut rules_to_import: Vec<(ParsedRule, XccdfRuleImportAction)> = parsed
+    let rules_to_import: Vec<(ParsedRule, XccdfRuleImportAction)> = parsed
         .rules
         .iter()
         .filter(|r| selected_set.contains(r.id.as_str()))
@@ -440,6 +441,12 @@ pub fn validate_import_plan(
     Ok(ValidatedImportPlan {
         expected_sha256: plan.expected_sha256,
         bundle: plan.bundle,
+        is_disa_stig: parsed.class == DocumentClass::ForeignXccdf
+            && parsed
+                .benchmark
+                .as_ref()
+                .and_then(|benchmark| benchmark.publisher.as_deref())
+                .is_some_and(|publisher| publisher.eq_ignore_ascii_case("DISA")),
         rules_to_import,
     })
 }
@@ -462,7 +469,8 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
                 .or_else(|| rule.title.clone().filter(|t| !t.trim().is_empty()))
                 .unwrap_or_else(|| rule.id.clone());
 
-            let mut compliance_metadata = ImportedPolicyRecord::build_compliance_metadata(rule);
+            let mut compliance_metadata =
+                ImportedPolicyRecord::build_compliance_metadata(rule, validated.is_disa_stig);
             let (policy_type, execution_phase, config, evidence_requirements) = match action {
                 XccdfRuleImportAction::CreateNativeCustom {
                     custom_check,
@@ -653,6 +661,57 @@ mod tests {
         );
         let validated = result.unwrap();
         assert_eq!(validated.rules_to_import.len(), 2);
+    }
+
+    #[test]
+    fn disa_stig_source_metadata_projects_only_supported_classification() {
+        let mut parsed = minimal_foreign_parsed(&["SV-123_rule"]);
+        parsed.benchmark.as_mut().unwrap().publisher = Some("DISA".into());
+        let rule = &mut parsed.rules[0];
+        rule.severity = Some("high".into());
+        rule.rationale = Some("The source rationale.".into());
+        rule.identifiers = vec![
+            crate::compliance::xccdf::models::StandardIdentifier {
+                system: "https://public.cyber.mil/stigs/srg".into(),
+                value: "SRG-OS-000001".into(),
+            },
+            crate::compliance::xccdf::models::StandardIdentifier {
+                system: "https://public.cyber.mil/stigs/cci".into(),
+                value: "CCI-000001".into(),
+            },
+        ];
+
+        let validated = validate_import_plan(valid_plan(&["SV-123_rule"]), &parsed)
+            .expect("DISA STIG import plan is valid");
+        let records = build_policy_records(&validated);
+        let metadata = &records[0].compliance_metadata;
+
+        assert_eq!(metadata["category"], "security");
+        assert_eq!(metadata["framework"], "DISA STIG");
+        assert_eq!(metadata["severity"], "high");
+        assert_eq!(metadata["rationale"], "The source rationale.");
+        assert_eq!(metadata["srg_ids"], serde_json::json!(["SRG-OS-000001"]));
+        assert_eq!(metadata["cci_ids"], serde_json::json!(["CCI-000001"]));
+        assert!(metadata.get("control_family").is_none());
+        assert!(metadata.get("cmmc_level").is_none());
+        assert!(metadata.get("cis_section").is_none());
+    }
+
+    #[test]
+    fn foreign_rule_without_source_severity_or_rationale_does_not_invent_them() {
+        let mut parsed = minimal_foreign_parsed(&["rule-1"]);
+        parsed.rules[0].severity = None;
+        parsed.rules[0].rationale = None;
+
+        let validated = validate_import_plan(valid_plan(&["rule-1"]), &parsed)
+            .expect("foreign import plan is valid");
+        let records = build_policy_records(&validated);
+        let metadata = &records[0].compliance_metadata;
+
+        assert!(metadata.get("severity").is_none());
+        assert!(metadata.get("rationale").is_none());
+        assert!(metadata.get("category").is_none());
+        assert!(metadata.get("framework").is_none());
     }
 
     #[test]

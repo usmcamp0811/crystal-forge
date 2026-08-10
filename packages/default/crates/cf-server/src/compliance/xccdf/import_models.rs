@@ -187,6 +187,9 @@ impl XccdfRuleImportAction {
 pub struct ValidatedImportPlan {
     pub expected_sha256: String,
     pub bundle: ImportedBundlePlan,
+    /// Whether the foreign benchmark identifies DISA as its publisher. This is
+    /// source evidence for the conservative DISA STIG classification projection.
+    pub is_disa_stig: bool,
     /// Non-excluded rules in document order, each paired with its action.
     pub rules_to_import: Vec<(ParsedRule, XccdfRuleImportAction)>,
 }
@@ -412,7 +415,7 @@ pub struct ImportedPolicyRecord {
 
 impl ImportedPolicyRecord {
     /// Build the canonical `compliance_metadata` JSONB value from parsed rule fields.
-    pub fn build_compliance_metadata(rule: &ParsedRule) -> serde_json::Value {
+    pub fn build_compliance_metadata(rule: &ParsedRule, is_disa_stig: bool) -> serde_json::Value {
         let identifiers: Vec<serde_json::Value> = rule
             .identifiers
             .iter()
@@ -451,11 +454,9 @@ impl ImportedPolicyRecord {
             .filter(|v| v.to_ascii_uppercase().starts_with("CCI-"))
             .collect();
 
-        serde_json::json!({
+        let mut metadata = serde_json::json!({
             "source_rule_id": rule.id,
             "source_group_id": rule.group_id,
-            "severity": rule.severity,
-            "rationale": rule.rationale,
             "version": rule.version,
             "platforms": rule.platforms,
             "identifiers": identifiers,
@@ -464,7 +465,24 @@ impl ImportedPolicyRecord {
             "fixes": fixes,
             "srg_ids": srg_ids,
             "cci_ids": cci_ids,
-        })
+        });
+        if let Some(object) = metadata.as_object_mut() {
+            if is_disa_stig {
+                object.insert("category".into(), serde_json::json!("security"));
+                object.insert("framework".into(), serde_json::json!("DISA STIG"));
+            }
+            // `severity` and `rationale` are standard XCCDF fields. Do not add a
+            // null placeholder when the source did not provide them, and do not
+            // infer either field from discussion, check, or fix prose.
+            if let Some(severity) = rule.severity.as_deref().filter(|value| !value.is_empty()) {
+                object.insert("severity".into(), serde_json::json!(severity));
+            }
+            if let Some(rationale) = rule.rationale.as_deref().filter(|value| !value.is_empty()) {
+                object.insert("rationale".into(), serde_json::json!(rationale));
+            }
+        }
+
+        metadata
     }
 }
 
