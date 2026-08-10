@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 01:32'
+updated_date: '2026-08-10 01:41'
 labels:
   - design
   - frontend
@@ -1436,6 +1436,11 @@ Phase 7 bundle framework UX: add a pure catalog in `packages/web-ui/src/views/co
 ### Policy editor DISA layout pass (2026-08-10)
 - Compare the production New custom policy modal with the Policies design reference and align DISA-specific SRG/CCI field placement, grouping, labels, and responsive behavior without changing classification semantics or unrelated editor flows.
 - Add or update focused UI coverage when a practical existing test surface exists; run the full existing web-ui test suite and the web-ui Nix check because this changes web-ui source.
+
+### Curated Anduril STIG mappings (2026-08-10)
+- Restore only explicit, reviewed DISA NixOS STIG rule-ID mappings to typed native policy configuration during foreign XCCDF import. Do not reinstate prose/Nix heuristic inference; unmatched foreign controls remain non-executable.
+- Add importer tests proving mapped IDs create native typed policy configuration and unmapped Nix-looking prose remains unbound without assertions.
+- Run focused XCCDF importer tests, server check, formatting, then commit and push.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
