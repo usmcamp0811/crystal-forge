@@ -27,9 +27,8 @@ use crate::api::models::{
 };
 use crate::components::environments::{
     BundleAssignmentChange, EnvBundleAssignment, EnvironmentCacheSummary,
-    EnvironmentComplianceSummary, EnvironmentDeploymentPolicy, EnvironmentFormDraft,
-    EnvironmentHealthBreakdown, EnvironmentItem, PolicyOption,
-    policy_library as fallback_policy_library,
+    EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentHealthBreakdown, EnvironmentItem,
+    PolicyOption, policy_library as fallback_policy_library,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -266,11 +265,6 @@ pub fn fallback_environments(default_required_policy: Uuid) -> Vec<EnvironmentIt
             requires_approval: Some(true),
             is_production: Some(true),
             role_assignment_count: Some(4),
-            compliance_bundle: Some(EnvironmentComplianceSummary {
-                id: Uuid::from_u128(201),
-                name: "STIG baseline".to_string(),
-                framework: "STIG".to_string(),
-            }),
             bundle_assignments: Vec::new(),
         },
         EnvironmentItem {
@@ -300,11 +294,6 @@ pub fn fallback_environments(default_required_policy: Uuid) -> Vec<EnvironmentIt
             requires_approval: Some(true),
             is_production: Some(false),
             role_assignment_count: Some(5),
-            compliance_bundle: Some(EnvironmentComplianceSummary {
-                id: Uuid::from_u128(202),
-                name: "NIST baseline".to_string(),
-                framework: "NIST 800-53".to_string(),
-            }),
             bundle_assignments: Vec::new(),
         },
         EnvironmentItem {
@@ -334,7 +323,6 @@ pub fn fallback_environments(default_required_policy: Uuid) -> Vec<EnvironmentIt
             requires_approval: Some(false),
             is_production: Some(false),
             role_assignment_count: Some(7),
-            compliance_bundle: None,
             bundle_assignments: Vec::new(),
         },
         EnvironmentItem {
@@ -353,7 +341,6 @@ pub fn fallback_environments(default_required_policy: Uuid) -> Vec<EnvironmentIt
             requires_approval: Some(false),
             is_production: Some(false),
             role_assignment_count: Some(1),
-            compliance_bundle: None,
             bundle_assignments: Vec::new(),
         },
     ]
@@ -406,13 +393,6 @@ pub fn api_to_environment_item(
         requires_approval: env.requires_approval,
         is_production: env.is_production,
         role_assignment_count: env.role_assignment_count.map(|count| count.max(0) as usize),
-        compliance_bundle: env
-            .compliance_bundle
-            .map(|bundle| EnvironmentComplianceSummary {
-                id: bundle.id,
-                name: bundle.name,
-                framework: bundle.framework,
-            }),
         bundle_assignments: env
             .compliance_assignments
             .iter()

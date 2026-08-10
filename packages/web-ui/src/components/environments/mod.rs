@@ -45,13 +45,10 @@ pub struct EnvironmentItem {
     /// Real backend data: count of `user_environment_memberships` rows for
     /// this environment.
     pub role_assignment_count: Option<usize>,
-    /// Real backend data: the compliance bundle assigned to this environment
-    /// via `compliance_bundle_environments`, if any. Kept for backward compat
-    /// with list-view display; the modal now uses `bundle_assignments`.
-    pub compliance_bundle: Option<EnvironmentComplianceSummary>,
     /// Live compliance bundle assignments from `compliance_bundle_assignments`
-    /// (scope_type = "environment"). The modal uses this as the authoritative
-    /// source; one entry per distinct assigned bundle lineage.
+    /// (scope_type = "environment"). This is the authoritative source for
+    /// which bundles are actually required; one entry per distinct assigned
+    /// bundle lineage.
     pub bundle_assignments: Vec<EnvBundleAssignment>,
 }
 
@@ -108,16 +105,7 @@ pub struct EnvironmentCacheSummary {
     pub status: String,
 }
 
-/// Compliance bundle assigned to an environment via
-/// `compliance_bundle_environments`.
-#[derive(Clone, Debug, PartialEq)]
-pub struct EnvironmentComplianceSummary {
-    pub id: Uuid,
-    pub name: String,
-    pub framework: String,
-}
-
-/// A live compliance bundle assignment for this environment via the versioned
+/// Compliance bundle assigned to an environment via the versioned
 /// `compliance_bundle_assignments` table. One per distinct assigned bundle
 /// lineage. This is the authoritative source for the Environment form modal.
 #[derive(Clone, Debug, PartialEq)]

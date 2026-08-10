@@ -372,10 +372,10 @@ struct EnforcementChipsProps {
 fn EnforcementChips(props: EnforcementChipsProps) -> Element {
     let env = props.environment;
     let policy_count = env.required_policy_ids.len();
-    // Prefer the versioned multi-bundle assignments if populated, fall back to the
-    // legacy single-bundle summary for environments not yet loaded through the modal.
+    // Authoritative versioned bundle assignments from the server
+    // (`compliance_bundle_assignments`). Only bundles that are actually
+    // required for this environment appear here.
     let assignment_count = env.bundle_assignments.len();
-    let has_bundles = assignment_count > 0 || env.compliance_bundle.is_some();
     rsx! {
         div { style: "display:flex; gap:6px; align-items:center; flex-wrap:wrap;",
             if assignment_count > 0 {
@@ -391,14 +391,11 @@ fn EnforcementChips(props: EnforcementChipsProps) -> Element {
                 if assignment_count > 2 {
                     span { class: "chip chip-info", "+{assignment_count - 2}" }
                 }
-            } else if let Some(bundle) = env.compliance_bundle.as_ref() {
-                // Legacy single-bundle fallback.
-                span { class: "chip chip-info", title: "Compliance bundle assigned to this environment", Icon { name: IconName::Shield, size: 9 } " {bundle.framework}" }
             }
             if policy_count > 0 {
                 span { class: "chip chip-unknown", title: "Required deployment policies (gates) for this environment", "{policy_count} gate{plural(policy_count)}" }
             }
-            if !has_bundles && policy_count == 0 {
+            if assignment_count == 0 && policy_count == 0 {
                 span { style: "font-size:11px; color:var(--cf-text-muted);", if props.compact { "—" } else { "none" } }
             }
         }
