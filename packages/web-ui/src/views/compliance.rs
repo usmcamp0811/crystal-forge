@@ -1681,11 +1681,29 @@ fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
                 .unwrap_or("")
                 .to_string();
 
-            // Foreign XCCDF prose and checks are source material, not an
-            // executable Crystal Forge policy. A native definition must be
-            // authored explicitly in the refinement flow or mapped to one.
-            let assertions = Vec::new();
-            let default_action = "unbound";
+            // Foreign source remains non-executable. The server may provide
+            // conservative structured suggestions from recognized fix literals.
+            let assertions: Vec<ImportedCustomCheckRule> = r
+                .inferred_assertions
+                .iter()
+                .filter_map(|a| {
+                    Some(ImportedCustomCheckRule {
+                        field_name: a.get("option_path")?.as_str()?.replace('.', "_"),
+                        expression: a.get("nix_expression")?.as_str()?.to_string(),
+                        description: a
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Inferred from official fix; review before importing.")
+                            .to_string(),
+                        strict: true,
+                    })
+                })
+                .collect();
+            let default_action = if r.is_native || !assertions.is_empty() {
+                "native"
+            } else {
+                "unbound"
+            };
 
             StigRule {
                 rule_id: r.id.clone(),

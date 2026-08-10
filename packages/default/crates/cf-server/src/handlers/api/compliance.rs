@@ -2980,6 +2980,25 @@ pub async fn xccdf_preview(
                     "preview": f.content,
                 })
             });
+            // Foreign XCCDF remains non-executable. This is a conservative,
+            // deterministic translation into reviewable structured suggestions.
+            let inferred_assertions: Vec<serde_json::Value> = r
+                .fix
+                .as_ref()
+                .map(|fix| {
+                    crate::compliance::xccdf::inference::infer_nixos_assertions(&fix.content)
+                        .into_iter()
+                        .map(|assertion| {
+                            serde_json::json!({
+                                "option_path": assertion.option_path,
+                                "expected_value": assertion.expected_value,
+                                "nix_expression": assertion.nix_expression,
+                                "description": assertion.description,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
 
             // Clean VulnDiscussion from description — strip the XML sub-element
             // tags that STIG documents embed inside the <description> text node.
@@ -3010,6 +3029,7 @@ pub async fn xccdf_preview(
                 "identifiers": idents,
                 "checks": check_summaries,
                 "fix": fix_summary,
+                "inferred_assertions": inferred_assertions,
                 "references": refs,
                 "has_opaque_xml": r.preserved_xml.is_some(),
             })

@@ -1495,6 +1495,8 @@ pub struct XccdfRuleInfo {
     #[serde(default)]
     pub fix: Option<serde_json::Value>,
     #[serde(default)]
+    pub inferred_assertions: Vec<serde_json::Value>,
+    #[serde(default)]
     pub references: Vec<serde_json::Value>,
     #[serde(default)]
     pub has_opaque_xml: bool,
