@@ -1142,6 +1142,14 @@ pub struct ComplianceSystemRollup {
     pub warn: i64,
     pub fail: i64,
     pub waiver: i64,
+    #[serde(default)]
+    pub not_checked: i64,
+    #[serde(default)]
+    pub not_applicable: i64,
+    #[serde(default)]
+    pub error: i64,
+    #[serde(default)]
+    pub report_only: i64,
     pub score: i64,
     #[serde(default)]
     pub resolution_state: Option<String>,

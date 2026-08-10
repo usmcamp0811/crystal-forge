@@ -1704,10 +1704,11 @@ pub async fn get_system_evidence(
     } else if bundle_version_id.is_some() {
         resolution_state = Some("conflict".to_string());
     }
-    let controls = policies
-        .into_iter()
-        .map(|policy| control_evidence(&system, policy))
-        .collect();
+    let mut controls = Vec::with_capacity(policies.len());
+    for policy in policies {
+        let evidence = resolve_control_evidence(pool, &system, policy).await?;
+        controls.push(evidence);
+    }
 
     Ok(Some(ComplianceEvidenceResponse {
         bundle_id,
@@ -2123,6 +2124,282 @@ fn policy_status(system: &SystemRow, policy: &PolicyRow) -> ComplianceControlSta
     }
 }
 
+#[derive(Debug, Clone, FromRow)]
+struct AssessmentContext {
+    derivation_id: i32,
+    policy_results: Value,
+}
+
+async fn assessment_context(pool: &PgPool, system_id: Uuid) -> Result<Option<AssessmentContext>> {
+    sqlx::query_as(
+        r#"
+        SELECT d.id AS derivation_id, d.policy_results
+        FROM systems s
+        JOIN LATERAL (
+            SELECT ss.derivation_path
+            FROM system_states ss
+            WHERE ss.hostname = s.hostname
+            ORDER BY ss.timestamp DESC, ss.id DESC
+            LIMIT 1
+        ) deployed ON true
+        JOIN derivations d ON d.derivation_path = deployed.derivation_path
+        WHERE s.id = $1
+          AND d.derivation_type = 'nixos'
+        "#,
+    )
+    .bind(system_id)
+    .fetch_optional(pool)
+    .await
+    .context("load deployed assessment context")
+}
+
+fn nix_policy_result(
+    policy_results: &Value,
+    policy_id: Uuid,
+) -> Result<Option<(bool, Option<String>)>> {
+    let Some(assigned) = policy_results.get("assigned") else {
+        return Ok(None);
+    };
+    let assigned = assigned
+        .as_object()
+        .context("persisted policy results have a non-object assigned map")?;
+    let Some(result) = assigned.get(&policy_id.to_string()) else {
+        return Ok(None);
+    };
+    let result = result
+        .as_object()
+        .context("persisted policy result is not an object")?;
+    let passed = result
+        .get("passed")
+        .and_then(Value::as_bool)
+        .context("persisted policy result has no boolean passed value")?;
+    let details = result
+        .get("details")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok(Some((passed, details)))
+}
+
+async fn resolve_control_evidence(
+    pool: &PgPool,
+    system: &SystemRow,
+    policy: PolicyRow,
+) -> Result<ComplianceControlEvidence> {
+    if !policy.enabled {
+        return Ok(control_evidence_with_resolved_status(
+            system,
+            policy,
+            ComplianceControlStatus::NotChecked,
+            "Policy is disabled and was not evaluated.".to_string(),
+            "No evidence is collected for disabled policies.".to_string(),
+            "policy_eval",
+            "Disabled policy",
+        ));
+    }
+    let context = assessment_context(pool, system.id).await?;
+    let (status, summary, body, artifact_type, artifact_title) = match policy.policy_type.as_str() {
+        // All Nix-evaluated policy types write an assigned per-lineage result
+        // during evaluation. Heartbeat health is not policy evidence.
+        "require_cf_agent" | "require_packages" | "custom_check" => match context {
+            None => (
+                ComplianceControlStatus::NotChecked,
+                format!(
+                    "No deployed evaluation is available for '{}' on {}.",
+                    policy.name, system.hostname
+                ),
+                "No deployed system state has persisted policy results.".to_string(),
+                "policy_eval",
+                "No applicable Nix evaluation",
+            ),
+            Some(context) => match nix_policy_result(&context.policy_results, policy.id) {
+                Ok(None) => (
+                    ComplianceControlStatus::NotChecked,
+                    format!(
+                        "The deployed evaluation contains no result for '{}' on {}.",
+                        policy.name, system.hostname
+                    ),
+                    format!(
+                        "derivation_id={} policy_lineage_id={}",
+                        context.derivation_id, policy.id
+                    ),
+                    "policy_eval",
+                    "No applicable Nix policy result",
+                ),
+                Ok(Some((true, details))) => (
+                    ComplianceControlStatus::Pass,
+                    format!(
+                        "The deployed Nix evaluation passed '{}' on {}.",
+                        policy.name, system.hostname
+                    ),
+                    details.unwrap_or_else(|| "Persisted Nix policy result passed.".to_string()),
+                    "policy_eval",
+                    "Persisted Nix policy result",
+                ),
+                Ok(Some((false, details))) => (
+                    ComplianceControlStatus::Fail,
+                    format!(
+                        "The deployed Nix evaluation failed '{}' on {}.",
+                        policy.name, system.hostname
+                    ),
+                    details.unwrap_or_else(|| "Persisted Nix policy result failed.".to_string()),
+                    "policy_eval",
+                    "Persisted Nix policy result",
+                ),
+                Err(error) => (
+                    ComplianceControlStatus::Error,
+                    format!(
+                        "The persisted evaluation result for '{}' is invalid.",
+                        policy.name
+                    ),
+                    error.to_string(),
+                    "policy_eval",
+                    "Invalid persisted Nix policy result",
+                ),
+            },
+        },
+        "require_cve_check" => match context {
+            None => (
+                ComplianceControlStatus::NotChecked,
+                format!(
+                    "No deployed derivation is available to assess '{}' on {}.",
+                    policy.name, system.hostname
+                ),
+                "No deployed system state has a derivation.".to_string(),
+                "cve_scan",
+                "No applicable CVE scan",
+            ),
+            Some(context) => {
+                let scan: Option<(Uuid, i32, i32)> = sqlx::query_as(
+                    r#"SELECT id, critical_count, high_count
+                       FROM cve_scans
+                       WHERE derivation_id = $1 AND status = 'completed'
+                       ORDER BY completed_at DESC NULLS LAST, id DESC
+                       LIMIT 1"#,
+                )
+                .bind(context.derivation_id)
+                .fetch_optional(pool)
+                .await?;
+                match scan {
+                    None => (
+                        ComplianceControlStatus::NotChecked,
+                        format!(
+                            "No completed CVE scan is available for '{}' on {}.",
+                            policy.name, system.hostname
+                        ),
+                        format!("derivation_id={}", context.derivation_id),
+                        "cve_scan",
+                        "No applicable CVE scan",
+                    ),
+                    Some((scan_id, critical_count, high_count)) => {
+                        let max_critical = policy
+                            .config
+                            .get("max_critical")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(i64::MAX);
+                        let max_high = policy.config.get("max_high").and_then(Value::as_i64);
+                        let failed = i64::from(critical_count) > max_critical
+                            || max_high.is_some_and(|max| i64::from(high_count) > max);
+                        let status = if failed {
+                            ComplianceControlStatus::Fail
+                        } else {
+                            ComplianceControlStatus::Pass
+                        };
+                        (
+                            status,
+                            format!(
+                                "Completed CVE scan assessed '{}' on {}.",
+                                policy.name, system.hostname
+                            ),
+                            format!(
+                                "scan_id={scan_id} critical_count={critical_count} high_count={high_count}"
+                            ),
+                            "cve_scan",
+                            "Completed CVE scan",
+                        )
+                    }
+                }
+            }
+        },
+        _ => (
+            ComplianceControlStatus::NotChecked,
+            format!(
+                "No applicable evidence found for '{}' on {}; control is not checked.",
+                policy.name, system.hostname
+            ),
+            format!(
+                "policy_type={} enabled={}",
+                policy.policy_type, policy.enabled
+            ),
+            "policy_eval",
+            "No applicable evidence",
+        ),
+    };
+
+    Ok(control_evidence_with_resolved_status(
+        system,
+        policy,
+        status,
+        summary,
+        body,
+        artifact_type,
+        artifact_title,
+    ))
+}
+
+fn control_evidence_with_resolved_status(
+    system: &SystemRow,
+    policy: PolicyRow,
+    status: ComplianceControlStatus,
+    summary: String,
+    body: String,
+    artifact_type: &str,
+    artifact_title: &str,
+) -> ComplianceControlEvidence {
+    let severity = policy
+        .compliance_metadata
+        .get("severity")
+        .and_then(Value::as_str)
+        .unwrap_or("info")
+        .to_string();
+
+    ComplianceControlEvidence {
+        policy_id: policy.id,
+        policy_name: policy.name.clone(),
+        status,
+        severity,
+        summary,
+        evidence_items: vec![ComplianceEvidenceItem {
+            kind: artifact_type.to_string(),
+            label: policy
+                .description
+                .clone()
+                .unwrap_or_else(|| policy.name.clone()),
+            body: body.clone(),
+            artifact: Some(ComplianceEvidenceArtifact {
+                artifact_type: artifact_type.to_string(),
+                title: artifact_title.to_string(),
+                body,
+            }),
+        }],
+        framework_mapping: String::new(),
+        control_family: policy
+            .compliance_metadata
+            .get("control_family")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        cmmc_level: policy
+            .compliance_metadata
+            .get("cmmc_level")
+            .and_then(Value::as_i64)
+            .and_then(|level| i32::try_from(level).ok()),
+        cis_section: policy
+            .compliance_metadata
+            .get("cis_section")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
+}
+
 fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlEvidence {
     let eval = evaluate_policy(system, &policy);
     let status = match &eval {
@@ -2288,6 +2565,42 @@ mod tests {
             critical_cve_count: 0,
             high_cve_count: 0,
         }
+    }
+
+    #[test]
+    fn persisted_nix_result_uses_policy_lineage_identity() {
+        let policy_id = Uuid::new_v4();
+        let results = serde_json::json!({
+            "assigned": {
+                policy_id.to_string(): {
+                    "passed": false,
+                    "details": "firewall is disabled"
+                }
+            }
+        });
+
+        let result = nix_policy_result(&results, policy_id).unwrap();
+        assert_eq!(
+            result,
+            Some((false, Some("firewall is disabled".to_string())))
+        );
+    }
+
+    #[test]
+    fn missing_persisted_nix_result_is_not_an_evaluation() {
+        let result =
+            nix_policy_result(&serde_json::json!({"assigned": {}}), Uuid::new_v4()).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn malformed_persisted_nix_result_is_an_error() {
+        let policy_id = Uuid::new_v4();
+        let results = serde_json::json!({
+            "assigned": { policy_id.to_string(): { "passed": "yes" } }
+        });
+
+        assert!(nix_policy_result(&results, policy_id).is_err());
     }
 
     fn bundle(id: Uuid, name: &str) -> ComplianceBundleSummary {
