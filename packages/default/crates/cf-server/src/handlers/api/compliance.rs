@@ -11820,4 +11820,223 @@ packages = ["git"]
             .await
             .ok();
     }
+
+    // ────────────────────────────────────────────────────────────────────────────
+    // § Slice 2: Audit Trail and Transactional Integrity
+    // ────────────────────────────────────────────────────────────────────────────
+
+    /// Exact-target audit assertion for policy trust
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn policy_trust_audit_records_exact_target() {
+        let pool = test_pool_from_env().await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (_, version_id, _) =
+            make_draft_policy(&pool, &format!("audit-trust-{}", Uuid::new_v4().simple())).await;
+        let base = spawn_phase1_server(pool.clone()).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/api/v1/policy-versions/{version_id}/trust"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({"trusted": true, "review_note": "Audit test"}))
+            .send()
+            .await
+            .expect("send");
+
+        assert_eq!(resp.status().as_u16(), 200);
+
+        // Query exact-target audit event
+        let (action, actor, prev_state, new_state): (String, Option<Uuid>, String, String) = sqlx::query_as(
+            "SELECT action, actor_user_id, metadata->>'previous_trust_state', metadata->>'new_trust_state'
+             FROM admin_audit_events
+             WHERE action = 'policy_version_trusted' AND target = $1
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&version_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("audit event found");
+
+        assert_eq!(action, "policy_version_trusted");
+        assert_eq!(actor, Some(admin_id));
+        assert_eq!(prev_state, "untrusted");
+        assert_eq!(new_state, "trusted");
+    }
+
+    /// Exact-target audit assertion for policy publication
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn policy_publication_audit_records_exact_target_and_state() {
+        let pool = test_pool_from_env().await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (_, version_id, digest) =
+            make_draft_policy(&pool, &format!("audit-pub-{}", Uuid::new_v4().simple())).await;
+
+        db_trust_policy_version(&pool, version_id, admin_id).await;
+
+        let base = spawn_phase1_server(pool.clone()).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/api/v1/policy-versions/{version_id}/publish"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({"expected_semantic_digest": digest}))
+            .send()
+            .await
+            .expect("send");
+
+        assert_eq!(resp.status().as_u16(), 200);
+
+        // Query exact-target audit event
+        #[derive(sqlx::FromRow)]
+        struct AuditEvent {
+            action: String,
+            actor_user_id: Option<Uuid>,
+            previous_state: String,
+            new_state: String,
+            digest: String,
+        }
+
+        let event: AuditEvent = sqlx::query_as(
+            "SELECT action, actor_user_id,
+                    metadata->>'previous_publication_state' as previous_state,
+                    metadata->>'new_publication_state' as new_state,
+                    metadata->>'semantic_digest' as digest
+             FROM admin_audit_events
+             WHERE action = 'policy_version_published' AND target = $1
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&version_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("audit event");
+
+        assert_eq!(event.action, "policy_version_published");
+        assert_eq!(event.actor_user_id, Some(admin_id));
+        assert_eq!(event.previous_state, "draft");
+        assert_eq!(event.new_state, "accepted");
+        assert_eq!(event.digest, digest);
+    }
+
+    /// Stale digest on accepted member should block bundle publication
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn bundle_publication_rejects_accepted_member_stale_digest() {
+        let pool = test_pool_from_env().await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+
+        // Create and publish policy member
+        let (p_id, pv_id, _) =
+            make_draft_policy(&pool, &format!("stale-mem-{}", Uuid::new_v4().simple())).await;
+        db_publish_policy_version(&pool, p_id, pv_id).await;
+
+        // Corrupt its digest (make it stale)
+        sqlx::query("UPDATE deployment_policy_versions SET semantic_digest = 'corrupted-digest' WHERE id = $1")
+            .bind(pv_id)
+            .execute(&pool)
+            .await
+            .expect("corrupt digest");
+
+        let (bundle_id, bv_id, _) = make_draft_bundle(
+            &pool,
+            &format!("stale-bundle-{}", Uuid::new_v4().simple()),
+            &[pv_id],
+        )
+        .await;
+
+        db_trust_bundle_version(&pool, bv_id, admin_id).await;
+
+        let base = spawn_phase1_server(pool.clone()).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/api/v1/compliance/bundle-versions/{bv_id}/publish"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({"expected_semantic_digest": "any-digest"}))
+            .send()
+            .await
+            .expect("send");
+
+        // Should reject due to stale member digest
+        assert_eq!(resp.status().as_u16(), 422, "stale accepted member digest must be rejected");
+
+        // Bundle must remain draft
+        let (pub_state,): (String,) = sqlx::query_as(
+            "SELECT publication_state FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(bv_id)
+        .fetch_one(&pool)
+        .await
+        .expect("bundle state");
+
+        assert_eq!(pub_state, "draft", "bundle must remain draft after stale digest rejection");
+    }
+
+    /// All-or-nothing bundle publication with stale member in middle
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn bundle_publication_all_or_nothing_on_stale_member() {
+        let pool = test_pool_from_env().await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+
+        // A: valid accepted member
+        let (pa_id, pva_id, _) = make_draft_policy(&pool, &format!("all-or-a-{}", Uuid::new_v4().simple())).await;
+        db_publish_policy_version(&pool, pa_id, pva_id).await;
+
+        // B: valid trusted draft member
+        let (pb_id, pvb_id, _) = make_draft_policy(&pool, &format!("all-or-b-{}", Uuid::new_v4().simple())).await;
+        db_trust_policy_version(&pool, pvb_id, admin_id).await;
+
+        // C: stale digest member
+        let (pc_id, pvc_id, _) = make_draft_policy(&pool, &format!("all-or-c-{}", Uuid::new_v4().simple())).await;
+        db_publish_policy_version(&pool, pc_id, pvc_id).await;
+        sqlx::query("UPDATE deployment_policy_versions SET semantic_digest = 'stale' WHERE id = $1")
+            .bind(pvc_id)
+            .execute(&pool)
+            .await
+            .expect("corrupt C");
+
+        let (bundle_id, bv_id, _) = make_draft_bundle(
+            &pool,
+            &format!("all-or-bundle-{}", Uuid::new_v4().simple()),
+            &[pva_id, pvb_id, pvc_id],
+        )
+        .await;
+
+        db_trust_bundle_version(&pool, bv_id, admin_id).await;
+
+        let base = spawn_phase1_server(pool.clone()).await;
+
+        // Attempt with auto-publish
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/api/v1/compliance/bundle-versions/{bv_id}/publish"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({"auto_publish_draft_policies": true}))
+            .send()
+            .await
+            .expect("send");
+
+        assert_eq!(resp.status().as_u16(), 422, "stale member must block entire bundle");
+
+        // Verify rollback: B must remain draft
+        let (pvb_state,): (String,) = sqlx::query_as(
+            "SELECT publication_state FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(pvb_id)
+        .fetch_one(&pool)
+        .await
+        .expect("B state");
+
+        assert_eq!(pvb_state, "draft", "B must not be auto-published on bundle failure");
+
+        // Verify no publication audit for B
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM admin_audit_events
+             WHERE action = 'policy_version_published' AND target = $1",
+        )
+        .bind(&pvb_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("audit count");
+
+        assert_eq!(audit_count, 0, "no audit event for failed auto-publish");
+    }
 }
