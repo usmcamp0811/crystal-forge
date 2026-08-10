@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 03:24'
+updated_date: '2026-08-10 03:32'
 labels:
   - design
   - frontend
@@ -1491,6 +1491,8 @@ Phase 9/10 classification integration completed locally. Foreign XCCDF imports n
 2026-08-09 deletion lifecycle increment started in /home/mcamp/code/crystal-forge/TASK-412-cf-xccdf-interchange. Preflight verified task branch/base and clean main/dev; the task worktree contains pre-existing unrelated untracked U_Anduril_NixOS_V1R1_STIG.zip and packages/web-ui/assets/tailwind.css, which will not be touched.
 
 2026-08-09 deletion lifecycle increment implemented: added admin GET /api/v1/deployment-policies/:id/deletion-eligibility and GET /api/v1/compliance/bundles/:id/deletion-eligibility. Both enumerate retained-history/use blockers, and DELETE reuses the same locked transactional eligibility checks before removal. No audit/source/assignment bypass was added. Verification: `nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-server` passed (pre-existing warnings); `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all --check` passed; `nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server deletion::tests --lib` passed (2 tests). Initial 120s test invocation timed out during full test-binary compilation; rerun with 300s completed successfully.
+
+2026-08-10 deletion correctness follow-up: added server-authoritative DeletionBlocker.kind/removable classification and made eligibility true only when all dependent records are transactionally removable. Policy/bundle checks now distinguish immutable accepted/deprecated history, immutable assignment history, immutable bundle membership, mutable draft membership, mutable direct assignment, disposable source mappings, immutable source mappings, and core policy. DELETE returns the full locked eligibility payload for 409s and explicitly removes eligible draft memberships/direct assignments/source mappings. Added migration 0210 to permit deleting source mappings only when their targets are mutable; immutable mapping targets remain protected. Added unit serialization/eligibility tests and an ignored live DB cleanup test. Verification passed: `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all --check`; `nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server queries::deletion::tests --lib` (4 passed); `nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-server`; `git diff --check`. Live test command (also retried with `--impure`) could not run because CRYSTAL_FORGE_TEST_DATABASE_URL is unavailable to the Nix shell. Preserved untracked STIG zip and web-ui CSS; no web-ui files modified.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
