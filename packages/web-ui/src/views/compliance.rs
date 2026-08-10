@@ -1677,35 +1677,11 @@ fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
                 .unwrap_or("")
                 .to_string();
 
-            // Build pre-populated assertions from server-inferred NixOS options.
-            // An inferred assertion sets the action to Native automatically.
-            let inferred = &r.inferred_assertions;
-            let assertions: Vec<ImportedCustomCheckRule> = inferred
-                .iter()
-                .filter_map(|a| {
-                    let path = a.get("option_path").and_then(|v| v.as_str())?;
-                    let expr = a.get("nix_expression").and_then(|v| v.as_str())?;
-                    let desc = a
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Assertion failed");
-                    Some(ImportedCustomCheckRule {
-                        field_name: path.replace('.', "_"),
-                        expression: expr.to_string(),
-                        description: desc.to_string(),
-                        strict: true,
-                    })
-                })
-                .collect();
-
-            // Default action: Native if assertions were inferred, Unbound otherwise.
-            let default_action = if r.is_native {
-                "native"
-            } else if !assertions.is_empty() {
-                "native"
-            } else {
-                "unbound"
-            };
+            // Foreign XCCDF prose and checks are source material, not an
+            // executable Crystal Forge policy. A native definition must be
+            // authored explicitly in the refinement flow or mapped to one.
+            let assertions = Vec::new();
+            let default_action = "unbound";
 
             StigRule {
                 rule_id: r.id.clone(),
@@ -4033,5 +4009,50 @@ mod tests {
     fn legacy_cmmc_is_a_standard_alias_without_normalizing_its_value() {
         assert!(is_standard_bundle_framework("CMMC"));
         assert!(!is_standard_bundle_framework("CMMC 3.0"));
+    }
+
+    #[test]
+    fn foreign_nix_looking_fix_defaults_to_unbound_without_assertions() {
+        let preview = XccdfPreviewResponse {
+            sha256: "a".repeat(64),
+            filename: Some("foreign.xml".into()),
+            document_class: Some("foreign_xccdf".into()),
+            fidelity: Some("preserved_opaque".into()),
+            fidelity_losses: vec![],
+            xccdf_version: Some("1.2".into()),
+            benchmark: None,
+            profiles: vec![],
+            rules: vec![crate::api::models::XccdfRuleInfo {
+                id: "foreign-firewall".into(),
+                title: Some("Firewall".into()),
+                description: Some("Foreign prose".into()),
+                severity: Some("medium".into()),
+                is_native: false,
+                version: None,
+                group_id: None,
+                platforms: vec![],
+                identifiers: vec![],
+                checks: vec![serde_json::json!({
+                    "content": "networking.firewall.enable = true;"
+                })],
+                fix: Some(serde_json::json!({
+                    "content": "networking.firewall.enable = true;"
+                })),
+                references: vec![],
+                has_opaque_xml: true,
+            }],
+            rule_count: 1,
+            profile_count: 0,
+            errors: vec![],
+            warnings: vec![],
+        };
+
+        let rules = rules_from_preview(&preview);
+        assert_eq!(rules[0].action, "unbound");
+        assert!(rules[0].assertions.is_empty());
+        assert!(matches!(
+            import_action_from_rule(&rules[0]),
+            XccdfRuleImportAction::CreateUnbound { .. }
+        ));
     }
 }

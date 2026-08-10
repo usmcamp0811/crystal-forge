@@ -775,6 +775,23 @@ mod tests {
     }
 
     #[test]
+    fn explicit_existing_mapping_remains_a_non_generated_import_action() {
+        let parsed = minimal_foreign_parsed(&["rule-1"]);
+        let mapped_version_id = Uuid::new_v4();
+        let mut plan = valid_plan(&["rule-1"]);
+        plan.rule_actions = vec![XccdfRuleImportAction::MapExisting {
+            rule_id: "rule-1".into(),
+            policy_version_id: mapped_version_id,
+        }];
+
+        let validated = validate_import_plan(plan, &parsed).expect("mapping plan is valid");
+        let records = build_policy_records(&validated);
+        assert_eq!(records[0].mapped_policy_version_id, Some(mapped_version_id));
+        assert_eq!(records[0].implementation_state, "mapped");
+        assert_eq!(records[0].policy_type, "imported_xccdf");
+    }
+
+    #[test]
     fn rule_customization_overrides_local_policy_fields() {
         let parsed = minimal_foreign_parsed(&["rule-1"]);
         let mut plan = valid_plan(&["rule-1"]);

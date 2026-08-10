@@ -2968,31 +2968,9 @@ pub async fn xccdf_preview(
                 })
             });
 
-            // Infer conservative NixOS assertions from the fix text.
-            let inferred_assertions: Vec<serde_json::Value> = r
-                .fix
-                .as_ref()
-                .map(|f| {
-                    crate::compliance::xccdf::inference::infer_nixos_assertions(&f.content)
-                        .into_iter()
-                        .map(|a| {
-                            serde_json::json!({
-                                "option_path": a.option_path,
-                                "expected_value": a.expected_value,
-                                "nix_expression": a.nix_expression,
-                                "description": a.description,
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-
             // Clean VulnDiscussion from description — strip the XML sub-element
             // tags that STIG documents embed inside the <description> text node.
-            let clean_description = r
-                .description
-                .as_deref()
-                .map(crate::compliance::xccdf::inference::extract_vuln_discussion);
+            let clean_description = r.description.as_deref().map(extract_preview_discussion);
 
             let refs: Vec<serde_json::Value> = r
                 .references
@@ -3019,7 +2997,6 @@ pub async fn xccdf_preview(
                 "identifiers": idents,
                 "checks": check_summaries,
                 "fix": fix_summary,
-                "inferred_assertions": inferred_assertions,
                 "references": refs,
                 "has_opaque_xml": r.preserved_xml.is_some(),
             })
@@ -3064,6 +3041,33 @@ pub async fn xccdf_preview(
         })).collect::<Vec<_>>(),
     });
     (StatusCode::OK, Json(response)).into_response()
+}
+
+/// Produce display-only discussion text from a parsed STIG description.
+/// Source descriptions remain preserved separately in the imported artifact.
+fn extract_preview_discussion(description: &str) -> String {
+    let content = description
+        .find("<VulnDiscussion>")
+        .map(|start| &description[start + "<VulnDiscussion>".len()..])
+        .map(|after_start| {
+            after_start
+                .split("</VulnDiscussion>")
+                .next()
+                .unwrap_or(after_start)
+        })
+        .unwrap_or(description);
+
+    let mut text = String::with_capacity(content.len());
+    let mut in_tag = false;
+    for character in content.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => text.push(character),
+            _ => {}
+        }
+    }
+    text.trim().to_string()
 }
 
 /// `POST /api/v1/compliance/xccdf/import`
@@ -7884,8 +7888,8 @@ mod tests {
     fn nixos_stig_xccdf_1_1() -> Vec<u8> {
         // Fixture derived from U_Anduril_NixOS_V1R1_STIG V-268078 (firewall rule).
         // The description uses the real STIG XML-escaped sub-element format.
-        // The fixtext contains the real NixOS option assignment so that
-        // `infer_nixos_assertions` can produce a testable result.
+        // The fixtext contains a real-looking NixOS option assignment. Foreign
+        // source prose remains source metadata; it is never made executable.
         let xccdf = r#"<?xml version="1.0" encoding="utf-8"?><?xml-stylesheet type='text/xsl' href='STIG_unclass.xsl'?>
 <Benchmark xmlns:dc="http://purl.org/dc/elements/1.1/"
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -8111,19 +8115,9 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
                 "V-268078 check-content must contain firewall check text"
             );
 
-            // Inferred assertions: exactly one boolean assertion for the firewall option.
-            let inferred = rule["inferred_assertions"]
-                .as_array()
-                .expect("inferred_assertions");
-            assert_eq!(
-                inferred.len(),
-                1,
-                "exactly one assertion inferred for V-268078"
-            );
-            assert_eq!(inferred[0]["option_path"], "networking.firewall.enable");
-            assert_eq!(
-                inferred[0]["nix_expression"],
-                "cfg.config.networking.firewall.enable == true"
+            assert!(
+                rule.get("inferred_assertions").is_none(),
+                "foreign preview must not turn fix prose into executable assertions"
             );
         } else {
             // When using the minimal fixture (no real ZIP), V-268078 is in the fixture

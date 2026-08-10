@@ -1486,10 +1486,6 @@ pub struct XccdfRuleInfo {
     /// as content, retained for backward compatibility), plus fix metadata.
     #[serde(default)]
     pub fix: Option<serde_json::Value>,
-    /// Conservative NixOS option assertions inferred from the fix text.
-    /// Each entry: `{ option_path, expected_value, nix_expression, description }`.
-    #[serde(default)]
-    pub inferred_assertions: Vec<serde_json::Value>,
     #[serde(default)]
     pub references: Vec<serde_json::Value>,
     #[serde(default)]

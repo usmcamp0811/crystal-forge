@@ -671,8 +671,8 @@ fn AssertionSection(rules: Signal<Vec<RefinedStigRule>>, index: usize) -> Elemen
     rsx! {
         section { class: "refine-section",
             div { class: "refine-section-label", "Enforcement rules" span { class: "refine-eval-badge", "CHECKED AT BUILD TIME" } }
-            p { class: "refine-helper", "The condition Crystal Forge checks against the rendered config during " span { class: "mono", "nix flake check" } " — a failing rule blocks the build before it ever deploys. " if count == 0 { "No rule could be inferred from this STIG control." } else { "Inferred from the STIG; review before importing." } }
-            if count == 0 { div { class: "refine-assertion-empty", Icon { name: IconName::Warn, size: 13 } div { "No rule could be inferred from this STIG control. Add one — check a NixOS option value, check a package is installed, or write a custom nix expression — or leave empty to rely on runtime evidence alone." } } }
+            p { class: "refine-helper", "A native definition is an explicit local policy authored here. Crystal Forge checks it against the rendered config during " span { class: "mono", "nix flake check" } "; a failing rule blocks the build before it deploys. Source STIG prose is preserved but never converted into this definition." }
+            if count == 0 { div { class: "refine-assertion-empty", Icon { name: IconName::Warn, size: 13 } div { "No native definition has been authored. Add one — check a NixOS option value, check a package is installed, or write a custom Nix expression — or leave this control unbound or manual." } } }
             for (assertion_index, assertion) in rules.read()[index].draft.assertions.iter().cloned().enumerate() {
                 AssertionEditor { rules, index, assertion_index, assertion }
             }
@@ -769,7 +769,7 @@ fn AssertionEditor(props: AssertionEditorProps) -> Element {
     };
     rsx! {
         div { class: "refine-assertion-card",
-            div { class: "refine-inferred-badge", "inferred · review" }
+            div { class: "refine-inferred-badge", "user-authored" }
             div { class: "refine-editor-row",
             div { class: "refine-editor-content", match props.assertion.clone() {
                 PolicyAssertionDraft::NixosOption { path, operator, expected_value, .. } => rsx! {
