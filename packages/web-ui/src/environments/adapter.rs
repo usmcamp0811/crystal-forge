@@ -775,8 +775,9 @@ mod tests {
                 name: "disa-rhel9-stig".to_string(),
                 framework: "STIG".to_string(),
             }),
+            compliance_assignments: Vec::new(),
         };
-        let item = api_to_environment_item(summary, vec![DEFAULT_POLICY]);
+        let item = api_to_environment_item(summary, vec![DEFAULT_POLICY], &[]);
         assert!(item.bundle_assignments.is_empty()); // populated lazily when modal opens
         assert_eq!(item.id, Uuid::from_u128(999));
         assert_eq!(item.name, "production");
@@ -817,8 +818,9 @@ mod tests {
             role_assignment_count: None,
             cache: None,
             compliance_bundle: None,
+            compliance_assignments: Vec::new(),
         };
-        let item = api_to_environment_item(summary, vec![DEFAULT_POLICY]);
+        let item = api_to_environment_item(summary, vec![DEFAULT_POLICY], &[]);
         assert_eq!(item.color_hex, "#123456");
         assert!(item.description.is_none());
     }

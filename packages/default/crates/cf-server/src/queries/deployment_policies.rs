@@ -785,8 +785,26 @@ pub async fn delete_deployment_policy(
         return Ok(PolicyDeleteOutcome::Blocked(eligibility));
     }
 
-    sqlx::query("DELETE FROM compliance_source_object_mappings m USING deployment_policy_versions pv LEFT JOIN compliance_bundle_versions bv ON bv.id = m.bundle_version_id WHERE m.policy_version_id = pv.id AND pv.policy_id = $1 AND pv.publication_state IN ('incomplete', 'draft', 'interim') AND (bv.id IS NULL OR bv.publication_state IN ('incomplete', 'draft', 'interim'))")
-        .bind(policy_id).execute(&mut *tx).await.context("Failed to remove disposable policy source mappings")?;
+    sqlx::query(
+        "DELETE FROM compliance_source_object_mappings m \
+         WHERE m.policy_version_id IN ( \
+             SELECT pv.id FROM deployment_policy_versions pv \
+             WHERE pv.policy_id = $1 \
+               AND pv.publication_state IN ('incomplete', 'draft', 'interim') \
+         ) \
+         AND ( \
+             m.bundle_version_id IS NULL \
+             OR NOT EXISTS ( \
+                 SELECT 1 FROM compliance_bundle_versions bv \
+                 WHERE bv.id = m.bundle_version_id \
+                   AND bv.publication_state IN ('accepted', 'deprecated') \
+             ) \
+         )",
+    )
+    .bind(policy_id)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to remove disposable policy source mappings")?;
     sqlx::query("DELETE FROM compliance_bundle_version_policies bvp USING deployment_policy_versions pv, compliance_bundle_versions bv WHERE bvp.policy_version_id = pv.id AND bvp.bundle_version_id = bv.id AND pv.policy_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim')")
         .bind(policy_id).execute(&mut *tx).await.context("Failed to remove mutable draft bundle memberships")?;
     sqlx::query("DELETE FROM environment_policies WHERE policy_id = $1")
@@ -1137,6 +1155,75 @@ mod tests {
         }
 
         (flake_id, sys_id, env_id, pol_id)
+    }
+
+    /// Publish a policy version in the trigger-safe order: clear the draft
+    /// pointer, flip the version state, then set the published pointer, all in
+    /// one transaction so the deferred lineage-pointer trigger passes at COMMIT.
+    async fn publish_policy_version_row(
+        pool: &sqlx::PgPool,
+        version_id: &Uuid,
+        state: &str,
+    ) -> sqlx::Result<()> {
+        let mut tx = pool.begin().await?;
+        sqlx::query(
+            "UPDATE deployment_policies SET current_draft_version_id = NULL \
+             WHERE current_draft_version_id = $1",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE deployment_policy_versions \
+             SET publication_state = $1, published_at = CURRENT_TIMESTAMP \
+             WHERE id = $2",
+        )
+        .bind(state)
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE deployment_policies SET current_published_version_id = $1 \
+             WHERE id = (SELECT policy_id FROM deployment_policy_versions WHERE id = $1)",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await
+    }
+
+    /// Publish a bundle version in the trigger-safe order, mirroring
+    /// `publish_policy_version_row` for compliance_bundle_versions.
+    async fn publish_bundle_version_row(
+        pool: &sqlx::PgPool,
+        version_id: &Uuid,
+        state: &str,
+    ) -> sqlx::Result<()> {
+        let mut tx = pool.begin().await?;
+        sqlx::query(
+            "UPDATE compliance_bundles SET current_draft_version_id = NULL \
+             WHERE current_draft_version_id = $1",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE compliance_bundle_versions \
+             SET publication_state = $1, published_at = CURRENT_TIMESTAMP \
+             WHERE id = $2",
+        )
+        .bind(state)
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE compliance_bundles SET current_published_version_id = $1 \
+             WHERE id = (SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1)",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await
     }
 
     #[tokio::test]
@@ -1763,14 +1850,9 @@ mod tests {
                 .await
                 .expect("load policy version");
                 if policy_state != "draft" {
-                    sqlx::query(
-                        "UPDATE deployment_policy_versions SET publication_state = $1, published_at = CURRENT_TIMESTAMP WHERE id = $2",
-                    )
-                    .bind(policy_state)
-                    .bind(version_id)
-                    .execute(&pool)
-                    .await
-                    .expect("publish policy version");
+                    publish_policy_version_row(&pool, &version_id, policy_state)
+                        .await
+                        .expect("publish policy version");
                 }
                 Some(version_id)
             } else {
@@ -1793,14 +1875,9 @@ mod tests {
                 .await
                 .expect("load bundle version");
                 if bundle_state != "draft" {
-                    sqlx::query(
-                        "UPDATE compliance_bundle_versions SET publication_state = $1, published_at = CURRENT_TIMESTAMP WHERE id = $2",
-                    )
-                    .bind(bundle_state)
-                    .bind(version_id)
-                    .execute(&pool)
-                    .await
-                    .expect("publish bundle version");
+                    publish_bundle_version_row(&pool, &version_id, bundle_state)
+                        .await
+                        .expect("publish bundle version");
                 }
                 Some(version_id)
             } else {
@@ -1868,7 +1945,7 @@ mod tests {
         let source_artifact_id: Uuid = sqlx::query_scalar(
             "INSERT INTO compliance_source_artifacts (content, filename, media_type, sha256, parser_version) VALUES ($1, 'fixture.xml', 'application/xml', encode(digest($1, 'sha256'), 'hex'), 'test') RETURNING id",
         )
-        .bind(b"<Benchmark/>".as_slice())
+        .bind(format!("<Benchmark><!-- {suffix} --></Benchmark>").into_bytes())
         .fetch_one(&pool)
         .await
         .expect("insert source artifact");
