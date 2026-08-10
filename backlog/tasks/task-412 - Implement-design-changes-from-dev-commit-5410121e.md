@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 03:33'
+updated_date: '2026-08-10 03:47'
 labels:
   - design
   - frontend
@@ -1447,6 +1447,8 @@ Deletion lifecycle increment: centralize policy and bundle deletion eligibility 
 Deletion correctness follow-up (server only): replace outcome-specific delete results with a single server-authoritative DeletionEligibility/DeletionBlocker contract that classifies immutable history, immutable assignment history, immutable bundle membership, mutable draft membership, mutable direct assignment, disposable and immutable source mappings, and core-policy protection. Reuse the locked eligibility result for DELETE conflict bodies, transactionally remove only draft-owned memberships/direct assignments and draft-only mappings before hard deletion, retain immutable history mappings, add an additive migration to distinguish disposable source mappings, and add focused unit/live-DB coverage where the existing harness permits. Do not modify web-ui or existing untracked files. Verify server formatting, check, and focused tests.
 
 2026-08-10 correction pass: keep assignment updates typed and version-CAS-safe; restrict Environment modal to add/remove/mode changes until a deliberate version-rebind API exists; bulk-load authoritative versioned environment assignment summaries to avoid N+1; make assignment loading blocking/retryable. Make deletion eligibility/disposition server-authoritative and hard-delete disposable source mappings transactionally while retaining immutable history. Add focused and isolated live DB regressions, then run required formatting, server/web-ui checks, Nix web-ui build, and commit/push verified increments without merging.
+
+Correction pass: classify source-object mappings exclusively from the publication states of every non-null referenced policy/bundle version. Update policy and bundle deletion preflight and cleanup predicates together, retain 0210's state-based trigger, and cover A-G nullable/draft/immutable reference combinations plus policy and bundle preflight/DELETE cleanup parity.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
