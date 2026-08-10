@@ -45,8 +45,13 @@ pub struct EnvironmentItem {
     /// this environment.
     pub role_assignment_count: Option<usize>,
     /// Real backend data: the compliance bundle assigned to this environment
-    /// via `compliance_bundle_environments`, if any.
+    /// via `compliance_bundle_environments`, if any. Kept for backward compat
+    /// with list-view display; the modal now uses `bundle_assignments`.
     pub compliance_bundle: Option<EnvironmentComplianceSummary>,
+    /// Live compliance bundle assignments from `compliance_bundle_assignments`
+    /// (scope_type = "environment"). The modal uses this as the authoritative
+    /// source; one entry per distinct assigned bundle lineage.
+    pub bundle_assignments: Vec<EnvBundleAssignment>,
 }
 
 /// Health-state counts for active systems in an environment.
@@ -111,6 +116,33 @@ pub struct EnvironmentComplianceSummary {
     pub framework: String,
 }
 
+/// A live compliance bundle assignment for this environment via the versioned
+/// `compliance_bundle_assignments` table. One per distinct assigned bundle
+/// lineage. This is the authoritative source for the Environment form modal.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnvBundleAssignment {
+    /// Stable assignment lineage ID (compliance_bundle_assignments.id).
+    pub assignment_id: Uuid,
+    /// Exact immutable version of the assignment (compliance_bundle_assignment_versions.id).
+    pub current_version_id: Uuid,
+    /// Bundle lineage ID.
+    pub bundle_id: Uuid,
+    /// Exact pinned bundle version ID.
+    pub bundle_version_id: Uuid,
+    /// Bundle display name.
+    pub bundle_name: String,
+    /// Exact assigned version label (e.g. "V2R1").
+    pub bundle_version: String,
+    /// Framework string (e.g. "DISA STIG").
+    pub framework: String,
+    /// "enforce" | "report_only"
+    pub enforcement_mode: String,
+    /// Preserved overlay exclusions — never cleared by the env modal.
+    pub exclusions: Vec<Uuid>,
+    /// Preserved overlay additions — never cleared by the env modal.
+    pub additions: Vec<Uuid>,
+}
+
 /// Draft for creating a new environment.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewEnvironmentDraft {
@@ -129,7 +161,38 @@ pub struct EditEnvironmentDraft {
     pub color_hex: String,
 }
 
-/// Unified Add/Edit modal draft for the CrystalForgelatest Environments surface.
+/// Staged change to an environment's bundle assignment used in the modal diff.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BundleAssignmentChange {
+    /// Existing assignment — keep with original overlays unless mode/version changed.
+    Unchanged {
+        assignment_id: Uuid,
+        current_version_id: Uuid,
+        bundle_version_id: Uuid,
+        enforcement_mode: String,
+        exclusions: Vec<Uuid>,
+        additions: Vec<Uuid>,
+    },
+    /// Create a brand-new assignment for a bundle not previously assigned.
+    Add {
+        bundle_id: Uuid,
+        bundle_version_id: Uuid,
+        enforcement_mode: String,
+    },
+    /// Update enforcement mode on an existing assignment (preserves overlays).
+    UpdateMode {
+        assignment_id: Uuid,
+        current_version_id: Uuid,
+        bundle_version_id: Uuid,
+        enforcement_mode: String,
+        exclusions: Vec<Uuid>,
+        additions: Vec<Uuid>,
+    },
+    /// Deactivate an existing assignment.
+    Remove { assignment_id: Uuid },
+}
+
+/// Unified Add/Edit modal draft for the CrystalForge Environments surface.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EnvironmentFormDraft {
     pub id: Option<Uuid>,
@@ -141,6 +204,10 @@ pub struct EnvironmentFormDraft {
     pub auto_sync: Option<bool>,
     pub requires_approval: Option<bool>,
     pub is_production: Option<bool>,
+    /// Current desired bundle assignments in the form. Populated when the
+    /// modal opens from authoritative server data. Save diffs against the
+    /// original list to produce BundleAssignmentChange entries.
+    pub bundle_assignments: Vec<EnvBundleAssignment>,
 }
 
 mod add_environment_form;

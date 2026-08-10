@@ -16,13 +16,18 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::api::client::{
-    ApiClientError, create_environment, delete_environment, fetch_environment_policies,
-    fetch_environment_policies_map, fetch_environments, fetch_policies, update_environment,
-    update_environment_policies,
+    ApiClientError, create_compliance_assignment, create_environment, delete_compliance_assignment,
+    delete_environment, fetch_compliance_bundles, fetch_environment_assignments,
+    fetch_environment_policies, fetch_environment_policies_map, fetch_environments, fetch_policies,
+    update_compliance_assignment, update_environment, update_environment_policies,
 };
-use crate::api::models::{CreateEnvironmentRequest, EnvironmentSummary, UpdateEnvironmentRequest};
+use crate::api::models::{
+    AssignmentResponse, ComplianceBundleSummary, CreateAssignmentRequest, CreateEnvironmentRequest,
+    EnvironmentSummary, UpdateEnvironmentRequest,
+};
 use crate::components::environments::{
-    EnvironmentCacheSummary, EnvironmentComplianceSummary, EnvironmentDeploymentPolicy,
+    BundleAssignmentChange, EnvBundleAssignment, EnvironmentCacheSummary,
+    EnvironmentComplianceSummary, EnvironmentDeploymentPolicy, EnvironmentFormDraft,
     EnvironmentHealthBreakdown, EnvironmentItem, PolicyOption,
     policy_library as fallback_policy_library,
 };
@@ -265,6 +270,7 @@ pub fn fallback_environments(default_required_policy: Uuid) -> Vec<EnvironmentIt
                 name: "STIG baseline".to_string(),
                 framework: "STIG".to_string(),
             }),
+            bundle_assignments: Vec::new(),
         },
         EnvironmentItem {
             id: Uuid::from_u128(102),
@@ -298,6 +304,7 @@ pub fn fallback_environments(default_required_policy: Uuid) -> Vec<EnvironmentIt
                 name: "NIST baseline".to_string(),
                 framework: "NIST 800-53".to_string(),
             }),
+            bundle_assignments: Vec::new(),
         },
         EnvironmentItem {
             id: Uuid::from_u128(103),
@@ -327,6 +334,7 @@ pub fn fallback_environments(default_required_policy: Uuid) -> Vec<EnvironmentIt
             is_production: Some(false),
             role_assignment_count: Some(7),
             compliance_bundle: None,
+            bundle_assignments: Vec::new(),
         },
         EnvironmentItem {
             id: Uuid::from_u128(104),
@@ -345,6 +353,7 @@ pub fn fallback_environments(default_required_policy: Uuid) -> Vec<EnvironmentIt
             is_production: Some(false),
             role_assignment_count: Some(1),
             compliance_bundle: None,
+            bundle_assignments: Vec::new(),
         },
     ]
 }
@@ -402,7 +411,150 @@ pub fn api_to_environment_item(
                 name: bundle.name,
                 framework: bundle.framework,
             }),
+        // bundle_assignments is populated lazily when the modal opens.
+        bundle_assignments: Vec::new(),
     }
+}
+
+/// Convert a server AssignmentResponse into a UI EnvBundleAssignment.
+/// Requires the bundle catalog to resolve name/version/framework.
+fn assignment_to_env_bundle(
+    a: &AssignmentResponse,
+    bundles: &[ComplianceBundleSummary],
+) -> EnvBundleAssignment {
+    let bundle = bundles.iter().find(|b| b.id == a.bundle_id);
+    let bundle_name = bundle.map(|b| b.name.clone()).unwrap_or_default();
+    let framework = bundle.map(|b| b.framework.clone()).unwrap_or_default();
+    // Find version label in bundle's version list matching the pinned version id.
+    let bundle_version = bundle
+        .and_then(|b| b.versions.iter().find(|v| v.id == a.bundle_version_id))
+        .map(|v| v.version.clone())
+        .unwrap_or_else(|| a.bundle_version_id.to_string()[..8].to_string());
+    EnvBundleAssignment {
+        assignment_id: a.id,
+        current_version_id: a.current_version_id,
+        bundle_id: a.bundle_id,
+        bundle_version_id: a.bundle_version_id,
+        bundle_name,
+        bundle_version,
+        framework,
+        enforcement_mode: a.enforcement_mode.clone(),
+        exclusions: a.exclusions.clone(),
+        additions: a.additions.clone(),
+    }
+}
+
+/// Load authoritative bundle assignments for one environment from the server.
+/// Used when opening the Edit modal to ensure the form starts from real state.
+pub async fn load_environment_bundle_assignments(
+    environment_id: &uuid::Uuid,
+) -> Result<Vec<EnvBundleAssignment>, String> {
+    let assignments = fetch_environment_assignments(environment_id)
+        .await
+        .map_err(|e| format!("Could not load assignments: {e}"))?;
+    let bundles = fetch_compliance_bundles()
+        .await
+        .map_err(|e| format!("Could not load bundle catalog: {e}"))?;
+    Ok(assignments
+        .iter()
+        .filter(|a| a.active)
+        .map(|a| assignment_to_env_bundle(a, &bundles))
+        .collect())
+}
+
+/// Diff original vs desired assignments and persist the changes.
+/// Returns Err on the first failed operation with a human-readable message.
+pub async fn reconcile_environment_assignments(
+    environment_id: uuid::Uuid,
+    original: &[EnvBundleAssignment],
+    desired: &[EnvBundleAssignment],
+) -> Result<(), String> {
+    // Build change set.
+    let mut changes: Vec<BundleAssignmentChange> = Vec::new();
+
+    // Check for removals: in original but not in desired (by assignment_id).
+    for orig in original {
+        if !desired.iter().any(|d| d.assignment_id == orig.assignment_id) {
+            changes.push(BundleAssignmentChange::Remove {
+                assignment_id: orig.assignment_id,
+            });
+        }
+    }
+
+    // Check adds and mode changes.
+    for d in desired {
+        if d.assignment_id == uuid::Uuid::nil() {
+            // Nil UUID signals a newly added bundle not yet persisted.
+            changes.push(BundleAssignmentChange::Add {
+                bundle_id: d.bundle_id,
+                bundle_version_id: d.bundle_version_id,
+                enforcement_mode: d.enforcement_mode.clone(),
+            });
+        } else if let Some(orig) = original.iter().find(|o| o.assignment_id == d.assignment_id) {
+            if orig.enforcement_mode != d.enforcement_mode
+                || orig.bundle_version_id != d.bundle_version_id
+            {
+                changes.push(BundleAssignmentChange::UpdateMode {
+                    assignment_id: d.assignment_id,
+                    current_version_id: d.current_version_id,
+                    bundle_version_id: d.bundle_version_id,
+                    enforcement_mode: d.enforcement_mode.clone(),
+                    exclusions: orig.exclusions.clone(),
+                    additions: orig.additions.clone(),
+                });
+            }
+            // Else Unchanged — no operation.
+        }
+    }
+
+    // Apply changes sequentially; fail-fast on first error.
+    for change in changes {
+        match change {
+            BundleAssignmentChange::Remove { assignment_id } => {
+                delete_compliance_assignment(&assignment_id)
+                    .await
+                    .map_err(|e| format!("Failed to deactivate assignment: {e}"))?;
+            }
+            BundleAssignmentChange::Add {
+                bundle_id: _,
+                bundle_version_id,
+                enforcement_mode,
+            } => {
+                let req = CreateAssignmentRequest {
+                    bundle_version_id,
+                    scope_type: "environment".to_string(),
+                    scope_id: environment_id,
+                    enforcement_mode: Some(enforcement_mode),
+                    exclusions: None,
+                    additions: None,
+                    value_overrides: None,
+                };
+                create_compliance_assignment(&req)
+                    .await
+                    .map_err(|e| format!("Failed to create assignment: {e}"))?;
+            }
+            BundleAssignmentChange::UpdateMode {
+                assignment_id,
+                current_version_id: _,
+                bundle_version_id,
+                enforcement_mode,
+                exclusions,
+                additions,
+            } => {
+                let payload = serde_json::json!({
+                    "bundle_version_id": bundle_version_id,
+                    "enforcement_mode": enforcement_mode,
+                    "exclusions": exclusions,
+                    "additions": additions,
+                });
+                update_compliance_assignment(&assignment_id, &payload)
+                    .await
+                    .map_err(|e| format!("Failed to update assignment: {e}"))?;
+            }
+            BundleAssignmentChange::Unchanged { .. } => {}
+        }
+    }
+    Ok(())
 }
 
 /// Create a new environment via backend API.
@@ -611,6 +763,7 @@ mod tests {
             }),
         };
         let item = api_to_environment_item(summary, vec![DEFAULT_POLICY]);
+        assert!(item.bundle_assignments.is_empty()); // populated lazily when modal opens
         assert_eq!(item.id, Uuid::from_u128(999));
         assert_eq!(item.name, "production");
         assert_eq!(item.color_hex, "#0F766E");
@@ -650,6 +803,7 @@ mod tests {
             role_assignment_count: None,
             cache: None,
             compliance_bundle: None,
+            bundle_assignments: Vec::new(),
         };
         let item = api_to_environment_item(summary, vec![DEFAULT_POLICY]);
         assert_eq!(item.color_hex, "#123456");
