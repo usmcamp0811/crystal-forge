@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 02:14'
+updated_date: '2026-08-10 02:27'
 labels:
   - design
   - frontend
@@ -1487,6 +1487,8 @@ Phase 9/10 classification integration completed locally. Foreign XCCDF imports n
 2026-08-10: Extended authoritative evidence use to bundle/system matrices and effective-assignment rollups. Assignment overlays retain their effective config and report-only count while outcome status comes from the same deployed Nix/CVE evidence resolver. The system effective-policy endpoint now returns an internal error rather than a synthetic score if evidence resolution fails. Focused server tests and web-ui cargo check passed.
 
 2026-08-09 deletion lifecycle increment started in /home/mcamp/code/crystal-forge/TASK-412-cf-xccdf-interchange. Preflight verified task branch/base and clean main/dev; the task worktree contains pre-existing unrelated untracked U_Anduril_NixOS_V1R1_STIG.zip and packages/web-ui/assets/tailwind.css, which will not be touched.
+
+2026-08-09 deletion lifecycle increment implemented: added admin GET /api/v1/deployment-policies/:id/deletion-eligibility and GET /api/v1/compliance/bundles/:id/deletion-eligibility. Both enumerate retained-history/use blockers, and DELETE reuses the same locked transactional eligibility checks before removal. No audit/source/assignment bypass was added. Verification: `nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-server` passed (pre-existing warnings); `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all --check` passed; `nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server deletion::tests --lib` passed (2 tests). Initial 120s test invocation timed out during full test-binary compilation; rerun with 300s completed successfully.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
