@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 00:56'
+updated_date: '2026-08-10 01:03'
 labels:
   - design
   - frontend
@@ -1461,6 +1461,8 @@ Phase 4 policy editor classification wiring implemented in the dedicated worktre
 Phase 7 bundle framework UX implemented in `packages/web-ui/src/views/compliance.rs`: New and Edit bundle modals now share a Standard/Custom framework field sourced from loaded bundle and policy metadata, with modal-only new-framework entry, Enter/Add acceptance, Escape/Cancel discard, and legacy CMMC preservation. Added pure catalog/legacy alias tests. Verification: `nix develop -c env SQLX_OFFLINE=true cargo check --manifest-path packages/web-ui/Cargo.toml` passed (existing warnings); `nix develop -c env SQLX_OFFLINE=true cargo test --manifest-path packages/web-ui/Cargo.toml views::compliance::tests` passed (3 tests); `rustfmt --edition 2024 --check packages/web-ui/src/views/compliance.rs` passed; `git diff --check` passed. `cargo fmt --all --check` was run via the web-ui manifest but is blocked by unrelated existing formatting differences in `src/api/client.rs`, `src/components/policy/grouping_schemes_modal.rs`, `src/components/policy/mod.rs`, and `src/views/policies.rs`; this change is formatted. The web-ui Nix check was intentionally not run per user instruction.
 
 Phase 9/10 classification integration completed locally. Foreign XCCDF imports now capture Dublin Core publisher and project `category=security` / `framework=DISA STIG` only for foreign benchmarks whose publisher is DISA; severity and rationale are copied only from their standard source elements, and SRG/CCI behavior is retained. CF-native XCCDF plus JSON/TOML retain full `compliance_metadata`, including unknown keys. Added focused digest and round-trip tests. Verified with `cargo fmt --all --check`, `cargo check -p cf-server`, focused `cargo test -p cf-server ... --lib` filters, and `git diff --check`; repository pre-existing warnings remain. Did not run the web-ui Nix check. Preserved untracked `U_Anduril_NixOS_V1R1_STIG.zip` and `packages/web-ui/assets/tailwind.css`.
+
+2026-08-10: Replaced the evidence endpoint's heartbeat/placeholder-CVE synthesis for Nix and `require_cve_check` policies. It now resolves only against the latest deployed system state and its matching derivation; Nix uses persisted per-lineage `policy_results`, CVE uses the newest completed derivation scan, and missing/malformed evidence maps to `not_checked`/`error`. Added coverage for lineage-keyed result decoding and aligned the web-ui rollup DTO fields. Focused server tests and web-ui cargo check passed. Full workspace formatting remains blocked by pre-existing formatting differences in previously changed web-ui grouping files; modified files pass direct rustfmt check.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
