@@ -3584,8 +3584,12 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
     let mut saving = use_signal(|| false);
     let mut confirm_delete = use_signal(|| false);
     let mut delete_busy = use_signal(|| false);
+    let mut eligibility: Signal<Option<crate::api::models::DeletionEligibility>> =
+        use_signal(|| None);
+    let mut eligibility_loading = use_signal(|| false);
     let framework_options = custom_bundle_frameworks(&props.bundles, &props.policies);
 
+    // Local pre-check from data already in the bundle summary.
     let has_immutable_history = props.bundle.versions.iter().any(|version| {
         matches!(
             version.publication_state.as_str(),
@@ -3812,27 +3816,108 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                         }
                     }
 
-                    // Danger zone. Do not present a misleading hard-delete
-                    // action when the server can already prove it is blocked.
+                    // Danger zone. Use the server preflight when available;
+                    // fall back to local summary heuristics for the initial state.
                     div { style: "margin-top:10px;padding-top:14px;border-top:1px solid var(--cf-divider);",
                         div { style: "font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);margin-bottom:8px;",
                             "Danger zone"
                         }
-                        if has_immutable_history {
-                            div { class: "help", style: "color:#fbbf24;",
-                                "Permanent deletion is unavailable because this bundle has accepted or deprecated compliance history."
+
+                        if let Some(elig) = eligibility.read().clone() {
+                            // ── Authoritative eligibility from server preflight ──
+                            if elig.eligible {
+                                button {
+                                    class: "btn btn-ghost focus-ring",
+                                    style: "color:#f87171;border-color:rgba(248,113,113,0.3);",
+                                    onclick: move |_| confirm_delete.set(true),
+                                    Icon { name: IconName::Trash, size: 12 }
+                                    " Delete bundle"
+                                }
+                            } else if elig.permanently_blocked() {
+                                // Show the specific permanent blockers.
+                                div { class: "sd-callout sd-callout-danger", style: "font-size:12px;",
+                                    Icon { name: IconName::Warn, size: 13 }
+                                    div {
+                                        p { style: "margin:0 0 6px;font-weight:600;", "Permanent deletion unavailable" }
+                                        for blocker in elig.blockers.iter() {
+                                            p { style: "margin:0 0 4px;", "{blocker.message}" }
+                                        }
+                                        p { style: "margin:4px 0 0;color:var(--cf-text-muted);font-size:11px;",
+                                            "To stop using this bundle, deactivate active assignments and deprecate published versions. Historical records are retained for auditability."
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Removable blockers — tell user exactly what to fix.
+                                div { class: "sd-callout sd-callout-danger", style: "font-size:12px;",
+                                    Icon { name: IconName::Warn, size: 13 }
+                                    div {
+                                        p { style: "margin:0 0 6px;font-weight:600;", "Permanent deletion blocked" }
+                                        for blocker in elig.blockers.iter() {
+                                            p { style: "margin:0 0 4px;",
+                                                "{blocker.message}"
+                                                if let Some(count) = blocker.count { " ({count})" }
+                                            }
+                                        }
+                                        p { style: "margin:4px 0 0;color:var(--cf-text-muted);font-size:11px;",
+                                            "Remove these references, then try again."
+                                        }
+                                    }
+                                }
+                            }
+                        } else if has_immutable_history {
+                            // Fast local gate — matches server would return permanently_blocked.
+                            div { style: "font-size:12px;color:var(--cf-text-muted);",
+                                "This bundle has published compliance history (accepted or deprecated versions). "
+                                "Permanent deletion is unavailable. Deactivate assignments and deprecate the bundle to stop using it; historical records remain for auditability."
                             }
                         } else if assigned_count > 0 {
-                            div { class: "help", style: "color:#fbbf24;",
-                                "This bundle is assigned to {assigned_count} target(s). Remove those assignments before permanently deleting it."
+                            div { style: "font-size:12px;color:var(--cf-text-muted);",
+                                "This bundle has assignment history ({assigned_count} active). "
+                                "Assignment records are immutable. Deactivate active assignments, then check eligibility."
+                            }
+                            button {
+                                class: "btn btn-ghost focus-ring",
+                                style: "margin-top:8px;",
+                                disabled: *eligibility_loading.read(),
+                                onclick: move |_| {
+                                    eligibility_loading.set(true);
+                                    let bid = bundle_id;
+                                    spawn(async move {
+                                        match crate::api::client::fetch_bundle_deletion_eligibility(&bid).await {
+                                            Ok(result) => { eligibility.set(Some(result)); }
+                                            Err(_) => {}
+                                        }
+                                        eligibility_loading.set(false);
+                                    });
+                                },
+                                if *eligibility_loading.read() { "Checking…" } else { "Check deletion eligibility" }
                             }
                         } else {
+                            // No local blockers detected — fetch authoritative check.
                             button {
                                 class: "btn btn-ghost focus-ring",
                                 style: "color:#f87171;border-color:rgba(248,113,113,0.3);",
-                                onclick: move |_| confirm_delete.set(true),
+                                disabled: *eligibility_loading.read(),
+                                onclick: move |_| {
+                                    eligibility_loading.set(true);
+                                    let bid = bundle_id;
+                                    spawn(async move {
+                                        match crate::api::client::fetch_bundle_deletion_eligibility(&bid).await {
+                                            Ok(result) => { eligibility.set(Some(result)); }
+                                            Err(_) => {
+                                                // On error, allow user to try direct delete.
+                                                eligibility.set(Some(crate::api::models::DeletionEligibility {
+                                                    eligible: true,
+                                                    blockers: vec![],
+                                                }));
+                                            }
+                                        }
+                                        eligibility_loading.set(false);
+                                    });
+                                },
                                 Icon { name: IconName::Trash, size: 12 }
-                                " Delete bundle"
+                                if *eligibility_loading.read() { " Checking…" } else { " Delete bundle" }
                             }
                         }
                     }
@@ -4060,6 +4145,7 @@ mod tests {
                 fix: Some(serde_json::json!({
                     "content": "networking.firewall.enable = true;"
                 })),
+                inferred_assertions: vec![],
                 references: vec![],
                 has_opaque_xml: true,
             }],

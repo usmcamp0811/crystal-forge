@@ -1262,6 +1262,18 @@ pub async fn delete_compliance_bundle(bundle_id: &Uuid) -> Result<(), ApiClientE
     send_empty_with_csrf::<()>("DELETE", &url, None).await
 }
 
+/// Fetch deletion eligibility for a compliance bundle without mutating anything.
+pub async fn fetch_bundle_deletion_eligibility(
+    bundle_id: &Uuid,
+) -> Result<DeletionEligibility, ApiClientError> {
+    let url = format!(
+        "{}/compliance/bundles/{}/deletion-eligibility",
+        base_url(),
+        bundle_id
+    );
+    fetch_json(&url).await
+}
+
 // =============================================================================
 // Deployment Policies CRUD API
 // =============================================================================
@@ -1313,6 +1325,14 @@ pub async fn update_deployment_policy(
 pub async fn delete_deployment_policy(id: &Uuid) -> Result<(), ApiClientError> {
     let url = format!("{}/deployment-policies/{}", base_url(), id);
     send_empty_with_csrf("DELETE", &url, None::<&()>).await
+}
+
+/// Fetch deletion eligibility for a deployment policy without mutating anything.
+pub async fn fetch_policy_deletion_eligibility(
+    id: &Uuid,
+) -> Result<DeletionEligibility, ApiClientError> {
+    let url = format!("{}/deployment-policies/{}/deletion-eligibility", base_url(), id);
+    fetch_json(&url).await
 }
 
 /// Fetch all flakes from registry.

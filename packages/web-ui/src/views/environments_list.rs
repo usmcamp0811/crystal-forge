@@ -709,6 +709,7 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
         .compliance_bundle
         .as_ref()
         .map(|bundle| bundle.framework.clone());
+    let display_bundle_assignments = env.bundle_assignments.clone();
     let is_production = env.is_production.unwrap_or(false);
     let total = env.health.total().max(env.system_count).max(1) as f64;
     let no_health = env.health.total() == 0;
@@ -865,8 +866,27 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
 
                         dt { "Enforcement" }
                         dd {
-                            div { style: "display:flex; gap:6px; flex-wrap:wrap; align-items:center;",
-                                if let Some(compliance_label) = display_compliance_label.clone() {
+                            div { style: "display:flex; flex-direction:column; gap:6px;",
+                                // Show all versioned bundle assignments if available.
+                                if !display_bundle_assignments.is_empty() {
+                                    for a in display_bundle_assignments.iter().cloned().collect::<Vec<_>>() {
+                                        div { style: "display:flex; align-items:center; gap:6px;",
+                                            button {
+                                                class: "chip chip-info sd-commit-sha-link",
+                                                style: "background:unset;",
+                                                title: "{a.bundle_name} · {a.bundle_version} — open Compliance",
+                                                onclick: move |_| { nav.push(Route::ComplianceView {}); },
+                                                Icon { name: IconName::Shield, size: 9 }
+                                                " {a.framework}"
+                                            }
+                                            span { class: "mono", style: "font-size:10px; color:var(--cf-text-muted);", "{a.bundle_version}" }
+                                            if a.enforcement_mode == "report_only" {
+                                                span { class: "chip chip-unknown", style: "font-size:10px;", "report only" }
+                                            }
+                                        }
+                                    }
+                                } else if let Some(compliance_label) = display_compliance_label.clone() {
+                                    // Legacy single-bundle fallback.
                                     button {
                                         class: "chip chip-info sd-commit-sha-link",
                                         style: "background:unset;",
@@ -881,7 +901,7 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
                                         "{gate_count} gate{plural_s(gate_count)}"
                                     }
                                 }
-                                if display_compliance_label.is_none() && display_gate_count.is_none() {
+                                if display_bundle_assignments.is_empty() && display_compliance_label.is_none() && display_gate_count.is_none() {
                                     span { style: "font-size:11px; color:var(--cf-text-muted);", "none" }
                                 }
                             }
@@ -1049,6 +1069,7 @@ mod tests {
             is_production: None,
             role_assignment_count: None,
             compliance_bundle: None,
+            bundle_assignments: Vec::new(),
         }
     }
 
@@ -1075,6 +1096,7 @@ mod tests {
             auto_sync: Some(false),
             requires_approval: Some(true),
             is_production: Some(true),
+            bundle_assignments: Vec::new(),
         };
 
         saved.required_policy_ids = draft.required_policy_ids.clone();

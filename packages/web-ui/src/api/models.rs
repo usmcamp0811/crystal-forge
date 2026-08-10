@@ -1767,6 +1767,50 @@ fn default_assignment_active() -> bool {
 
 /// Server returns `{ "assignments": [...] }` — use this to deserialize then
 /// extract the inner Vec.
+/// A retained record that prevents permanent deletion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeletionBlocker {
+    /// Machine-readable blocker kind, e.g. "immutable_history", "draft_bundle_membership".
+    pub code: String,
+    /// Human-readable explanation.
+    pub message: String,
+    /// Number of references, when applicable.
+    #[serde(default)]
+    pub count: Option<i64>,
+    /// Specific immutable version UUIDs that are blocking.
+    #[serde(default)]
+    pub version_ids: Vec<Uuid>,
+}
+
+impl DeletionBlocker {
+    /// True if the blocker is permanent and cannot be resolved through normal
+    /// application lifecycle (accepted/deprecated history, immutable assignment history).
+    pub fn is_permanent(&self) -> bool {
+        matches!(
+            self.code.as_str(),
+            "policy_immutable_history"
+                | "bundle_immutable_history"
+                | "bundle_assignment_history"
+                | "immutable_bundle_membership"
+                | "immutable_assignment_reference"
+        )
+    }
+}
+
+/// Whether a policy or bundle lineage can be permanently deleted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeletionEligibility {
+    pub eligible: bool,
+    #[serde(default)]
+    pub blockers: Vec<DeletionBlocker>,
+}
+
+impl DeletionEligibility {
+    pub fn permanently_blocked(&self) -> bool {
+        self.blockers.iter().any(|b| b.is_permanent())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssignmentListResponse {
     pub assignments: Vec<AssignmentResponse>,

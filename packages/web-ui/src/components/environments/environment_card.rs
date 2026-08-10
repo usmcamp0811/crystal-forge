@@ -372,19 +372,33 @@ struct EnforcementChipsProps {
 fn EnforcementChips(props: EnforcementChipsProps) -> Element {
     let env = props.environment;
     let policy_count = env.required_policy_ids.len();
-    let compliance_label = env
-        .compliance_bundle
-        .as_ref()
-        .map(|bundle| bundle.framework.clone());
+    // Prefer the versioned multi-bundle assignments if populated, fall back to the
+    // legacy single-bundle summary for environments not yet loaded through the modal.
+    let assignment_count = env.bundle_assignments.len();
+    let has_bundles = assignment_count > 0 || env.compliance_bundle.is_some();
     rsx! {
         div { style: "display:flex; gap:6px; align-items:center; flex-wrap:wrap;",
-            if let Some(label) = compliance_label.clone() {
-                span { class: "chip chip-info", title: "Compliance bundle assigned to this environment", Icon { name: IconName::Shield, size: 9 } " {label}" }
+            if assignment_count > 0 {
+                // Show first 2 framework chips; overflow as "+N".
+                for a in env.bundle_assignments.iter().take(2).cloned().collect::<Vec<_>>() {
+                    span {
+                        class: "chip chip-info",
+                        title: "{a.bundle_name} · {a.bundle_version} ({a.enforcement_mode})",
+                        Icon { name: IconName::Shield, size: 9 }
+                        " {a.framework}"
+                    }
+                }
+                if assignment_count > 2 {
+                    span { class: "chip chip-info", "+{assignment_count - 2}" }
+                }
+            } else if let Some(bundle) = env.compliance_bundle.as_ref() {
+                // Legacy single-bundle fallback.
+                span { class: "chip chip-info", title: "Compliance bundle assigned to this environment", Icon { name: IconName::Shield, size: 9 } " {bundle.framework}" }
             }
             if policy_count > 0 {
                 span { class: "chip chip-unknown", title: "Required deployment policies (gates) for this environment", "{policy_count} gate{plural(policy_count)}" }
             }
-            if compliance_label.is_none() && policy_count == 0 {
+            if !has_bundles && policy_count == 0 {
                 span { style: "font-size:11px; color:var(--cf-text-muted);", if props.compact { "—" } else { "none" } }
             }
         }

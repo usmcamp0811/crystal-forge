@@ -73,6 +73,9 @@ pub fn PoliciesView() -> Element {
     let mut delete_confirm: Signal<Option<Uuid>> = use_signal(|| None);
     let mut delete_busy = use_signal(|| false);
     let mut delete_error: Signal<Option<String>> = use_signal(|| None);
+    let mut delete_eligibility: Signal<Option<crate::api::models::DeletionEligibility>> =
+        use_signal(|| None);
+    let mut delete_eligibility_loading = use_signal(|| false);
     let mut focused_policy_name = use_signal(|| None::<String>);
     let mut policies_loaded = use_signal(|| false);
     let mut pending_policy_focus = use_signal(|| None::<NavigationFocus>);
@@ -607,7 +610,18 @@ pub fn PoliciesView() -> Element {
                                         show_editor.set(true);
                                     },
                                     on_delete: move |id: Uuid| {
+                                        // Fetch deletion eligibility before showing the dialog.
+                                        delete_eligibility.set(None);
+                                        delete_error.set(None);
+                                        delete_eligibility_loading.set(true);
                                         delete_confirm.set(Some(id));
+                                        spawn(async move {
+                                            match crate::api::client::fetch_policy_deletion_eligibility(&id).await {
+                                                Ok(result) => delete_eligibility.set(Some(result)),
+                                                Err(_) => {}
+                                            }
+                                            delete_eligibility_loading.set(false);
+                                        });
                                     },
                                     selection_mode: selection_mode(),
                                     selected: selected_policy_ids.read().contains(&policy.id),
@@ -694,6 +708,8 @@ pub fn PoliciesView() -> Element {
                     policy_id: id,
                     policy_name: policy_library.read().iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default(),
                     busy: *delete_busy.read(),
+                    eligibility_loading: *delete_eligibility_loading.read(),
+                    eligibility: delete_eligibility.read().clone(),
                     error: delete_error.read().clone(),
                     on_confirm: move |_| {
                         let mut policy_library = policy_library;
@@ -1574,38 +1590,103 @@ fn DeleteConfirmModal(
     policy_id: Uuid,
     policy_name: String,
     busy: bool,
+    eligibility_loading: bool,
+    eligibility: Option<crate::api::models::DeletionEligibility>,
     error: Option<String>,
     on_confirm: EventHandler<()>,
     on_cancel: EventHandler<()>,
 ) -> Element {
     let _ = policy_id;
+    let can_delete = eligibility
+        .as_ref()
+        .map(|e| e.eligible)
+        .unwrap_or(false);
+    let permanently_blocked = eligibility
+        .as_ref()
+        .map(|e| e.permanently_blocked())
+        .unwrap_or(false);
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+            class: "modal-backdrop",
             onclick: move |_| on_cancel.call(()),
             div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-28",
+                class: "modal",
+                style: "width:min(520px,96vw);max-height:92vh;",
                 onclick: |evt| evt.stop_propagation(),
-                div { class: "flex justify-center mb-4",
-                    div { class: "w-12 h-12 rounded-full bg-red-500/20 flex items-center justify-center",
-                        svg { class: "w-6 h-6 text-red-400", fill: "none", stroke: "currentColor", view_box: "0 0 24 24",
-                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" }
+
+                div { class: "modal-head",
+                    h2 { style: "display:flex;align-items:center;gap:8px;",
+                        span { style: "color:#f87171;display:inline-flex;",
+                            crate::components::icon::Icon { name: crate::components::icon::IconName::Trash, size: 15 }
+                        }
+                        if permanently_blocked { "Policy cannot be permanently deleted" }
+                        else if !can_delete && eligibility.is_some() { "Remove references before deleting" }
+                        else { "Delete draft policy?" }
+                    }
+                    p {
+                        if permanently_blocked {
+                            "{policy_name} has published or immutable compliance history that Crystal Forge retains for auditability."
+                        } else if !can_delete && eligibility.is_some() {
+                            "{policy_name} is still referenced by unpublished draft content. Remove those references first."
+                        } else if can_delete {
+                            "This policy has never been published and has no retained compliance history."
+                        } else {
+                            "Checking deletion eligibility…"
                         }
                     }
                 }
-                h3 { class: "text-lg font-semibold text-white text-center mb-2", "Delete draft policy?" }
-                p { class: "text-sm {theme::text::SECONDARY} text-center mb-6",
-                    "This permanently removes the unpublished policy "
-                    span { class: "font-medium text-white", "{policy_name}" }
-                    " and its draft history. This cannot be undone."
+
+                div { class: "modal-body",
+                    if eligibility_loading {
+                        div { style: "color:var(--cf-text-muted);font-size:13px;", "Checking deletion eligibility…" }
+                    } else if let Some(elig) = eligibility.as_ref() {
+                        if !elig.eligible {
+                            div { class: "sd-callout sd-callout-danger", style: "margin-bottom:12px;",
+                                crate::components::icon::Icon { name: crate::components::icon::IconName::Warn, size: 13 }
+                                div { style: "font-size:12px;",
+                                    for blocker in elig.blockers.iter() {
+                                        p { style: "margin:0 0 4px;font-weight:600;", "{blocker.message}" }
+                                    }
+                                    if permanently_blocked {
+                                        p { style: "margin:6px 0 0;color:var(--cf-text-muted);font-size:11px;",
+                                            "Remove this policy from future drafts and active assignments. Historical references will remain."
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            div { style: "font-size:13px;color:var(--cf-text-muted);margin-bottom:12px;",
+                                "Permanently deleting "
+                                span { style: "font-weight:600;color:var(--cf-text-primary);", "{policy_name}" }
+                                " removes its unpublished policy versions and mutable import/source mappings. "
+                                "This cannot be undone."
+                            }
+                        }
+                    }
+
+                    if let Some(error) = error {
+                        div { class: "sd-callout sd-callout-danger", style: "margin-bottom:12px;", "{error}" }
+                    }
                 }
-                if let Some(error) = error {
-                    div { class: "sd-callout sd-callout-danger", style: "margin-bottom:12px;", "{error}" }
-                }
-                div { class: "flex gap-3",
-                    button { class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-gray-700 hover:bg-gray-600 text-white", disabled: busy, onclick: move |_| on_cancel.call(()), "Cancel" }
-                    button { class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-red-500 hover:bg-red-400 text-white", disabled: busy, onclick: move |_| on_confirm.call(()), if busy { "Deleting…" } else { "Delete" } }
+
+                div { class: "modal-foot",
+                    button {
+                        class: "btn btn-ghost focus-ring",
+                        disabled: busy,
+                        onclick: move |_| on_cancel.call(()),
+                        "Cancel"
+                    }
+                    if !permanently_blocked && can_delete {
+                        button {
+                            class: "btn focus-ring",
+                            style: "background:#dc2626;color:white;",
+                            disabled: busy,
+                            onclick: move |_| on_confirm.call(()),
+                            crate::components::icon::Icon { name: crate::components::icon::IconName::Trash, size: 13 }
+                            if busy { " Deleting…" } else { " Delete permanently" }
+                        }
+                    }
                 }
             }
         }
