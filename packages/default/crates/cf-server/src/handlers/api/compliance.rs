@@ -351,15 +351,21 @@ pub async fn get_system_compliance_bundles(
     }
 
     match list_system_bundles(&pool, system_id).await {
-        Ok(Some(bundle_rollup_pairs)) => {
-            let bundles = bundle_rollup_pairs
+        Ok(Some(bundle_rollups)) => {
+            let bundles = bundle_rollups
+                .bundles
                 .into_iter()
                 .map(|(bundle, rollup)| SystemComplianceBundle { bundle, rollup })
                 .collect();
 
             (
                 StatusCode::OK,
-                Json(SystemComplianceBundlesResponse { system_id, bundles }),
+                Json(SystemComplianceBundlesResponse {
+                    system_id,
+                    bundles,
+                    direct_rollup: bundle_rollups.direct_rollup,
+                    overall_rollup: bundle_rollups.overall_rollup,
+                }),
             )
                 .into_response()
         }

@@ -83,8 +83,9 @@ pub async fn load_environments_with_fallback(
     match (
         fetch_environments().await,
         fetch_environment_policies_map().await,
+        fetch_compliance_bundles().await,
     ) {
-        (Ok(items), Ok(policy_map_entries)) => {
+        (Ok(items), Ok(policy_map_entries), Ok(bundles)) => {
             let policy_map: HashMap<Uuid, Vec<Uuid>> = policy_map_entries
                 .into_iter()
                 .map(|entry| (entry.environment_id, entry.required_policy_ids))
@@ -94,7 +95,7 @@ pub async fn load_environments_with_fallback(
                 .into_iter()
                 .map(|env| {
                     let required_policy_ids = policy_map.get(&env.id).cloned().unwrap_or_default();
-                    api_to_environment_item(env, required_policy_ids)
+                    api_to_environment_item(env, required_policy_ids, &bundles)
                 })
                 .collect();
 
@@ -104,14 +105,14 @@ pub async fn load_environments_with_fallback(
                 redirect_to_login: false,
             }
         }
-        (Err(error), _) | (_, Err(error)) if should_redirect_to_login(&error) => {
+        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) if should_redirect_to_login(&error) => {
             EnvironmentsLoadResult {
                 environments: Vec::new(),
                 notice: None,
                 redirect_to_login: true,
             }
         }
-        (Err(error), _) | (_, Err(error)) => EnvironmentsLoadResult {
+        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => EnvironmentsLoadResult {
             environments: fallback_environments(default_required_policy),
             notice: Some(format!(
                 "Environments API unavailable, using deterministic fallback data: {error}"
@@ -369,6 +370,7 @@ pub fn fallback_environments(default_required_policy: Uuid) -> Vec<EnvironmentIt
 pub fn api_to_environment_item(
     env: EnvironmentSummary,
     required_policy_ids: Vec<Uuid>,
+    bundles: &[ComplianceBundleSummary],
 ) -> EnvironmentItem {
     let default_policy = match env.default_policy.as_deref() {
         Some("manual") => Some(EnvironmentDeploymentPolicy::Manual),
@@ -411,8 +413,11 @@ pub fn api_to_environment_item(
                 name: bundle.name,
                 framework: bundle.framework,
             }),
-        // bundle_assignments is populated lazily when the modal opens.
-        bundle_assignments: Vec::new(),
+        bundle_assignments: env
+            .compliance_assignments
+            .iter()
+            .map(|assignment| assignment_to_env_bundle(assignment, bundles))
+            .collect(),
     }
 }
 
@@ -590,7 +595,7 @@ pub async fn create_environment_via_api(
     };
 
     match create_environment(&request).await {
-        Ok(env) => Ok(api_to_environment_item(env, vec![default_required_policy])),
+        Ok(env) => Ok(api_to_environment_item(env, vec![default_required_policy], &[])),
         Err(ApiClientError::Status {
             code: 401 | 403, ..
         }) => Err("Authentication required. Please log in.".to_string()),
@@ -641,7 +646,7 @@ pub async fn update_environment_via_api(
                 Ok(details) => details.required_policy_ids,
                 Err(_) => vec![default_required_policy],
             };
-            Ok(api_to_environment_item(env, required_policy_ids))
+            Ok(api_to_environment_item(env, required_policy_ids, &[]))
         }
         Err(ApiClientError::Status {
             code: 401 | 403, ..

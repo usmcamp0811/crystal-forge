@@ -1245,6 +1245,9 @@ pub struct EnvironmentSummary {
     pub cache: Option<EnvironmentCacheSummary>,
     #[serde(default)]
     pub compliance_bundle: Option<EnvironmentComplianceSummary>,
+    /// Active versioned bundle assignments, loaded with the environment list.
+    #[serde(default)]
+    pub compliance_assignments: Vec<AssignmentResponse>,
 }
 
 /// Request payload for creating an environment.
@@ -1546,6 +1549,10 @@ pub struct ComplianceBundleSystemsResponse {
 pub struct SystemComplianceBundlesResponse {
     pub system_id: uuid::Uuid,
     pub bundles: Vec<SystemComplianceBundle>,
+    /// Effective direct environment/system policies, excluding bundle members.
+    pub direct_rollup: ComplianceSystemRollup,
+    /// The authoritative deduplicated effective policy set for this system.
+    pub overall_rollup: ComplianceSystemRollup,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

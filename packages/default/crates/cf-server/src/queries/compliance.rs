@@ -1501,10 +1501,50 @@ pub async fn list_bundle_systems_for_version(
 /// with no fallible operations.
 ///
 /// Returns None if the system does not exist (caller should return 404).
+pub struct SystemBundleRollups {
+    pub bundles: Vec<(ComplianceBundleSummary, ComplianceSystemRollup)>,
+    pub direct_rollup: ComplianceSystemRollup,
+    pub overall_rollup: ComplianceSystemRollup,
+}
+
+fn partition_effective_policies_by_bundle(
+    policies: &[crate::compliance::resolver::EffectivePolicy],
+) -> (
+    std::collections::HashMap<Uuid, Vec<crate::compliance::resolver::EffectivePolicy>>,
+    Vec<crate::compliance::resolver::EffectivePolicy>,
+) {
+    let mut by_bundle = std::collections::HashMap::new();
+    let mut direct = Vec::new();
+    for policy in policies {
+        if matches!(
+            policy.source,
+            crate::compliance::resolver::EffectivePolicySource::LegacyDirect
+        ) {
+            direct.push(policy.clone());
+            continue;
+        }
+        let mut attributed_bundles = std::collections::HashSet::new();
+        for provenance in &policy.provenance {
+            if provenance.authoritative {
+                let Some(bundle_id) = provenance.bundle_id else {
+                    continue;
+                };
+                if attributed_bundles.insert(bundle_id) {
+                    by_bundle
+                        .entry(bundle_id)
+                        .or_insert_with(Vec::new)
+                        .push(policy.clone());
+                }
+            }
+        }
+    }
+    (by_bundle, direct)
+}
+
 pub async fn list_system_bundles(
     pool: &PgPool,
     system_id: Uuid,
-) -> Result<Option<Vec<(ComplianceBundleSummary, ComplianceSystemRollup)>>> {
+) -> Result<Option<SystemBundleRollups>> {
     // First verify the system exists - return None for 404 behavior
     let system_row = sqlx::query_as::<_, SystemRow>(
         r#"
@@ -1530,14 +1570,13 @@ pub async fn list_system_bundles(
     // Get all bundles (one query)
     let all_bundles = list_bundles(pool).await?;
 
-    if all_bundles.is_empty() {
-        return Ok(Some(Vec::new()));
-    }
-
     // Determine which bundles apply to this system using set-based query
     // This replaces N individual applicability checks
-    let applicable_bundle_ids_vec: Vec<Uuid> = sqlx::query_scalar::<_, Uuid>(
-        r#"
+    let applicable_bundle_ids_vec: Vec<Uuid> = if all_bundles.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
         SELECT DISTINCT b.id
         FROM compliance_bundles b
         LEFT JOIN environments e ON e.name = $2
@@ -1553,34 +1592,35 @@ pub async fn list_system_bundles(
             )
           )
         "#,
-    )
-    .bind(all_bundles.iter().map(|b| b.id).collect::<Vec<_>>())
-    .bind(&system.environment)
-    .fetch_all(pool)
-    .await?;
+        )
+        .bind(all_bundles.iter().map(|b| b.id).collect::<Vec<_>>())
+        .bind(&system.environment)
+        .fetch_all(pool)
+        .await?
+    };
 
     // Convert to HashSet for O(1) membership checks
     let applicable_bundle_ids: std::collections::HashSet<Uuid> =
         applicable_bundle_ids_vec.into_iter().collect();
 
-    if applicable_bundle_ids.is_empty() {
-        return Ok(Some(Vec::new()));
-    }
-
     // Fetch all policies for all applicable bundles in one query
     // This replaces N individual policy fetches
-    let all_policies = sqlx::query_as::<_, PolicyRow>(
-        r#"
+    let all_policies = if applicable_bundle_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as::<_, PolicyRow>(
+            r#"
         SELECT dp.id, cbp.bundle_id, dp.name, dp.description, dp.policy_type, dp.config, dp.enabled
         FROM compliance_bundle_policies cbp
         JOIN deployment_policies dp ON dp.id = cbp.policy_id
         WHERE cbp.bundle_id = ANY($1)
         ORDER BY cbp.bundle_id, dp.name ASC
         "#,
-    )
-    .bind(applicable_bundle_ids.iter().copied().collect::<Vec<_>>())
-    .fetch_all(pool)
-    .await?;
+        )
+        .bind(applicable_bundle_ids.iter().copied().collect::<Vec<_>>())
+        .fetch_all(pool)
+        .await?
+    };
 
     // Group policies by bundle_id for O(1) lookup
     let mut policies_by_bundle: std::collections::HashMap<Uuid, Vec<PolicyRow>> =
@@ -1592,43 +1632,60 @@ pub async fn list_system_bundles(
             .push(policy);
     }
 
-    // Resolve persisted evidence for each visible bundle. The synchronous
-    // assembler remains available for isolated unit tests, but production
-    // rollups must not infer policy outcomes from heartbeat health or view
-    // placeholders.
-    let mut result = Vec::new();
-    for bundle in all_bundles {
-        if !applicable_bundle_ids.contains(&bundle.id) {
-            continue;
-        }
-        let policies = policies_by_bundle
-            .get(&bundle.id)
-            .cloned()
-            .unwrap_or_default();
-        let rollup = system_rollup_with_evidence(pool, system.clone(), &policies).await?;
-        result.push((bundle, rollup));
-    }
+    let visible_bundles: Vec<ComplianceBundleSummary> = all_bundles
+        .into_iter()
+        .filter(|bundle| applicable_bundle_ids.contains(&bundle.id))
+        .collect();
 
-    if let ResolutionOutcome::Resolved(effective) =
-        resolve_system_effective_policies(pool, system_id).await?
-    {
-        let resolved_bundle_id: Option<Uuid> =
-            sqlx::query_scalar("SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1")
-                .bind(effective.bundle_version_id)
-                .fetch_optional(pool)
-                .await?;
-        if let Some(resolved_bundle_id) = resolved_bundle_id {
-            if let Some((_, rollup)) = result
-                .iter_mut()
-                .find(|(bundle, _)| bundle.id == resolved_bundle_id)
-            {
-                *rollup = effective_policy_rollup_with_evidence(pool, &system, &effective.policies)
-                    .await?;
-            }
-        }
-    }
+    let outcome = resolve_system_effective_policies(pool, system_id).await?;
+    let ResolutionOutcome::Resolved(effective) = outcome else {
+        let state = match outcome {
+            ResolutionOutcome::Conflict(conflicts) => conflicts
+                .first()
+                .map(|conflict| conflict.code.clone())
+                .unwrap_or_else(|| "conflict".to_string()),
+            ResolutionOutcome::Resolved(_) => unreachable!(),
+        };
+        let bundles = visible_bundles
+            .into_iter()
+            .map(|bundle| {
+                let total = policies_by_bundle
+                    .get(&bundle.id)
+                    .map_or(0, |policies| policies.len() as i64);
+                (
+                    bundle,
+                    unresolved_system_rollup(system.clone(), total, &state),
+                )
+            })
+            .collect();
+        return Ok(Some(SystemBundleRollups {
+            bundles,
+            direct_rollup: unresolved_system_rollup(system.clone(), 0, &state),
+            overall_rollup: unresolved_system_rollup(system, 0, &state),
+        }));
+    };
 
-    Ok(Some(result))
+    let (mut policies_by_bundle, direct_policies) =
+        partition_effective_policies_by_bundle(&effective.policies);
+
+    let mut bundles = Vec::with_capacity(visible_bundles.len());
+    for bundle in visible_bundles {
+        let policies = policies_by_bundle.remove(&bundle.id).unwrap_or_default();
+        bundles.push((
+            bundle,
+            effective_policy_rollup_with_evidence(pool, &system, &policies).await?,
+        ));
+    }
+    let direct_rollup =
+        effective_policy_rollup_with_evidence(pool, &system, &direct_policies).await?;
+    let overall_rollup =
+        effective_policy_rollup_with_evidence(pool, &system, &effective.policies).await?;
+
+    Ok(Some(SystemBundleRollups {
+        bundles,
+        direct_rollup,
+        overall_rollup,
+    }))
 }
 
 /// Pure in-memory assembly of compliance bundles for a system.
@@ -2674,6 +2731,9 @@ fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compliance::resolver::{
+        AssignmentMode, EffectivePolicy, EffectivePolicySource, PolicySpecificity, ProvenanceEntry,
+    };
     use std::collections::{HashMap, HashSet};
 
     fn named_policy(policy_type: &str, name: &str, config: Value, enabled: bool) -> PolicyRow {
@@ -2713,6 +2773,66 @@ mod tests {
             critical_cve_count: 0,
             high_cve_count: 0,
         }
+    }
+
+    #[test]
+    fn partitions_bundle_and_direct_effective_policies_without_duplication() {
+        let bundle_a = Uuid::from_u128(101);
+        let bundle_b = Uuid::from_u128(102);
+        let bundle_policy = |version_id, bundle_id| EffectivePolicy {
+            policy_version_id: version_id,
+            policy_lineage_id: version_id,
+            policy_type: "require_cf_agent".to_string(),
+            source: EffectivePolicySource::Baseline,
+            specificity: PolicySpecificity::Environment,
+            baseline_order: Some(0),
+            addition_order: None,
+            overrides: Vec::new(),
+            effective_config: Value::Null,
+            assignment_mode: AssignmentMode::ReportOnly,
+            effective_mode: AssignmentMode::ReportOnly,
+            provenance: vec![ProvenanceEntry {
+                source: EffectivePolicySource::Baseline,
+                specificity: PolicySpecificity::Environment,
+                assignment_id: Some(Uuid::from_u128(201)),
+                bundle_id: Some(bundle_id),
+                bundle_version_id: Some(Uuid::from_u128(301)),
+                scope_type: Some("environment".to_string()),
+                enforcement_mode: "report_only".to_string(),
+                authoritative: true,
+            }],
+        };
+        let mut direct_policy = bundle_policy(Uuid::from_u128(3), bundle_a);
+        direct_policy.source = EffectivePolicySource::LegacyDirect;
+        direct_policy.effective_mode = AssignmentMode::Enforce;
+
+        let mut shared = bundle_policy(Uuid::from_u128(4), bundle_a);
+        shared.provenance.push(ProvenanceEntry {
+            source: EffectivePolicySource::Baseline,
+            specificity: PolicySpecificity::Environment,
+            assignment_id: Some(Uuid::from_u128(202)),
+            bundle_id: Some(bundle_b),
+            bundle_version_id: Some(Uuid::from_u128(302)),
+            scope_type: Some("environment".to_string()),
+            enforcement_mode: "report_only".to_string(),
+            authoritative: false,
+        });
+
+        let (by_bundle, direct) = partition_effective_policies_by_bundle(&[
+            bundle_policy(Uuid::from_u128(1), bundle_a),
+            bundle_policy(Uuid::from_u128(2), bundle_b),
+            shared,
+            direct_policy,
+        ]);
+
+        assert_eq!(by_bundle[&bundle_a].len(), 2);
+        assert_eq!(by_bundle[&bundle_b].len(), 1);
+        assert_eq!(direct.len(), 1);
+        assert_eq!(direct[0].policy_version_id, Uuid::from_u128(3));
+        assert_eq!(
+            by_bundle[&bundle_a][0].effective_mode,
+            AssignmentMode::ReportOnly
+        );
     }
 
     #[test]

@@ -1,11 +1,13 @@
 use crate::api::models::{
-    DeploymentPolicySummary, EnvironmentCacheSummary, EnvironmentComplianceSummary,
-    EnvironmentPolicyMapEntry, EnvironmentRollup, EnvironmentSummary, EnvironmentWithPolicies,
+    AssignmentResponse, DeploymentPolicySummary, EnvironmentCacheSummary,
+    EnvironmentComplianceSummary, EnvironmentPolicyMapEntry, EnvironmentRollup, EnvironmentSummary,
+    EnvironmentWithPolicies, PolicyValueOverride,
 };
 use crate::config::EnvironmentConfig;
 use crate::models::environments::Environment;
 use anyhow::Result;
 use sqlx::{FromRow, PgPool};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -89,7 +91,142 @@ fn environment_summary_from_row(r: EnvironmentRow) -> EnvironmentSummary {
                     .compliance_bundle_framework
                     .unwrap_or_else(|| "unknown".to_string()),
             }),
+        compliance_assignments: Vec::new(),
     }
+}
+
+/// Load active assignment snapshots for a set of environments in a fixed number
+/// of queries. This is intentionally separate from the environment list SQL so
+/// every overlay collection is assembled once rather than once per environment.
+async fn list_active_environment_assignments(
+    pool: &PgPool,
+    environment_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<AssignmentResponse>>> {
+    if environment_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let assignments: Vec<(
+        Uuid,
+        Uuid,
+        Uuid,
+        Uuid,
+        Uuid,
+        String,
+        String,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+    )> = sqlx::query_as(
+        r#"
+        SELECT a.id, a.current_version_id, a.bundle_id, av.bundle_version_id,
+               a.environment_id, av.enforcement_mode, av.assignment_overlay_digest,
+               a.created_at, a.updated_at
+        FROM compliance_bundle_assignments a
+        JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
+        WHERE a.active
+          AND a.environment_id = ANY($1)
+        ORDER BY a.environment_id, a.created_at, a.id
+        "#,
+    )
+    .bind(environment_ids)
+    .fetch_all(pool)
+    .await?;
+
+    let assignment_version_ids: Vec<Uuid> = assignments.iter().map(|(_, id, ..)| *id).collect();
+    let exclusions: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT assignment_version_id, policy_version_id
+         FROM compliance_assignment_exclusions
+         WHERE assignment_version_id = ANY($1)
+         ORDER BY assignment_version_id, policy_version_id",
+    )
+    .bind(&assignment_version_ids)
+    .fetch_all(pool)
+    .await?;
+    let additions: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT assignment_version_id, policy_version_id
+         FROM compliance_assignment_additions
+         WHERE assignment_version_id = ANY($1)
+         ORDER BY assignment_version_id, addition_order",
+    )
+    .bind(&assignment_version_ids)
+    .fetch_all(pool)
+    .await?;
+    let overrides: Vec<(Uuid, Uuid, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT assignment_version_id, policy_version_id, value_path, value
+         FROM compliance_assignment_value_overrides
+         WHERE assignment_version_id = ANY($1)
+         ORDER BY assignment_version_id, policy_version_id, value_path",
+    )
+    .bind(&assignment_version_ids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut exclusions_by_version: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for (assignment_version_id, policy_version_id) in exclusions {
+        exclusions_by_version
+            .entry(assignment_version_id)
+            .or_default()
+            .push(policy_version_id);
+    }
+    let mut additions_by_version: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for (assignment_version_id, policy_version_id) in additions {
+        additions_by_version
+            .entry(assignment_version_id)
+            .or_default()
+            .push(policy_version_id);
+    }
+    let mut overrides_by_version: HashMap<Uuid, Vec<PolicyValueOverride>> = HashMap::new();
+    for (assignment_version_id, policy_version_id, value_path, value) in overrides {
+        overrides_by_version
+            .entry(assignment_version_id)
+            .or_default()
+            .push(PolicyValueOverride {
+                policy_version_id,
+                value_path,
+                value,
+            });
+    }
+
+    let mut result: HashMap<Uuid, Vec<AssignmentResponse>> = HashMap::new();
+    for (
+        id,
+        current_version_id,
+        bundle_id,
+        bundle_version_id,
+        environment_id,
+        enforcement_mode,
+        assignment_overlay_digest,
+        created_at,
+        updated_at,
+    ) in assignments
+    {
+        result
+            .entry(environment_id)
+            .or_default()
+            .push(AssignmentResponse {
+                id,
+                current_version_id,
+                bundle_id,
+                bundle_version_id,
+                scope_type: "environment".to_string(),
+                scope_id: environment_id,
+                enforcement_mode,
+                exclusions: exclusions_by_version
+                    .remove(&current_version_id)
+                    .unwrap_or_default(),
+                additions: additions_by_version
+                    .remove(&current_version_id)
+                    .unwrap_or_default(),
+                value_overrides: overrides_by_version
+                    .remove(&current_version_id)
+                    .unwrap_or_default(),
+                assignment_overlay_digest,
+                active: true,
+                created_at,
+                updated_at,
+            });
+    }
+    Ok(result)
 }
 
 /// Fetch the environment record associated with this system
@@ -305,7 +442,17 @@ pub async fn list_environments_for_user(
         .await?
     };
 
-    Ok(rows.into_iter().map(environment_summary_from_row).collect())
+    let mut summaries: Vec<EnvironmentSummary> =
+        rows.into_iter().map(environment_summary_from_row).collect();
+    let environment_ids: Vec<Uuid> = summaries.iter().map(|summary| summary.id).collect();
+    let mut assignments_by_environment =
+        list_active_environment_assignments(pool, &environment_ids).await?;
+    for summary in &mut summaries {
+        summary.compliance_assignments = assignments_by_environment
+            .remove(&summary.id)
+            .unwrap_or_default();
+    }
+    Ok(summaries)
 }
 
 /// Fetch a single environment by ID, scoped to a user.

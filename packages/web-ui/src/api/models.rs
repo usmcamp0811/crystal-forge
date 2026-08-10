@@ -980,6 +980,8 @@ pub struct EnvironmentSummary {
     pub cache: Option<EnvironmentCacheSummary>,
     #[serde(default)]
     pub compliance_bundle: Option<EnvironmentComplianceSummary>,
+    #[serde(default)]
+    pub compliance_assignments: Vec<AssignmentResponse>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -146,6 +146,15 @@ pub struct EffectivePolicy {
 pub struct ProvenanceEntry {
     pub source: EffectivePolicySource,
     pub specificity: PolicySpecificity,
+    /// Assignment that contributed this policy, when it came from a bundle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignment_id: Option<Uuid>,
+    /// Bundle lineage that contributed this policy, when it came from a bundle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<Uuid>,
+    /// Exact assigned bundle version, when it came from a bundle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_version_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_type: Option<String>,
     pub enforcement_mode: String,
@@ -1479,7 +1488,9 @@ async fn resolve_systems_effective_policies_batch(
         let mut has_assignments = false;
 
         // Process bundle assignments (already in scope order).
-        for (_, av_id, _, bv_id, scope_type, enforcement_mode, _, _) in sys_assignments {
+        for (assignment_id, av_id, bundle_id, bv_id, scope_type, enforcement_mode, _, _) in
+            sys_assignments
+        {
             has_assignments = true;
 
             let specificity = match scope_type.as_str() {
@@ -1715,6 +1726,9 @@ async fn resolve_systems_effective_policies_batch(
                 let prov = ProvenanceEntry {
                     source: pol.source.clone(),
                     specificity,
+                    assignment_id: Some(*assignment_id),
+                    bundle_id: Some(*bundle_id),
+                    bundle_version_id: Some(*bv_id),
                     scope_type: Some(scope_type.clone()),
                     enforcement_mode: enforcement_mode.clone(),
                     authoritative: true,
@@ -1761,6 +1775,9 @@ async fn resolve_systems_effective_policies_batch(
                         let provenance = ProvenanceEntry {
                             source: EffectivePolicySource::LegacyDirect,
                             specificity: PolicySpecificity::Environment,
+                            assignment_id: None,
+                            bundle_id: None,
+                            bundle_version_id: None,
                             scope_type: Some("environment".to_string()),
                             enforcement_mode: "enforce".to_string(),
                             authoritative: true,
@@ -1801,6 +1818,9 @@ async fn resolve_systems_effective_policies_batch(
                     let provenance = ProvenanceEntry {
                         source: EffectivePolicySource::LegacyDirect,
                         specificity: PolicySpecificity::System,
+                        assignment_id: None,
+                        bundle_id: None,
+                        bundle_version_id: None,
                         scope_type: Some("system".to_string()),
                         enforcement_mode: "enforce".to_string(),
                         authoritative: true,
@@ -2031,9 +2051,9 @@ async fn resolve_system_effective_policies_with_options(
 
     // Process bundle assignments first (in scope-order).
     for (
-        _assignment_id,
+        assignment_id,
         assignment_version_id,
-        _bundle_id,
+        bundle_id,
         bundle_version_id,
         scope_type,
         enforcement_mode,
@@ -2116,6 +2136,9 @@ async fn resolve_system_effective_policies_with_options(
                     let prov = ProvenanceEntry {
                         source: pol.source.clone(),
                         specificity,
+                        assignment_id: Some(*assignment_id),
+                        bundle_id: Some(*bundle_id),
+                        bundle_version_id: Some(*bundle_version_id),
                         scope_type: Some(scope_type.to_string()),
                         enforcement_mode: enforcement_mode.to_string(),
                         authoritative: true,
@@ -2149,6 +2172,9 @@ async fn resolve_system_effective_policies_with_options(
         let prov = ProvenanceEntry {
             source: EffectivePolicySource::LegacyDirect,
             specificity,
+            assignment_id: None,
+            bundle_id: None,
+            bundle_version_id: None,
             scope_type: Some(
                 if specificity == PolicySpecificity::Environment {
                     "environment"
@@ -2797,6 +2823,9 @@ mod tests {
                 ProvenanceEntry {
                     source: EffectivePolicySource::Baseline,
                     specificity: PolicySpecificity::BundleBaseline,
+                    assignment_id: None,
+                    bundle_id: None,
+                    bundle_version_id: None,
                     scope_type: Some("environment".to_string()),
                     enforcement_mode: "enforce".to_string(),
                     authoritative: true,
@@ -2820,6 +2849,9 @@ mod tests {
                 ProvenanceEntry {
                     source: EffectivePolicySource::Addition,
                     specificity: PolicySpecificity::Environment,
+                    assignment_id: None,
+                    bundle_id: None,
+                    bundle_version_id: None,
                     scope_type: Some("environment".to_string()),
                     enforcement_mode: "enforce".to_string(),
                     authoritative: true,
@@ -2844,6 +2876,9 @@ mod tests {
                 ProvenanceEntry {
                     source: EffectivePolicySource::LegacyDirect,
                     specificity: PolicySpecificity::System,
+                    assignment_id: None,
+                    bundle_id: None,
+                    bundle_version_id: None,
                     scope_type: Some("system".to_string()),
                     enforcement_mode: "enforce".to_string(),
                     authoritative: true,
@@ -2870,6 +2905,9 @@ mod tests {
         let provenance = |scope_type: &str| ProvenanceEntry {
             source: EffectivePolicySource::Addition,
             specificity: PolicySpecificity::Environment,
+            assignment_id: None,
+            bundle_id: None,
+            bundle_version_id: None,
             scope_type: Some(scope_type.to_string()),
             enforcement_mode: "enforce".to_string(),
             authoritative: true,
