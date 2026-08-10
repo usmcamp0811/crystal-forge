@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 02:27'
+updated_date: '2026-08-10 03:24'
 labels:
   - design
   - frontend
@@ -1443,6 +1443,8 @@ Phase 7 bundle framework UX: add a pure catalog in `packages/web-ui/src/views/co
 - Run focused XCCDF importer tests, server check, formatting, then commit and push.
 
 Deletion lifecycle increment: centralize policy and bundle deletion eligibility (immutable history, retained source/reference records, assignments, and core-policy protection), expose read-only admin preflight/status APIs, make DELETE consume the same result transactionally, and surface preflight blockers in existing policy and bundle confirmation UI. Preserve all audit/source history; do not add a destructive bypass. Verify with focused server tests and formatting.
+
+Deletion correctness follow-up (server only): replace outcome-specific delete results with a single server-authoritative DeletionEligibility/DeletionBlocker contract that classifies immutable history, immutable assignment history, immutable bundle membership, mutable draft membership, mutable direct assignment, disposable and immutable source mappings, and core-policy protection. Reuse the locked eligibility result for DELETE conflict bodies, transactionally remove only draft-owned memberships/direct assignments and draft-only mappings before hard deletion, retain immutable history mappings, add an additive migration to distinguish disposable source mappings, and add focused unit/live-DB coverage where the existing harness permits. Do not modify web-ui or existing untracked files. Verify server formatting, check, and focused tests.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
