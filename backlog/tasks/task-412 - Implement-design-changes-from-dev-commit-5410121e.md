@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 03:50'
+updated_date: '2026-08-10 03:55'
 labels:
   - design
   - frontend
@@ -1438,6 +1438,8 @@ Deletion correctness follow-up (server only): replace outcome-specific delete re
 2026-08-10 correction pass: keep assignment updates typed and version-CAS-safe; restrict Environment modal to add/remove/mode changes until a deliberate version-rebind API exists; bulk-load authoritative versioned environment assignment summaries to avoid N+1; make assignment loading blocking/retryable. Make deletion eligibility/disposition server-authoritative and hard-delete disposable source mappings transactionally while retaining immutable history. Add focused and isolated live DB regressions, then run required formatting, server/web-ui checks, Nix web-ui build, and commit/push verified increments without merging.
 
 Correction pass: classify source-object mappings exclusively from the publication states of every non-null referenced policy/bundle version. Update policy and bundle deletion preflight and cleanup predicates together, retain 0210's state-based trigger, and cover A-G nullable/draft/immutable reference combinations plus policy and bundle preflight/DELETE cleanup parity.
+
+2026-08-10 final correction scope approved by user: complete bulk initial environment-assignment loading, edit-modal load/error safety, deletion preflight failure UX, and multi-bundle rollup attribution. Conduct a design-authoritative pixel-alignment pass on the Edit Compliance Bundle modal using docs/design/CrystalForge/components/ComplianceView.jsx for labels, order, alignment, and spacing. Preserve existing assignment CAS/overlay behavior.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
