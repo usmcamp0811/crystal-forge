@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 01:03'
+updated_date: '2026-08-10 01:12'
 labels:
   - design
   - frontend
@@ -1463,6 +1463,8 @@ Phase 7 bundle framework UX implemented in `packages/web-ui/src/views/compliance
 Phase 9/10 classification integration completed locally. Foreign XCCDF imports now capture Dublin Core publisher and project `category=security` / `framework=DISA STIG` only for foreign benchmarks whose publisher is DISA; severity and rationale are copied only from their standard source elements, and SRG/CCI behavior is retained. CF-native XCCDF plus JSON/TOML retain full `compliance_metadata`, including unknown keys. Added focused digest and round-trip tests. Verified with `cargo fmt --all --check`, `cargo check -p cf-server`, focused `cargo test -p cf-server ... --lib` filters, and `git diff --check`; repository pre-existing warnings remain. Did not run the web-ui Nix check. Preserved untracked `U_Anduril_NixOS_V1R1_STIG.zip` and `packages/web-ui/assets/tailwind.css`.
 
 2026-08-10: Replaced the evidence endpoint's heartbeat/placeholder-CVE synthesis for Nix and `require_cve_check` policies. It now resolves only against the latest deployed system state and its matching derivation; Nix uses persisted per-lineage `policy_results`, CVE uses the newest completed derivation scan, and missing/malformed evidence maps to `not_checked`/`error`. Added coverage for lineage-keyed result decoding and aligned the web-ui rollup DTO fields. Focused server tests and web-ui cargo check passed. Full workspace formatting remains blocked by pre-existing formatting differences in previously changed web-ui grouping files; modified files pass direct rustfmt check.
+
+2026-08-10: Extended authoritative evidence use to bundle/system matrices and effective-assignment rollups. Assignment overlays retain their effective config and report-only count while outcome status comes from the same deployed Nix/CVE evidence resolver. The system effective-policy endpoint now returns an internal error rather than a synthetic score if evidence resolution fails. Focused server tests and web-ui cargo check passed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
