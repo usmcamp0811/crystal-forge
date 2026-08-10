@@ -499,6 +499,344 @@ pub async fn delete_compliance_bundle(
 
 // ── Trust and Publication (Phase 1) ────────────────────────────────────────
 
+// ── Transaction-safe helpers for trust and publication (Slice 2) ────────────
+
+/// Write an admin audit event within an existing transaction.
+async fn write_audit_event(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    action: &str,
+    target: &str,
+    metadata: serde_json::Value,
+) -> Result<(), sqlx::Error> {
+    let actor_identifier: Option<String> =
+        sqlx::query_scalar("SELECT COALESCE(email, username) FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+
+    sqlx::query(
+        "INSERT INTO admin_audit_events (actor_user_id, actor_identifier, action, target, metadata)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(user_id)
+    .bind(actor_identifier)
+    .bind(action)
+    .bind(target)
+    .bind(metadata)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+/// Recompute and validate a policy version's canonical digest from locked row.
+/// Returns the computed digest.
+/// Rejects if digest is 'pending' or if recomputed digest does not match stored.
+async fn recompute_policy_version_digest_locked(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    version_id: Uuid,
+) -> Result<String, axum::response::Response> {
+    use crate::compliance::digest::PolicyVersionCanonical;
+
+    // Load current state
+    #[derive(sqlx::FromRow)]
+    struct PolicyRow {
+        semantic_digest: String,
+        name: String,
+        description: Option<String>,
+        policy_type: String,
+        implementation_state: String,
+        execution_phase: String,
+        config: serde_json::Value,
+        compliance_metadata: serde_json::Value,
+        dependencies: serde_json::Value,
+        opaque_xml: Option<String>,
+        enabled_by_default: Option<bool>,
+    }
+
+    let row = match sqlx::query_as::<_, PolicyRow>(
+        "SELECT semantic_digest, name, description, policy_type, implementation_state,
+                execution_phase, config, compliance_metadata, dependencies, opaque_xml,
+                enabled_by_default
+         FROM deployment_policy_versions WHERE id = $1 FOR UPDATE",
+    )
+    .bind(version_id)
+    .fetch_optional(&mut **tx)
+    .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return Err(not_found()),
+        Err(e) => {
+            tracing::error!("Failed to load policy version for digest recompute: {e}");
+            return Err(internal_error("Failed to load policy version"));
+        }
+    };
+
+    // Reject 'pending' digest
+    if row.semantic_digest == "pending" {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "Pending digest",
+                "message": "Policy version digest has not been computed yet",
+                "code": "DIGEST_PENDING"
+            })),
+        )
+            .into_response());
+    }
+
+    // Recompute canonical digest
+    let canonical = PolicyVersionCanonical {
+        name: row.name,
+        description: row.description,
+        policy_type: row.policy_type,
+        implementation_state: row.implementation_state,
+        execution_phase: row.execution_phase,
+        config: row.config,
+        compliance_metadata: row.compliance_metadata,
+        dependencies: row.dependencies,
+        opaque_xml_digest: PolicyVersionCanonical::digest_opaque_xml(row.opaque_xml.as_deref()),
+        enabled_by_default: row.enabled_by_default,
+    };
+    let computed_digest = canonical.compute_digest();
+
+    // Reject if mismatch
+    if computed_digest != row.semantic_digest {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "Digest mismatch",
+                "message": "Recomputed digest does not match stored digest. The version may have been modified.",
+                "code": "DIGEST_STALE"
+            })),
+        )
+            .into_response());
+    }
+
+    Ok(computed_digest)
+}
+
+/// Recompute and validate a bundle version's canonical digest from locked state.
+/// Returns the computed digest.
+/// Rejects if digest is 'pending' or if recomputed digest does not match stored.
+async fn recompute_bundle_version_digest_locked(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    version_id: Uuid,
+) -> Result<String, axum::response::Response> {
+    use crate::compliance::digest::{BundleVersionCanonical, BundleMembershipEntry};
+
+    // Load bundle metadata with FOR UPDATE
+    #[derive(sqlx::FromRow)]
+    struct BundleRow {
+        semantic_digest: String,
+        name: String,
+        framework: String,
+        framework_version: Option<String>,
+        description: Option<String>,
+        layer: String,
+        owner: String,
+    }
+
+    let row = match sqlx::query_as::<_, BundleRow>(
+        "SELECT semantic_digest, name, framework, framework_version, description, layer, owner
+         FROM compliance_bundle_versions WHERE id = $1 FOR UPDATE",
+    )
+    .bind(version_id)
+    .fetch_optional(&mut **tx)
+    .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return Err(not_found()),
+        Err(e) => {
+            tracing::error!("Failed to load bundle version for digest recompute: {e}");
+            return Err(internal_error("Failed to load bundle version"));
+        }
+    };
+
+    // Reject 'pending' digest
+    if row.semantic_digest == "pending" {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "Pending digest",
+                "message": "Bundle version digest has not been computed yet",
+                "code": "DIGEST_PENDING"
+            })),
+        )
+            .into_response());
+    }
+
+    // Load membership in order
+    #[derive(sqlx::FromRow)]
+    struct MemberRow {
+        policy_version_id: Uuid,
+        selected: bool,
+    }
+
+    let members_rows = match sqlx::query_as::<_, MemberRow>(
+        "SELECT policy_version_id, selected
+         FROM compliance_bundle_version_policies
+         WHERE bundle_version_id = $1
+         ORDER BY policy_order ASC",
+    )
+    .bind(version_id)
+    .fetch_all(&mut **tx)
+    .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!("Failed to load bundle membership for digest recompute: {e}");
+            return Err(internal_error("Failed to load bundle membership"));
+        }
+    };
+
+    let members: Vec<BundleMembershipEntry> = members_rows
+        .into_iter()
+        .map(|r| BundleMembershipEntry {
+            policy_version_id: r.policy_version_id,
+            selected: r.selected,
+        })
+        .collect();
+
+    // Recompute canonical digest
+    let canonical = BundleVersionCanonical {
+        name: row.name,
+        framework: row.framework,
+        framework_version: row.framework_version,
+        description: row.description,
+        layer: row.layer,
+        owner: row.owner,
+        members,
+    };
+    let computed_digest = canonical.compute_digest();
+
+    // Reject if mismatch
+    if computed_digest != row.semantic_digest {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "Digest mismatch",
+                "message": "Recomputed digest does not match stored digest. The version may have been modified.",
+                "code": "DIGEST_STALE"
+            })),
+        )
+            .into_response());
+    }
+
+    Ok(computed_digest)
+}
+
+/// Result struct for policy publication
+#[derive(Debug)]
+struct PublishedPolicyVersion {
+    version_id: Uuid,
+    policy_id: Uuid,
+    publication_state: String,
+    semantic_digest: String,
+    published_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Apply the trigger-safe policy publication sequence within a transaction under lock.
+/// Assumes version is already locked with FOR UPDATE.
+/// Writes the policy_version_published audit event before returning.
+async fn apply_policy_publication_locked(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    actor_user_id: Uuid,
+    version_id: Uuid,
+    policy_id: Uuid,
+    computed_digest: String,
+) -> Result<PublishedPolicyVersion, axum::response::Response> {
+    // Step 1: clear draft pointer if it points to this version
+    let _ = sqlx::query(
+        r#"UPDATE deployment_policies
+           SET current_draft_version_id = NULL
+           WHERE id = (SELECT policy_id FROM deployment_policy_versions WHERE id = $1)
+             AND current_draft_version_id = $1"#,
+    )
+    .bind(version_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to clear draft pointer: {e}");
+        internal_error("Failed to clear draft pointer")
+    })?;
+
+    // Step 2: accept the version (DEFERRED trigger queued)
+    #[derive(sqlx::FromRow)]
+    struct AcceptRow {
+        id: Uuid,
+        policy_id: Uuid,
+        publication_state: String,
+        published_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    let accept_result = match sqlx::query_as::<_, AcceptRow>(
+        r#"UPDATE deployment_policy_versions
+           SET publication_state = 'accepted', published_at = CURRENT_TIMESTAMP
+           WHERE id = $1 AND publication_state != 'accepted'
+           RETURNING id, policy_id, publication_state, published_at"#,
+    )
+    .bind(version_id)
+    .fetch_optional(&mut **tx)
+    .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return Err(not_found()),
+        Err(e) => {
+            tracing::error!("Failed to accept policy version: {e}");
+            return Err(internal_error("Failed to accept policy version"));
+        }
+    };
+
+    let (id, policy_lineage_id, state, published_at) =
+        (accept_result.id, accept_result.policy_id, accept_result.publication_state, accept_result.published_at);
+
+    // Step 3: set the pointer (BEFORE trigger sees accepted version)
+    sqlx::query(
+        r#"UPDATE deployment_policies
+           SET current_published_version_id = $1
+           WHERE id = $2"#,
+    )
+    .bind(id)
+    .bind(policy_lineage_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to set published pointer: {e}");
+        internal_error("Failed to update published pointer")
+    })?;
+
+    // Step 4: write audit event
+    let audit_metadata = serde_json::json!({
+        "policy_id": policy_id,
+        "policy_version_id": version_id,
+        "semantic_digest": computed_digest,
+        "new_publication_state": state,
+    });
+
+    write_audit_event(
+        tx,
+        actor_user_id,
+        "policy_version_published",
+        &version_id.to_string(),
+        audit_metadata,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to write publication audit event: {e}");
+        internal_error("Failed to write audit event")
+    })?;
+
+    Ok(PublishedPolicyVersion {
+        version_id: id,
+        policy_id: policy_lineage_id,
+        publication_state: state,
+        semantic_digest: computed_digest,
+        published_at,
+    })
+}
+
 /// `POST /api/v1/policy-versions/:version_id/trust`
 /// Trust or reject a policy version. Only admin users can perform this operation.
 pub async fn trust_policy_version(
@@ -517,57 +855,105 @@ pub async fn trust_policy_version(
         return forbidden();
     }
 
-    let trust_state = if payload.trusted {
-        "trusted"
-    } else {
-        "rejected"
+    let new_trust_state = if payload.trusted { "trusted" } else { "rejected" };
+
+    // Begin transaction immediately after RBAC
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return internal_error("Failed to start transaction"),
     };
 
-    // Update the version with trust state
-    let result = sqlx::query_as::<_, (Uuid, String, String)>(
+    // Load and lock the version
+    #[derive(sqlx::FromRow)]
+    struct VersionRow {
+        id: Uuid,
+        policy_id: Uuid,
+        publication_state: String,
+        trust_state: String,
+    }
+
+    let version_row = match sqlx::query_as::<_, VersionRow>(
+        r#"SELECT id, policy_id, publication_state, trust_state
+           FROM deployment_policy_versions WHERE id = $1 FOR UPDATE"#,
+    )
+    .bind(version_id)
+    .fetch_optional(&mut *tx)
+    .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            let _ = tx.rollback().await;
+            return not_found();
+        }
+        Err(e) => {
+            let _ = tx.rollback().await;
+            tracing::error!("Failed to load policy version for trust update: {e}");
+            return internal_error("Failed to load policy version");
+        }
+    };
+
+    // Update trust state
+    let update_result = sqlx::query_as::<
+        _,
+        (Option<Uuid>, Option<chrono::DateTime<chrono::Utc>>),
+    >(
         r#"UPDATE deployment_policy_versions
            SET trust_state = $2, trusted_by = $3, trusted_at = CURRENT_TIMESTAMP,
                trust_review_note = $4
            WHERE id = $1
-           RETURNING id, publication_state, trust_state"#,
+           RETURNING trusted_by, trusted_at"#,
     )
     .bind(version_id)
-    .bind(trust_state)
+    .bind(new_trust_state)
     .bind(user_id)
     .bind(&payload.review_note)
-    .fetch_optional(&pool)
+    .fetch_one(&mut *tx)
     .await;
 
-    match result {
-        Ok(Some((version_id, publication_state, trust_state))) => {
-            // Load the full version to get trusted_by and trusted_at
-            let full_result = sqlx::query_as::<
-                _,
-                (Option<Uuid>, Option<chrono::DateTime<chrono::Utc>>),
-            >(
-                r#"SELECT trusted_by, trusted_at FROM deployment_policy_versions WHERE id = $1"#,
-            )
-            .bind(version_id)
-            .fetch_one(&pool)
-            .await;
-
-            match full_result {
-                Ok((trusted_by, trusted_at)) => {
-                    let response = TrustPolicyVersionResponse {
-                        version_id,
-                        publication_state,
-                        trust_state,
-                        trusted_by,
-                        trusted_at,
-                    };
-                    (StatusCode::OK, Json(response)).into_response()
-                }
-                Err(_) => internal_error("Failed to load trust state after update"),
-            }
+    let (trusted_by, trusted_at) = match update_result {
+        Ok(row) => row,
+        Err(e) => {
+            let _ = tx.rollback().await;
+            tracing::error!("Failed to update trust state: {e}");
+            return internal_error("Failed to update trust state");
         }
-        Ok(None) => not_found(),
-        Err(_) => internal_error("Failed to update policy version trust state"),
+    };
+
+    // Write audit event
+    let audit_metadata = serde_json::json!({
+        "policy_id": version_row.policy_id,
+        "version_id": version_id,
+        "previous_trust_state": version_row.trust_state,
+        "new_trust_state": new_trust_state,
+        "review_note": payload.review_note,
+    });
+    let action = if payload.trusted {
+        "policy_version_trusted"
+    } else {
+        "policy_version_rejected"
+    };
+
+    if let Err(e) = write_audit_event(&mut tx, user_id, action, &version_id.to_string(), audit_metadata).await
+    {
+        let _ = tx.rollback().await;
+        tracing::error!("Failed to write trust audit event: {e}");
+        return internal_error("Failed to write audit event");
     }
+
+    // Commit transaction
+    if let Err(e) = tx.commit().await {
+        tracing::error!("Failed to commit trust update: {e}");
+        return internal_error("Failed to commit trust update");
+    }
+
+    let response = TrustPolicyVersionResponse {
+        version_id,
+        publication_state: version_row.publication_state,
+        trust_state: new_trust_state.to_string(),
+        trusted_by,
+        trusted_at,
+    };
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 /// `POST /api/v1/compliance/bundle-versions/:version_id/trust`
@@ -588,57 +974,103 @@ pub async fn trust_bundle_version(
         return forbidden();
     }
 
-    let trust_state = if payload.trusted {
-        "trusted"
-    } else {
-        "rejected"
+    let new_trust_state = if payload.trusted { "trusted" } else { "rejected" };
+
+    // Begin transaction immediately after RBAC
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return internal_error("Failed to start transaction"),
     };
 
-    // Update the version with trust state
-    let result = sqlx::query_as::<_, (Uuid, String, String)>(
+    // Load and lock the bundle version
+    #[derive(sqlx::FromRow)]
+    struct BundleVersionRow {
+        id: Uuid,
+        publication_state: String,
+        trust_state: String,
+    }
+
+    let bundle_row = match sqlx::query_as::<_, BundleVersionRow>(
+        r#"SELECT id, publication_state, trust_state
+           FROM compliance_bundle_versions WHERE id = $1 FOR UPDATE"#,
+    )
+    .bind(version_id)
+    .fetch_optional(&mut *tx)
+    .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            let _ = tx.rollback().await;
+            return not_found();
+        }
+        Err(e) => {
+            let _ = tx.rollback().await;
+            tracing::error!("Failed to load bundle version for trust update: {e}");
+            return internal_error("Failed to load bundle version");
+        }
+    };
+
+    // Update trust state
+    let update_result = sqlx::query_as::<
+        _,
+        (Option<Uuid>, Option<chrono::DateTime<chrono::Utc>>),
+    >(
         r#"UPDATE compliance_bundle_versions
            SET trust_state = $2, trusted_by = $3, trusted_at = CURRENT_TIMESTAMP,
                trust_review_note = $4
            WHERE id = $1
-           RETURNING id, publication_state, trust_state"#,
+           RETURNING trusted_by, trusted_at"#,
     )
     .bind(version_id)
-    .bind(trust_state)
+    .bind(new_trust_state)
     .bind(user_id)
     .bind(&payload.review_note)
-    .fetch_optional(&pool)
+    .fetch_one(&mut *tx)
     .await;
 
-    match result {
-        Ok(Some((version_id, publication_state, trust_state))) => {
-            // Load the full version to get trusted_by and trusted_at
-            let full_result = sqlx::query_as::<
-                _,
-                (Option<Uuid>, Option<chrono::DateTime<chrono::Utc>>),
-            >(
-                r#"SELECT trusted_by, trusted_at FROM compliance_bundle_versions WHERE id = $1"#,
-            )
-            .bind(version_id)
-            .fetch_one(&pool)
-            .await;
-
-            match full_result {
-                Ok((trusted_by, trusted_at)) => {
-                    let response = TrustBundleVersionResponse {
-                        version_id,
-                        publication_state,
-                        trust_state,
-                        trusted_by,
-                        trusted_at,
-                    };
-                    (StatusCode::OK, Json(response)).into_response()
-                }
-                Err(_) => internal_error("Failed to load trust state after update"),
-            }
+    let (trusted_by, trusted_at) = match update_result {
+        Ok(row) => row,
+        Err(e) => {
+            let _ = tx.rollback().await;
+            tracing::error!("Failed to update trust state: {e}");
+            return internal_error("Failed to update trust state");
         }
-        Ok(None) => not_found(),
-        Err(_) => internal_error("Failed to update bundle version trust state"),
+    };
+
+    // Write audit event
+    let audit_metadata = serde_json::json!({
+        "bundle_version_id": version_id,
+        "previous_trust_state": bundle_row.trust_state,
+        "new_trust_state": new_trust_state,
+        "review_note": payload.review_note,
+    });
+    let action = if payload.trusted {
+        "bundle_version_trusted"
+    } else {
+        "bundle_version_rejected"
+    };
+
+    if let Err(e) = write_audit_event(&mut tx, user_id, action, &version_id.to_string(), audit_metadata).await
+    {
+        let _ = tx.rollback().await;
+        tracing::error!("Failed to write trust audit event: {e}");
+        return internal_error("Failed to write audit event");
     }
+
+    // Commit transaction
+    if let Err(e) = tx.commit().await {
+        tracing::error!("Failed to commit trust update: {e}");
+        return internal_error("Failed to commit trust update");
+    }
+
+    let response = TrustBundleVersionResponse {
+        version_id,
+        publication_state: bundle_row.publication_state,
+        trust_state: new_trust_state.to_string(),
+        trusted_by,
+        trusted_at,
+    };
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 /// `POST /api/v1/policy-versions/:version_id/publish`
@@ -651,7 +1083,7 @@ pub async fn publish_policy_version(
 ) -> impl IntoResponse {
     use crate::api::models::PublishPolicyVersionResponse;
 
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
 
@@ -659,28 +1091,50 @@ pub async fn publish_policy_version(
         return forbidden();
     }
 
-    // Load the version to check current state and digest
-    let version_result = sqlx::query_as::<_, (Uuid, String, String, String, String, String)>(
-        r#"SELECT id, publication_state, semantic_digest, policy_type,
-                  implementation_state, trust_state
-           FROM deployment_policy_versions WHERE id = $1"#,
+    // Begin transaction immediately after RBAC
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return internal_error("Failed to start transaction"),
+    };
+
+    // Load and lock the version with all needed fields
+    #[derive(sqlx::FromRow)]
+    struct PolicyVersionRow {
+        id: Uuid,
+        policy_id: Uuid,
+        publication_state: String,
+        policy_type: String,
+        implementation_state: String,
+        trust_state: String,
+    }
+
+    let version_row = match sqlx::query_as::<_, PolicyVersionRow>(
+        r#"SELECT id, policy_id, publication_state, policy_type, implementation_state, trust_state
+           FROM deployment_policy_versions WHERE id = $1 FOR UPDATE"#,
     )
     .bind(version_id)
-    .fetch_optional(&pool)
-    .await;
-
-    let (_, publication_state, digest, _policy_type, implementation_state, trust_state) =
-        match version_result {
-            Ok(Some(v)) => v,
-            Ok(None) => return not_found(),
-            Err(_) => return internal_error("Failed to load policy version"),
-        };
-
-    if matches!(
-        implementation_state.as_str(),
-        "native" | "external" | "manual"
-    ) && trust_state != "trusted"
+    .fetch_optional(&mut *tx)
+    .await
     {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            let _ = tx.rollback().await;
+            return not_found();
+        }
+        Err(e) => {
+            let _ = tx.rollback().await;
+            tracing::error!("Failed to load policy version: {e}");
+            return internal_error("Failed to load policy version");
+        }
+    };
+
+    // Validate trust requirement from locked row
+    if matches!(
+        version_row.implementation_state.as_str(),
+        "native" | "external" | "manual"
+    ) && version_row.trust_state != "trusted"
+    {
+        let _ = tx.rollback().await;
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({
@@ -692,23 +1146,9 @@ pub async fn publish_policy_version(
             .into_response();
     }
 
-    // Verify digest if provided
-    if let Some(expected_digest) = &payload.expected_semantic_digest {
-        if expected_digest != &digest {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(serde_json::json!({
-                    "error": "Semantic digest mismatch",
-                    "message": "The provided digest does not match the stored digest. The version may have been modified.",
-                    "code": "DIGEST_MISMATCH"
-                })),
-            )
-                .into_response();
-        }
-    }
-
     // Reject if already published
-    if publication_state == "accepted" {
+    if version_row.publication_state == "accepted" {
+        let _ = tx.rollback().await;
         return (
             StatusCode::CONFLICT,
             Json(serde_json::json!({
@@ -720,87 +1160,59 @@ pub async fn publish_policy_version(
             .into_response();
     }
 
-    // Publish atomically in a transaction.
-    //
-    // Trigger execution order matters:
-    //   - trigger_validate_policy_lineage_on_state_change (AFTER UPDATE, DEFERRABLE INITIALLY DEFERRED):
-    //     fires at COMMIT; checks that current_published_version_id points to this version.
-    //   - trigger_policy_version_pointer_integrity_update (BEFORE UPDATE, immediate):
-    //     fires when updating current_published_version_id; checks the pointed version is 'accepted'.
-    //
-    // Required sequence within one transaction:
-    //   1. Clear draft pointer if it is this version (so step 2's DEFERRED check passes).
-    //   2. Accept the version state → queues the DEFERRED validation.
-    //   3. Set the pointer → immediate trigger now sees 'accepted' version and passes.
-    //   4. COMMIT → DEFERRED trigger checks pointer is set, passes.
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
-        Err(_) => return internal_error("Failed to start transaction"),
-    };
-
-    // Step 1: clear draft pointer if it points to this version
-    let _ = sqlx::query(
-        r#"UPDATE deployment_policies
-           SET current_draft_version_id = NULL
-           WHERE id = (SELECT policy_id FROM deployment_policy_versions WHERE id = $1)
-             AND current_draft_version_id = $1"#,
-    )
-    .bind(version_id)
-    .execute(&mut *tx)
-    .await;
-
-    // Step 2: accept the version (DEFERRED trigger queued — pointer check at commit)
-    let publish_result =
-        sqlx::query_as::<_, (Uuid, Uuid, String, String, chrono::DateTime<chrono::Utc>)>(
-            r#"UPDATE deployment_policy_versions
-           SET publication_state = 'accepted', published_at = CURRENT_TIMESTAMP
-           WHERE id = $1 AND publication_state != 'accepted'
-           RETURNING id, policy_id, publication_state, semantic_digest, published_at"#,
-        )
-        .bind(version_id)
-        .fetch_optional(&mut *tx)
-        .await;
-
-    let (id, policy_lineage_id, state, digest, published_at) = match publish_result {
-        Ok(Some(row)) => row,
-        Ok(None) => {
+    // Recompute and validate canonical digest while lock is held
+    let computed_digest = match recompute_policy_version_digest_locked(&mut tx, version_id).await {
+        Ok(digest) => digest,
+        Err(resp) => {
             let _ = tx.rollback().await;
-            return not_found();
-        }
-        Err(e) => {
-            let _ = tx.rollback().await;
-            tracing::error!("Failed to accept policy version {version_id}: {e}");
-            return internal_error("Failed to publish policy version");
+            return resp;
         }
     };
 
-    // Step 3: set the pointer — BEFORE trigger fires and sees version is now 'accepted'
-    if let Err(e) = sqlx::query(
-        r#"UPDATE deployment_policies
-           SET current_published_version_id = $1
-           WHERE id = $2"#,
-    )
-    .bind(id)
-    .bind(policy_lineage_id)
-    .execute(&mut *tx)
-    .await
-    {
-        let _ = tx.rollback().await;
-        tracing::error!("Failed to set published pointer for {version_id}: {e}");
-        return internal_error("Failed to update published pointer");
+    // Verify expected digest if provided
+    if let Some(expected_digest) = &payload.expected_semantic_digest {
+        if expected_digest != &computed_digest {
+            let _ = tx.rollback().await;
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": "Semantic digest mismatch",
+                    "message": "The provided digest does not match the current digest. The version may have been modified.",
+                    "code": "DIGEST_MISMATCH"
+                })),
+            )
+                .into_response();
+        }
     }
 
-    // COMMIT — DEFERRED trigger validates pointer is set
+    // Apply trigger-safe publication sequence (including audit event)
+    let published = match apply_policy_publication_locked(
+        &mut tx,
+        user_id,
+        version_id,
+        version_row.policy_id,
+        computed_digest.clone(),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(resp) => {
+            let _ = tx.rollback().await;
+            return resp;
+        }
+    };
+
+    // Commit transaction
     if let Err(e) = tx.commit().await {
         tracing::error!("Failed to commit policy publication {version_id}: {e}");
         return internal_error("Failed to commit publication");
     }
 
     let response = PublishPolicyVersionResponse {
-        version_id: id,
-        publication_state: state,
-        published_at,
-        semantic_digest: digest,
+        version_id: published.version_id,
+        publication_state: published.publication_state,
+        published_at: published.published_at,
+        semantic_digest: published.semantic_digest,
     };
     (StatusCode::OK, Json(response)).into_response()
 }
@@ -931,7 +1343,7 @@ pub async fn publish_bundle_version(
 ) -> impl IntoResponse {
     use crate::api::models::PublishBundleVersionResponse;
 
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
 
@@ -939,23 +1351,51 @@ pub async fn publish_bundle_version(
         return forbidden();
     }
 
-    // Load the bundle version
-    let bundle_result = sqlx::query_as::<_, (Uuid, Uuid, String, String, String, String)>(
-        r#"SELECT id, bundle_id, publication_state, semantic_digest, version, trust_state
-           FROM compliance_bundle_versions WHERE id = $1"#,
+    // Begin transaction immediately after RBAC
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return internal_error("Failed to start transaction"),
+    };
+
+    // Load and lock the bundle version
+    #[derive(sqlx::FromRow)]
+    struct BundleVersionRow {
+        id: Uuid,
+        bundle_id: Uuid,
+        publication_state: String,
+        trust_state: String,
+        name: String,
+        framework: String,
+        framework_version: Option<String>,
+        description: Option<String>,
+        layer: String,
+        owner: String,
+    }
+
+    let bundle_row = match sqlx::query_as::<_, BundleVersionRow>(
+        r#"SELECT id, bundle_id, publication_state, trust_state, name, framework,
+                  framework_version, description, layer, owner
+           FROM compliance_bundle_versions WHERE id = $1 FOR UPDATE"#,
     )
     .bind(version_id)
-    .fetch_optional(&pool)
-    .await;
+    .fetch_optional(&mut *tx)
+    .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            let _ = tx.rollback().await;
+            return not_found();
+        }
+        Err(e) => {
+            let _ = tx.rollback().await;
+            tracing::error!("Failed to load bundle version: {e}");
+            return internal_error("Failed to load bundle version");
+        }
+    };
 
-    let (_, bundle_id, publication_state, digest, _version, bundle_trust_state) =
-        match bundle_result {
-            Ok(Some(v)) => v,
-            Ok(None) => return not_found(),
-            Err(_) => return internal_error("Failed to load bundle version"),
-        };
-
-    if bundle_trust_state != "trusted" {
+    // Validate trust requirement
+    if bundle_row.trust_state != "trusted" {
+        let _ = tx.rollback().await;
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({
@@ -967,23 +1407,9 @@ pub async fn publish_bundle_version(
             .into_response();
     }
 
-    // Verify digest if provided
-    if let Some(expected_digest) = &payload.expected_semantic_digest {
-        if expected_digest != &digest {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(serde_json::json!({
-                    "error": "Semantic digest mismatch",
-                    "message": "The provided digest does not match the stored digest. The version may have been modified.",
-                    "code": "DIGEST_MISMATCH"
-                })),
-            )
-                .into_response();
-        }
-    }
-
     // Reject if already published
-    if publication_state == "accepted" {
+    if bundle_row.publication_state == "accepted" {
+        let _ = tx.rollback().await;
         return (
             StatusCode::CONFLICT,
             Json(serde_json::json!({
@@ -995,41 +1421,91 @@ pub async fn publish_bundle_version(
             .into_response();
     }
 
-    // Start a transaction to ensure atomicity
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
-        Err(_) => return internal_error("Failed to start transaction"),
-    };
+    // Load membership in policy_order (semantic order)
+    #[derive(sqlx::FromRow)]
+    struct MembershipRow {
+        policy_version_id: Uuid,
+        selected: bool,
+    }
 
-    // Verify all included policies are published or can be auto-published
-    let policies_result = sqlx::query_as::<_, (Uuid, String, String, String)>(
-        r#"SELECT pv.id, pv.publication_state, pv.implementation_state, pv.trust_state
-           FROM compliance_bundle_version_policies cbvp
-           JOIN deployment_policy_versions pv ON cbvp.policy_version_id = pv.id
-           WHERE cbvp.bundle_version_id = $1 AND cbvp.selected = TRUE"#,
+    let membership = match sqlx::query_as::<_, MembershipRow>(
+        r#"SELECT policy_version_id, selected
+           FROM compliance_bundle_version_policies
+           WHERE bundle_version_id = $1
+           ORDER BY policy_order ASC"#,
     )
     .bind(version_id)
     .fetch_all(&mut *tx)
-    .await;
-
-    let policies = match policies_result {
-        Ok(p) => p,
+    .await
+    {
+        Ok(m) => m,
         Err(e) => {
             let _ = tx.rollback().await;
-            tracing::error!("Failed to load bundle policies for {version_id}: {e}");
-            return internal_error("Failed to load bundle policies");
+            tracing::error!("Failed to load bundle membership: {e}");
+            return internal_error("Failed to load bundle membership");
         }
     };
 
-    let mut auto_published_count = 0i32;
+    // Collect selected member IDs for locking in deterministic UUID order
+    let mut member_ids: Vec<Uuid> = membership.iter().filter(|m| m.selected).map(|m| m.policy_version_id).collect();
+    member_ids.sort(); // deterministic lock order
+    member_ids.dedup();
 
-    // Check and optionally auto-publish draft policies.
-    // NOTE: In policies, `policy_id` below is the policy VERSION id, not the lineage id.
-    for (policy_version_id, state, implementation_state, trust_state) in &policies {
+    // Load and lock all members in sorted UUID order
+    #[derive(sqlx::FromRow)]
+    struct MemberRow {
+        id: Uuid,
+        policy_id: Uuid,
+        publication_state: String,
+        implementation_state: String,
+        trust_state: String,
+    }
+
+    let locked_members = match sqlx::query_as::<_, MemberRow>(
+        r#"SELECT id, policy_id, publication_state, implementation_state, trust_state
+           FROM deployment_policy_versions
+           WHERE id = ANY($1)
+           ORDER BY id ASC
+           FOR UPDATE"#,
+    )
+    .bind(&member_ids)
+    .fetch_all(&mut *tx)
+    .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = tx.rollback().await;
+            tracing::error!("Failed to load member versions: {e}");
+            return internal_error("Failed to load bundle members");
+        }
+    };
+
+    // Build a map of locked members by ID
+    let mut member_map: std::collections::HashMap<Uuid, MemberRow> =
+        locked_members.into_iter().map(|m| (m.id, m)).collect();
+
+    let mut auto_published_count = 0i32;
+    let mut auto_published_ids = Vec::new();
+
+    // Validate and optionally auto-publish each selected member in policy_order
+    for member in &membership {
+        if !member.selected {
+            continue;
+        }
+
+        let member_row = match member_map.get(&member.policy_version_id) {
+            Some(m) => m,
+            None => {
+                let _ = tx.rollback().await;
+                return internal_error("Failed to find locked member");
+            }
+        };
+
+        // Validate trust for executable members
         if matches!(
-            implementation_state.as_str(),
+            member_row.implementation_state.as_str(),
             "native" | "external" | "manual"
-        ) && trust_state != "trusted"
+        ) && member_row.trust_state != "trusted"
         {
             let _ = tx.rollback().await;
             return (
@@ -1038,74 +1514,46 @@ pub async fn publish_bundle_version(
                     "error": "Untrusted policy member",
                     "message": "Executable bundle members must be trusted before publication",
                     "code": "POLICY_NOT_TRUSTED",
-                    "policy_version_id": policy_version_id
+                    "policy_version_id": member.policy_version_id
                 })),
             )
                 .into_response();
         }
-        if state == "accepted" {
-            // Already published; nothing to do.
+
+        if member_row.publication_state == "accepted" {
+            // Already published; skip
             continue;
         }
 
-        if state == "draft" && payload.auto_publish_draft_policies.unwrap_or(false) {
-            // Fetch the policy lineage id for this version
-            let lineage_row = sqlx::query_as::<_, (Uuid,)>(
-                "SELECT policy_id FROM deployment_policy_versions WHERE id = $1",
-            )
-            .bind(policy_version_id)
-            .fetch_optional(&mut *tx)
-            .await;
-
-            let policy_lineage_id = match lineage_row {
-                Ok(Some((lid,))) => lid,
-                _ => {
+        if member_row.publication_state == "draft" && payload.auto_publish_draft_policies.unwrap_or(false) {
+            // Recompute and validate member digest while locked
+            let member_digest = match recompute_policy_version_digest_locked(&mut tx, member.policy_version_id).await {
+                Ok(d) => d,
+                Err(resp) => {
                     let _ = tx.rollback().await;
-                    return internal_error("Failed to load policy lineage for auto-publish");
+                    return resp;
                 }
             };
 
-            // Auto-publish using trigger-safe order:
-            // 1. Clear draft pointer, 2. Accept version, 3. Set pointer.
-            let _ = sqlx::query(
-                "UPDATE deployment_policies SET current_draft_version_id = NULL \
-                 WHERE id = $1 AND current_draft_version_id = $2",
+            // Auto-publish using shared helper (which writes audit event)
+            match apply_policy_publication_locked(
+                &mut tx,
+                user_id,
+                member.policy_version_id,
+                member_row.policy_id,
+                member_digest,
             )
-            .bind(policy_lineage_id)
-            .bind(policy_version_id)
-            .execute(&mut *tx)
-            .await;
-
-            // Accept version first (DEFERRED trigger queued)
-            if let Err(e) = sqlx::query(
-                "UPDATE deployment_policy_versions \
-                 SET publication_state = 'accepted', published_at = CURRENT_TIMESTAMP \
-                 WHERE id = $1",
-            )
-            .bind(policy_version_id)
-            .execute(&mut *tx)
             .await
             {
-                let _ = tx.rollback().await;
-                tracing::error!("Failed to auto-publish included policy version: {e}");
-                return internal_error("Failed to auto-publish included policy (state)");
+                Ok(_) => {
+                    auto_published_count += 1;
+                    auto_published_ids.push(member.policy_version_id);
+                }
+                Err(resp) => {
+                    let _ = tx.rollback().await;
+                    return resp;
+                }
             }
-
-            // Then set pointer (BEFORE trigger sees accepted version)
-            if let Err(e) = sqlx::query(
-                "UPDATE deployment_policies SET current_published_version_id = $2 WHERE id = $1",
-            )
-            .bind(policy_lineage_id)
-            .bind(policy_version_id)
-            .execute(&mut *tx)
-            .await
-            {
-                let _ = tx.rollback().await;
-                tracing::error!("Failed to set policy published pointer during auto-publish: {e}");
-                return internal_error("Failed to auto-publish included policy (pointer)");
-            }
-
-            auto_published_count += 1;
         } else {
             // Draft without auto-publish, or invalid state
             let _ = tx.rollback().await;
@@ -1113,8 +1561,7 @@ pub async fn publish_bundle_version(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(serde_json::json!({
                     "error": "Draft member not eligible",
-                    "message": "Bundle contains an unpublished policy version. \
-                                Set auto_publish_draft_policies=true to publish them automatically.",
+                    "message": "Bundle contains an unpublished policy version. Set auto_publish_draft_policies=true to publish them automatically.",
                     "code": "DRAFT_MEMBER_NOT_ALLOWED"
                 })),
             )
@@ -1122,24 +1569,52 @@ pub async fn publish_bundle_version(
         }
     }
 
-    // Publish bundle atomically using the trigger-safe order:
-    //   1. Clear draft pointer if it points to this version.
-    //   2. Accept bundle version state (DEFERRED trigger queued at commit).
-    //   3. Set pointer (BEFORE trigger sees accepted version, passes).
-    //   4. COMMIT (DEFERRED trigger validates pointer is set).
+    // Recompute and validate bundle digest
+    let computed_bundle_digest = match recompute_bundle_version_digest_locked(&mut tx, version_id).await {
+        Ok(digest) => digest,
+        Err(resp) => {
+            let _ = tx.rollback().await;
+            return resp;
+        }
+    };
 
+    // Verify expected digest if provided
+    if let Some(expected_digest) = &payload.expected_semantic_digest {
+        if expected_digest != &computed_bundle_digest {
+            let _ = tx.rollback().await;
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": "Semantic digest mismatch",
+                    "message": "The provided digest does not match the current digest. The version may have been modified.",
+                    "code": "DIGEST_MISMATCH"
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // Apply bundle trigger-safe publication sequence
     // Step 1: clear draft pointer
     let _ = sqlx::query(
-        "UPDATE compliance_bundles SET current_draft_version_id = NULL \
-         WHERE id = $1 AND current_draft_version_id = $2",
+        r#"UPDATE compliance_bundles
+           SET current_draft_version_id = NULL
+           WHERE id = $1 AND current_draft_version_id = $2"#,
     )
-    .bind(bundle_id)
+    .bind(bundle_row.bundle_id)
     .bind(version_id)
     .execute(&mut *tx)
     .await;
 
     // Step 2: accept bundle version (DEFERRED trigger queued)
-    let publish_result = sqlx::query_as::<_, (Uuid, String, chrono::DateTime<chrono::Utc>)>(
+    #[derive(sqlx::FromRow)]
+    struct BundlePublishRow {
+        id: Uuid,
+        publication_state: String,
+        published_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    let publish_result = match sqlx::query_as::<_, BundlePublishRow>(
         r#"UPDATE compliance_bundle_versions
            SET publication_state = 'accepted', published_at = CURRENT_TIMESTAMP
            WHERE id = $1
@@ -1147,9 +1622,8 @@ pub async fn publish_bundle_version(
     )
     .bind(version_id)
     .fetch_optional(&mut *tx)
-    .await;
-
-    let (id, state, published_at) = match publish_result {
+    .await
+    {
         Ok(Some(row)) => row,
         Ok(None) => {
             let _ = tx.rollback().await;
@@ -1157,36 +1631,62 @@ pub async fn publish_bundle_version(
         }
         Err(e) => {
             let _ = tx.rollback().await;
-            tracing::error!("Failed to accept bundle version {version_id}: {e}");
+            tracing::error!("Failed to accept bundle version: {e}");
             return internal_error("Failed to publish bundle version");
         }
     };
 
-    // Step 3: set pointer (BEFORE trigger sees accepted bundle version, passes)
-    if let Err(e) =
-        sqlx::query("UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2")
-            .bind(id)
-            .bind(bundle_id)
-            .execute(&mut *tx)
-            .await
+    // Step 3: set pointer (BEFORE trigger sees accepted version)
+    if let Err(e) = sqlx::query(
+        r#"UPDATE compliance_bundles
+           SET current_published_version_id = $1
+           WHERE id = $2"#,
+    )
+    .bind(publish_result.id)
+    .bind(bundle_row.bundle_id)
+    .execute(&mut *tx)
+    .await
     {
         let _ = tx.rollback().await;
-        tracing::error!("Failed to set bundle published pointer {version_id}: {e}");
+        tracing::error!("Failed to set bundle published pointer: {e}");
         return internal_error("Failed to update bundle published pointer");
     }
 
-    // Step 4: COMMIT — DEFERRED trigger validates pointer is set
+    // Write bundle publication audit event
+    let bundle_audit_metadata = serde_json::json!({
+        "bundle_id": bundle_row.bundle_id,
+        "bundle_version_id": version_id,
+        "semantic_digest": computed_bundle_digest,
+        "new_publication_state": publish_result.publication_state,
+        "auto_published_member_count": auto_published_count,
+    });
+
+    if let Err(e) = write_audit_event(
+        &mut tx,
+        user_id,
+        "bundle_version_published",
+        &version_id.to_string(),
+        bundle_audit_metadata,
+    )
+    .await
+    {
+        let _ = tx.rollback().await;
+        tracing::error!("Failed to write bundle publication audit event: {e}");
+        return internal_error("Failed to write audit event");
+    }
+
+    // Commit transaction (audit events for member publications already written by apply_policy_publication_locked)
     if let Err(e) = tx.commit().await {
         tracing::error!("Failed to commit bundle publication {version_id}: {e}");
         return internal_error("Failed to commit bundle publication");
     }
 
     let response = PublishBundleVersionResponse {
-        version_id: id,
-        publication_state: state,
-        published_at,
-        semantic_digest: digest,
-        published_policy_count: policies.len() as i32,
+        version_id: publish_result.id,
+        publication_state: publish_result.publication_state,
+        published_at: publish_result.published_at,
+        semantic_digest: computed_bundle_digest,
+        published_policy_count: membership.iter().filter(|m| m.selected).count() as i32,
         auto_published_policy_count: auto_published_count,
     };
     (StatusCode::OK, Json(response)).into_response()
@@ -6138,6 +6638,8 @@ mod tests {
     /// Create a minimal draft policy and return (policy_id, version_id, digest).
     /// Does NOT insert a manual version — relies on the trigger to create '0.1.0'.
     async fn make_draft_policy(pool: &PgPool, name: &str) -> (Uuid, Uuid, String) {
+        use crate::compliance::digest::PolicyVersionCanonical;
+
         let policy_id = Uuid::new_v4();
         sqlx::query(
             r#"INSERT INTO deployment_policies (id, name, policy_type, enabled, config)
@@ -6150,8 +6652,26 @@ mod tests {
         .expect("insert deployment_policy");
 
         // The trigger creates a '0.1.0' draft version; fetch it
-        let (version_id, digest): (Uuid, String) = sqlx::query_as(
-            r#"SELECT id, semantic_digest FROM deployment_policy_versions
+        #[derive(sqlx::FromRow)]
+        struct DraftVersionRow {
+            id: Uuid,
+            name: String,
+            description: Option<String>,
+            policy_type: String,
+            implementation_state: String,
+            execution_phase: String,
+            config: serde_json::Value,
+            compliance_metadata: serde_json::Value,
+            dependencies: serde_json::Value,
+            opaque_xml: Option<String>,
+            enabled_by_default: Option<bool>,
+        }
+
+        let version_row: DraftVersionRow = sqlx::query_as(
+            r#"SELECT id, name, description, policy_type, implementation_state,
+                      execution_phase, config, compliance_metadata, dependencies,
+                      opaque_xml, enabled_by_default
+               FROM deployment_policy_versions
                WHERE policy_id = $1 AND version = '0.1.0'"#,
         )
         .bind(policy_id)
@@ -6159,7 +6679,32 @@ mod tests {
         .await
         .expect("fetch trigger-created version");
 
-        (policy_id, version_id, digest)
+        // Compute the real canonical digest
+        let canonical = PolicyVersionCanonical {
+            name: version_row.name,
+            description: version_row.description,
+            policy_type: version_row.policy_type,
+            implementation_state: version_row.implementation_state,
+            execution_phase: version_row.execution_phase,
+            config: version_row.config,
+            compliance_metadata: version_row.compliance_metadata,
+            dependencies: version_row.dependencies,
+            opaque_xml_digest: PolicyVersionCanonical::digest_opaque_xml(version_row.opaque_xml.as_deref()),
+            enabled_by_default: version_row.enabled_by_default,
+        };
+        let computed_digest = canonical.compute_digest();
+
+        // Update the version with the computed digest
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET semantic_digest = $1 WHERE id = $2",
+        )
+        .bind(&computed_digest)
+        .bind(version_row.id)
+        .execute(pool)
+        .await
+        .expect("update fixture digest");
+
+        (policy_id, version_row.id, computed_digest)
     }
 
     async fn make_draft_cve_policy(pool: &PgPool, name: &str) -> (Uuid, Uuid) {
@@ -6230,15 +6775,17 @@ mod tests {
     /// Returns (bundle_id, bundle_version_id, current_semantic_digest).
     ///
     /// The `invalidate_bundle_digest_on_membership_change` trigger sets the digest to
-    /// 'pending' after membership inserts, so we re-read it after all inserts.
+    /// 'pending' after membership inserts. This fixture computes the correct canonical digest.
     async fn make_draft_bundle(
         pool: &PgPool,
         name: &str,
         policy_version_ids: &[Uuid],
     ) -> (Uuid, Uuid, String) {
+        use crate::compliance::digest::{BundleVersionCanonical, BundleMembershipEntry, load_bundle_membership};
+
         let bundle_id = Uuid::new_v4();
         let bv_id = Uuid::new_v4();
-        let initial_digest = format!("test-digest-{}", Uuid::new_v4().simple());
+        let placeholder_digest = "placeholder";
 
         sqlx::query(
             r#"INSERT INTO compliance_bundles (id, name, framework, layer, owner)
@@ -6258,7 +6805,7 @@ mod tests {
         .bind(bv_id)
         .bind(bundle_id)
         .bind(name)
-        .bind(&initial_digest)
+        .bind(placeholder_digest)
         .execute(pool)
         .await
         .expect("insert compliance_bundle_versions");
@@ -6284,18 +6831,102 @@ mod tests {
             .expect("insert membership");
         }
 
-        // The invalidate_bundle_digest_on_membership_change trigger sets semantic_digest
-        // to 'pending' after each membership INSERT. We restore a deterministic value
-        // so tests that pass expected_semantic_digest get a predictable match.
-        let final_digest = format!("test-digest-final-{}", bv_id.simple());
+        // Load bundle and membership to compute real canonical digest
+        #[derive(sqlx::FromRow)]
+        struct BundleVersionRow {
+            name: String,
+            framework: String,
+            framework_version: Option<String>,
+            description: Option<String>,
+            layer: String,
+            owner: String,
+        }
+
+        let bundle_row: BundleVersionRow = sqlx::query_as(
+            "SELECT name, framework, framework_version, description, layer, owner \
+             FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(bv_id)
+        .fetch_one(pool)
+        .await
+        .expect("load bundle for digest");
+
+        // Load membership in policy_order
+        #[derive(sqlx::FromRow)]
+        struct MembershipRow {
+            policy_version_id: Uuid,
+            selected: bool,
+        }
+
+        let membership_rows: Vec<MembershipRow> = sqlx::query_as(
+            "SELECT policy_version_id, selected \
+             FROM compliance_bundle_version_policies \
+             WHERE bundle_version_id = $1 ORDER BY policy_order ASC",
+        )
+        .bind(bv_id)
+        .fetch_all(pool)
+        .await
+        .expect("load membership");
+
+        let members: Vec<BundleMembershipEntry> = membership_rows
+            .into_iter()
+            .map(|r| BundleMembershipEntry {
+                policy_version_id: r.policy_version_id,
+                selected: r.selected,
+            })
+            .collect();
+
+        // Compute the real canonical digest
+        let canonical = BundleVersionCanonical {
+            name: bundle_row.name,
+            framework: bundle_row.framework,
+            framework_version: bundle_row.framework_version,
+            description: bundle_row.description,
+            layer: bundle_row.layer,
+            owner: bundle_row.owner,
+            members,
+        };
+        let computed_digest = canonical.compute_digest();
+
+        // Update the bundle version with the computed digest
         sqlx::query("UPDATE compliance_bundle_versions SET semantic_digest = $1 WHERE id = $2")
-            .bind(&final_digest)
+            .bind(&computed_digest)
             .bind(bv_id)
             .execute(pool)
             .await
-            .expect("restore deterministic digest");
+            .expect("update bundle fixture digest");
 
-        (bundle_id, bv_id, final_digest)
+        (bundle_id, bv_id, computed_digest)
+    }
+
+    /// Trust a policy version directly in the database.
+    /// Used in test fixture setup when publication prerequisites need to be met.
+    async fn db_trust_policy_version(pool: &PgPool, version_id: Uuid, admin_id: Uuid) {
+        sqlx::query(
+            "UPDATE deployment_policy_versions \
+             SET trust_state = 'trusted', trusted_by = $2, trusted_at = CURRENT_TIMESTAMP \
+             WHERE id = $1",
+        )
+        .bind(version_id)
+        .bind(admin_id)
+        .execute(pool)
+        .await
+        .expect("db_trust_policy_version");
+    }
+
+    /// Trust a bundle version directly in the database.
+    /// Used in test fixture setup when publication prerequisites need to be met.
+    async fn db_trust_bundle_version(pool: &PgPool, version_id: Uuid, admin_id: Uuid) {
+        sqlx::query(
+            "UPDATE compliance_bundle_versions \
+             SET trust_state = 'trusted', trusted_by = $2, trusted_at = CURRENT_TIMESTAMP \
+             WHERE id = $1",
+        )
+        .bind(version_id)
+        .bind(admin_id)
+        .execute(pool)
+        .await
+        .expect("db_trust_bundle_version");
     }
 
     // ────────────────────────────────────────────────────────────────────────────
@@ -6663,9 +7294,13 @@ mod tests {
     #[ignore = "requires live database connection"]
     async fn publish_policy_version_succeeds() {
         let pool = test_pool_from_env().await;
-        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
         let (policy_id, version_id, digest) =
             make_draft_policy(&pool, &format!("pub-ok-{}", Uuid::new_v4().simple())).await;
+
+        // Trust the version before publication
+        db_trust_policy_version(&pool, version_id, admin_id).await;
+
         let base = spawn_phase1_server(pool.clone()).await;
 
         let resp = reqwest::Client::new()
@@ -6720,9 +7355,13 @@ mod tests {
     #[ignore = "requires live database connection"]
     async fn publish_policy_digest_mismatch_returns_422() {
         let pool = test_pool_from_env().await;
-        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
         let (_, version_id, _) =
             make_draft_policy(&pool, &format!("pub-mismatch-{}", Uuid::new_v4().simple())).await;
+
+        // Trust the version before publication
+        db_trust_policy_version(&pool, version_id, admin_id).await;
+
         let base = spawn_phase1_server(pool.clone()).await;
 
         let resp = reqwest::Client::new()
@@ -6752,9 +7391,13 @@ mod tests {
     #[ignore = "requires live database connection"]
     async fn publish_already_published_returns_409() {
         let pool = test_pool_from_env().await;
-        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
         let (policy_id, version_id, digest) =
             make_draft_policy(&pool, &format!("pub-409-{}", Uuid::new_v4().simple())).await;
+
+        // Trust the version before publication
+        db_trust_policy_version(&pool, version_id, admin_id).await;
+
         let base = spawn_phase1_server(pool.clone()).await;
         let client = reqwest::Client::new();
 
@@ -6801,16 +7444,21 @@ mod tests {
     #[ignore = "requires live database connection"]
     async fn publish_policy_operator_forbidden() {
         let pool = test_pool_from_env().await;
-        let (_, token) = session_token_for_role(&pool, AuthRole::Operator).await;
+        let (_, op_token) = session_token_for_role(&pool, AuthRole::Operator).await;
         let (_, version_id, digest) =
             make_draft_policy(&pool, &format!("pub-op-{}", Uuid::new_v4().simple())).await;
+
+        // Trust the version before attempting publish (even though operator will be denied)
+        let (admin_id, _) = session_token_for_role(&pool, AuthRole::Admin).await;
+        db_trust_policy_version(&pool, version_id, admin_id).await;
+
         let base = spawn_phase1_server(pool.clone()).await;
 
         let resp = reqwest::Client::new()
             .post(format!(
                 "{base}/api/v1/policy-versions/{version_id}/publish"
             ))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={op_token}"))
             .json(&serde_json::json!({"expected_semantic_digest": digest}))
             .send()
             .await
@@ -6836,9 +7484,12 @@ mod tests {
     #[ignore = "requires live database connection"]
     async fn policy_draft_derived_from_published() {
         let pool = test_pool_from_env().await;
-        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
         let pol_name = format!("draft-derive-{}", Uuid::new_v4().simple());
         let (policy_id, version_id, digest) = make_draft_policy(&pool, &pol_name).await;
+
+        // Trust the version before publishing
+        db_trust_policy_version(&pool, version_id, admin_id).await;
 
         // Publish via API first
         let base = spawn_phase1_server(pool.clone()).await;
@@ -7024,9 +7675,9 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
-    async fn publish_bundle_with_single_policy_succeeds() {
+     async fn publish_bundle_with_single_policy_succeeds() {
         let pool = test_pool_from_env().await;
-        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
 
         // Create policy and publish it directly
         let (policy_id, pv_id, _) =
@@ -7039,6 +7690,9 @@ mod tests {
             &[pv_id],
         )
         .await;
+
+        // Trust the bundle before publishing
+        db_trust_bundle_version(&pool, bv_id, admin_id).await;
 
         let base = spawn_phase1_server(pool.clone()).await;
         let resp = reqwest::Client::new()
@@ -7092,7 +7746,7 @@ mod tests {
     async fn publish_bundle_multi_policy_with_auto_publish() {
         // Two policies: one already published, one draft. Auto-publish enabled.
         let pool = test_pool_from_env().await;
-        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
 
         let (p1_id, pv1_id, _) =
             make_draft_policy(&pool, &format!("bpol-m1-{}", Uuid::new_v4().simple())).await;
@@ -7101,6 +7755,8 @@ mod tests {
         let (_, pv2_id, _) =
             make_draft_policy(&pool, &format!("bpol-m2-{}", Uuid::new_v4().simple())).await;
         // pv2 remains draft
+        // Trust pv2 so it can be auto-published
+        db_trust_policy_version(&pool, pv2_id, admin_id).await;
 
         let (bundle_id, bv_id, digest) = make_draft_bundle(
             &pool,
@@ -7108,6 +7764,9 @@ mod tests {
             &[pv1_id, pv2_id],
         )
         .await;
+
+        // Trust the bundle before publishing
+        db_trust_bundle_version(&pool, bv_id, admin_id).await;
 
         let base = spawn_phase1_server(pool.clone()).await;
         let resp = reqwest::Client::new()
@@ -7183,7 +7842,7 @@ mod tests {
     #[ignore = "requires live database connection"]
     async fn publish_bundle_already_published_returns_409() {
         let pool = test_pool_from_env().await;
-        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
         let (p_id, pv_id, _) =
             make_draft_policy(&pool, &format!("bpol-409-{}", Uuid::new_v4().simple())).await;
         db_publish_policy_version(&pool, p_id, pv_id).await;
@@ -7193,6 +7852,9 @@ mod tests {
             &[pv_id],
         )
         .await;
+
+        // Trust the bundle before publishing
+        db_trust_bundle_version(&pool, bv_id, admin_id).await;
 
         let base = spawn_phase1_server(pool.clone()).await;
         let client = reqwest::Client::new();
