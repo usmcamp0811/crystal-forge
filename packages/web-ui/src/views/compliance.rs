@@ -603,6 +603,7 @@ pub fn ComplianceView() -> Element {
         if is_admin && *show_new_bundle.read() {
             NewBundleModal {
                 policies: policies.read().clone(),
+                bundles: bundles.read().clone(),
                 environments: environments.read().clone(),
                 on_close: move |_| show_new_bundle.set(false),
                 on_created: move |bundle: ComplianceBundleSummary| {
@@ -630,6 +631,7 @@ pub fn ComplianceView() -> Element {
                 EditBundleModal {
                     bundle,
                     policies: policies.read().clone(),
+                    bundles: bundles.read().clone(),
                     environments: environments.read().clone(),
                     on_close: move |_| show_edit_bundle.set(false),
                     on_saved: move |updated: ComplianceBundleSummary| {
@@ -3135,9 +3137,180 @@ fn ExportModal(props: ExportModalProps) -> Element {
 
 // ─── New bundle modal ─────────────────────────────────────────────────────────
 
+const STANDARD_BUNDLE_FRAMEWORKS: [&str; 4] =
+    ["DISA STIG", "NIST 800-53", "CMMC 2.0", "CIS Benchmark"];
+const STANDARD_BUNDLE_FRAMEWORK_ALIASES: [&str; 5] = [
+    "DISA STIG",
+    "NIST 800-53",
+    "CMMC",
+    "CMMC 2.0",
+    "CIS Benchmark",
+];
+const DEFINE_NEW_FRAMEWORK: &str = "__define_new_framework__";
+
+fn is_standard_bundle_framework(framework: &str) -> bool {
+    STANDARD_BUNDLE_FRAMEWORK_ALIASES
+        .iter()
+        .any(|standard| framework.trim().eq_ignore_ascii_case(standard))
+}
+
+fn custom_bundle_frameworks(
+    bundles: &[ComplianceBundleSummary],
+    policies: &[DeploymentPolicySummary],
+) -> Vec<String> {
+    custom_framework_values(
+        bundles
+            .iter()
+            .map(|bundle| bundle.framework.as_str())
+            .chain(
+                policies
+                    .iter()
+                    .filter_map(|policy| policy.framework.as_deref()),
+            ),
+    )
+}
+
+fn custom_framework_values<'a>(frameworks: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut frameworks = frameworks
+        .into_iter()
+        .map(str::trim)
+        .filter(|framework| !framework.is_empty() && !is_standard_bundle_framework(framework))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    frameworks.sort_by_key(|framework| framework.to_ascii_lowercase());
+    frameworks.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    frameworks
+}
+
+fn accept_new_bundle_framework(
+    mut framework: Signal<String>,
+    mut new_framework: Signal<String>,
+    mut accepted_frameworks: Signal<Vec<String>>,
+    mut defining_new: Signal<bool>,
+) {
+    let value = new_framework.read().trim().to_string();
+    if value.is_empty() {
+        return;
+    }
+    if !is_standard_bundle_framework(&value)
+        && !accepted_frameworks
+            .read()
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&value))
+    {
+        accepted_frameworks.write().push(value.clone());
+    }
+    framework.set(value);
+    new_framework.set(String::new());
+    defining_new.set(false);
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct BundleFrameworkFieldProps {
+    framework: Signal<String>,
+    custom_frameworks: Vec<String>,
+}
+
+#[component]
+fn BundleFrameworkField(props: BundleFrameworkFieldProps) -> Element {
+    let mut framework = props.framework;
+    let mut defining_new = use_signal(|| false);
+    let mut new_framework = use_signal(String::new);
+    let mut accepted_frameworks = use_signal(Vec::<String>::new);
+    let current_framework = framework.read().clone();
+    let legacy_cmmc_value = current_framework
+        .trim()
+        .eq_ignore_ascii_case("CMMC")
+        .then_some(current_framework.clone());
+    let mut custom_frameworks = props.custom_frameworks.clone();
+    custom_frameworks.extend(accepted_frameworks.read().iter().cloned());
+    custom_frameworks.sort_by_key(|framework| framework.to_ascii_lowercase());
+    custom_frameworks.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+
+    rsx! {
+        div { class: "field",
+            label { "Framework" }
+            if *defining_new.read() {
+                div { style: "display:flex;gap:6px;",
+                    input {
+                        class: "input focus-ring",
+                        autofocus: true,
+                        placeholder: "e.g. Acme Internal Baseline",
+                        value: "{new_framework}",
+                        oninput: move |event| new_framework.set(event.value()),
+                        onkeydown: move |event| match event.key() {
+                            Key::Enter => accept_new_bundle_framework(
+                                framework,
+                                new_framework,
+                                accepted_frameworks,
+                                defining_new,
+                            ),
+                            Key::Escape => {
+                                new_framework.set(String::new());
+                                defining_new.set(false);
+                            }
+                            _ => {}
+                        },
+                    }
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        disabled: new_framework.read().trim().is_empty(),
+                        onclick: move |_| accept_new_bundle_framework(
+                            framework,
+                            new_framework,
+                            accepted_frameworks,
+                            defining_new,
+                        ),
+                        "Add"
+                    }
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        onclick: move |_| {
+                            new_framework.set(String::new());
+                            defining_new.set(false);
+                        },
+                        "Cancel"
+                    }
+                }
+            } else {
+                select {
+                    class: "input focus-ring",
+                    value: "{current_framework}",
+                    onchange: move |event| {
+                        let value = event.value();
+                        if value == DEFINE_NEW_FRAMEWORK {
+                            new_framework.set(String::new());
+                            defining_new.set(true);
+                        } else {
+                            framework.set(value);
+                        }
+                    },
+                    optgroup { label: "Standard",
+                        for standard in STANDARD_BUNDLE_FRAMEWORKS {
+                            option { value: "{standard}", "{standard}" }
+                        }
+                        if let Some(value) = legacy_cmmc_value {
+                            option { value: "{value}", "CMMC 2.0" }
+                        }
+                    }
+                    if !custom_frameworks.is_empty() {
+                        optgroup { label: "Custom",
+                            for custom in custom_frameworks {
+                                option { value: "{custom}", "{custom}" }
+                            }
+                        }
+                    }
+                    option { value: DEFINE_NEW_FRAMEWORK, "+ Define new framework…" }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Props, Clone, PartialEq)]
 struct NewBundleModalProps {
     policies: Vec<DeploymentPolicySummary>,
+    bundles: Vec<ComplianceBundleSummary>,
     environments: Vec<EnvironmentSummary>,
     on_close: EventHandler<()>,
     on_created: EventHandler<ComplianceBundleSummary>,
@@ -3154,6 +3327,7 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
     let mut query = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
     let mut saving = use_signal(|| false);
+    let framework_options = custom_bundle_frameworks(&props.bundles, &props.policies);
 
     let can_save = !name.read().trim().is_empty() && !selected_policy_ids.read().is_empty();
 
@@ -3222,17 +3396,7 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
 
                     // Framework + description row
                     div { style: "display:grid;grid-template-columns:1fr 2fr;gap:14px;",
-                        div { class: "field",
-                            label { "Framework" }
-                            select {
-                                class: "input focus-ring",
-                                value: "{framework}",
-                                onchange: move |e| framework.set(e.value()),
-                                for opt in ["DISA STIG","NIST 800-53","CMMC","CIS Benchmark","Internal","Custom"] {
-                                    option { value: "{opt}", "{opt}" }
-                                }
-                            }
-                        }
+                        BundleFrameworkField { framework, custom_frameworks: framework_options }
                         div { class: "field",
                             label { "Description" }
                             input {
@@ -3398,6 +3562,7 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
 struct EditBundleModalProps {
     bundle: ComplianceBundleSummary,
     policies: Vec<DeploymentPolicySummary>,
+    bundles: Vec<ComplianceBundleSummary>,
     environments: Vec<EnvironmentSummary>,
     on_close: EventHandler<()>,
     on_saved: EventHandler<ComplianceBundleSummary>,
@@ -3421,6 +3586,7 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
     let mut saving = use_signal(|| false);
     let mut confirm_delete = use_signal(|| false);
     let mut delete_busy = use_signal(|| false);
+    let framework_options = custom_bundle_frameworks(&props.bundles, &props.policies);
 
     let has_immutable_history = props.bundle.versions.iter().any(|version| {
         matches!(
@@ -3535,17 +3701,7 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                     }
 
                     div { style: "display:grid;grid-template-columns:1fr 2fr;gap:14px;",
-                        div { class: "field",
-                            label { "Framework" }
-                            select {
-                                class: "input focus-ring",
-                                value: "{framework}",
-                                onchange: move |e| framework.set(e.value()),
-                                for opt in ["DISA STIG","NIST 800-53","CMMC","CIS Benchmark","Internal","Custom"] {
-                                    option { value: "{opt}", "{opt}" }
-                                }
-                            }
-                        }
+                        BundleFrameworkField { framework, custom_frameworks: framework_options }
                         div { class: "field",
                             label { "Description" }
                             input {
@@ -3853,5 +4009,29 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn custom_framework_catalog_excludes_standard_aliases_and_normalizes_values() {
+        assert_eq!(
+            custom_framework_values([
+                "DISA STIG",
+                "nist 800-53",
+                "CMMC",
+                "cmmc 2.0",
+                "CIS Benchmark",
+                "  Internal  ",
+                "internal",
+                "Custom Baseline",
+                "",
+            ]),
+            vec!["Custom Baseline", "Internal"]
+        );
+    }
+
+    #[test]
+    fn legacy_cmmc_is_a_standard_alias_without_normalizing_its_value() {
+        assert!(is_standard_bundle_framework("CMMC"));
+        assert!(!is_standard_bundle_framework("CMMC 3.0"));
     }
 }
