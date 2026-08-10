@@ -5160,10 +5160,23 @@ pub async fn policy_interchange_import(
     };
     let _ = expected_source_sha256;
 
-    let policies = match parse_policy_interchange_upload(&upload) {
+    // Use source-aware deterministic parsing to match preview behavior
+    let policies = match parse_policy_interchange_upload_with_source(&upload, &actual_source_sha256)
+    {
         Ok(policies) => policies,
         Err(message) => return bad_request(&message),
     };
+
+    // Validate no duplicate version IDs within the document
+    let mut seen_versions = std::collections::HashSet::new();
+    for policy in &policies {
+        if !seen_versions.insert(policy.version_id) {
+            return bad_request(&format!(
+                "Duplicate version ID {} in import document",
+                policy.version_id
+            ));
+        }
+    }
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
@@ -5488,11 +5501,13 @@ async fn load_and_plan_policy_reconciliation(
     let imported_version_ids: Vec<Uuid> = imported.iter().map(|p| p.version_id).collect();
     let imported_names: Vec<String> = imported.iter().map(|p| p.name.clone()).collect();
 
-    // Load policy versions that match imported IDs
+    // Load policy versions that match imported IDs OR belong to imported lineages
+    // This allows distinguishing new_version from new_lineage
     let matching_versions: Vec<(Uuid, Uuid, String, String)> = sqlx::query_as(
-        "SELECT id, policy_id, semantic_digest, policy_type FROM deployment_policy_versions WHERE id = ANY($1)"
+        "SELECT id, policy_id, semantic_digest, policy_type FROM deployment_policy_versions WHERE id = ANY($1) OR policy_id = ANY($2)"
     )
     .bind(&imported_version_ids)
+    .bind(&imported_lineage_ids)
     .fetch_all(pool)
     .await
     .map_err(|e| format!("Failed to load matching versions: {e}"))?;
