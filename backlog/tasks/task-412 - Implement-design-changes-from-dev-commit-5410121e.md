@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 01:12'
+updated_date: '2026-08-10 01:25'
 labels:
   - design
   - frontend
@@ -1423,6 +1423,13 @@ Phase 7 bundle framework UX: add a pure catalog in `packages/web-ui/src/views/co
 - Keep time-window, approvals, canary, manual, external, unbound, and opaque policies `not_checked` until their deployment-decision/manual-evidence context is durably available; do not manufacture a live read-time result.
 - Make evidence endpoint and affected rollups share resolved statuses, add unit tests for JSON result decoding/CVE mapping, and align missing web UI rollup fields.
 - Verify with focused server and web-ui Rust tests plus formatting; skip the user-directed web-ui Nix check.
+
+### Evidence parity and per-bundle attribution correction (2026-08-10)
+- Introduce one explicit effective-policy evidence materialization helper carrying lineage/version identity, exact-version metadata, effective config, mode, and centralized enabled state; use it in both drawer and effective rollups.
+- Replace combined-set-to-primary-bundle attribution with resolver-backed per-bundle effective sets. Keep direct policies explicitly outside bundle rows.
+- Make no-version bundle-system reads select the same authoritative current version/assignment-aware semantics as versioned reads, including post-delete selection paths.
+- Add transaction-backed PostgreSQL coverage for multi-assignment overlays, precedence, report-only attribution, and drawer/matrix/system-rollup parity from persisted deployed Nix/CVE evidence.
+- Run requested fmt/check/live compliance tests using only the repository PostgreSQL instance; do not run the web-ui Nix check unless web-ui sources change.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
