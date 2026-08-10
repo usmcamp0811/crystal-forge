@@ -277,6 +277,9 @@ async fn deletion_lifecycle_database_matrix() {
         .unwrap();
         let statement = if table == "compliance_assignment_value_overrides" {
             "INSERT INTO compliance_assignment_value_overrides (assignment_id, assignment_version_id, policy_version_id, value_path, value) VALUES ($1, $2, $3, 'enabled', 'true')".to_string()
+        } else if table == "compliance_assignment_additions" {
+            // Migration 0207 requires a NOT NULL addition_order per version.
+            "INSERT INTO compliance_assignment_additions (assignment_id, assignment_version_id, policy_version_id, addition_order) VALUES ($1, $2, $3, 0)".to_string()
         } else {
             format!(
                 "INSERT INTO {table} (assignment_id, assignment_version_id, policy_version_id) VALUES ($1, $2, $3)"
