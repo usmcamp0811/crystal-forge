@@ -3587,6 +3587,7 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
     let mut eligibility: Signal<Option<crate::api::models::DeletionEligibility>> =
         use_signal(|| None);
     let mut eligibility_loading = use_signal(|| false);
+    let mut eligibility_error = use_signal(|| None::<String>);
     let framework_options = custom_bundle_frameworks(&props.bundles, &props.policies);
 
     // Local pre-check from data already in the bundle summary.
@@ -3666,10 +3667,10 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
 
                 div { class: "modal-head",
                     h2 {
-                        Icon { name: IconName::Shield, size: 14 }
+                        span { style: "margin-right:6px;vertical-align:text-bottom;display:inline-flex;", Icon { name: IconName::Shield, size: 14 } }
                         " Edit compliance bundle"
                     }
-                    p { "A bundle represents a standard assembled from granular policies that each assert one thing." }
+                    p { "A bundle represents a standard (a STIG, NIST baseline, or your own) — assembled from granular policies that each assert one thing." }
                 }
 
                 div { class: "modal-body", style: "overflow-y:auto;",
@@ -3681,16 +3682,16 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                     }
 
                     div { style: "display:grid;grid-template-columns:2fr 1fr;gap:14px;",
-                        div { class: "field",
+                        div { class: "field", style: "margin-top:0;",
                             label { "Bundle name" }
                             input {
                                 class: "input focus-ring",
                                 value: "{name}",
-                                placeholder: "e.g. DISA RHEL9 STIG (v1r5)",
+                                placeholder: "e.g. Anduril NixOS STIG (v1r2)",
                                 oninput: move |e| name.set(e.value()),
                             }
                         }
-                        div { class: "field",
+                        div { class: "field", style: "margin-top:0;",
                             label { "Version / revision" }
                             input {
                                 class: "input focus-ring mono",
@@ -3702,9 +3703,9 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                         }
                     }
 
-                    div { style: "display:grid;grid-template-columns:1fr 2fr;gap:14px;",
+                    div { style: "display:grid;grid-template-columns:1fr 2fr;gap:14px;margin-top:14px;",
                         BundleFrameworkField { framework, custom_frameworks: framework_options }
-                        div { class: "field",
+                        div { class: "field", style: "margin-top:0;",
                             label { "Description" }
                             input {
                                 class: "input focus-ring",
@@ -3798,7 +3799,7 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                                             div { style: "min-width:0;flex:1;",
                                                 div { style: "display:flex;align-items:center;gap:8px;",
                                                     span { class: "mono", style: "font-size:12px;font-weight:600;", "{pname}" }
-                                                    span { class: "chip chip-unknown", style: "font-size:9px;", "{ptype}" }
+                                                    span { class: if ptype == "builtin" { "chip chip-unknown" } else { "chip chip-info" }, style: "font-size:9px;", "{ptype}" }
                                                 }
                                                 div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{pdesc}" }
                                             }
@@ -3809,10 +3810,10 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                         }
                     }
 
-                    if !can_save && !name.read().trim().is_empty() {
+                    if selected_policy_ids.read().is_empty() {
                         div { class: "help", style: "color:#fbbf24;margin-top:8px;",
                             Icon { name: IconName::Warn, size: 10 }
-                            " Select at least one policy."
+                            " Select at least one policy. A bundle is a collection of policies that together represent a standard."
                         }
                     }
 
@@ -3823,7 +3824,27 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                             "Danger zone"
                         }
 
-                        if let Some(elig) = eligibility.read().clone() {
+                        if let Some(preflight_error) = eligibility_error.read().clone() {
+                            div { class: "sd-callout sd-callout-danger", style: "font-size:12px;",
+                                Icon { name: IconName::Warn, size: 13 }
+                                div {
+                                    p { style: "margin:0 0 6px;font-weight:600;", "Could not determine whether this item can be permanently deleted." }
+                                    p { style: "margin:0 0 8px;", "{preflight_error}" }
+                                    button { class: "btn btn-ghost xs focus-ring", disabled: *eligibility_loading.read(), onclick: move |_| {
+                                        eligibility_error.set(None);
+                                        eligibility_loading.set(true);
+                                        let bid = bundle_id;
+                                        spawn(async move {
+                                            match crate::api::client::fetch_bundle_deletion_eligibility(&bid).await {
+                                                Ok(result) => eligibility.set(Some(result)),
+                                                Err(error) => eligibility_error.set(Some(error.to_string())),
+                                            }
+                                            eligibility_loading.set(false);
+                                        });
+                                    }, "Retry" }
+                                }
+                            }
+                        } else if let Some(elig) = eligibility.read().clone() {
                             // ── Authoritative eligibility from server preflight ──
                             if elig.eligible {
                                 button {
@@ -3882,11 +3903,12 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                                 disabled: *eligibility_loading.read(),
                                 onclick: move |_| {
                                     eligibility_loading.set(true);
+                                    eligibility_error.set(None);
                                     let bid = bundle_id;
                                     spawn(async move {
                                         match crate::api::client::fetch_bundle_deletion_eligibility(&bid).await {
                                             Ok(result) => { eligibility.set(Some(result)); }
-                                            Err(_) => {}
+                                            Err(error) => eligibility_error.set(Some(error.to_string())),
                                         }
                                         eligibility_loading.set(false);
                                     });
@@ -3901,23 +3923,18 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                                 disabled: *eligibility_loading.read(),
                                 onclick: move |_| {
                                     eligibility_loading.set(true);
+                                    eligibility_error.set(None);
                                     let bid = bundle_id;
                                     spawn(async move {
                                         match crate::api::client::fetch_bundle_deletion_eligibility(&bid).await {
                                             Ok(result) => { eligibility.set(Some(result)); }
-                                            Err(_) => {
-                                                // On error, allow user to try direct delete.
-                                                eligibility.set(Some(crate::api::models::DeletionEligibility {
-                                                    eligible: true,
-                                                    blockers: vec![],
-                                                }));
-                                            }
+                                            Err(error) => eligibility_error.set(Some(error.to_string())),
                                         }
                                         eligibility_loading.set(false);
                                     });
                                 },
                                 Icon { name: IconName::Trash, size: 12 }
-                                if *eligibility_loading.read() { " Checking…" } else { " Delete bundle" }
+                                if *eligibility_loading.read() { " Checking…" } else { " Check deletion eligibility" }
                             }
                         }
                     }
