@@ -746,6 +746,7 @@ async fn apply_policy_publication_locked(
     version_id: Uuid,
     policy_id: Uuid,
     computed_digest: String,
+    previous_publication_state: String,
 ) -> Result<PublishedPolicyVersion, axum::response::Response> {
     // Step 1: clear draft pointer if it points to this version
     let _ = sqlx::query(
@@ -812,6 +813,7 @@ async fn apply_policy_publication_locked(
         "policy_id": policy_id,
         "policy_version_id": version_id,
         "semantic_digest": computed_digest,
+        "previous_publication_state": previous_publication_state,
         "new_publication_state": state,
     });
 
@@ -1192,6 +1194,7 @@ pub async fn publish_policy_version(
         version_id,
         version_row.policy_id,
         computed_digest.clone(),
+        version_row.publication_state.clone(),
     )
     .await
     {
@@ -1446,8 +1449,9 @@ pub async fn publish_bundle_version(
         }
     };
 
-    // Collect selected member IDs for locking in deterministic UUID order
-    let mut member_ids: Vec<Uuid> = membership.iter().filter(|m| m.selected).map(|m| m.policy_version_id).collect();
+    // Collect ALL member IDs (including unselected) for locking in deterministic UUID order
+    // We validate all members; selective processing happens later based on selected flag
+    let mut member_ids: Vec<Uuid> = membership.iter().map(|m| m.policy_version_id).collect();
     member_ids.sort(); // deterministic lock order
     member_ids.dedup();
 
@@ -1487,12 +1491,8 @@ pub async fn publish_bundle_version(
     let mut auto_published_count = 0i32;
     let mut auto_published_ids = Vec::new();
 
-    // Validate and optionally auto-publish each selected member in policy_order
+    // Validate every member in policy_order (both selected and unselected)
     for member in &membership {
-        if !member.selected {
-            continue;
-        }
-
         let member_row = match member_map.get(&member.policy_version_id) {
             Some(m) => m,
             None => {
@@ -1501,7 +1501,7 @@ pub async fn publish_bundle_version(
             }
         };
 
-        // Validate trust for executable members
+        // Validate trust for executable members (all members, not just selected)
         if matches!(
             member_row.implementation_state.as_str(),
             "native" | "external" | "manual"
@@ -1520,21 +1520,28 @@ pub async fn publish_bundle_version(
                 .into_response();
         }
 
+        // Recompute and validate member digest for all members
+        let member_digest = match recompute_policy_version_digest_locked(&mut tx, member.policy_version_id).await {
+            Ok(d) => d,
+            Err(resp) => {
+                let _ = tx.rollback().await;
+                return resp;
+            }
+        };
+
+        // Only process publication transitions for selected members
+        if !member.selected {
+            // Unselected members are validated but not published
+            continue;
+        }
+
+        // Branch on publication state for selected members
         if member_row.publication_state == "accepted" {
-            // Already published; skip
+            // Already published; digest validated above, no state transition
             continue;
         }
 
         if member_row.publication_state == "draft" && payload.auto_publish_draft_policies.unwrap_or(false) {
-            // Recompute and validate member digest while locked
-            let member_digest = match recompute_policy_version_digest_locked(&mut tx, member.policy_version_id).await {
-                Ok(d) => d,
-                Err(resp) => {
-                    let _ = tx.rollback().await;
-                    return resp;
-                }
-            };
-
             // Auto-publish using shared helper (which writes audit event)
             match apply_policy_publication_locked(
                 &mut tx,
@@ -1542,6 +1549,7 @@ pub async fn publish_bundle_version(
                 member.policy_version_id,
                 member_row.policy_id,
                 member_digest,
+                member_row.publication_state.clone(),
             )
             .await
             {
@@ -1657,8 +1665,10 @@ pub async fn publish_bundle_version(
         "bundle_id": bundle_row.bundle_id,
         "bundle_version_id": version_id,
         "semantic_digest": computed_bundle_digest,
+        "previous_publication_state": bundle_row.publication_state,
         "new_publication_state": publish_result.publication_state,
-        "auto_published_member_count": auto_published_count,
+        "member_count": membership.iter().filter(|m| m.selected).count(),
+        "auto_published_policy_count": auto_published_count,
     });
 
     if let Err(e) = write_audit_event(
