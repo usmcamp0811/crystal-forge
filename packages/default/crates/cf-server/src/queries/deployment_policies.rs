@@ -665,14 +665,14 @@ async fn policy_deletion_eligibility_in_transaction(
             .context("Failed to check system policy assignments")?;
 
     let immutable_source_mapping_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM compliance_source_object_mappings m JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id WHERE pv.policy_id = $1 AND (pv.publication_state IN ('accepted', 'deprecated') OR m.bundle_version_id IS NOT NULL)",
+        "SELECT COUNT(*) FROM compliance_source_object_mappings m JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id LEFT JOIN compliance_bundle_versions bv ON bv.id = m.bundle_version_id WHERE pv.policy_id = $1 AND (pv.publication_state IN ('accepted', 'deprecated') OR bv.publication_state IN ('accepted', 'deprecated'))",
     )
     .bind(policy_id)
     .fetch_one(&mut **tx)
     .await
     .context("Failed to check immutable policy source mappings")?;
     let disposable_source_mapping_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM compliance_source_object_mappings m JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id WHERE pv.policy_id = $1 AND pv.publication_state IN ('incomplete', 'draft', 'interim') AND m.bundle_version_id IS NULL",
+        "SELECT COUNT(*) FROM compliance_source_object_mappings m JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id LEFT JOIN compliance_bundle_versions bv ON bv.id = m.bundle_version_id WHERE pv.policy_id = $1 AND pv.publication_state IN ('incomplete', 'draft', 'interim') AND (bv.id IS NULL OR bv.publication_state IN ('incomplete', 'draft', 'interim'))",
     )
     .bind(policy_id)
     .fetch_one(&mut **tx)
@@ -785,7 +785,7 @@ pub async fn delete_deployment_policy(
         return Ok(PolicyDeleteOutcome::Blocked(eligibility));
     }
 
-    sqlx::query("DELETE FROM compliance_source_object_mappings m USING deployment_policy_versions pv WHERE m.policy_version_id = pv.id AND pv.policy_id = $1 AND pv.publication_state IN ('incomplete', 'draft', 'interim') AND m.bundle_version_id IS NULL")
+    sqlx::query("DELETE FROM compliance_source_object_mappings m USING deployment_policy_versions pv LEFT JOIN compliance_bundle_versions bv ON bv.id = m.bundle_version_id WHERE m.policy_version_id = pv.id AND pv.policy_id = $1 AND pv.publication_state IN ('incomplete', 'draft', 'interim') AND (bv.id IS NULL OR bv.publication_state IN ('incomplete', 'draft', 'interim'))")
         .bind(policy_id).execute(&mut *tx).await.context("Failed to remove disposable policy source mappings")?;
     sqlx::query("DELETE FROM compliance_bundle_version_policies bvp USING deployment_policy_versions pv, compliance_bundle_versions bv WHERE bvp.policy_version_id = pv.id AND bvp.bundle_version_id = bv.id AND pv.policy_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim')")
         .bind(policy_id).execute(&mut *tx).await.context("Failed to remove mutable draft bundle memberships")?;
@@ -1718,6 +1718,121 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a test database role with CREATE DATABASE privileges"]
+    async fn source_mapping_guard_uses_all_referenced_version_states() {
+        let (admin_pool, pool, db_name) = create_temp_db().await;
+        MIGRATOR
+            .run(&pool)
+            .await
+            .expect("apply migrations to isolated database");
+
+        let artifact_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_source_artifacts (content, filename, media_type, sha256, parser_version) VALUES ($1, 'fixture.xml', 'application/xml', encode(digest($1, 'sha256'), 'hex'), 'test') RETURNING id",
+        )
+        .bind(b"<Benchmark/>".as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("insert source artifact");
+
+        // A-G: draft or immutable single references, then every two-reference
+        // combination. A mapping is disposable only in A, C, and E.
+        let cases = [
+            ("A", Some("draft"), None, true),
+            ("B", Some("accepted"), None, false),
+            ("C", None, Some("draft"), true),
+            ("D", None, Some("accepted"), false),
+            ("E", Some("draft"), Some("draft"), true),
+            ("F", Some("accepted"), Some("draft"), false),
+            ("G", Some("draft"), Some("accepted"), false),
+        ];
+
+        for (case, policy_state, bundle_state, disposable) in cases {
+            let policy_version_id = if let Some(policy_state) = policy_state {
+                let policy_id: Uuid = sqlx::query_scalar(
+                    "INSERT INTO deployment_policies (name, policy_type, config, enabled) VALUES ($1, 'custom_check', '{\"expression\": \"true\"}', false) RETURNING id",
+                )
+                .bind(format!("source-mapping-{case}-policy"))
+                .fetch_one(&pool)
+                .await
+                .expect("insert policy");
+                let version_id: Uuid = sqlx::query_scalar(
+                    "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+                )
+                .bind(policy_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load policy version");
+                if policy_state != "draft" {
+                    sqlx::query(
+                        "UPDATE deployment_policy_versions SET publication_state = $1, published_at = CURRENT_TIMESTAMP WHERE id = $2",
+                    )
+                    .bind(policy_state)
+                    .bind(version_id)
+                    .execute(&pool)
+                    .await
+                    .expect("publish policy version");
+                }
+                Some(version_id)
+            } else {
+                None
+            };
+
+            let bundle_version_id = if let Some(bundle_state) = bundle_state {
+                let bundle_id: Uuid = sqlx::query_scalar(
+                    "INSERT INTO compliance_bundles (name, framework, layer, owner) VALUES ($1, 'test', 'fleet', 'test') RETURNING id",
+                )
+                .bind(format!("source-mapping-{case}-bundle"))
+                .fetch_one(&pool)
+                .await
+                .expect("insert bundle");
+                let version_id: Uuid = sqlx::query_scalar(
+                    "SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1",
+                )
+                .bind(bundle_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load bundle version");
+                if bundle_state != "draft" {
+                    sqlx::query(
+                        "UPDATE compliance_bundle_versions SET publication_state = $1, published_at = CURRENT_TIMESTAMP WHERE id = $2",
+                    )
+                    .bind(bundle_state)
+                    .bind(version_id)
+                    .execute(&pool)
+                    .await
+                    .expect("publish bundle version");
+                }
+                Some(version_id)
+            } else {
+                None
+            };
+
+            let mapping_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO compliance_source_object_mappings (source_artifact_id, object_kind, source_identity, policy_version_id, bundle_version_id, fidelity) VALUES ($1, 'rule', $2, $3, $4, 'native_exact') RETURNING id",
+            )
+            .bind(artifact_id)
+            .bind(format!("source-mapping-{case}"))
+            .bind(policy_version_id)
+            .bind(bundle_version_id)
+            .fetch_one(&pool)
+            .await
+            .expect("insert source mapping");
+            let result = sqlx::query("DELETE FROM compliance_source_object_mappings WHERE id = $1")
+                .bind(mapping_id)
+                .execute(&pool)
+                .await;
+            assert_eq!(
+                result.is_ok(),
+                disposable,
+                "case {case} must classify mappings from version state, not a non-null UUID"
+            );
+        }
+
+        drop(pool);
+        drop_temp_db(&admin_pool, &db_name).await;
+    }
+
+    #[tokio::test]
     #[ignore = "requires CRYSTAL_FORGE_TEST_DATABASE_URL with migration 0210 applied"]
     async fn hard_delete_removes_disposable_draft_source_mapping() {
         let pool = get_test_pool().await;
@@ -1736,6 +1851,20 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("find draft policy version");
+        let bundle_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_bundles (name, framework, layer, owner) VALUES ($1, 'test', 'fleet', 'test') RETURNING id",
+        )
+        .bind(format!("deletion-disposable-bundle-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .expect("insert draft bundle");
+        let bundle_version_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM compliance_bundle_versions WHERE bundle_id = $1 AND publication_state = 'draft'",
+        )
+        .bind(bundle_id)
+        .fetch_one(&pool)
+        .await
+        .expect("find draft bundle version");
         let source_artifact_id: Uuid = sqlx::query_scalar(
             "INSERT INTO compliance_source_artifacts (content, filename, media_type, sha256, parser_version) VALUES ($1, 'fixture.xml', 'application/xml', encode(digest($1, 'sha256'), 'hex'), 'test') RETURNING id",
         )
@@ -1744,11 +1873,12 @@ mod tests {
         .await
         .expect("insert source artifact");
         let mapping_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO compliance_source_object_mappings (source_artifact_id, object_kind, source_identity, policy_version_id, fidelity) VALUES ($1, 'rule', $2, $3, 'native_exact') RETURNING id",
+            "INSERT INTO compliance_source_object_mappings (source_artifact_id, object_kind, source_identity, policy_version_id, bundle_version_id, fidelity) VALUES ($1, 'rule', $2, $3, $4, 'native_exact') RETURNING id",
         )
         .bind(source_artifact_id)
         .bind(format!("rule-{suffix}"))
         .bind(policy_version_id)
+        .bind(bundle_version_id)
         .fetch_one(&pool)
         .await
         .expect("insert disposable mapping");
@@ -1778,6 +1908,84 @@ mod tests {
         .await
         .expect("check mapping cleanup");
         assert!(!mapping_exists);
+
+        assert_eq!(
+            crate::queries::compliance::delete_bundle(&pool, bundle_id)
+                .await
+                .expect("delete draft bundle"),
+            crate::queries::compliance::BundleDeleteOutcome::Deleted
+        );
+
+        let bundle_policy_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config, enabled) VALUES ($1, 'custom_check', '{\"expression\": \"true\"}', false) RETURNING id",
+        )
+        .bind(format!("deletion-disposable-bundle-policy-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .expect("insert second draft policy");
+        let bundle_policy_version_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(bundle_policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("find second draft policy version");
+        let bundle_only_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_bundles (name, framework, layer, owner) VALUES ($1, 'test', 'fleet', 'test') RETURNING id",
+        )
+        .bind(format!("deletion-disposable-bundle-only-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .expect("insert second draft bundle");
+        let bundle_only_version_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1",
+        )
+        .bind(bundle_only_id)
+        .fetch_one(&pool)
+        .await
+        .expect("find second draft bundle version");
+        let bundle_mapping_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_source_object_mappings (source_artifact_id, object_kind, source_identity, policy_version_id, bundle_version_id, fidelity) VALUES ($1, 'rule', $2, $3, $4, 'native_exact') RETURNING id",
+        )
+        .bind(source_artifact_id)
+        .bind(format!("bundle-rule-{suffix}"))
+        .bind(bundle_policy_version_id)
+        .bind(bundle_only_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert disposable bundle mapping");
+
+        let bundle_eligibility =
+            crate::queries::compliance::bundle_deletion_eligibility(&pool, bundle_only_id)
+                .await
+                .expect("load bundle eligibility")
+                .expect("bundle exists");
+        assert!(bundle_eligibility.eligible);
+        assert!(
+            bundle_eligibility.blockers.iter().any(|blocker| {
+                blocker.kind == "disposable_source_mapping" && blocker.removable
+            })
+        );
+        assert_eq!(
+            crate::queries::compliance::delete_bundle(&pool, bundle_only_id)
+                .await
+                .expect("delete second draft bundle"),
+            crate::queries::compliance::BundleDeleteOutcome::Deleted
+        );
+        let bundle_mapping_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM compliance_source_object_mappings WHERE id = $1)",
+        )
+        .bind(bundle_mapping_id)
+        .fetch_one(&pool)
+        .await
+        .expect("check bundle mapping cleanup");
+        assert!(!bundle_mapping_exists);
+        assert_eq!(
+            delete_deployment_policy(&pool, &bundle_policy_id)
+                .await
+                .expect("delete second draft policy"),
+            PolicyDeleteOutcome::Deleted
+        );
 
         sqlx::query("DELETE FROM compliance_source_artifacts WHERE id = $1")
             .bind(source_artifact_id)

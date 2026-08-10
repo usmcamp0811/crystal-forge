@@ -2435,7 +2435,7 @@ pub fn compliance_assignment_xccdf_url(assignment_id: &Uuid) -> String {
 /// Delete (deactivate) an assignment.
 pub async fn delete_compliance_assignment(assignment_id: &Uuid) -> Result<(), ApiClientError> {
     let url = format!("{}/compliance/assignments/{}", base_url(), assignment_id);
-    send_empty("DELETE", &url).await
+    send_empty_with_csrf::<()>("DELETE", &url, None).await
 }
 
 /// Update an assignment (creates a new immutable version).

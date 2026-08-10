@@ -204,6 +204,15 @@ pub struct EnvironmentFormDraft {
     pub bundle_assignments: Vec<EnvBundleAssignment>,
 }
 
+/// Authoritative assignment load state for the Environment edit form. A save
+/// must never reconcile against an unknown assignment snapshot.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AssignmentLoadState {
+    Ready,
+    Loading,
+    Failed(String),
+}
+
 mod add_environment_form;
 mod environment_card;
 mod environment_form_modal;

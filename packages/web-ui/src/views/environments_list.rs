@@ -129,6 +129,7 @@ pub fn EnvironmentsListView() -> Element {
     let mut form_error = use_signal(|| None::<String>);
     // Snapshot of bundle assignments at modal open — used to diff on Save.
     let mut original_assignments = use_signal(|| Vec::<crate::components::environments::EnvBundleAssignment>::new());
+    let mut assignment_load_state = use_signal(|| crate::components::environments::AssignmentLoadState::Ready);
     let mut pending_remove = use_signal(|| None::<EnvironmentItem>);
     let mut view_env = use_signal(|| None::<EnvironmentItem>);
 
@@ -301,7 +302,7 @@ pub fn EnvironmentsListView() -> Element {
                                     occurrence_id_for_subject("environments", &env.id.to_string()).as_deref(),
                                 );
                                 form_error.set(None);
-                                open_edit_modal(&env, form_draft.clone(), original_assignments.clone());
+                                open_edit_modal(&env, form_draft.clone(), original_assignments.clone(), assignment_load_state.clone());
                             }
                         }
                     }
@@ -328,7 +329,7 @@ pub fn EnvironmentsListView() -> Element {
                             occurrence_id_for_subject("environments", &env.id.to_string()).as_deref(),
                         );
                         form_error.set(None);
-                        open_edit_modal(&env, form_draft.clone(), original_assignments.clone());
+                        open_edit_modal(&env, form_draft.clone(), original_assignments.clone(), assignment_load_state.clone());
                     }
                 }
             }
@@ -347,7 +348,7 @@ pub fn EnvironmentsListView() -> Element {
                         );
                         view_env.set(None);
                         form_error.set(None);
-                        open_edit_modal(&env, form_draft.clone(), original_assignments.clone());
+                        open_edit_modal(&env, form_draft.clone(), original_assignments.clone(), assignment_load_state.clone());
                     },
                 }
             }
@@ -357,6 +358,13 @@ pub fn EnvironmentsListView() -> Element {
                 existing: items.clone(),
                 policy_library: policy_library_state.read().clone(),
                 bundle_catalog: bundle_catalog.read().clone(),
+                assignment_load_state,
+                on_retry_assignments: move |_| {
+                    let current_id = form_draft.read().as_ref().and_then(|draft| draft.id);
+                    if let Some(env) = current_id.and_then(|id| environments.read().iter().find(|env| env.id == id).cloned()) {
+                        open_edit_modal(&env, form_draft.clone(), original_assignments.clone(), assignment_load_state.clone());
+                    }
+                },
                 error: form_error,
                 on_close: move |_| {
                     form_draft.set(None);
@@ -525,11 +533,13 @@ fn open_edit_modal(
     env: &EnvironmentItem,
     mut form_draft: Signal<Option<EnvironmentFormDraft>>,
     mut original_assignments: Signal<Vec<crate::components::environments::EnvBundleAssignment>>,
+    mut assignment_load_state: Signal<crate::components::environments::AssignmentLoadState>,
 ) {
     let draft = form_draft_from_environment(env);
     let env_id = env.id;
     original_assignments.set(env.bundle_assignments.clone());
     form_draft.set(Some(draft.clone()));
+    assignment_load_state.set(crate::components::environments::AssignmentLoadState::Loading);
     // Load authoritative assignments in the background.
     spawn(async move {
         let assignments_result = crate::environments::adapter::load_environment_bundle_assignments(&env_id).await;
@@ -538,17 +548,15 @@ fn open_edit_modal(
                 original_assignments.set(loaded.clone());
                 let cur = form_draft.read().clone();
                 if let Some(mut current) = cur {
-                    current.bundle_assignments = loaded;
-                    form_draft.set(Some(current));
+                    if current.id == Some(env_id) {
+                        current.bundle_assignments = loaded;
+                        form_draft.set(Some(current));
+                        assignment_load_state.set(crate::components::environments::AssignmentLoadState::Ready);
+                    }
                 }
             }
             Err(err) => {
-                // Leave the modal open with empty assignments.
-                let cur = form_draft.read().clone();
-                if let Some(mut current) = cur {
-                    current.bundle_assignments = Vec::new();
-                    form_draft.set(Some(current));
-                }
+                assignment_load_state.set(crate::components::environments::AssignmentLoadState::Failed(err.clone()));
                 web_sys::console::warn_1(&format!("Failed to load environment assignments: {err}").into());
             }
         }

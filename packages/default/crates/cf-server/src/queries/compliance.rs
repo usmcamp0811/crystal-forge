@@ -1239,14 +1239,14 @@ async fn bundle_deletion_eligibility_in_transaction(
     .await
     .context("Failed to check mutable draft bundle memberships")?;
     let immutable_source_mapping_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM compliance_source_object_mappings m JOIN compliance_bundle_versions bv ON bv.id = m.bundle_version_id WHERE bv.bundle_id = $1 AND (bv.publication_state IN ('accepted', 'deprecated') OR m.policy_version_id IS NOT NULL)",
+        "SELECT COUNT(*) FROM compliance_source_object_mappings m JOIN compliance_bundle_versions bv ON bv.id = m.bundle_version_id LEFT JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id WHERE bv.bundle_id = $1 AND (bv.publication_state IN ('accepted', 'deprecated') OR pv.publication_state IN ('accepted', 'deprecated'))",
     )
     .bind(bundle_id)
     .fetch_one(&mut **tx)
     .await
     .context("Failed to check immutable bundle source mappings")?;
     let disposable_source_mapping_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM compliance_source_object_mappings m JOIN compliance_bundle_versions bv ON bv.id = m.bundle_version_id WHERE bv.bundle_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim') AND m.policy_version_id IS NULL",
+        "SELECT COUNT(*) FROM compliance_source_object_mappings m JOIN compliance_bundle_versions bv ON bv.id = m.bundle_version_id LEFT JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id WHERE bv.bundle_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim') AND (pv.id IS NULL OR pv.publication_state IN ('incomplete', 'draft', 'interim'))",
     )
     .bind(bundle_id)
     .fetch_one(&mut **tx)
@@ -1320,7 +1320,7 @@ pub async fn delete_bundle(pool: &PgPool, bundle_id: Uuid) -> Result<BundleDelet
         return Ok(BundleDeleteOutcome::Blocked(eligibility));
     }
 
-    sqlx::query("DELETE FROM compliance_source_object_mappings m USING compliance_bundle_versions bv WHERE m.bundle_version_id = bv.id AND bv.bundle_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim') AND m.policy_version_id IS NULL")
+    sqlx::query("DELETE FROM compliance_source_object_mappings m USING compliance_bundle_versions bv WHERE m.bundle_version_id = bv.id AND bv.bundle_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim') AND NOT EXISTS (SELECT 1 FROM deployment_policy_versions pv WHERE pv.id = m.policy_version_id AND pv.publication_state IN ('accepted', 'deprecated'))")
         .bind(bundle_id).execute(&mut *tx).await.context("Failed to remove disposable bundle source mappings")?;
     sqlx::query("DELETE FROM compliance_bundle_version_policies bvp USING compliance_bundle_versions bv WHERE bvp.bundle_version_id = bv.id AND bv.bundle_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim')")
         .bind(bundle_id).execute(&mut *tx).await.context("Failed to remove mutable draft bundle memberships")?;

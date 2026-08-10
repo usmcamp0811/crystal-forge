@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use super::{
-    EnvBundleAssignment, EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentItem,
+    AssignmentLoadState, EnvBundleAssignment, EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentItem,
     PolicyOption, looks_like_hex_color,
 };
 use crate::api::models::ComplianceBundleSummary;
@@ -18,6 +18,8 @@ pub struct EnvironmentFormModalProps {
     /// Bundle catalog used by the assignment picker.
     #[props(default)]
     pub bundle_catalog: Vec<ComplianceBundleSummary>,
+    pub assignment_load_state: Signal<AssignmentLoadState>,
+    pub on_retry_assignments: EventHandler<()>,
     pub error: Signal<Option<String>>,
     pub on_close: EventHandler<()>,
     pub on_save: EventHandler<EnvironmentFormDraft>,
@@ -52,6 +54,8 @@ pub fn EnvironmentFormModal(props: EnvironmentFormModalProps) -> Element {
         return rsx! {};
     };
     let is_edit = current.id.is_some();
+    let assignment_load_state = props.assignment_load_state.read().clone();
+    let assignments_ready = !is_edit || matches!(assignment_load_state, AssignmentLoadState::Ready);
     let matching_env = current
         .id
         .and_then(|id| props.existing.iter().find(|env| env.id == id).cloned());
@@ -104,7 +108,7 @@ pub fn EnvironmentFormModal(props: EnvironmentFormModalProps) -> Element {
 
                     CacheSection {}
                     DeploymentPolicySection { draft }
-                    PolicyEnforcementSection { draft, policy_library: props.policy_library.clone(), bundle_catalog: props.bundle_catalog.clone() }
+                    PolicyEnforcementSection { draft, policy_library: props.policy_library.clone(), bundle_catalog: props.bundle_catalog.clone(), disabled: !assignments_ready, load_state: assignment_load_state.clone(), on_retry: props.on_retry_assignments }
                     ProductionToggle { draft }
 
                     // Behavior toggles.
@@ -157,7 +161,7 @@ pub fn EnvironmentFormModal(props: EnvironmentFormModalProps) -> Element {
 
                 div { class: "modal-foot",
                     button { class: "btn btn-ghost focus-ring", onclick: move |_| props.on_close.call(()), "Cancel" }
-                    button { class: "btn btn-primary focus-ring", onclick: move |_| props.on_save.call(current.clone()), Icon { name: IconName::Check, size: 13 } if is_edit { " Save changes" } else { " Add environment" } }
+                    button { class: "btn btn-primary focus-ring", disabled: !assignments_ready, onclick: move |_| props.on_save.call(current.clone()), Icon { name: IconName::Check, size: 13 } if is_edit { " Save changes" } else { " Add environment" } }
                 }
             }
         }
@@ -275,6 +279,9 @@ struct PolicyEnforcementSectionProps {
     draft: Signal<Option<EnvironmentFormDraft>>,
     policy_library: Vec<PolicyOption>,
     bundle_catalog: Vec<ComplianceBundleSummary>,
+    disabled: bool,
+    load_state: AssignmentLoadState,
+    on_retry: EventHandler<()>,
 }
 
 #[component]
@@ -284,6 +291,7 @@ fn PolicyEnforcementSection(props: PolicyEnforcementSectionProps) -> Element {
         return rsx! {};
     };
     let mut bundle_search = use_signal(String::new);
+    let disabled = props.disabled;
     let q = bundle_search.read().to_ascii_lowercase();
 
     // Bundles available to add: have a current published version and are not already assigned.
@@ -377,6 +385,13 @@ fn PolicyEnforcementSection(props: PolicyEnforcementSectionProps) -> Element {
                 span { style: "font-weight:400; color:var(--cf-text-muted); margin-left:6px;", "for regulated / ATO environments" }
             }
 
+            if let AssignmentLoadState::Loading = props.load_state {
+                div { class: "help", "Loading authoritative bundle assignments…" }
+            }
+            if let AssignmentLoadState::Failed(message) = props.load_state.clone() {
+                div { class: "sd-callout sd-callout-danger", style: "margin-bottom:8px;", "Could not load bundle assignments: {message}" button { class: "btn btn-ghost xs focus-ring", onclick: move |_| props.on_retry.call(()), "Retry" } }
+            }
+
             // Currently assigned bundles.
             for assignment in current.bundle_assignments.iter().cloned().collect::<Vec<_>>() {
                 {
@@ -401,6 +416,7 @@ fn PolicyEnforcementSection(props: PolicyEnforcementSectionProps) -> Element {
                                 class: "input focus-ring",
                                 style: "width:auto; font-size:12px; padding:3px 8px;",
                                 value: "{current_mode}",
+                                disabled: disabled,
                                 onchange: move |evt| {
                                     let new_mode = evt.value();
                                     update_draft(&mut draft, move |next| {
@@ -415,6 +431,7 @@ fn PolicyEnforcementSection(props: PolicyEnforcementSectionProps) -> Element {
                             button {
                                 class: "btn-icon focus-ring",
                                 title: "Remove bundle assignment",
+                                disabled: disabled,
                                 onclick: move |_| update_draft(&mut draft, move |next| {
                                     next.bundle_assignments.retain(|a| a.assignment_id != a_id);
                                 }),
@@ -432,6 +449,7 @@ fn PolicyEnforcementSection(props: PolicyEnforcementSectionProps) -> Element {
                     class: "input focus-ring",
                     placeholder: "Search compliance bundles…",
                     value: "{bundle_search}",
+                    disabled: disabled,
                     oninput: move |evt| bundle_search.set(evt.value()),
                 }
             }
