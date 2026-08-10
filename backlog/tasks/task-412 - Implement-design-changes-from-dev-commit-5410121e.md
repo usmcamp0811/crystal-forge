@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 00:17'
+updated_date: '2026-08-10 00:32'
 labels:
   - design
   - frontend
@@ -1410,6 +1410,11 @@ Parity pass for Refine Policy Modal against ImportStigModal.jsx. Root causes: (1
 Phase 4 policy classification UI/data wiring: extend the web-ui CRUD request DTOs, seed the unified PolicyEditorModal from the selected current policy, and persist domain/category/framework classification, severity, framework-specific metadata, and rationale. Use the loaded policy library for custom framework suggestions; retain unsupported rule/evidence safeguards. Render selected-revision classification in PolicyDrawer and actual security severity on cards. Verify with focused pure tests, cargo fmt --all --check, and SQLX_OFFLINE cargo check -p web-ui; do not run the web-ui Nix build.
 
 Phase 7 bundle framework UX: add a pure catalog in `packages/web-ui/src/views/compliance.rs` that recognizes the four standard names plus legacy CMMC as an alias, derives distinct non-standard framework values from loaded bundle and policy metadata without browser storage, and renders it in both bundle modals. Replace the selector with Standard and conditional Custom optgroups plus an inline define-new input that accepts Enter/Add and cancels with Escape/Cancel. Preserve the selected persisted string in create/update payloads. Add catalog unit tests and verify with cargo fmt, SQLX_OFFLINE cargo check -p web-ui, and focused tests; do not run the web-ui Nix check.
+
+### Phase 9/10 classification integration
+- Preserve full `compliance_metadata` values in the existing CF-native JSON/TOML and CF-XCCDF extension paths; add focused round-trip coverage including unknown keys.
+- Add a conservative foreign DISA/STIG classification projection only when benchmark source metadata identifies DISA/STIG, retaining parsed severity and existing SRG/CCI mappings without inferring unrelated classification fields.
+- Add explicit semantic-digest coverage for every classification key, then run Rust formatting, package checks, and focused server tests. Do not run the web-ui Nix check.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
