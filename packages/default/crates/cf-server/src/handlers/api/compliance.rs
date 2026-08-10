@@ -472,38 +472,14 @@ pub async fn delete_compliance_bundle(
     match delete_bundle_row(&pool, bundle_id).await {
         Ok(BundleDeleteOutcome::Deleted) => StatusCode::NO_CONTENT.into_response(),
         Ok(BundleDeleteOutcome::NotFound) => not_found(),
-        Ok(BundleDeleteOutcome::BlockedByImmutableHistory { version_ids }) => (
+        Ok(BundleDeleteOutcome::Blocked(eligibility)) => (
             StatusCode::CONFLICT,
             Json(ApiError {
-                error: "bundle_immutable_history".to_string(),
-                message: "This compliance bundle has accepted or deprecated history and cannot be permanently deleted.".to_string(),
+                error: "deletion_blocked".to_string(),
+                message: "This compliance bundle cannot be permanently deleted.".to_string(),
                 details: Some(serde_json::json!({
                     "bundle_id": bundle_id,
-                    "blocking_versions": version_ids,
-                })),
-            }),
-        )
-            .into_response(),
-        Ok(BundleDeleteOutcome::BlockedBySourceMappings { mapping_count }) => (
-            StatusCode::CONFLICT,
-            Json(ApiError {
-                error: "bundle_referenced".to_string(),
-                message: "This compliance bundle has immutable source mappings and cannot be permanently deleted.".to_string(),
-                details: Some(serde_json::json!({
-                    "bundle_id": bundle_id,
-                    "mapping_count": mapping_count,
-                })),
-            }),
-        )
-            .into_response(),
-        Ok(BundleDeleteOutcome::BlockedByAssignments { assignment_count }) => (
-            StatusCode::CONFLICT,
-            Json(ApiError {
-                error: "bundle_in_use".to_string(),
-                message: "This compliance bundle is assigned and cannot be permanently deleted.".to_string(),
-                details: Some(serde_json::json!({
-                    "bundle_id": bundle_id,
-                    "assignment_count": assignment_count,
+                    "eligibility": eligibility,
                 })),
             }),
         )

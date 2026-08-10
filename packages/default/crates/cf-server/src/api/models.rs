@@ -1324,8 +1324,13 @@ pub struct DeploymentPolicySummary {
 /// before it removes anything.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeletionBlocker {
+    /// Stable server-side classification used by preflight and DELETE conflicts.
+    pub kind: String,
     pub code: String,
     pub message: String,
+    /// True when DELETE will remove this draft-only dependent record in its
+    /// transaction. False means retained history or a protected record blocks it.
+    pub removable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1336,6 +1341,7 @@ pub struct DeletionBlocker {
 /// removing audit, source, publication, or assignment history.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeletionEligibility {
+    /// True when all listed dependent records are removable in this delete transaction.
     pub eligible: bool,
     #[serde(default)]
     pub blockers: Vec<DeletionBlocker>,

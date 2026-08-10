@@ -1194,9 +1194,7 @@ pub async fn update_bundle(
 pub enum BundleDeleteOutcome {
     Deleted,
     NotFound,
-    BlockedByImmutableHistory { version_ids: Vec<Uuid> },
-    BlockedBySourceMappings { mapping_count: i64 },
-    BlockedByAssignments { assignment_count: i64 },
+    Blocked(DeletionEligibility),
 }
 
 async fn bundle_deletion_eligibility_in_transaction(
@@ -1219,34 +1217,71 @@ async fn bundle_deletion_eligibility_in_transaction(
     .fetch_all(&mut **tx)
     .await
     .context("Failed to check compliance bundle immutable history")?;
-    let assignment_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM compliance_bundle_assignments WHERE bundle_id = $1",
+    let immutable_assignment_history: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM compliance_bundle_assignment_versions av JOIN compliance_bundle_assignments a ON a.id = av.assignment_id WHERE a.bundle_id = $1",
     )
     .bind(bundle_id)
     .fetch_one(&mut **tx)
     .await
-    .context("Failed to check compliance bundle assignments")?;
-    let mapping_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM compliance_source_object_mappings m JOIN compliance_bundle_versions v ON v.id = m.bundle_version_id WHERE v.bundle_id = $1",
+    .context("Failed to check immutable bundle assignment history")?;
+    let immutable_membership_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM compliance_bundle_version_policies bvp JOIN compliance_bundle_versions bv ON bv.id = bvp.bundle_version_id WHERE bv.bundle_id = $1 AND bv.publication_state IN ('accepted', 'deprecated')",
     )
     .bind(bundle_id)
     .fetch_one(&mut **tx)
     .await
-    .context("Failed to check compliance bundle source mappings")?;
+    .context("Failed to check immutable bundle memberships")?;
+    let mutable_membership_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM compliance_bundle_version_policies bvp JOIN compliance_bundle_versions bv ON bv.id = bvp.bundle_version_id WHERE bv.bundle_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim')",
+    )
+    .bind(bundle_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("Failed to check mutable draft bundle memberships")?;
+    let immutable_source_mapping_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM compliance_source_object_mappings m JOIN compliance_bundle_versions bv ON bv.id = m.bundle_version_id WHERE bv.bundle_id = $1 AND (bv.publication_state IN ('accepted', 'deprecated') OR m.policy_version_id IS NOT NULL)",
+    )
+    .bind(bundle_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("Failed to check immutable bundle source mappings")?;
+    let disposable_source_mapping_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM compliance_source_object_mappings m JOIN compliance_bundle_versions bv ON bv.id = m.bundle_version_id WHERE bv.bundle_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim') AND m.policy_version_id IS NULL",
+    )
+    .bind(bundle_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("Failed to check disposable bundle source mappings")?;
     let mut blockers = Vec::new();
     if !immutable_versions.is_empty() {
-        blockers.push(blocker("bundle_immutable_history", "This compliance bundle has accepted or deprecated history and cannot be permanently deleted.", None, immutable_versions));
+        blockers.push(blocker("bundle_immutable_history", "This compliance bundle has accepted or deprecated history and cannot be permanently deleted.", false, None, immutable_versions));
     }
-    if mapping_count > 0 {
-        blockers.push(blocker("bundle_referenced", "This compliance bundle has immutable source mappings and cannot be permanently deleted.", Some(mapping_count), Vec::new()));
+    if immutable_assignment_history > 0 {
+        blockers.push(blocker("immutable_assignment_history", "This compliance bundle has immutable assignment history and cannot be permanently deleted.", false, Some(immutable_assignment_history), Vec::new()));
     }
-    if assignment_count > 0 {
+    if immutable_membership_count > 0 {
+        blockers.push(blocker("immutable_bundle_membership", "This compliance bundle has immutable policy membership and cannot be permanently deleted.", false, Some(immutable_membership_count), Vec::new()));
+    }
+    if mutable_membership_count > 0 {
         blockers.push(blocker(
-            "bundle_in_use",
-            "This compliance bundle is assigned and cannot be permanently deleted.",
-            Some(assignment_count),
+            "mutable_draft_membership",
+            "Draft bundle membership will be removed with this bundle.",
+            true,
+            Some(mutable_membership_count),
             Vec::new(),
         ));
+    }
+    if disposable_source_mapping_count > 0 {
+        blockers.push(blocker(
+            "disposable_source_mapping",
+            "Draft-only source mappings will be removed with this bundle.",
+            true,
+            Some(disposable_source_mapping_count),
+            Vec::new(),
+        ));
+    }
+    if immutable_source_mapping_count > 0 {
+        blockers.push(blocker("immutable_source_mapping", "This compliance bundle has retained source mappings and cannot be permanently deleted.", false, Some(immutable_source_mapping_count), Vec::new()));
     }
     Ok(Some(eligibility(blockers)))
 }
@@ -1280,20 +1315,15 @@ pub async fn delete_bundle(pool: &PgPool, bundle_id: Uuid) -> Result<BundleDelet
         tx.rollback().await.ok();
         return Ok(BundleDeleteOutcome::NotFound);
     };
-    if let Some(blocker) = eligibility.blockers.first() {
+    if !eligibility.eligible {
         tx.rollback().await.ok();
-        return Ok(match blocker.code.as_str() {
-            "bundle_immutable_history" => BundleDeleteOutcome::BlockedByImmutableHistory {
-                version_ids: blocker.version_ids.clone(),
-            },
-            "bundle_referenced" => BundleDeleteOutcome::BlockedBySourceMappings {
-                mapping_count: blocker.count.unwrap_or_default(),
-            },
-            _ => BundleDeleteOutcome::BlockedByAssignments {
-                assignment_count: blocker.count.unwrap_or_default(),
-            },
-        });
+        return Ok(BundleDeleteOutcome::Blocked(eligibility));
     }
+
+    sqlx::query("DELETE FROM compliance_source_object_mappings m USING compliance_bundle_versions bv WHERE m.bundle_version_id = bv.id AND bv.bundle_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim') AND m.policy_version_id IS NULL")
+        .bind(bundle_id).execute(&mut *tx).await.context("Failed to remove disposable bundle source mappings")?;
+    sqlx::query("DELETE FROM compliance_bundle_version_policies bvp USING compliance_bundle_versions bv WHERE bvp.bundle_version_id = bv.id AND bv.bundle_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim')")
+        .bind(bundle_id).execute(&mut *tx).await.context("Failed to remove mutable draft bundle memberships")?;
 
     // Keep the trigger in place as defense in depth against publication races.
     let deleted = sqlx::query("DELETE FROM compliance_bundles WHERE id = $1")

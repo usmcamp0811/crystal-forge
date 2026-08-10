@@ -2441,8 +2441,8 @@ pub async fn delete_compliance_assignment(assignment_id: &Uuid) -> Result<(), Ap
 /// Update an assignment (creates a new immutable version).
 pub async fn update_compliance_assignment(
     assignment_id: &Uuid,
-    request: &serde_json::Value,
-) -> Result<serde_json::Value, ApiClientError> {
+    request: &UpdateAssignmentRequest,
+) -> Result<AssignmentResponse, ApiClientError> {
     let url = format!("{}/compliance/assignments/{}", base_url(), assignment_id);
     send_json_with_csrf("PUT", &url, Some(request)).await
 }

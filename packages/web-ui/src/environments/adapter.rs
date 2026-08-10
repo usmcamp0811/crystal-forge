@@ -23,7 +23,7 @@ use crate::api::client::{
 };
 use crate::api::models::{
     AssignmentResponse, ComplianceBundleSummary, CreateAssignmentRequest, CreateEnvironmentRequest,
-    EnvironmentSummary, UpdateEnvironmentRequest,
+    EnvironmentSummary, UpdateAssignmentRequest, UpdateEnvironmentRequest,
 };
 use crate::components::environments::{
     BundleAssignmentChange, EnvBundleAssignment, EnvironmentCacheSummary,
@@ -441,6 +441,7 @@ fn assignment_to_env_bundle(
         enforcement_mode: a.enforcement_mode.clone(),
         exclusions: a.exclusions.clone(),
         additions: a.additions.clone(),
+        value_overrides: a.value_overrides.clone(),
     }
 }
 
@@ -464,12 +465,10 @@ pub async fn load_environment_bundle_assignments(
 
 /// Diff original vs desired assignments and persist the changes.
 /// Returns Err on the first failed operation with a human-readable message.
-pub async fn reconcile_environment_assignments(
-    environment_id: uuid::Uuid,
+pub fn diff_environment_bundle_assignments(
     original: &[EnvBundleAssignment],
     desired: &[EnvBundleAssignment],
-) -> Result<(), String> {
-    // Build change set.
+) -> Vec<BundleAssignmentChange> {
     let mut changes: Vec<BundleAssignmentChange> = Vec::new();
 
     // Check for removals: in original but not in desired (by assignment_id).
@@ -491,24 +490,34 @@ pub async fn reconcile_environment_assignments(
                 enforcement_mode: d.enforcement_mode.clone(),
             });
         } else if let Some(orig) = original.iter().find(|o| o.assignment_id == d.assignment_id) {
-            if orig.enforcement_mode != d.enforcement_mode
-                || orig.bundle_version_id != d.bundle_version_id
-            {
+            // Bundle version rebinding is not supported by the update API.
+            // Existing assignments retain their exact pinned bundle version.
+            if orig.enforcement_mode != d.enforcement_mode {
                 changes.push(BundleAssignmentChange::UpdateMode {
                     assignment_id: d.assignment_id,
                     current_version_id: d.current_version_id,
-                    bundle_version_id: d.bundle_version_id,
                     enforcement_mode: d.enforcement_mode.clone(),
                     exclusions: orig.exclusions.clone(),
                     additions: orig.additions.clone(),
+                    value_overrides: orig.value_overrides.clone(),
                 });
             }
             // Else Unchanged — no operation.
         }
     }
 
+    changes
+}
+
+/// Diff original vs desired assignments and persist the changes.
+/// Returns Err on the first failed operation with a human-readable message.
+pub async fn reconcile_environment_assignments(
+    environment_id: uuid::Uuid,
+    original: &[EnvBundleAssignment],
+    desired: &[EnvBundleAssignment],
+) -> Result<(), String> {
     // Apply changes sequentially; fail-fast on first error.
-    for change in changes {
+    for change in diff_environment_bundle_assignments(original, desired) {
         match change {
             BundleAssignmentChange::Remove { assignment_id } => {
                 delete_compliance_assignment(&assignment_id)
@@ -535,23 +544,23 @@ pub async fn reconcile_environment_assignments(
             }
             BundleAssignmentChange::UpdateMode {
                 assignment_id,
-                current_version_id: _,
-                bundle_version_id,
+                current_version_id,
                 enforcement_mode,
                 exclusions,
                 additions,
+                value_overrides,
             } => {
-                let payload = serde_json::json!({
-                    "bundle_version_id": bundle_version_id,
-                    "enforcement_mode": enforcement_mode,
-                    "exclusions": exclusions,
-                    "additions": additions,
-                });
-                update_compliance_assignment(&assignment_id, &payload)
+                let request = UpdateAssignmentRequest {
+                    expected_version_id: current_version_id,
+                    enforcement_mode: Some(enforcement_mode),
+                    exclusions: Some(exclusions),
+                    additions: Some(additions),
+                    value_overrides: Some(value_overrides),
+                };
+                update_compliance_assignment(&assignment_id, &request)
                     .await
                     .map_err(|e| format!("Failed to update assignment: {e}"))?;
             }
-            BundleAssignmentChange::Unchanged { .. } => {}
         }
     }
     Ok(())
@@ -830,45 +839,8 @@ mod tests {
             enforcement_mode: mode.into(),
             exclusions: excl,
             additions: adds,
+            value_overrides: Vec::new(),
         }
-    }
-
-    fn diff(
-        original: &[EnvBundleAssignment],
-        desired: &[EnvBundleAssignment],
-    ) -> Vec<BundleAssignmentChange> {
-        // Replicate the diff logic from reconcile_environment_assignments without I/O.
-        let mut changes = Vec::new();
-        for orig in original {
-            if !desired.iter().any(|d| d.assignment_id == orig.assignment_id) {
-                changes.push(BundleAssignmentChange::Remove {
-                    assignment_id: orig.assignment_id,
-                });
-            }
-        }
-        for d in desired {
-            if d.assignment_id == Uuid::nil() {
-                changes.push(BundleAssignmentChange::Add {
-                    bundle_id: d.bundle_id,
-                    bundle_version_id: d.bundle_version_id,
-                    enforcement_mode: d.enforcement_mode.clone(),
-                });
-            } else if let Some(orig) = original.iter().find(|o| o.assignment_id == d.assignment_id) {
-                if orig.enforcement_mode != d.enforcement_mode
-                    || orig.bundle_version_id != d.bundle_version_id
-                {
-                    changes.push(BundleAssignmentChange::UpdateMode {
-                        assignment_id: d.assignment_id,
-                        current_version_id: d.current_version_id,
-                        bundle_version_id: d.bundle_version_id,
-                        enforcement_mode: d.enforcement_mode.clone(),
-                        exclusions: orig.exclusions.clone(),
-                        additions: orig.additions.clone(),
-                    });
-                }
-            }
-        }
-        changes
     }
 
     #[test]
@@ -878,7 +850,7 @@ mod tests {
         let vid = Uuid::new_v4();
         let orig = make_assignment(aid, bid, vid, "enforce", vec![], vec![]);
         let desired = make_assignment(aid, bid, vid, "enforce", vec![], vec![]);
-        let changes = diff(&[orig], &[desired]);
+        let changes = diff_environment_bundle_assignments(&[orig], &[desired]);
         assert!(
             changes.is_empty(),
             "Identical assignments must produce no mutations"
@@ -889,7 +861,7 @@ mod tests {
     fn removing_a_bundle_produces_deactivate_change() {
         let aid = Uuid::new_v4();
         let orig = make_assignment(aid, Uuid::new_v4(), Uuid::new_v4(), "enforce", vec![], vec![]);
-        let changes = diff(&[orig], &[]);
+        let changes = diff_environment_bundle_assignments(&[orig], &[]);
         assert_eq!(changes.len(), 1);
         assert!(matches!(changes[0], BundleAssignmentChange::Remove { .. }));
     }
@@ -898,7 +870,7 @@ mod tests {
     fn new_assignment_with_nil_id_produces_add_change() {
         let mut new_a = make_assignment(Uuid::nil(), Uuid::new_v4(), Uuid::new_v4(), "enforce", vec![], vec![]);
         new_a.assignment_id = Uuid::nil();
-        let changes = diff(&[], &[new_a]);
+        let changes = diff_environment_bundle_assignments(&[], &[new_a]);
         assert_eq!(changes.len(), 1);
         assert!(matches!(changes[0], BundleAssignmentChange::Add { .. }));
     }
@@ -911,7 +883,7 @@ mod tests {
         let orig = make_assignment(aid, bid, vid, "enforce", vec![], vec![]);
         let mut desired = make_assignment(aid, bid, vid, "report_only", vec![], vec![]);
         desired.assignment_id = aid;
-        let changes = diff(&[orig], &[desired]);
+        let changes = diff_environment_bundle_assignments(&[orig], &[desired]);
         assert_eq!(changes.len(), 1);
         assert!(
             matches!(changes[0], BundleAssignmentChange::UpdateMode { .. }),
@@ -926,13 +898,20 @@ mod tests {
         let vid = Uuid::new_v4();
         let excl = vec![Uuid::new_v4()];
         let adds = vec![Uuid::new_v4()];
-        let orig = make_assignment(aid, bid, vid, "enforce", excl.clone(), adds.clone());
+        let overrides = vec![crate::api::models::PolicyValueOverride {
+            policy_version_id: Uuid::new_v4(),
+            value_path: "settings.strict".to_string(),
+            value: serde_json::json!(true),
+        }];
+        let mut orig = make_assignment(aid, bid, vid, "enforce", excl.clone(), adds.clone());
+        orig.value_overrides = overrides.clone();
         let mut desired = make_assignment(aid, bid, vid, "report_only", vec![], vec![]);
         desired.assignment_id = aid;
-        let changes = diff(&[orig], &[desired]);
-        if let BundleAssignmentChange::UpdateMode { exclusions, additions, .. } = &changes[0] {
+        let changes = diff_environment_bundle_assignments(&[orig], &[desired]);
+        if let BundleAssignmentChange::UpdateMode { exclusions, additions, value_overrides, .. } = &changes[0] {
             assert_eq!(exclusions, &excl, "Exclusions must be preserved from original");
             assert_eq!(additions, &adds, "Additions must be preserved from original");
+            assert_eq!(value_overrides, &overrides, "Value overrides must be preserved from original");
         } else {
             panic!("Expected UpdateMode");
         }
@@ -946,7 +925,7 @@ mod tests {
         let orig2 = make_assignment(a2, Uuid::new_v4(), Uuid::new_v4(), "report_only", vec![], vec![]);
         let desired1 = orig1.clone();
         let desired2 = orig2.clone();
-        let changes = diff(&[orig1, orig2], &[desired1, desired2]);
+        let changes = diff_environment_bundle_assignments(&[orig1, orig2], &[desired1, desired2]);
         assert!(
             changes.is_empty(),
             "Unchanged two-bundle environment must produce zero mutations"
@@ -974,7 +953,7 @@ mod tests {
             make_assignment(a1, b1, v1, "enforce", vec![], vec![]),
             new_b3,
         ];
-        let changes = diff(&original, &desired);
+        let changes = diff_environment_bundle_assignments(&original, &desired);
         assert_eq!(changes.len(), 2, "Should have one Remove and one Add");
         let removes = changes.iter().filter(|c| matches!(c, BundleAssignmentChange::Remove { .. })).count();
         let adds = changes.iter().filter(|c| matches!(c, BundleAssignmentChange::Add { .. })).count();

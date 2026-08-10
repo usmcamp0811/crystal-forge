@@ -14,7 +14,7 @@ use crate::api::models::{
     ImportedCustomCheckRule, ImportedEvidenceRequirement, ImportedPolicyCustomization,
     PolicyValueOverride, PublishBundleVersionRequest, SortOrder, SystemSummary, SystemsListParams,
     TrustBundleVersionRequest, UpdateComplianceBundleRequest, XccdfImportPlan, XccdfImportResponse,
-    XccdfPreviewResponse, XccdfRuleImportAction,
+    UpdateAssignmentRequest, XccdfPreviewResponse, XccdfRuleImportAction,
 };
 use crate::components::compliance::{
     BundleCatalog, BundleHeader, EvidenceDrawer, ImportReview, RefinePolicyStep,
@@ -1422,17 +1422,17 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                             };
                                             edit_busy.set(true);
                                             edit_error.set(None);
-                                            let body = serde_json::json!({
-                                                "expected_version_id": cm,
-                                                "enforcement_mode": (*edit_mode.read()).clone(),
-                                                "exclusions": exclusions,
-                                                "additions": additions,
-                                                "value_overrides": value_overrides,
-                                            });
+                                            let request = UpdateAssignmentRequest {
+                                                expected_version_id: cm,
+                                                enforcement_mode: Some((*edit_mode.read()).clone()),
+                                                exclusions: Some(exclusions),
+                                                additions: Some(additions),
+                                                value_overrides: Some(value_overrides),
+                                            };
                                             let st = scope_type.clone();
                                             let si = scope_id;
                                             spawn(async move {
-                                                match crate::api::client::update_compliance_assignment(&a_id, &body).await {
+                                                match crate::api::client::update_compliance_assignment(&a_id, &request).await {
                                                     Ok(_) => {
                                                         edit_busy.set(false);
                                                         editing.set(false);

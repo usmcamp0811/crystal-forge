@@ -594,10 +594,7 @@ pub async fn update_deployment_policy(
 pub enum PolicyDeleteOutcome {
     Deleted,
     NotFound,
-    BlockedByCorePolicy,
-    BlockedByImmutableHistory { version_ids: Vec<Uuid> },
-    BlockedByReferences { reference_count: i64 },
-    BlockedByAssignments { assignment_count: i64 },
+    Blocked(DeletionEligibility),
 }
 
 /// Return every retained record that prevents deleting this policy lineage.
@@ -627,22 +624,33 @@ async fn policy_deletion_eligibility_in_transaction(
     .await
     .context("Failed to check policy immutable history")?;
 
-    let version_references: i64 = sqlx::query_scalar(
+    let immutable_assignment_history: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*) FROM (
-            SELECT bvp.policy_version_id FROM compliance_bundle_version_policies bvp JOIN deployment_policy_versions pv ON pv.id = bvp.policy_version_id WHERE pv.policy_id = $1
-            UNION ALL SELECT cbp.policy_id FROM compliance_bundle_policies cbp WHERE cbp.policy_id = $1
-            UNION ALL SELECT e.policy_version_id FROM compliance_assignment_exclusions e JOIN deployment_policy_versions pv ON pv.id = e.policy_version_id WHERE pv.policy_id = $1
-            UNION ALL SELECT a.policy_version_id FROM compliance_assignment_additions a JOIN deployment_policy_versions pv ON pv.id = a.policy_version_id WHERE pv.policy_id = $1
-            UNION ALL SELECT o.policy_version_id FROM compliance_assignment_value_overrides o JOIN deployment_policy_versions pv ON pv.id = o.policy_version_id WHERE pv.policy_id = $1
-            UNION ALL SELECT m.policy_version_id FROM compliance_source_object_mappings m JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id WHERE pv.policy_id = $1
-        ) AS policy_refs
+            SELECT e.assignment_version_id FROM compliance_assignment_exclusions e JOIN deployment_policy_versions pv ON pv.id = e.policy_version_id WHERE pv.policy_id = $1
+            UNION SELECT a.assignment_version_id FROM compliance_assignment_additions a JOIN deployment_policy_versions pv ON pv.id = a.policy_version_id WHERE pv.policy_id = $1
+            UNION SELECT o.assignment_version_id FROM compliance_assignment_value_overrides o JOIN deployment_policy_versions pv ON pv.id = o.policy_version_id WHERE pv.policy_id = $1
+        ) AS assignment_history
         "#,
     )
     .bind(policy_id)
     .fetch_one(&mut **tx)
     .await
-    .context("Failed to check policy version references")?;
+    .context("Failed to check immutable policy assignment history")?;
+    let immutable_memberships: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT bvp.bundle_version_id FROM compliance_bundle_version_policies bvp JOIN deployment_policy_versions pv ON pv.id = bvp.policy_version_id JOIN compliance_bundle_versions bv ON bv.id = bvp.bundle_version_id WHERE pv.policy_id = $1 AND bv.publication_state IN ('accepted', 'deprecated') ORDER BY bvp.bundle_version_id",
+    )
+    .bind(policy_id)
+    .fetch_all(&mut **tx)
+    .await
+    .context("Failed to check immutable bundle memberships")?;
+    let mutable_membership_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM compliance_bundle_version_policies bvp JOIN deployment_policy_versions pv ON pv.id = bvp.policy_version_id JOIN compliance_bundle_versions bv ON bv.id = bvp.bundle_version_id WHERE pv.policy_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim')",
+    )
+    .bind(policy_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("Failed to check mutable draft memberships")?;
     let environment_assignment_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM environment_policies WHERE policy_id = $1")
             .bind(policy_id)
@@ -656,11 +664,27 @@ async fn policy_deletion_eligibility_in_transaction(
             .await
             .context("Failed to check system policy assignments")?;
 
+    let immutable_source_mapping_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM compliance_source_object_mappings m JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id WHERE pv.policy_id = $1 AND (pv.publication_state IN ('accepted', 'deprecated') OR m.bundle_version_id IS NOT NULL)",
+    )
+    .bind(policy_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("Failed to check immutable policy source mappings")?;
+    let disposable_source_mapping_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM compliance_source_object_mappings m JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id WHERE pv.policy_id = $1 AND pv.publication_state IN ('incomplete', 'draft', 'interim') AND m.bundle_version_id IS NULL",
+    )
+    .bind(policy_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("Failed to check disposable policy source mappings")?;
+
     let mut blockers = Vec::new();
     if policy_type == "require_cf_agent" {
         blockers.push(blocker(
             "policy_core",
             "The core require_cf_agent policy cannot be permanently deleted.",
+            false,
             None,
             Vec::new(),
         ));
@@ -669,19 +693,57 @@ async fn policy_deletion_eligibility_in_transaction(
         blockers.push(blocker(
             "policy_immutable_history",
             "This policy has accepted or deprecated history and cannot be permanently deleted.",
+            false,
             None,
             immutable_versions,
         ));
     }
-    if version_references > 0 {
-        blockers.push(blocker("policy_referenced", "This policy cannot be permanently deleted because compliance bundle versions or assignment overlays reference it.", Some(version_references), Vec::new()));
+    if immutable_assignment_history > 0 {
+        blockers.push(blocker("immutable_assignment_history", "This policy is referenced by immutable assignment history and cannot be permanently deleted.", false, Some(immutable_assignment_history), Vec::new()));
+    }
+    if !immutable_memberships.is_empty() {
+        blockers.push(blocker(
+            "immutable_bundle_membership",
+            "This policy belongs to immutable bundle membership and cannot be permanently deleted.",
+            false,
+            None,
+            immutable_memberships,
+        ));
+    }
+    if mutable_membership_count > 0 {
+        blockers.push(blocker(
+            "mutable_draft_membership",
+            "Draft bundle membership will be removed with this policy.",
+            true,
+            Some(mutable_membership_count),
+            Vec::new(),
+        ));
     }
     let assignment_count = environment_assignment_count + system_assignment_count;
     if assignment_count > 0 {
         blockers.push(blocker(
-            "policy_assigned",
-            "This policy is assigned to environments or systems and cannot be permanently deleted.",
+            "mutable_direct_assignment",
+            "Direct environment or system assignments will be removed with this policy.",
+            true,
             Some(assignment_count),
+            Vec::new(),
+        ));
+    }
+    if disposable_source_mapping_count > 0 {
+        blockers.push(blocker(
+            "disposable_source_mapping",
+            "Draft-only source mappings will be removed with this policy.",
+            true,
+            Some(disposable_source_mapping_count),
+            Vec::new(),
+        ));
+    }
+    if immutable_source_mapping_count > 0 {
+        blockers.push(blocker(
+            "immutable_source_mapping",
+            "This policy has retained source mappings and cannot be permanently deleted.",
+            false,
+            Some(immutable_source_mapping_count),
             Vec::new(),
         ));
     }
@@ -718,22 +780,25 @@ pub async fn delete_deployment_policy(
         tx.rollback().await.ok();
         return Ok(PolicyDeleteOutcome::NotFound);
     };
-    if let Some(blocker) = eligibility.blockers.first() {
+    if !eligibility.eligible {
         tx.rollback().await.ok();
-        return Ok(match blocker.code.as_str() {
-            "policy_immutable_history" => PolicyDeleteOutcome::BlockedByImmutableHistory {
-                version_ids: blocker.version_ids.clone(),
-            },
-            "policy_referenced" => PolicyDeleteOutcome::BlockedByReferences {
-                reference_count: blocker.count.unwrap_or_default(),
-            },
-            "policy_assigned" => PolicyDeleteOutcome::BlockedByAssignments {
-                assignment_count: blocker.count.unwrap_or_default(),
-            },
-            "policy_core" => PolicyDeleteOutcome::BlockedByCorePolicy,
-            _ => PolicyDeleteOutcome::BlockedByReferences { reference_count: 0 },
-        });
+        return Ok(PolicyDeleteOutcome::Blocked(eligibility));
     }
+
+    sqlx::query("DELETE FROM compliance_source_object_mappings m USING deployment_policy_versions pv WHERE m.policy_version_id = pv.id AND pv.policy_id = $1 AND pv.publication_state IN ('incomplete', 'draft', 'interim') AND m.bundle_version_id IS NULL")
+        .bind(policy_id).execute(&mut *tx).await.context("Failed to remove disposable policy source mappings")?;
+    sqlx::query("DELETE FROM compliance_bundle_version_policies bvp USING deployment_policy_versions pv, compliance_bundle_versions bv WHERE bvp.policy_version_id = pv.id AND bvp.bundle_version_id = bv.id AND pv.policy_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim')")
+        .bind(policy_id).execute(&mut *tx).await.context("Failed to remove mutable draft bundle memberships")?;
+    sqlx::query("DELETE FROM environment_policies WHERE policy_id = $1")
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to remove mutable environment policy assignments")?;
+    sqlx::query("DELETE FROM system_policies WHERE policy_id = $1")
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to remove mutable system policy assignments")?;
 
     let deleted = sqlx::query("DELETE FROM deployment_policies WHERE id = $1")
         .bind(policy_id)
@@ -1628,7 +1693,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires a test database role with CREATE DATABASE privileges"]
-    async fn full_migration_chain_applies_cleanly_on_fresh_database_including_0187() {
+    async fn full_migration_chain_applies_cleanly_on_fresh_database_including_0210() {
         let (admin_pool, pool, db_name) = create_temp_db().await;
 
         MIGRATOR
@@ -1636,19 +1701,88 @@ mod tests {
             .await
             .expect("full migration chain should apply successfully on a fresh database");
 
-        // 0187 must be recorded as successfully applied.
-        let success_187: Option<bool> =
-            sqlx::query_scalar("SELECT success FROM _sqlx_migrations WHERE version = 187")
+        // The deletion mapping guard migration must be recorded as applied.
+        let success_210: Option<bool> =
+            sqlx::query_scalar("SELECT success FROM _sqlx_migrations WHERE version = 210")
                 .fetch_optional(&pool)
                 .await
-                .expect("query _sqlx_migrations for version 187");
+                .expect("query _sqlx_migrations for version 210");
         assert_eq!(
-            success_187,
+            success_210,
             Some(true),
-            "migration 0187 must be recorded as successful after a fresh-chain apply"
+            "migration 0210 must be recorded as successful after a fresh-chain apply"
         );
 
         drop(pool);
         drop_temp_db(&admin_pool, &db_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires CRYSTAL_FORGE_TEST_DATABASE_URL with migration 0210 applied"]
+    async fn hard_delete_removes_disposable_draft_source_mapping() {
+        let pool = get_test_pool().await;
+        let suffix = uuid::Uuid::new_v4();
+        let policy_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config, enabled) VALUES ($1, 'custom_check', '{\"expression\": \"true\"}', false) RETURNING id",
+        )
+        .bind(format!("deletion-disposable-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .expect("insert draft policy");
+        let policy_version_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM deployment_policy_versions WHERE policy_id = $1 AND publication_state = 'draft'",
+        )
+        .bind(policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("find draft policy version");
+        let source_artifact_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_source_artifacts (content, filename, media_type, sha256, parser_version) VALUES ($1, 'fixture.xml', 'application/xml', encode(digest($1, 'sha256'), 'hex'), 'test') RETURNING id",
+        )
+        .bind(b"<Benchmark/>".as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("insert source artifact");
+        let mapping_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_source_object_mappings (source_artifact_id, object_kind, source_identity, policy_version_id, fidelity) VALUES ($1, 'rule', $2, $3, 'native_exact') RETURNING id",
+        )
+        .bind(source_artifact_id)
+        .bind(format!("rule-{suffix}"))
+        .bind(policy_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert disposable mapping");
+
+        let eligibility = policy_deletion_eligibility(&pool, &policy_id)
+            .await
+            .expect("load eligibility")
+            .expect("policy exists");
+        assert!(eligibility.eligible);
+        assert!(
+            eligibility
+                .blockers
+                .iter()
+                .any(|blocker| blocker.kind == "disposable_source_mapping" && blocker.removable)
+        );
+        assert_eq!(
+            delete_deployment_policy(&pool, &policy_id)
+                .await
+                .expect("delete policy"),
+            PolicyDeleteOutcome::Deleted
+        );
+        let mapping_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM compliance_source_object_mappings WHERE id = $1)",
+        )
+        .bind(mapping_id)
+        .fetch_one(&pool)
+        .await
+        .expect("check mapping cleanup");
+        assert!(!mapping_exists);
+
+        sqlx::query("DELETE FROM compliance_source_artifacts WHERE id = $1")
+            .bind(source_artifact_id)
+            .execute(&pool)
+            .await
+            .expect("clean up source artifact");
     }
 }

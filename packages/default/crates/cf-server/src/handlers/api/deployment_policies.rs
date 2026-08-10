@@ -1052,8 +1052,8 @@ pub async fn update_deployment_policy(
 /// Available to Admin role only.
 ///
 /// Returns 404 if the policy does not exist.
-/// Returns typed 409 responses for immutable history, bundle/overlay references,
-/// or legacy environment/system assignments.
+/// Returns a typed 409 body containing the authoritative, transactionally checked
+/// deletion eligibility and every retained blocker.
 pub async fn get_deployment_policy_deletion_eligibility(
     RequireAdmin(_user): RequireAdmin,
     State(state): State<CFState>,
@@ -1104,31 +1104,11 @@ pub async fn delete_deployment_policy(
             "Deployment policy not found",
             None,
         )),
-        PolicyDeleteOutcome::BlockedByCorePolicy => Err(policy_delete_error(
+        PolicyDeleteOutcome::Blocked(eligibility) => Err(policy_delete_error(
             StatusCode::CONFLICT,
-            "policy_core",
-            "The core require_cf_agent policy cannot be permanently deleted.",
-            None,
-        )),
-        PolicyDeleteOutcome::BlockedByImmutableHistory { version_ids } => Err(policy_delete_error(
-            StatusCode::CONFLICT,
-            "policy_immutable_history",
-            "This policy has accepted or deprecated history and cannot be permanently deleted.",
-            Some(serde_json::json!({ "policy_id": policy_id, "blocking_versions": version_ids })),
-        )),
-        PolicyDeleteOutcome::BlockedByReferences { reference_count } => Err(policy_delete_error(
-            StatusCode::CONFLICT,
-            "policy_referenced",
-            "This policy cannot be permanently deleted because compliance bundle versions or assignment overlays reference it.",
-            Some(serde_json::json!({ "policy_id": policy_id, "reference_count": reference_count })),
-        )),
-        PolicyDeleteOutcome::BlockedByAssignments { assignment_count } => Err(policy_delete_error(
-            StatusCode::CONFLICT,
-            "policy_assigned",
-            "This policy is assigned to environments or systems and cannot be permanently deleted.",
-            Some(
-                serde_json::json!({ "policy_id": policy_id, "assignment_count": assignment_count }),
-            ),
+            "deletion_blocked",
+            "This deployment policy cannot be permanently deleted.",
+            Some(serde_json::json!({ "policy_id": policy_id, "eligibility": eligibility })),
         )),
     }
 }

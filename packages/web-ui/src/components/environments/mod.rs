@@ -5,6 +5,7 @@
 
 use dioxus::prelude::*;
 use uuid::Uuid;
+use crate::api::models::PolicyValueOverride;
 
 /// Policy option for environment requirements.
 #[derive(Clone, Debug, PartialEq)]
@@ -141,6 +142,8 @@ pub struct EnvBundleAssignment {
     pub exclusions: Vec<Uuid>,
     /// Preserved overlay additions — never cleared by the env modal.
     pub additions: Vec<Uuid>,
+    /// Preserved value overrides — never cleared by a mode-only update.
+    pub value_overrides: Vec<PolicyValueOverride>,
 }
 
 /// Draft for creating a new environment.
@@ -164,15 +167,6 @@ pub struct EditEnvironmentDraft {
 /// Staged change to an environment's bundle assignment used in the modal diff.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BundleAssignmentChange {
-    /// Existing assignment — keep with original overlays unless mode/version changed.
-    Unchanged {
-        assignment_id: Uuid,
-        current_version_id: Uuid,
-        bundle_version_id: Uuid,
-        enforcement_mode: String,
-        exclusions: Vec<Uuid>,
-        additions: Vec<Uuid>,
-    },
     /// Create a brand-new assignment for a bundle not previously assigned.
     Add {
         bundle_id: Uuid,
@@ -183,10 +177,10 @@ pub enum BundleAssignmentChange {
     UpdateMode {
         assignment_id: Uuid,
         current_version_id: Uuid,
-        bundle_version_id: Uuid,
         enforcement_mode: String,
         exclusions: Vec<Uuid>,
         additions: Vec<Uuid>,
+        value_overrides: Vec<PolicyValueOverride>,
     },
     /// Deactivate an existing assignment.
     Remove { assignment_id: Uuid },

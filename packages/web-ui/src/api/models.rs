@@ -1739,6 +1739,20 @@ pub struct CreateAssignmentRequest {
     pub value_overrides: Option<Vec<PolicyValueOverride>>,
 }
 
+/// Request to replace an assignment's mutable overlay and enforcement mode.
+///
+/// The server creates a new immutable assignment version and compares
+/// `expected_version_id` with the current version before doing so. Bundle
+/// version rebinding is deliberately not part of this request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateAssignmentRequest {
+    pub expected_version_id: Uuid,
+    pub enforcement_mode: Option<String>,
+    pub exclusions: Option<Vec<Uuid>>,
+    pub additions: Option<Vec<Uuid>>,
+    pub value_overrides: Option<Vec<PolicyValueOverride>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssignmentResponse {
     pub id: Uuid,
@@ -1780,21 +1794,10 @@ pub struct DeletionBlocker {
     /// Specific immutable version UUIDs that are blocking.
     #[serde(default)]
     pub version_ids: Vec<Uuid>,
-}
-
-impl DeletionBlocker {
-    /// True if the blocker is permanent and cannot be resolved through normal
-    /// application lifecycle (accepted/deprecated history, immutable assignment history).
-    pub fn is_permanent(&self) -> bool {
-        matches!(
-            self.code.as_str(),
-            "policy_immutable_history"
-                | "bundle_immutable_history"
-                | "bundle_assignment_history"
-                | "immutable_bundle_membership"
-                | "immutable_assignment_reference"
-        )
-    }
+    /// Classification supplied by the server. A false value means normal
+    /// lifecycle actions cannot remove the blocker.
+    #[serde(default)]
+    pub removable: bool,
 }
 
 /// Whether a policy or bundle lineage can be permanently deleted.
@@ -1807,7 +1810,7 @@ pub struct DeletionEligibility {
 
 impl DeletionEligibility {
     pub fn permanently_blocked(&self) -> bool {
-        self.blockers.iter().any(|b| b.is_permanent())
+        self.blockers.iter().any(|blocker| !blocker.removable)
     }
 }
 

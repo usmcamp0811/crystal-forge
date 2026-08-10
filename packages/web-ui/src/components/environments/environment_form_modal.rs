@@ -470,6 +470,7 @@ fn PolicyEnforcementSection(props: PolicyEnforcementSectionProps) -> Element {
                                                     enforcement_mode: "enforce".to_string(),
                                                     exclusions: Vec::new(),
                                                     additions: Vec::new(),
+                                                    value_overrides: Vec::new(),
                                                 });
                                             }
                                         });
