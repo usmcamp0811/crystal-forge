@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 00:00'
+updated_date: '2026-08-10 00:02'
 labels:
   - design
   - frontend
@@ -1406,6 +1406,8 @@ Parity pass for Refine Policy Modal against ImportStigModal.jsx. Root causes: (1
 - Provide an admin-only modal using established modal classes to create, update/select/delete schemes and edit group query, descriptions, lineage-ID pins, and exclusions.
 - Apply custom matching after existing filters: case-insensitive searchable metadata substring, pins first, exclusions win, first configured group owns a control, and remaining security controls appear in Ungrouped.
 - Add pure matching tests and run cargo fmt, offline web-ui cargo check, and focused tests. Do not run the web-ui Nix build per user instruction.
+
+Phase 4 policy classification UI/data wiring: extend the web-ui CRUD request DTOs, seed the unified PolicyEditorModal from the selected current policy, and persist domain/category/framework classification, severity, framework-specific metadata, and rationale. Use the loaded policy library for custom framework suggestions; retain unsupported rule/evidence safeguards. Render selected-revision classification in PolicyDrawer and actual security severity on cards. Verify with focused pure tests, cargo fmt --all --check, and SQLX_OFFLINE cargo check -p web-ui; do not run the web-ui Nix build.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
