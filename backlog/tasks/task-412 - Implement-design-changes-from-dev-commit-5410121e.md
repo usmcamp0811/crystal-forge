@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 01:29'
+updated_date: '2026-08-10 01:32'
 labels:
   - design
   - frontend
@@ -1432,6 +1432,10 @@ Phase 7 bundle framework UX: add a pure catalog in `packages/web-ui/src/views/co
 - Run requested fmt/check/live compliance tests using only the repository PostgreSQL instance; do not run the web-ui Nix check unless web-ui sources change.
 
 - Approved API representation decision (2026-08-10): add an optional `direct_policy_rollup` field to `SystemComplianceBundlesResponse`; bundle rows remain strictly bundle-scoped and direct environment/system policies are not attributed to any bundle.
+
+### Policy editor DISA layout pass (2026-08-10)
+- Compare the production New custom policy modal with the Policies design reference and align DISA-specific SRG/CCI field placement, grouping, labels, and responsive behavior without changing classification semantics or unrelated editor flows.
+- Add or update focused UI coverage when a practical existing test surface exists; run the full existing web-ui test suite and the web-ui Nix check because this changes web-ui source.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
