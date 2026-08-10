@@ -33,7 +33,7 @@ use crate::compliance::xccdf::importer::{
     validate_sha256_match,
 };
 use crate::compliance::xccdf::package::{ProcessingError, process_xccdf_bytes};
-use crate::compliance::xccdf::reconciliation::NativeReconcileFailure;
+use crate::compliance::xccdf::reconciliation::{NativeReconcileFailure, ReconcileConflict};
 use crate::compliance::xccdf::xml_writer::{XccdfWriterError, write_bundle_xccdf_export};
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
@@ -5340,6 +5340,362 @@ pub async fn policy_interchange_import(
         .into_response()
 }
 
+/// Generate a deterministic UUID for legacy compatibility policy imports.
+/// Used when a policy document lacks explicit portable lineage_id/version_id.
+///
+/// Creates stable UUIDs based on:
+/// - Crystal Forge namespace
+/// - source document SHA-256
+/// - policy ordinal within the document
+/// - field type (lineage or version)
+///
+/// Important: Same source bytes + same ordinal produce identical UUIDs across
+/// preview and import calls, enabling proper reconciliation without name-based matching.
+fn generate_compatibility_policy_uuid(
+    source_sha256: &str,
+    ordinal: usize,
+    field: &str, // "lineage" or "version"
+) -> Uuid {
+    use sha2::{Digest, Sha256};
+
+    let seed = format!(
+        "crystal-forge:policy-compat-{}:1:{}:{}",
+        field, source_sha256, ordinal
+    );
+    let hash = Sha256::digest(seed.as_bytes());
+
+    // Convert first 16 bytes of SHA-256 to UUID
+    // This is deterministic and collision-resistant
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&hash[..16]);
+    Uuid::from_bytes(bytes)
+}
+
+/// Reconciliation preview for a single imported policy.
+/// Contains both reconciliation decision and local context information.
+#[derive(Debug, Clone, serde::Serialize)]
+struct PolicyReconciliationPreview {
+    lineage_id: Uuid,
+    version_id: Uuid,
+    version: String,
+    name: String,
+    policy_type: String,
+    semantic_digest: String,
+    reconciliation_state: String, // "exact_match", "new_lineage", "new_version", "identity_conflict"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_lineage_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_version_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_semantic_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name_collision: Option<NameCollision>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    blocking_conflicts: Vec<ConflictInfo>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct NameCollision {
+    local_policy_id: Uuid,
+    local_policy_name: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ConflictInfo {
+    code: String,
+    #[serde(flatten)]
+    details: serde_json::Value,
+}
+
+/// Helper: determine if a reconciliation conflict is blocking for import.
+fn reconciliation_conflict_is_blocking(conflict: &ReconcileConflict) -> bool {
+    matches!(
+        conflict,
+        ReconcileConflict::VersionDigestMismatch { .. }
+            | ReconcileConflict::VersionBelongsToDifferentLineage { .. }
+            | ReconcileConflict::PolicyTypeMismatch { .. }
+            | ReconcileConflict::LineageObjectTypeMismatch { .. }
+            | ReconcileConflict::InvalidPortableIdentity { .. }
+    )
+}
+
+/// Convert ReconcileConflict to serializable ConflictInfo with relevant context.
+fn conflict_to_info(conflict: &ReconcileConflict) -> ConflictInfo {
+    let (code, details) = match conflict {
+        ReconcileConflict::VersionDigestMismatch {
+            lineage_id,
+            version_id,
+            local_digest,
+            imported_digest,
+            ..
+        } => (
+            "INTERCHANGE_VERSION_DIGEST_CONFLICT".to_string(),
+            serde_json::json!({
+                "lineage_id": lineage_id,
+                "version_id": version_id,
+                "local_digest": local_digest,
+                "imported_digest": imported_digest,
+            }),
+        ),
+        ReconcileConflict::VersionBelongsToDifferentLineage {
+            lineage_id,
+            version_id,
+            actual_lineage_id,
+        } => (
+            "INTERCHANGE_VERSION_LINEAGE_MISMATCH".to_string(),
+            serde_json::json!({
+                "imported_lineage_id": lineage_id,
+                "version_id": version_id,
+                "actual_lineage_id": actual_lineage_id,
+            }),
+        ),
+        ReconcileConflict::PolicyTypeMismatch {
+            lineage_id,
+            version_id,
+        } => (
+            "INTERCHANGE_POLICY_TYPE_MISMATCH".to_string(),
+            serde_json::json!({
+                "lineage_id": lineage_id,
+                "version_id": version_id,
+            }),
+        ),
+        ReconcileConflict::LineageObjectTypeMismatch { lineage_id } => (
+            "INTERCHANGE_LINEAGE_TYPE_MISMATCH".to_string(),
+            serde_json::json!({
+                "lineage_id": lineage_id,
+            }),
+        ),
+        ReconcileConflict::InvalidPortableIdentity { source_rule_id } => (
+            "INTERCHANGE_INVALID_PORTABLE_ID".to_string(),
+            serde_json::json!({
+                "source_rule_id": source_rule_id,
+            }),
+        ),
+    };
+    ConflictInfo { code, details }
+}
+
+/// Load local policy identities and reconcile imported policies using the
+/// authoritative planner. This function performs NO mutations.
+async fn load_and_plan_policy_reconciliation(
+    pool: &PgPool,
+    imported: &[NormalizedPolicyImport],
+) -> Result<(Vec<PolicyReconciliationPreview>, Vec<ReconcileConflict>), String> {
+    use crate::compliance::xccdf::reconciliation::{ExistingPolicyIdentity, NativePolicyIdentity};
+
+    // Load only relevant local policies
+    let imported_lineage_ids: Vec<Uuid> = imported.iter().map(|p| p.lineage_id).collect();
+    let imported_version_ids: Vec<Uuid> = imported.iter().map(|p| p.version_id).collect();
+    let imported_names: Vec<String> = imported.iter().map(|p| p.name.clone()).collect();
+
+    // Load policy versions that match imported IDs
+    let matching_versions: Vec<(Uuid, Uuid, String, String)> = sqlx::query_as(
+        "SELECT id, policy_id, semantic_digest, policy_type FROM deployment_policy_versions WHERE id = ANY($1)"
+    )
+    .bind(&imported_version_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to load matching versions: {e}"))?;
+
+    // Load policies by name for collision detection
+    let policies_by_name: Vec<(String, Uuid)> =
+        sqlx::query_as("SELECT name, id FROM deployment_policies WHERE name = ANY($1)")
+            .bind(&imported_names)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("Failed to load policies by name: {e}"))?;
+
+    // Build maps
+    let version_to_lineage: std::collections::HashMap<Uuid, (Uuid, String, String)> =
+        matching_versions
+            .iter()
+            .map(|(vid, lid, digest, ptype)| (*vid, (*lid, digest.clone(), ptype.clone())))
+            .collect();
+
+    let name_to_lineage: std::collections::HashMap<String, Uuid> = policies_by_name
+        .iter()
+        .map(|(name, id)| (name.clone(), *id))
+        .collect();
+
+    // Convert imported to native identities
+    let native_imported: Vec<NativePolicyIdentity> = imported
+        .iter()
+        .map(|p| NativePolicyIdentity {
+            lineage_id: p.lineage_id,
+            version_id: p.version_id,
+            policy_type: p.policy_type.clone(),
+            semantic_digest: p.semantic_digest.clone(),
+            source_rule_id: p.name.clone(), // Use name as identifier for error reporting
+        })
+        .collect();
+
+    // Convert existing to policy identities
+    let native_existing: Vec<ExistingPolicyIdentity> = matching_versions
+        .iter()
+        .map(|(vid, lid, digest, ptype)| ExistingPolicyIdentity {
+            lineage_id: *lid,
+            version_id: *vid,
+            policy_type: ptype.clone(),
+            semantic_digest: digest.clone(),
+        })
+        .collect();
+
+    // Run the authoritative planner
+    let plan = crate::compliance::xccdf::reconciliation::plan_policy_reconciliation(
+        &native_imported,
+        &native_existing,
+    );
+
+    // Build previews from decisions + conflicts
+    let mut previews = Vec::new();
+    let mut preview_map: std::collections::HashMap<(Uuid, Uuid), PolicyReconciliationPreview> =
+        std::collections::HashMap::new();
+
+    // Add previews for decisions (successful reconciliation)
+    for (imported_identity, decision) in &plan.decisions {
+        let mut preview = PolicyReconciliationPreview {
+            lineage_id: imported_identity.lineage_id,
+            version_id: imported_identity.version_id,
+            version: imported
+                .iter()
+                .find(|p| p.version_id == imported_identity.version_id)
+                .map(|p| p.version.clone())
+                .unwrap_or_else(|| "0.1.0".to_string()),
+            name: imported_identity.source_rule_id.clone(),
+            policy_type: imported_identity.policy_type.clone(),
+            semantic_digest: imported_identity.semantic_digest.clone(),
+            reconciliation_state: match decision {
+                crate::compliance::xccdf::reconciliation::ReconcileDecision::ReuseExact { .. } => {
+                    "exact_match".to_string()
+                }
+                crate::compliance::xccdf::reconciliation::ReconcileDecision::CreateLineageAndVersion { .. } => {
+                    "new_lineage".to_string()
+                }
+                crate::compliance::xccdf::reconciliation::ReconcileDecision::CreateVersionInExistingLineage { .. } => {
+                    "new_version".to_string()
+                }
+            },
+            local_lineage_id: match decision {
+                crate::compliance::xccdf::reconciliation::ReconcileDecision::ReuseExact {
+                    local_lineage_id,
+                    ..
+                } => Some(*local_lineage_id),
+                crate::compliance::xccdf::reconciliation::ReconcileDecision::CreateVersionInExistingLineage {
+                    local_lineage_id,
+                    ..
+                } => Some(*local_lineage_id),
+                _ => None,
+            },
+            local_version_id: match decision {
+                crate::compliance::xccdf::reconciliation::ReconcileDecision::ReuseExact {
+                    local_version_id,
+                    ..
+                } => Some(*local_version_id),
+                _ => None,
+            },
+            local_semantic_digest: match decision {
+                crate::compliance::xccdf::reconciliation::ReconcileDecision::ReuseExact {
+                    local_version_id,
+                    ..
+                } => matching_versions
+                    .iter()
+                    .find(|(vid, _, _, _)| vid == local_version_id)
+                    .map(|(_, _, digest, _)| digest.clone()),
+                _ => None,
+            },
+            name_collision: None,
+            blocking_conflicts: Vec::new(),
+        };
+
+        // Check for name collision
+        if let Some(collision_lineage_id) = name_to_lineage.get(&preview.name) {
+            if *collision_lineage_id != preview.lineage_id {
+                preview.name_collision = Some(NameCollision {
+                    local_policy_id: *collision_lineage_id,
+                    local_policy_name: preview.name.clone(),
+                });
+            }
+        }
+
+        preview_map.insert((preview.lineage_id, preview.version_id), preview);
+    }
+
+    // Add previews for conflicts (identity conflicts) - these have no decision
+    for conflict in &plan.conflicts {
+        let (lineage_id, version_id) = match conflict {
+            ReconcileConflict::VersionDigestMismatch {
+                lineage_id,
+                version_id,
+                ..
+            }
+            | ReconcileConflict::VersionBelongsToDifferentLineage {
+                lineage_id,
+                version_id,
+                ..
+            }
+            | ReconcileConflict::PolicyTypeMismatch {
+                lineage_id,
+                version_id,
+            } => (*lineage_id, *version_id),
+            ReconcileConflict::LineageObjectTypeMismatch { .. }
+            | ReconcileConflict::InvalidPortableIdentity { .. } => {
+                // These don't map to a specific version, skip preview
+                continue;
+            }
+        };
+
+        let imported_policy = imported
+            .iter()
+            .find(|p| p.lineage_id == lineage_id && p.version_id == version_id);
+
+        if let Some(imported_policy) = imported_policy {
+            let (local_lineage_id, local_version_id, local_digest) =
+                if let Some((lid, digest, _ptype)) = version_to_lineage.get(&version_id) {
+                    (Some(*lid), Some(version_id), Some(digest.clone()))
+                } else {
+                    (None, None, None)
+                };
+
+            let mut preview = PolicyReconciliationPreview {
+                lineage_id: imported_policy.lineage_id,
+                version_id: imported_policy.version_id,
+                version: imported_policy.version.clone(),
+                name: imported_policy.name.clone(),
+                policy_type: imported_policy.policy_type.clone(),
+                semantic_digest: imported_policy.semantic_digest.clone(),
+                reconciliation_state: "identity_conflict".to_string(),
+                local_lineage_id,
+                local_version_id,
+                local_semantic_digest: local_digest,
+                name_collision: None,
+                blocking_conflicts: vec![conflict_to_info(conflict)],
+            };
+
+            // Check for name collision
+            if let Some(collision_lineage_id) = name_to_lineage.get(&preview.name) {
+                if *collision_lineage_id != preview.lineage_id {
+                    preview.name_collision = Some(NameCollision {
+                        local_policy_id: *collision_lineage_id,
+                        local_policy_name: preview.name.clone(),
+                    });
+                }
+            }
+
+            preview_map.insert((lineage_id, version_id), preview);
+        }
+    }
+
+    // Collect all previews
+    previews.extend(preview_map.into_values());
+    previews.sort_by(|a, b| {
+        a.lineage_id
+            .cmp(&b.lineage_id)
+            .then(a.version_id.cmp(&b.version_id))
+    });
+
+    Ok((previews, plan.conflicts))
+}
+
 /// `POST /api/v1/policies/interchange/preview`
 ///
 /// Parses and validates a policy interchange document without writing to the
@@ -5366,7 +5722,7 @@ pub async fn policy_interchange_preview(
         use sha2::{Digest, Sha256};
         hex::encode(Sha256::digest(&upload.bytes))
     };
-    let policies = match parse_policy_interchange_upload(&upload) {
+    let policies = match parse_policy_interchange_upload_with_source(&upload, &source_sha256) {
         Ok(policies) => policies,
         Err(message) => {
             return (
@@ -5381,27 +5737,86 @@ pub async fn policy_interchange_preview(
         }
     };
 
+    // Validate no duplicate version IDs within the document
+    let mut seen_versions = std::collections::HashSet::new();
+    for policy in &policies {
+        if !seen_versions.insert(policy.version_id) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "source_sha256": source_sha256,
+                    "error": "POLICY_INTERCHANGE_INVALID",
+                    "message": format!("Duplicate version ID {} in import document", policy.version_id),
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    let (previews, conflicts) = match load_and_plan_policy_reconciliation(&pool, &policies).await {
+        Ok((p, c)) => (p, c),
+        Err(error) => {
+            tracing::error!("Failed to reconcile imported policies: {error}");
+            return internal_error("Failed to analyze policy compatibility");
+        }
+    };
+
+    let has_blocking_conflicts = conflicts.iter().any(reconciliation_conflict_is_blocking);
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "source_sha256": source_sha256,
             "filename": upload.filename,
             "policy_count": policies.len(),
-            "policies": policies.iter().map(|policy| serde_json::json!({
-                "lineage_id": policy.lineage_id,
-                "version_id": policy.version_id,
-                "version": policy.version,
-                "name": policy.name,
-                "policy_type": policy.policy_type,
-                "implementation_state": policy.implementation_state,
-                "semantic_digest": policy.semantic_digest,
-            })).collect::<Vec<_>>(),
-            "publication_state": "draft",
-            "enabled": false,
-            "trusted": false,
+            "policies": previews,
+            "has_blocking_conflicts": has_blocking_conflicts,
+            "blocking_conflicts": conflicts
+                .iter()
+                .filter(|c| reconciliation_conflict_is_blocking(c))
+                .map(conflict_to_info)
+                .collect::<Vec<_>>(),
         })),
     )
         .into_response()
+}
+
+fn parse_policy_interchange_upload_with_source(
+    upload: &MultipartUpload,
+    source_sha256: &str,
+) -> Result<Vec<NormalizedPolicyImport>, String> {
+    let policies = parse_policy_interchange_upload(upload)?;
+    // Re-normalize with source_sha256 to get deterministic IDs
+    let format = upload
+        .filename
+        .as_deref()
+        .and_then(|name| name.rsplit('.').next())
+        .unwrap_or("json")
+        .to_ascii_lowercase();
+    let document = match format.as_str() {
+        "toml" => std::str::from_utf8(&upload.bytes)
+            .ok()
+            .and_then(|text| toml::from_str::<toml::Value>(text).ok())
+            .and_then(|value| serde_json::to_value(value).ok())
+            .ok_or_else(|| "Policy TOML is invalid".to_string())?,
+        "json" => serde_json::from_slice::<serde_json::Value>(&upload.bytes)
+            .map_err(|_| "Policy JSON is invalid".to_string())?,
+        _ => return Err("Policy interchange format must be JSON or TOML".to_string()),
+    };
+    let raw_policies = match document.get("policies") {
+        Some(serde_json::Value::Array(policies)) => policies.clone(),
+        Some(_) => return Err("The policies field must be an array".to_string()),
+        None if document.get("policy_type").is_some() => vec![document],
+        None => return Err("Policy interchange document must contain policies".to_string()),
+    };
+    if raw_policies.is_empty() {
+        return Err("Policy interchange document contains no policies".to_string());
+    }
+    raw_policies
+        .into_iter()
+        .enumerate()
+        .map(|(idx, raw)| normalize_policy_import(raw, Some(source_sha256), None, idx))
+        .collect()
 }
 
 fn parse_policy_interchange_upload(
@@ -5434,27 +5849,44 @@ fn parse_policy_interchange_upload(
     }
     raw_policies
         .into_iter()
-        .map(normalize_policy_import)
+        .enumerate()
+        .map(|(idx, raw)| normalize_policy_import(raw, None, None, idx))
         .collect()
 }
 
-fn normalize_policy_import(raw: serde_json::Value) -> Result<NormalizedPolicyImport, String> {
+fn normalize_policy_import(
+    raw: serde_json::Value,
+    source_sha256: Option<&str>,
+    compat_seed: Option<&str>,
+    ordinal: usize,
+) -> Result<NormalizedPolicyImport, String> {
     let object = raw
         .as_object()
         .ok_or_else(|| "Each imported policy must be an object".to_string())?;
     let compatibility_expression = object.get("expression").and_then(serde_json::Value::as_str);
-    let lineage_id = object
-        .get("lineage_id")
-        .and_then(serde_json::Value::as_str)
-        .map(|value| Uuid::parse_str(value).map_err(|_| "lineage_id is not a UUID".to_string()))
-        .transpose()?
-        .unwrap_or_else(Uuid::new_v4);
-    let version_id = object
-        .get("version_id")
-        .and_then(serde_json::Value::as_str)
-        .map(|value| Uuid::parse_str(value).map_err(|_| "version_id is not a UUID".to_string()))
-        .transpose()?
-        .unwrap_or_else(Uuid::new_v4);
+
+    // Portable IDs: if explicit, use them; if missing, generate deterministically
+    let lineage_id =
+        if let Some(lid_str) = object.get("lineage_id").and_then(serde_json::Value::as_str) {
+            Uuid::parse_str(lid_str).map_err(|_| "lineage_id is not a UUID".to_string())?
+        } else if let (Some(source_sha), _) = (source_sha256, compat_seed) {
+            // Deterministic compatibility ID from source
+            generate_compatibility_policy_uuid(source_sha, ordinal, "lineage")
+        } else {
+            // For preview without source_sha256 context, use random
+            Uuid::new_v4()
+        };
+
+    let version_id =
+        if let Some(vid_str) = object.get("version_id").and_then(serde_json::Value::as_str) {
+            Uuid::parse_str(vid_str).map_err(|_| "version_id is not a UUID".to_string())?
+        } else if let (Some(source_sha), _) = (source_sha256, compat_seed) {
+            // Deterministic compatibility ID from source
+            generate_compatibility_policy_uuid(source_sha, ordinal, "version")
+        } else {
+            // For preview without source_sha256 context, use random
+            Uuid::new_v4()
+        };
     let name = object
         .get("name")
         .and_then(serde_json::Value::as_str)
