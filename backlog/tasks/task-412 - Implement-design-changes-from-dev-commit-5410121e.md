@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 03:57'
+updated_date: '2026-08-10 04:06'
 labels:
   - design
   - frontend
@@ -1495,6 +1495,8 @@ Phase 9/10 classification integration completed locally. Foreign XCCDF imports n
 2026-08-10 deletion correctness follow-up: added server-authoritative DeletionBlocker.kind/removable classification and made eligibility true only when all dependent records are transactionally removable. Policy/bundle checks now distinguish immutable accepted/deprecated history, immutable assignment history, immutable bundle membership, mutable draft membership, mutable direct assignment, disposable source mappings, immutable source mappings, and core policy. DELETE returns the full locked eligibility payload for 409s and explicitly removes eligible draft memberships/direct assignments/source mappings. Added migration 0210 to permit deleting source mappings only when their targets are mutable; immutable mapping targets remain protected. Added unit serialization/eligibility tests and an ignored live DB cleanup test. Verification passed: `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all --check`; `nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server queries::deletion::tests --lib` (4 passed); `nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-server`; `git diff --check`. Live test command (also retried with `--impure`) could not run because CRYSTAL_FORGE_TEST_DATABASE_URL is unavailable to the Nix shell. Preserved untracked STIG zip and web-ui CSS; no web-ui files modified.
 
 Server-only source-mapping lifecycle correction: policy/bundle eligibility and cleanup now classify every non-null target by publication state, so draft-policy+draft-bundle mappings are removable and immutable history is retained. Added ignored isolated DB coverage for A-G single/dual-reference states and expanded ignored live cleanup coverage so policy and bundle preflight both agree with DELETE. Verification: `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all --check` passed; `nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server queries::deletion::tests --lib` passed (4); `nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-server` passed; `git diff --check` passed. Live DB execution unavailable because `CRYSTAL_FORGE_TEST_DATABASE_URL` is unset; the two ignored test targets compile and remain ignored.
+
+Implemented the requested server-only completion slice in `TASK-412-cf-xccdf-interchange`: `GET /api/v1/environments` now bulk-loads active versioned environment assignment snapshots (current assignment/bundle version IDs, mode, exclusions, additions, overrides) in four set-based overlay queries. System compliance now preserves bundle provenance through resolution and returns per-bundle effective rollups, direct-only rollup, and authoritative deduplicated overall rollup. Added serialization and attribution tests. Verification passed: `nix develop -c cargo fmt --all --check`; `nix develop -c cargo test -p cf-server --lib` (1047 passed, 298 ignored). No web-ui files were changed; no commit or push.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
