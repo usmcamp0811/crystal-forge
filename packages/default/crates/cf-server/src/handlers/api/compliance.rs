@@ -5118,6 +5118,59 @@ fn safe_policy_toml_filename(name: &str) -> String {
 /// Imports a canonical JSON or TOML policy-set document. Imported policies are
 /// always created as disabled draft versions; this endpoint never trusts or
 /// activates executable content.
+/// Load policy reconciliation data within an existing transaction and run the authoritative planner.
+/// Used by both preview (via pool wrapper) and import (direct transaction use).
+async fn load_and_plan_policy_reconciliation_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    imported: &[NormalizedPolicyImport],
+) -> Result<crate::compliance::xccdf::reconciliation::PolicyReconciliationPlan, String> {
+    use crate::compliance::xccdf::reconciliation::{ExistingPolicyIdentity, NativePolicyIdentity};
+
+    let imported_lineage_ids: Vec<Uuid> = imported.iter().map(|p| p.lineage_id).collect();
+    let imported_version_ids: Vec<Uuid> = imported.iter().map(|p| p.version_id).collect();
+
+    // Load policy versions that match imported IDs OR belong to imported lineages
+    let matching_versions: Vec<(Uuid, Uuid, String, String)> = sqlx::query_as(
+        "SELECT id, policy_id, semantic_digest, policy_type FROM deployment_policy_versions WHERE id = ANY($1) OR policy_id = ANY($2)"
+    )
+    .bind(&imported_version_ids)
+    .bind(&imported_lineage_ids)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| format!("Failed to load matching versions: {e}"))?;
+
+    // Convert imported to native identities
+    let native_imported: Vec<NativePolicyIdentity> = imported
+        .iter()
+        .map(|p| NativePolicyIdentity {
+            lineage_id: p.lineage_id,
+            version_id: p.version_id,
+            policy_type: p.policy_type.clone(),
+            semantic_digest: p.semantic_digest.clone(),
+            source_rule_id: p.name.clone(),
+        })
+        .collect();
+
+    // Convert existing to policy identities
+    let native_existing: Vec<ExistingPolicyIdentity> = matching_versions
+        .iter()
+        .map(|(vid, lid, digest, ptype)| ExistingPolicyIdentity {
+            lineage_id: *lid,
+            version_id: *vid,
+            policy_type: ptype.clone(),
+            semantic_digest: digest.clone(),
+        })
+        .collect();
+
+    // Run the authoritative planner
+    Ok(
+        crate::compliance::xccdf::reconciliation::plan_policy_reconciliation(
+            &native_imported,
+            &native_existing,
+        ),
+    )
+}
+
 pub async fn policy_interchange_import(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -5185,154 +5238,237 @@ pub async fn policy_interchange_import(
             return internal_error("Failed to import policies");
         }
     };
+    // Acquire advisory locks for all imported identities to prevent concurrent races
+    let mut lock_keys: Vec<String> = Vec::new();
+    for policy in &policies {
+        lock_keys.push(format!("policy-lineage:{}", policy.lineage_id));
+        lock_keys.push(format!("policy-version:{}", policy.version_id));
+    }
+    lock_keys.sort();
+    lock_keys.dedup();
+
+    for lock_key in &lock_keys {
+        if let Err(error) = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await
+        {
+            let _ = tx.rollback().await;
+            tracing::error!("Failed to acquire advisory lock for {}: {error}", lock_key);
+            return internal_error("Failed to acquire import locks");
+        }
+    }
+
+    // Run authoritative reconciliation planner under transaction locks
+    let plan = match load_and_plan_policy_reconciliation_in_tx(&mut tx, &policies).await {
+        Ok(p) => p,
+        Err(error) => {
+            let _ = tx.rollback().await;
+            tracing::error!("Failed to plan policy reconciliation during import: {error}");
+            return internal_error("Failed to plan policy reconciliation");
+        }
+    };
+
+    // Reject if any conflicts were detected
+    if !plan.conflicts.is_empty() {
+        let _ = tx.rollback().await;
+        // Return structured conflict response matching preview
+        let conflicts_info: Vec<ConflictInfo> = plan
+            .conflicts
+            .iter()
+            .filter(|c| reconciliation_conflict_is_blocking(c))
+            .map(conflict_to_info)
+            .collect();
+
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "POLICY_INTERCHANGE_CONFLICTS",
+                "conflicts": conflicts_info,
+            })),
+        )
+            .into_response();
+    }
+
     let mut reused = 0u32;
     let mut created = 0u32;
 
-    for policy in &policies {
-        let existing: Option<(Uuid, String)> = match sqlx::query_as(
-            "SELECT id, semantic_digest FROM deployment_policy_versions WHERE id = $1",
-        )
-        .bind(policy.version_id)
-        .fetch_optional(&mut *tx)
-        .await
-        {
-            Ok(row) => row,
-            Err(error) => {
-                tracing::error!(error = %error, "failed to inspect policy version during import");
-                let _ = tx.rollback().await;
-                return internal_error("Failed to import policies");
+    // Apply reconciliation decisions
+    for (imported_identity, decision) in &plan.decisions {
+        match decision {
+            crate::compliance::xccdf::reconciliation::ReconcileDecision::ReuseExact {
+                local_lineage_id: _,
+                local_version_id: _,
+            } => {
+                // Exact match: do not mutate, just count as reused
+                reused += 1;
             }
-        };
-        if let Some((_id, digest)) = existing {
-            if digest != policy.semantic_digest {
-                let _ = tx.rollback().await;
-                return conflict_response(vec![crate::compliance::resolver::ResolutionConflict {
-                    code: "POLICY_VERSION_DIGEST_CONFLICT".to_string(),
-                    message: format!(
-                        "Policy version {} already exists with a different semantic digest",
-                        policy.version_id
-                    ),
-                }]);
-            }
-            reused += 1;
-            continue;
-        }
+            crate::compliance::xccdf::reconciliation::ReconcileDecision::CreateLineageAndVersion {
+                portable_lineage_id,
+                portable_version_id,
+            } => {
+                // Create new lineage
+                let imported_policy = policies
+                    .iter()
+                    .find(|p| p.version_id == imported_identity.version_id)
+                    .expect("imported policy must exist");
 
-        let lineage_exists: Option<Uuid> = match sqlx::query_scalar(
-            "SELECT id FROM deployment_policies WHERE id = $1",
-        )
-        .bind(policy.lineage_id)
-        .fetch_optional(&mut *tx)
-        .await
-        {
-            Ok(row) => row,
-            Err(error) => {
-                tracing::error!(error = %error, "failed to inspect policy lineage during import");
-                let _ = tx.rollback().await;
-                return internal_error("Failed to import policies");
-            }
-        };
-        let mut new_lineage = false;
-        if lineage_exists.is_none() {
-            if let Err(error) = sqlx::query(
-                "INSERT INTO deployment_policies (id, name, description, policy_type, config, enabled) VALUES ($1, $2, $3, $4, $5, false)",
-            )
-            .bind(policy.lineage_id)
-            .bind(&policy.name)
-            .bind(&policy.description)
-            .bind(&policy.policy_type)
-            .bind(&policy.config)
-            .execute(&mut *tx)
-            .await
-            {
-                tracing::error!(error = %error, "failed to create imported policy lineage");
-                let _ = tx.rollback().await;
-                return internal_error("Failed to import policies");
-            }
-            new_lineage = true;
-
-            // The legacy lineage INSERT trigger creates an automatic draft
-            // version. Remove that generated row so the portable version_id
-            // from the interchange document can be preserved exactly.
-            let generated_version: Option<Uuid> = match sqlx::query_scalar(
-                "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
-            )
-            .bind(policy.lineage_id)
-            .fetch_one(&mut *tx)
-            .await
-            {
-                Ok(version_id) => version_id,
-                Err(error) => {
-                    tracing::error!(error = %error, "failed to inspect generated policy draft");
-                    let _ = tx.rollback().await;
-                    return internal_error("Failed to import policies");
-                }
-            };
-            if let Some(generated_version) = generated_version {
                 if let Err(error) = sqlx::query(
-                    "UPDATE deployment_policies SET current_draft_version_id = NULL WHERE id = $1",
+                    "INSERT INTO deployment_policies (id, name, description, policy_type, config, enabled) VALUES ($1, $2, $3, $4, $5, false)",
                 )
-                .bind(policy.lineage_id)
+                .bind(portable_lineage_id)
+                .bind(&imported_policy.name)
+                .bind(&imported_policy.description)
+                .bind(&imported_policy.policy_type)
+                .bind(&imported_policy.config)
                 .execute(&mut *tx)
                 .await
                 {
-                    tracing::error!(error = %error, "failed to replace generated policy draft");
                     let _ = tx.rollback().await;
+                    tracing::error!("Failed to create policy lineage: {error}");
                     return internal_error("Failed to import policies");
                 }
-                if let Err(error) =
-                    sqlx::query("DELETE FROM deployment_policy_versions WHERE id = $1")
+
+                // Remove trigger-created synthetic draft
+                if let Ok(Some(generated_version)) = sqlx::query_scalar::<_, Option<Uuid>>(
+                    "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1"
+                )
+                .bind(portable_lineage_id)
+                .fetch_one(&mut *tx)
+                .await
+                {
+                    let _ = sqlx::query("UPDATE deployment_policies SET current_draft_version_id = NULL WHERE id = $1")
+                        .bind(portable_lineage_id)
+                        .execute(&mut *tx)
+                        .await;
+                    let _ = sqlx::query("DELETE FROM deployment_policy_versions WHERE id = $1")
                         .bind(generated_version)
                         .execute(&mut *tx)
-                        .await
+                        .await;
+                }
+
+                // Create exact portable version
+                if let Err(error) = sqlx::query(
+                    "INSERT INTO deployment_policy_versions (id, policy_id, version, publication_state, name, description, policy_type, implementation_state, execution_phase, config, compliance_metadata, dependencies, opaque_xml, enabled_by_default, semantic_digest, created_by) VALUES ($1, $2, $3, 'draft', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+                )
+                .bind(portable_version_id)
+                .bind(portable_lineage_id)
+                .bind(&imported_policy.version)
+                .bind(&imported_policy.name)
+                .bind(&imported_policy.description)
+                .bind(&imported_policy.policy_type)
+                .bind(&imported_policy.implementation_state)
+                .bind(&imported_policy.execution_phase)
+                .bind(&imported_policy.config)
+                .bind(&imported_policy.compliance_metadata)
+                .bind(&imported_policy.dependencies)
+                .bind(&imported_policy.opaque_xml)
+                .bind(imported_policy.enabled_by_default)
+                .bind(&imported_policy.semantic_digest)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
                 {
-                    tracing::error!(error = %error, "failed to remove generated policy draft");
                     let _ = tx.rollback().await;
+                    tracing::error!("Failed to create policy version: {error}");
                     return internal_error("Failed to import policies");
                 }
+
+                // Update draft pointer
+                if let Err(error) = sqlx::query(
+                    "UPDATE deployment_policies SET current_draft_version_id = $1 WHERE id = $2"
+                )
+                .bind(portable_version_id)
+                .bind(portable_lineage_id)
+                .execute(&mut *tx)
+                .await
+                {
+                    let _ = tx.rollback().await;
+                    tracing::error!("Failed to set draft pointer: {error}");
+                    return internal_error("Failed to import policies");
+                }
+
+                created += 1;
+            }
+            crate::compliance::xccdf::reconciliation::ReconcileDecision::CreateVersionInExistingLineage {
+                local_lineage_id,
+                portable_version_id,
+            } => {
+                // Create new version under existing lineage
+                let imported_policy = policies
+                    .iter()
+                    .find(|p| p.version_id == imported_identity.version_id)
+                    .expect("imported policy must exist");
+
+                if let Err(error) = sqlx::query(
+                    "INSERT INTO deployment_policy_versions (id, policy_id, version, publication_state, name, description, policy_type, implementation_state, execution_phase, config, compliance_metadata, dependencies, opaque_xml, enabled_by_default, semantic_digest, created_by) VALUES ($1, $2, $3, 'draft', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+                )
+                .bind(portable_version_id)
+                .bind(local_lineage_id)
+                .bind(&imported_policy.version)
+                .bind(&imported_policy.name)
+                .bind(&imported_policy.description)
+                .bind(&imported_policy.policy_type)
+                .bind(&imported_policy.implementation_state)
+                .bind(&imported_policy.execution_phase)
+                .bind(&imported_policy.config)
+                .bind(&imported_policy.compliance_metadata)
+                .bind(&imported_policy.dependencies)
+                .bind(&imported_policy.opaque_xml)
+                .bind(imported_policy.enabled_by_default)
+                .bind(&imported_policy.semantic_digest)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                {
+                    let _ = tx.rollback().await;
+                    tracing::error!("Failed to create policy version: {error}");
+                    return internal_error("Failed to import policies");
+                }
+
+                created += 1;
             }
         }
+    }
 
-        if let Err(error) = sqlx::query(
-            "INSERT INTO deployment_policy_versions (id, policy_id, version, publication_state, name, description, policy_type, implementation_state, execution_phase, config, compliance_metadata, dependencies, opaque_xml, enabled_by_default, semantic_digest, created_by) VALUES ($1, $2, $3, 'draft', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+    // Write audit events for each imported policy
+    for (imported_identity, decision) in &plan.decisions {
+        let (reconciliation_action, created_flag) = match decision {
+            crate::compliance::xccdf::reconciliation::ReconcileDecision::ReuseExact { .. } => {
+                ("exact_match".to_string(), false)
+            }
+            crate::compliance::xccdf::reconciliation::ReconcileDecision::CreateLineageAndVersion { .. } => {
+                ("new_lineage".to_string(), true)
+            }
+            crate::compliance::xccdf::reconciliation::ReconcileDecision::CreateVersionInExistingLineage { .. } => {
+                ("new_version".to_string(), true)
+            }
+        };
+
+        let audit_metadata = serde_json::json!({
+            "lineage_id": imported_identity.lineage_id,
+            "version_id": imported_identity.version_id,
+            "source_digest": actual_source_sha256,
+            "reconciliation_action": reconciliation_action,
+            "created": created_flag,
+            "final_publication_state": "draft",
+            "final_trust_state": "untrusted",
+            "final_enabled": false,
+        });
+
+        if let Err(e) = write_audit_event(
+            &mut tx,
+            user_id,
+            "policy_interchange_imported",
+            &imported_identity.version_id.to_string(),
+            audit_metadata,
         )
-        .bind(policy.version_id)
-        .bind(policy.lineage_id)
-        .bind(&policy.version)
-        .bind(&policy.name)
-        .bind(&policy.description)
-        .bind(&policy.policy_type)
-        .bind(&policy.implementation_state)
-        .bind(&policy.execution_phase)
-        .bind(&policy.config)
-        .bind(&policy.compliance_metadata)
-        .bind(&policy.dependencies)
-        .bind(&policy.opaque_xml)
-        .bind(policy.enabled_by_default)
-        .bind(&policy.semantic_digest)
-        .bind(user_id)
-        .execute(&mut *tx)
         .await
         {
-            tracing::error!(error = %error, "failed to create imported policy version");
             let _ = tx.rollback().await;
-            return internal_error("Failed to import policies");
+            tracing::error!("Failed to write import audit event: {e}");
+            return internal_error("Failed to write import audit events");
         }
-        if new_lineage {
-            if let Err(error) = sqlx::query(
-                "UPDATE deployment_policies SET current_draft_version_id = $1 WHERE id = $2",
-            )
-            .bind(policy.version_id)
-            .bind(policy.lineage_id)
-            .execute(&mut *tx)
-            .await
-            {
-                tracing::error!(error = %error, "failed to set imported current draft pointer");
-                let _ = tx.rollback().await;
-                return internal_error("Failed to import policies");
-            }
-        }
-        created += 1;
     }
 
     if let Err(error) = tx.commit().await {
