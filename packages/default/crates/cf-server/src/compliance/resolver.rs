@@ -402,6 +402,48 @@ fn is_nix_evaluation_policy_type(policy_type: &str) -> bool {
     matches!(policy_type, "require_packages" | "custom_check")
 }
 
+/// Implementation states that represent an unresolved requirement that Crystal
+/// Forge cannot execute: `unbound` (requirement exists but has no
+/// implementation) or `opaque` (the rule is preserved but its check semantics
+/// cannot be modeled).
+fn is_unresolved_implementation_state(implementation_state: &str) -> bool {
+    matches!(implementation_state, "unbound" | "opaque")
+}
+
+/// Validate the effective set of one assignment for enforceability.
+///
+/// An enforce-mode assignment must not contain unresolved `unbound` or `opaque`
+/// policies. Callers must apply exclusions **before** invoking this helper so
+/// an excluded unresolved baseline policy is not rejected. Report-only
+/// assignments may contain unresolved policies (they evaluate as `not_checked`
+/// and never block deployment).
+///
+/// `effective_impl_states` maps each effective policy version to its
+/// implementation state. Returns one typed `UNRESOLVED_ENFORCEMENT_POLICY`
+/// conflict per unresolved policy so the UI can identify every policy that
+/// blocks enforcement.
+fn enforce_mode_unresolved_conflicts(
+    mode: &AssignmentMode,
+    effective_impl_states: &[(Uuid, String)],
+) -> Vec<ResolutionConflict> {
+    if *mode != AssignmentMode::Enforce {
+        return Vec::new();
+    }
+    effective_impl_states
+        .iter()
+        .filter(|(_, implementation_state)| {
+            is_unresolved_implementation_state(implementation_state)
+        })
+        .map(|(pv_id, implementation_state)| ResolutionConflict {
+            code: "UNRESOLVED_ENFORCEMENT_POLICY".to_string(),
+            message: format!(
+                "Policy version {} has implementation state '{}'; enforce-mode assignments cannot contain unresolved policies (exclude the policy or use report-only mode)",
+                pv_id, implementation_state
+            ),
+        })
+        .collect()
+}
+
 // ── Authoritative resolver ────────────────────────────────────────────────────
 
 /// Resolve the effective policy set for one assignment.
@@ -563,10 +605,32 @@ async fn resolve_effective_policy_set_with_options(
         input.exclusions.iter().copied().collect();
 
     // ── Step 3: Build surviving baseline after exclusions ─────────────────────
-    let mut effective: Vec<EffectivePolicy> = baseline_rows
+    // Implementation states are tracked alongside the effective set so the
+    // enforceability check below runs against the post-exclusion set only.
+    let surviving_baseline: Vec<&(
+        Uuid,
+        Uuid,
+        String,
+        String,
+        String,
+        serde_json::Value,
+        String,
+        String,
+    )> = baseline_rows
+        .iter()
+        .filter(|(pv_id, _, _, _, _, _, _, _)| !exclusions_set.contains(pv_id))
+        .collect();
+
+    let mut effective_impl_states: Vec<(Uuid, String)> = surviving_baseline
+        .iter()
+        .map(|(pv_id, _, _, _, _, _, implementation_state, _)| {
+            (*pv_id, implementation_state.clone())
+        })
+        .collect();
+
+    let mut effective: Vec<EffectivePolicy> = surviving_baseline
         .iter()
         .enumerate()
-        .filter(|(_, (pv_id, _, _, _, _, _, _, _))| !exclusions_set.contains(pv_id))
         .map(
             |(idx, (pv_id, lin_id, ptype, _, _, config, _, _))| EffectivePolicy {
                 policy_version_id: *pv_id,
@@ -688,6 +752,7 @@ async fn resolve_effective_policy_set_with_options(
         }
 
         seen_lineages.insert(add_lineage, *add_id);
+        effective_impl_states.push((*add_id, implementation_state.clone()));
         effective.push(EffectivePolicy {
             policy_version_id: *add_id,
             policy_lineage_id: add_lineage,
@@ -702,6 +767,17 @@ async fn resolve_effective_policy_set_with_options(
             effective_mode: input.assignment_mode.clone(),
             provenance: Vec::new(),
         });
+    }
+
+    // ── Step 4b: Validate that the effective set is enforceable ───────────────
+    // Enforce-mode assignments reject unresolved `unbound`/`opaque` policies.
+    // Exclusions were already applied when building `effective`, so an excluded
+    // unresolved baseline policy never reaches this check. Report-only
+    // assignments accept unresolved policies (they evaluate as `not_checked`).
+    let unresolved =
+        enforce_mode_unresolved_conflicts(&input.assignment_mode, &effective_impl_states);
+    if !unresolved.is_empty() {
+        return Ok(ResolutionOutcome::Conflict(unresolved));
     }
 
     // ── Step 5: Validate and apply overrides ──────────────────────────────────
@@ -1293,21 +1369,24 @@ async fn resolve_systems_effective_policies_batch(
         .into_iter()
         .collect();
 
-    let mut addition_pv_info: std::collections::HashMap<Uuid, (Uuid, String, serde_json::Value)> =
-        std::collections::HashMap::new();
+    let mut addition_pv_info: std::collections::HashMap<
+        Uuid,
+        (Uuid, String, serde_json::Value, String),
+    > = std::collections::HashMap::new();
     if !all_addition_pv_ids.is_empty() {
-        let raw_addition_pvs: Vec<(Uuid, Uuid, String, serde_json::Value)> = sqlx::query_as(
-            "SELECT id, policy_id, policy_type, config
-             FROM deployment_policy_versions
-             WHERE id = ANY($1)",
-        )
-        .bind(&all_addition_pv_ids)
-        .fetch_all(&mut *tx)
-        .await
-        .context("batch load addition policy versions")?;
+        let raw_addition_pvs: Vec<(Uuid, Uuid, String, serde_json::Value, String)> =
+            sqlx::query_as(
+                "SELECT id, policy_id, policy_type, config, implementation_state
+                 FROM deployment_policy_versions
+                 WHERE id = ANY($1)",
+            )
+            .bind(&all_addition_pv_ids)
+            .fetch_all(&mut *tx)
+            .await
+            .context("batch load addition policy versions")?;
 
-        for (pv_id, lin_id, ptype, config) in raw_addition_pvs {
-            addition_pv_info.insert(pv_id, (lin_id, ptype, config));
+        for (pv_id, lin_id, ptype, config, implementation_state) in raw_addition_pvs {
+            addition_pv_info.insert(pv_id, (lin_id, ptype, config, implementation_state));
         }
     }
 
@@ -1597,9 +1676,29 @@ async fn resolve_systems_effective_policies_batch(
             }
 
             // Build surviving baseline
-            let mut assignment_effective: Vec<EffectivePolicy> = baseline
+            let surviving_baseline: Vec<&(
+                Uuid,
+                Uuid,
+                String,
+                String,
+                String,
+                String,
+                i32,
+                serde_json::Value,
+            )> = baseline
                 .iter()
                 .filter(|(pv_id, _, _, _, _, _, _, _)| !exclusions_set.contains(pv_id))
+                .collect();
+
+            let mut assignment_effective_impl_states: Vec<(Uuid, String)> = surviving_baseline
+                .iter()
+                .map(|(pv_id, _, _, _, implementation_state, _, _, _)| {
+                    (*pv_id, implementation_state.clone())
+                })
+                .collect();
+
+            let mut assignment_effective: Vec<EffectivePolicy> = surviving_baseline
+                .iter()
                 .enumerate()
                 .map(
                     |(idx, (pv_id, lin_id, ptype, _, _, _, _, config))| EffectivePolicy {
@@ -1653,7 +1752,9 @@ async fn resolve_systems_effective_policies_batch(
                     continue 'system;
                 }
 
-                let Some((lin_id, ptype, config)) = addition_pv_info.get(add_pv_id) else {
+                let Some((lin_id, ptype, config, implementation_state)) =
+                    addition_pv_info.get(add_pv_id)
+                else {
                     results.insert(
                         sys_id,
                         ResolutionOutcome::Conflict(vec![ResolutionConflict {
@@ -1680,6 +1781,8 @@ async fn resolve_systems_effective_policies_batch(
                     }
                 } else {
                     seen_lineages.insert(*lin_id, *add_pv_id);
+                    assignment_effective_impl_states
+                        .push((*add_pv_id, implementation_state.clone()));
                     assignment_effective.push(EffectivePolicy {
                         policy_version_id: *add_pv_id,
                         policy_lineage_id: *lin_id,
@@ -1695,6 +1798,17 @@ async fn resolve_systems_effective_policies_batch(
                         provenance: Vec::new(),
                     });
                 }
+            }
+
+            // Enforce-mode assignments reject unresolved `unbound`/`opaque`
+            // policies. Exclusions were applied when building
+            // `assignment_effective`, so an excluded unresolved baseline policy
+            // never reaches this check. Report-only assignments accept them.
+            let unresolved =
+                enforce_mode_unresolved_conflicts(&mode, &assignment_effective_impl_states);
+            if !unresolved.is_empty() {
+                results.insert(sys_id, ResolutionOutcome::Conflict(unresolved));
+                continue 'system;
             }
 
             // Apply overrides
