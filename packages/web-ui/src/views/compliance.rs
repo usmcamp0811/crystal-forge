@@ -3893,27 +3893,13 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                                 "Permanent deletion is unavailable. Deactivate assignments and deprecate the bundle to stop using it; historical records remain for auditability."
                             }
                         } else if assigned_count > 0 {
+                            // An active assignment already implies immutable assignment
+                            // history (the server reports `immutable_assignment_history`),
+                            // so permanent deletion is unavailable; no preflight needed.
                             div { style: "font-size:12px;color:var(--cf-text-muted);",
-                                "This bundle has assignment history ({assigned_count} active). "
-                                "Assignment records are immutable. Deactivate active assignments, then check eligibility."
-                            }
-                            button {
-                                class: "btn btn-ghost focus-ring",
-                                style: "margin-top:8px;",
-                                disabled: *eligibility_loading.read(),
-                                onclick: move |_| {
-                                    eligibility_loading.set(true);
-                                    eligibility_error.set(None);
-                                    let bid = bundle_id;
-                                    spawn(async move {
-                                        match crate::api::client::fetch_bundle_deletion_eligibility(&bid).await {
-                                            Ok(result) => { eligibility.set(Some(result)); }
-                                            Err(error) => eligibility_error.set(Some(error.to_string())),
-                                        }
-                                        eligibility_loading.set(false);
-                                    });
-                                },
-                                if *eligibility_loading.read() { "Checking…" } else { "Check deletion eligibility" }
+                                "This bundle has active assignments and therefore has immutable assignment history. "
+                                "Permanent deletion is unavailable. Deactivate assignments to stop using the bundle; "
+                                "historical assignment records are retained for auditability."
                             }
                         } else {
                             // No local blockers detected — fetch authoritative check.
