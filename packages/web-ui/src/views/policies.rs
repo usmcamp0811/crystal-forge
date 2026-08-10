@@ -989,6 +989,21 @@ fn PolicyDrawer(
                         }
                     }
                 } else {
+                    if displayed_policy.category.as_deref().is_some_and(|category| category.eq_ignore_ascii_case("security")) {
+                        div {
+                            h3 { class: "policy-drawer-section-title", "Classification" }
+                            div { style: "display: flex; flex-wrap: wrap; gap: 5px;",
+                                if let Some(framework) = displayed_policy.framework.as_deref().filter(|value| !value.trim().is_empty()) { span { class: "chip chip-info", "{framework}" } }
+                                if let Some(severity) = displayed_policy.severity.as_deref().filter(|value| !value.trim().is_empty()) { span { class: "chip chip-unknown", "{severity}" } }
+                                if let Some(family) = displayed_policy.control_family.as_deref().filter(|value| !value.trim().is_empty()) { span { class: "chip mono", "{family}" } }
+                                if let Some(level) = displayed_policy.cmmc_level { span { class: "chip", "CMMC Level {level}" } }
+                                if let Some(section) = displayed_policy.cis_section.as_deref().filter(|value| !value.trim().is_empty()) { span { class: "chip mono", "CIS {section}" } }
+                            }
+                            if let Some(rationale) = displayed_policy.rationale.as_deref().filter(|value| !value.trim().is_empty()) {
+                                p { style: "margin:8px 0 0;font-size:12px;color:var(--cf-text-secondary);line-height:1.5;", "{rationale}" }
+                            }
+                        }
+                    }
                     if !displayed_policy.srg_ids.is_empty() || !displayed_policy.cci_ids.is_empty() {
                         div {
                             h3 { class: "policy-drawer-section-title", "SRG / CCI mapping" }

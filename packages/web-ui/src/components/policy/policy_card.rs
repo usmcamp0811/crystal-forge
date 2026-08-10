@@ -83,6 +83,11 @@ pub fn PolicyCard(
                     if !enabled {
                         span { class: "chip chip-unknown", "disabled" }
                     }
+                    if policy.category.as_deref().is_some_and(|category| category.eq_ignore_ascii_case("security")) {
+                        if let Some(severity) = policy.severity.as_deref().filter(|severity| matches!(severity.to_ascii_lowercase().as_str(), "high" | "medium" | "low")) {
+                            span { class: "chip chip-unknown", "{severity}" }
+                        }
+                    }
                 }
             }
 

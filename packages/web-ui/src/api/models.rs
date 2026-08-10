@@ -1799,6 +1799,20 @@ pub struct CreateDeploymentPolicyRequest {
     /// CCI mappings. Normalised server-side.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cci_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub framework: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cmmc_level: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cis_section: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
 }
 
 /// Request to update an existing deployment policy.
@@ -1822,6 +1836,20 @@ pub struct UpdateDeploymentPolicyRequest {
     /// `None` (omitted) preserves the existing value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cci_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub framework: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cmmc_level: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cis_section: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

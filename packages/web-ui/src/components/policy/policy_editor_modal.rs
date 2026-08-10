@@ -6,16 +6,8 @@
 //! evidence-for-ATO builder, and an edit-mode danger zone with typed-confirmation
 //! delete.
 //!
-//! Backend reality: the deployment-policy API persists name, description,
-//! policy_type, config (JSON), enabled, srg_ids, and cci_ids.
-//!
-//! Persisted fields:
-//! - name, description, policy_type, config, enabled
-//! - SRG IDs (compliance_metadata.srg_ids) — searchable, version-specific
-//! - CCI IDs (compliance_metadata.cci_ids) — searchable, version-specific
-//!
-//! NOT yet persisted (UI-only, flagged with badge):
-//! - category, severity, rationale, evidence for ATO
+//! The deployment-policy API persists classification with the exact policy
+//! version, while Evidence remains unavailable in the current API.
 
 use dioxus::prelude::*;
 use uuid::Uuid;
@@ -26,7 +18,10 @@ use crate::api::client::{
 use crate::api::models::{CreateDeploymentPolicyRequest, UpdateDeploymentPolicyRequest};
 use crate::views::policies_api;
 
-use super::types::{POLICY_CATEGORIES, PolicyDefinition, PolicyFormat};
+use super::types::{PolicyCategory, PolicyDefinition, PolicyFormat};
+
+const STANDARD_FRAMEWORKS: [&str; 4] = ["DISA STIG", "NIST 800-53", "CMMC 2.0", "CIS Benchmark"];
+const NIST_CONTROL_FAMILIES: [&str; 7] = ["AC", "AU", "CM", "IA", "SC", "SI", "MP"];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Rule + evidence model (mirrors the design example)
@@ -437,6 +432,28 @@ fn split_packages(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn non_empty(value: String) -> Option<String> {
+    (!value.trim().is_empty()).then(|| value.trim().to_string())
+}
+
+fn custom_frameworks(policies: &[PolicyDefinition]) -> Vec<String> {
+    let mut frameworks = policies
+        .iter()
+        .filter_map(|policy| policy.framework.as_deref())
+        .map(str::trim)
+        .filter(|framework| {
+            !framework.is_empty()
+                && !STANDARD_FRAMEWORKS
+                    .iter()
+                    .any(|standard| framework.eq_ignore_ascii_case(standard))
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    frameworks.sort_by_key(|framework| framework.to_ascii_lowercase());
+    frameworks.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    frameworks
+}
+
 /// Reconstruct builder rules from an existing policy definition (best-effort) so
 /// edit mode is pre-populated with what the backend stored.
 fn rules_from_policy(policy_type: &str, config: &serde_json::Value) -> Vec<PolicyRule> {
@@ -560,15 +577,85 @@ pub fn PolicyEditorModal(
             PolicyRule::new("build_succeeded"),
         ]
     };
-    let seed_category = match existing_type.as_str() {
-        "require_cve_check" => "pipeline",
-        "require_packages" | "custom_check" => "security",
-        _ => "deployment",
-    };
+    let existing_policy = editing_policy_id.read().and_then(|id| {
+        policy_library
+            .read()
+            .iter()
+            .find(|policy| policy.id == id)
+            .cloned()
+    });
+    let seed_category = existing_policy
+        .as_ref()
+        .and_then(|policy| policy.category.as_deref())
+        .unwrap_or(match existing_type.as_str() {
+            "require_cve_check" => "pipeline",
+            "require_packages" | "custom_check" => "security",
+            _ => "deployment",
+        });
 
-    let mut category = use_signal(|| seed_category.to_string());
-    let mut severity = use_signal(|| "medium".to_string());
-    let mut rationale = use_signal(String::new);
+    let mut domain = use_signal(|| {
+        if seed_category.eq_ignore_ascii_case("security") {
+            "security".to_string()
+        } else {
+            "platform".to_string()
+        }
+    });
+    let mut platform_category = use_signal(|| match seed_category {
+        "pipeline" => "pipeline".to_string(),
+        "rollout" => "rollout".to_string(),
+        _ => "deployment".to_string(),
+    });
+    let seed_framework = existing_policy
+        .as_ref()
+        .and_then(|policy| policy.framework.clone())
+        .unwrap_or_default();
+    let framework_is_standard = STANDARD_FRAMEWORKS
+        .iter()
+        .any(|standard| seed_framework.eq_ignore_ascii_case(standard));
+    let mut framework = use_signal(|| {
+        if framework_is_standard || seed_framework.is_empty() {
+            seed_framework.clone()
+        } else {
+            "__custom__".to_string()
+        }
+    });
+    let mut custom_framework = use_signal(|| {
+        (!framework_is_standard)
+            .then_some(seed_framework.clone())
+            .unwrap_or_default()
+    });
+    let mut severity = use_signal(|| {
+        existing_policy
+            .as_ref()
+            .and_then(|policy| policy.severity.clone())
+            .unwrap_or_default()
+    });
+    let mut control_family = use_signal(|| {
+        existing_policy
+            .as_ref()
+            .and_then(|policy| policy.control_family.clone())
+            .unwrap_or_default()
+    });
+    let mut cmmc_level = use_signal(|| {
+        existing_policy
+            .as_ref()
+            .and_then(|policy| policy.cmmc_level)
+            .map(|level| level.to_string())
+            .unwrap_or_default()
+    });
+    let mut cis_section = use_signal(|| {
+        existing_policy
+            .as_ref()
+            .and_then(|policy| policy.cis_section.clone())
+            .unwrap_or_default()
+    });
+    let mut rationale = use_signal(|| {
+        existing_policy
+            .as_ref()
+            .and_then(|policy| policy.rationale.clone())
+            .unwrap_or_default()
+    });
+    let framework_options = custom_frameworks(&policy_library.read());
     let mut rules = use_signal(|| seed_rules);
     let mut evidence: Signal<Vec<PolicyEvidence>> = use_signal(Vec::new);
     let mut add_rule_kind = use_signal(String::new);
@@ -726,14 +813,26 @@ pub fn PolicyEditorModal(
                             }
                         }
 
-                        // Category (UI-only / not persisted)
                         div { class: "field",
-                            label {
-                                "Category "
-                                span { class: "cf-policy-ui-only-badge", "UI only — not persisted yet" }
+                            label { "Domain" }
+                            div { class: "seg", role: "radiogroup", style: "width:fit-content;",
+                                for (value, label) in [("platform", "Platform"), ("security", "Security controls")] {
+                                    button {
+                                        key: "domain-{value}", r#type: "button", role: "radio",
+                                        aria_checked: if domain.read().as_str() == value { "true" } else { "false" },
+                                        class: if domain.read().as_str() == value { "active" } else { "" },
+                                        onclick: move |_| domain.set(value.to_string()),
+                                        "{label}"
+                                    }
+                                }
                             }
+                        }
+
+                        if domain.read().as_str() == "platform" {
+                        div { class: "field",
+                            label { "Category" }
                             div { role: "radiogroup", style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;",
-                                for policy_category in POLICY_CATEGORIES {
+                                for policy_category in [PolicyCategory::Deployment, PolicyCategory::Pipeline, PolicyCategory::Rollout] {
                                     {
                                         let id = policy_category.id();
                                         let label = policy_category.label();
@@ -745,10 +844,10 @@ pub fn PolicyEditorModal(
                                         key: "{id}",
                                         r#type: "button",
                                         role: "radio",
-                                        aria_checked: if category.read().as_str() == id { "true" } else { "false" },
-                                        class: if category.read().as_str() == id { "cf-policy-category-card cf-policy-category-card-active focus-ring" } else { "cf-policy-category-card focus-ring" },
+                                        aria_checked: if platform_category.read().as_str() == id { "true" } else { "false" },
+                                        class: if platform_category.read().as_str() == id { "cf-policy-category-card cf-policy-category-card-active focus-ring" } else { "cf-policy-category-card focus-ring" },
                                         style: "--cf-policy-category-color:{color};",
-                                        onclick: move |_| category.set(id.to_string()),
+                                        onclick: move |_| platform_category.set(id.to_string()),
                                         span { style: "flex-shrink:0;width:24px;height:24px;border-radius:6px;display:grid;place-items:center;background:color-mix(in oklab, {color} 16%, transparent);color:{color};",
                                             svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
                                                 if icon == "deploy" {
@@ -766,7 +865,7 @@ pub fn PolicyEditorModal(
                                             }
                                         }
                                         span { style: "min-width:0;",
-                                            span { style: if category.read().as_str() == id { "display:block;font-size:12px;font-weight:600;color:{color};" } else { "display:block;font-size:12px;font-weight:600;color:var(--cf-text-primary);" }, "{label}" }
+                                            span { style: if platform_category.read().as_str() == id { "display:block;font-size:12px;font-weight:600;color:{color};" } else { "display:block;font-size:12px;font-weight:600;color:var(--cf-text-primary);" }, "{label}" }
                                             span { style: "display:block;font-size:10.5px;color:var(--cf-text-muted);line-height:1.35;margin-top:2px;", "{blurb}" }
                                         }
                                     }
@@ -775,15 +874,32 @@ pub fn PolicyEditorModal(
                                 }
                             }
                         }
+                        }
 
-                        // Severity (UI-only / not persisted)
+                        if domain.read().as_str() == "security" {
                         div { class: "field",
-                            label {
-                                "Severity "
-                                span { class: "cf-policy-ui-only-badge", "UI only — not persisted yet" }
+                            label { "Framework" }
+                            select {
+                                class: "input focus-ring", value: "{framework}",
+                                onchange: move |event| framework.set(event.value()),
+                                option { value: "", "Select a framework" }
+                                for standard in STANDARD_FRAMEWORKS { option { value: "{standard}", "{standard}" } }
+                                for existing in framework_options.iter() { option { value: "{existing}", "{existing}" } }
+                                option { value: "__custom__", "Define new framework..." }
                             }
+                            if framework.read().as_str() == "__custom__" {
+                                input {
+                                    class: "input focus-ring", style: "margin-top:8px;",
+                                    placeholder: "Framework name", value: "{custom_framework}",
+                                    oninput: move |event| custom_framework.set(event.value()),
+                                }
+                            }
+                        }
+
+                        div { class: "field",
+                            label { "Severity" }
                             div { class: "seg seg-sev", role: "radiogroup", style: "width:fit-content;",
-                                for (value, label, color) in [("high", "High (CAT I)", "#f87171"), ("medium", "Medium (CAT II)", "#fbbf24"), ("low", "Low (CAT III)", "#60a5fa")] {
+                                for (value, label, color) in [("", "Unset", "var(--cf-text-muted)"), ("high", "High", "#f87171"), ("medium", "Medium", "#fbbf24"), ("low", "Low", "#60a5fa")] {
                                     button {
                                         key: "{value}",
                                         r#type: "button",
@@ -803,15 +919,11 @@ pub fn PolicyEditorModal(
                                     }
                                 }
                             }
-                            div { class: "help", "Drives how failures of this control are weighted in compliance scoring and evidence reports." }
+                            div { class: "help", "Records the control's stated severity independently from enforcement behavior." }
                         }
 
-                        // Rationale (UI-only / not persisted)
                         div { class: "field",
-                            label {
-                                "Rationale "
-                                span { class: "cf-policy-ui-only-badge", "UI only — not persisted yet" }
-                            }
+                            label { "Rationale" }
                             textarea {
                                 class: "input focus-ring",
                                 rows: "2",
@@ -822,7 +934,7 @@ pub fn PolicyEditorModal(
                             }
                         }
 
-                        // SRG IDs — PERSISTED to compliance_metadata
+                        if framework.read().as_str() == "DISA STIG" {
                         div { class: "field",
                             label { "SRG IDs" }
                             input {
@@ -850,6 +962,34 @@ pub fn PolicyEditorModal(
                             div { class: "help",
                                 "Comma-separated CCI mappings, if applicable. Persisted to policy version compliance metadata."
                             }
+                        }
+                        }
+                        if framework.read().as_str() == "NIST 800-53" {
+                        div { class: "field",
+                            label { "Control family" }
+                            select { class: "input focus-ring", value: "{control_family}", onchange: move |event| control_family.set(event.value()),
+                                option { value: "", "Unassigned" }
+                                for family in NIST_CONTROL_FAMILIES { option { value: "{family}", "{family}" } }
+                            }
+                        }
+                        }
+                        if framework.read().as_str() == "CMMC 2.0" {
+                        div { class: "field",
+                            label { "CMMC level" }
+                            select { class: "input focus-ring", value: "{cmmc_level}", onchange: move |event| cmmc_level.set(event.value()),
+                                option { value: "", "Unassigned" }
+                                option { value: "1", "Level 1" }
+                                option { value: "2", "Level 2" }
+                                option { value: "3", "Level 3" }
+                            }
+                        }
+                        }
+                        if framework.read().as_str() == "CIS Benchmark" {
+                        div { class: "field",
+                            label { "CIS section" }
+                            input { class: "input focus-ring mono", placeholder: "e.g. 5.2.3", value: "{cis_section}", oninput: move |event| cis_section.set(event.value()) }
+                        }
+                        }
                         }
                         }
 
@@ -1059,6 +1199,22 @@ pub fn PolicyEditorModal(
                                     .map(|s| s.trim().to_string())
                                     .filter(|s| !s.is_empty())
                                     .collect();
+                                let is_security = domain.read().as_str() == "security";
+                                let selected_framework = if framework.read().as_str() == "__custom__" {
+                                    non_empty(custom_framework.read().clone())
+                                } else {
+                                    non_empty(framework.read().clone())
+                                };
+                                let selected_cmmc_level = cmmc_level.read().trim().parse::<i32>().ok();
+                                let selected_category = if is_security {
+                                    Some("security".to_string())
+                                } else {
+                                    Some(platform_category.read().clone())
+                                };
+                                let selected_severity = if is_security { non_empty(severity.read().clone()) } else { None };
+                                let selected_control_family = if is_security && selected_framework.as_deref() == Some("NIST 800-53") { non_empty(control_family.read().clone()) } else { None };
+                                let selected_cis_section = if is_security && selected_framework.as_deref() == Some("CIS Benchmark") { non_empty(cis_section.read().clone()) } else { None };
+                                let selected_rationale = non_empty(rationale.read().clone());
 
                                 save_error.set(String::new());
                                 is_saving.set(true);
@@ -1075,6 +1231,13 @@ pub fn PolicyEditorModal(
                                             // the curated mapping (Some([]) clears it).
                                             srg_ids: Some(srg_raw),
                                             cci_ids: Some(cci_raw),
+                                            category: selected_category,
+                                            framework: selected_framework,
+                                            severity: selected_severity,
+                                            control_family: selected_control_family,
+                                            cmmc_level: selected_cmmc_level,
+                                            cis_section: selected_cis_section,
+                                            rationale: selected_rationale,
                                         };
                                         update_deployment_policy(&policy_id, &request).await.map(|_| ())
                                     } else {
@@ -1086,6 +1249,13 @@ pub fn PolicyEditorModal(
                                             enabled: Some(true),
                                             srg_ids: srg_raw,
                                             cci_ids: cci_raw,
+                                            category: selected_category,
+                                            framework: selected_framework,
+                                            severity: selected_severity,
+                                            control_family: selected_control_family,
+                                            cmmc_level: selected_cmmc_level,
+                                            cis_section: selected_cis_section,
+                                            rationale: selected_rationale,
                                         };
                                         create_deployment_policy(&request).await.map(|_| ())
                                     };
@@ -1540,5 +1710,44 @@ mod tests {
             )
             .is_some()
         );
+    }
+
+    #[test]
+    fn custom_frameworks_excludes_standard_and_empty_values() {
+        let policy = |framework: Option<&str>| PolicyDefinition {
+            id: Uuid::new_v4(),
+            lineage_id: Uuid::new_v4(),
+            version_id: None,
+            revision: None,
+            publication_state: None,
+            semantic_digest: None,
+            revisions: Vec::new(),
+            name: "test".to_string(),
+            description: String::new(),
+            format: PolicyFormat::Json,
+            body: "{}".to_string(),
+            policy_type: None,
+            updated_at: String::new(),
+            system_count: 0,
+            srg_ids: Vec::new(),
+            cci_ids: Vec::new(),
+            category: Some("security".to_string()),
+            framework: framework.map(str::to_string),
+            severity: None,
+            control_family: None,
+            cmmc_level: None,
+            cis_section: None,
+            rationale: None,
+        };
+
+        let frameworks = custom_frameworks(&[
+            policy(Some("DISA STIG")),
+            policy(Some("  Internal Baseline  ")),
+            policy(Some("internal baseline")),
+            policy(Some("")),
+            policy(None),
+        ]);
+
+        assert_eq!(frameworks, vec!["Internal Baseline"]);
     }
 }
