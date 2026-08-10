@@ -648,7 +648,8 @@ pub fn ComplianceView() -> Element {
                     on_deleted: move |deleted_id: uuid::Uuid| {
                         let mut next = bundles.read().clone();
                         next.retain(|b| b.id != deleted_id);
-                        let next_id = next.first().map(|b| b.id);
+                        let next_bundle = next.first().cloned();
+                        let next_id = next_bundle.as_ref().map(|b| b.id);
                         bundles.set(next);
                         selected_bundle_id.set(next_id);
                         evidence.set(None);
@@ -656,8 +657,11 @@ pub fn ComplianceView() -> Element {
                         let eg = *evidence_gen.read() + 1;
                         evidence_gen.set(eg);
                         show_edit_bundle.set(false);
-                        if let Some(nid) = next_id {
-                            start_systems_fetch(nid, None);
+                        if let Some(bundle) = next_bundle {
+                            start_systems_fetch(
+                                bundle.id,
+                                bundle.current_published_version_id.or(bundle.current_draft_version_id),
+                            );
                         }
                     },
                 }
@@ -3204,7 +3208,7 @@ fn BundleFrameworkField(props: BundleFrameworkFieldProps) -> Element {
     custom_frameworks.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
 
     rsx! {
-        div { class: "field",
+        div { class: "field", style: "margin-top:0;",
             label { "Framework" }
             if *defining_new.read() {
                 div { style: "display:flex;gap:6px;",
@@ -3349,7 +3353,7 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
 
                     // Name + version row
                     div { style: "display:grid;grid-template-columns:2fr 1fr;gap:14px;",
-                        div { class: "field",
+                        div { class: "field", style: "margin-top:0;",
                             label { "Bundle name" }
                             input {
                                 class: "input focus-ring",
@@ -3358,7 +3362,7 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
                                 oninput: move |e| name.set(e.value()),
                             }
                         }
-                        div { class: "field",
+                        div { class: "field", style: "margin-top:0;",
                             label { "Version / revision" }
                             input {
                                 class: "input focus-ring mono",
@@ -3371,9 +3375,9 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
                     }
 
                     // Framework + description row
-                    div { style: "display:grid;grid-template-columns:1fr 2fr;gap:14px;",
+                    div { style: "display:grid;grid-template-columns:1fr 2fr;gap:14px;margin-top:14px;",
                         BundleFrameworkField { framework, custom_frameworks: framework_options }
-                        div { class: "field",
+                        div { class: "field", style: "margin-top:0;",
                             label { "Description" }
                             input {
                                 class: "input focus-ring",

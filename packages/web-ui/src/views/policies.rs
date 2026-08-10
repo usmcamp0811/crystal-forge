@@ -557,7 +557,7 @@ pub fn PoliciesView() -> Element {
                                 p { class: "text-gray-400 mb-2", "Policy data is unavailable." }
                                 p { class: "text-sm text-gray-500", "Resolve the management API error above and retry." }
                             } else {
-                                svg { class: "w-12 h-12 mx-auto text-gray-600 mb-4", fill: "none", stroke: "currentColor", view_box: "0 0 24 24",
+                                svg { width: "48", height: "48", class: "mx-auto text-gray-600 mb-4", style: "display:block;width:48px;height:48px;max-width:48px;max-height:48px;", fill: "none", stroke: "currentColor", view_box: "0 0 24 24",
                                     path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "1.5", d: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" }
                                 }
                                 p { class: "text-gray-400 mb-2", "No policies yet" }

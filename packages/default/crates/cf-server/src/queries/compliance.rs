@@ -1297,6 +1297,15 @@ pub async fn list_bundle_systems(
     let Some(bundle) = find_bundle(pool, bundle_id).await? else {
         return Ok(None);
     };
+    // The unversioned endpoint is a convenience alias for the bundle's current
+    // immutable revision. It must never fall back to mutable lineage membership
+    // because that would bypass assignment overlays and diverge from the UI.
+    if let Some(version_id) = bundle
+        .current_published_version_id
+        .or(bundle.current_draft_version_id)
+    {
+        return list_bundle_systems_for_version(pool, bundle_id, version_id).await;
+    }
     let policies = list_bundle_policies(pool, bundle_id).await?;
     let systems = list_applicable_system_rows(pool, bundle_id).await?;
 
@@ -1670,42 +1679,7 @@ pub async fn get_system_evidence(
             .map(|requested| effective.bundle_version_id == requested)
             .unwrap_or(resolved_bundle_id == Some(bundle_id));
         if exact_requested && resolved_bundle_id == Some(bundle_id) {
-            let ids: Vec<Uuid> = effective
-                .policies
-                .iter()
-                .map(|policy| policy.policy_version_id)
-                .collect();
-            let names = sqlx::query_as::<_, (Uuid, String, Option<String>, bool, Value)>(
-                "SELECT id, name, description, enabled, compliance_metadata FROM deployment_policy_versions WHERE id = ANY($1)",
-            )
-            .bind(&ids)
-            .fetch_all(pool)
-            .await?;
-            let names: std::collections::HashMap<Uuid, (String, Option<String>, bool, Value)> =
-                names
-                    .into_iter()
-                    .map(|(id, name, description, enabled, metadata)| {
-                        (id, (name, description, enabled, metadata))
-                    })
-                    .collect();
-            policies = effective
-                .policies
-                .into_iter()
-                .filter_map(|policy| {
-                    let (name, description, enabled, compliance_metadata) =
-                        names.get(&policy.policy_version_id)?.clone();
-                    Some(PolicyRow {
-                        id: policy.policy_version_id,
-                        bundle_id,
-                        name,
-                        description,
-                        policy_type: policy.policy_type,
-                        config: policy.effective_config,
-                        enabled,
-                        compliance_metadata,
-                    })
-                })
-                .collect();
+            policies = materialize_effective_policies(pool, &effective.policies).await?;
         } else if bundle_version_id.is_some() {
             resolution_state = Some("not_applicable".to_string());
         }
@@ -2072,6 +2046,33 @@ pub(crate) async fn effective_policy_rollup_with_evidence(
     system: &SystemRow,
     effective_policies: &[crate::compliance::resolver::EffectivePolicy],
 ) -> Result<ComplianceSystemRollup> {
+    let policies = materialize_effective_policies(pool, effective_policies).await?;
+    let report_only = effective_policies
+        .iter()
+        .filter(|policy| {
+            matches!(
+                policy.effective_mode,
+                crate::compliance::resolver::AssignmentMode::ReportOnly
+            )
+        })
+        .count() as i64;
+
+    let mut statuses = Vec::with_capacity(policies.len());
+    for policy in policies {
+        statuses.push(resolve_control_evidence(pool, system, policy).await?.status);
+    }
+    Ok(rollup_from_statuses(system.clone(), &statuses, report_only))
+}
+
+/// Materialize an assignment resolver output for evidence. `PolicyRow::id` is
+/// deliberately the stable lineage identity because persisted Nix results are
+/// keyed by lineage; the version is used only to load exact metadata and the
+/// effective enabled state. Every consumer of effective evidence must use this
+/// helper rather than constructing a `PolicyRow` from a version UUID.
+async fn materialize_effective_policies(
+    pool: &PgPool,
+    effective_policies: &[crate::compliance::resolver::EffectivePolicy],
+) -> Result<Vec<PolicyRow>> {
     let version_ids: Vec<Uuid> = effective_policies
         .iter()
         .map(|policy| policy.policy_version_id)
@@ -2097,7 +2098,6 @@ pub(crate) async fn effective_policy_rollup_with_evidence(
         .collect::<std::collections::HashMap<_, _>>();
 
     let mut policies = Vec::with_capacity(effective_policies.len());
-    let mut report_only = 0;
     for effective in effective_policies {
         let Some((name, description, enabled, compliance_metadata)) =
             rows.get(&effective.policy_version_id).cloned()
@@ -2107,12 +2107,6 @@ pub(crate) async fn effective_policy_rollup_with_evidence(
                 effective.policy_version_id
             );
         };
-        if matches!(
-            effective.effective_mode,
-            crate::compliance::resolver::AssignmentMode::ReportOnly
-        ) {
-            report_only += 1;
-        }
         policies.push(PolicyRow {
             id: effective.policy_lineage_id,
             bundle_id: Uuid::nil(),
@@ -2124,12 +2118,7 @@ pub(crate) async fn effective_policy_rollup_with_evidence(
             compliance_metadata,
         });
     }
-
-    let mut statuses = Vec::with_capacity(policies.len());
-    for policy in policies {
-        statuses.push(resolve_control_evidence(pool, system, policy).await?.status);
-    }
-    Ok(rollup_from_statuses(system.clone(), &statuses, report_only))
+    Ok(policies)
 }
 
 pub(crate) fn totals_for_rollups(rollups: &[ComplianceSystemRollup]) -> ComplianceRollupTotals {

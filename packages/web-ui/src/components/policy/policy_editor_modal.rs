@@ -896,44 +896,6 @@ pub fn PolicyEditorModal(
                             }
                         }
 
-                        div { class: "field",
-                            label { "Severity" }
-                            div { class: "seg seg-sev", role: "radiogroup", style: "width:fit-content;",
-                                for (value, label, color) in [("", "Unset", "var(--cf-text-muted)"), ("high", "High", "#f87171"), ("medium", "Medium", "#fbbf24"), ("low", "Low", "#60a5fa")] {
-                                    button {
-                                        key: "{value}",
-                                        r#type: "button",
-                                        role: "radio",
-                                        aria_checked: if severity.read().as_str() == value { "true" } else { "false" },
-                                        class: if severity.read().as_str() == value { "active" } else { "" },
-                                        style: if severity.read().as_str() == value {
-                                            "color:{color};background:color-mix(in oklab, {color} 16%, transparent);box-shadow:inset 0 0 0 1px color-mix(in oklab, {color} 45%, transparent);"
-                                        } else {
-                                            "color:var(--cf-text-secondary);background:transparent;box-shadow:none;"
-                                        },
-                                        onclick: move |_| severity.set(value.to_string()),
-                                        span { style: "display:inline-flex;align-items:center;gap:6px;",
-                                            span { style: "width:7px;height:7px;border-radius:50%;background:{color};" }
-                                            "{label}"
-                                        }
-                                    }
-                                }
-                            }
-                            div { class: "help", "Records the control's stated severity independently from enforcement behavior." }
-                        }
-
-                        div { class: "field",
-                            label { "Rationale" }
-                            textarea {
-                                class: "input focus-ring",
-                                rows: "2",
-                                placeholder: "Why this policy exists — shown in detail view",
-                                style: "resize:vertical;",
-                                value: "{rationale}",
-                                oninput: move |event| rationale.set(event.value()),
-                            }
-                        }
-
                         if framework.read().as_str() == "DISA STIG" {
                         div { class: "field",
                             label { "SRG IDs" }
@@ -989,6 +951,26 @@ pub fn PolicyEditorModal(
                             label { "CIS section" }
                             input { class: "input focus-ring mono", placeholder: "e.g. 5.2.3", value: "{cis_section}", oninput: move |event| cis_section.set(event.value()) }
                         }
+                        }
+                        div { class: "field",
+                            label { "Severity" }
+                            div { class: "seg seg-sev", role: "radiogroup", style: "width:fit-content;",
+                                for (value, label, color) in [("", "Unset", "var(--cf-text-muted)"), ("high", "High", "#f87171"), ("medium", "Medium", "#fbbf24"), ("low", "Low", "#60a5fa")] {
+                                    button {
+                                        key: "{value}", r#type: "button", role: "radio",
+                                        aria_checked: if severity.read().as_str() == value { "true" } else { "false" },
+                                        class: if severity.read().as_str() == value { "active" } else { "" },
+                                        style: if severity.read().as_str() == value { "color:{color};background:color-mix(in oklab, {color} 16%, transparent);box-shadow:inset 0 0 0 1px color-mix(in oklab, {color} 45%, transparent);" } else { "color:var(--cf-text-secondary);background:transparent;box-shadow:none;" },
+                                        onclick: move |_| severity.set(value.to_string()),
+                                        span { style: "display:inline-flex;align-items:center;gap:6px;", span { style: "width:7px;height:7px;border-radius:50%;background:{color};" } "{label}" }
+                                    }
+                                }
+                            }
+                            div { class: "help", "Records the control's stated severity independently from enforcement behavior." }
+                        }
+                        div { class: "field",
+                            label { "Rationale" }
+                            textarea { class: "input focus-ring", rows: "2", placeholder: "Why this policy exists — shown in detail view", style: "resize:vertical;", value: "{rationale}", oninput: move |event| rationale.set(event.value()) }
                         }
                         }
                         }
