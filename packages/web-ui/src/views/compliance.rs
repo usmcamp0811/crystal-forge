@@ -2,19 +2,21 @@ use dioxus::prelude::*;
 
 use crate::api::client::{
     create_bundle_draft, create_compliance_assignment, create_compliance_bundle,
-    delete_compliance_bundle, fetch_bundle_version_policy_membership,
+    delete_compliance_bundle, fetch_bundle_requirement_coverage,
+    fetch_bundle_version_policy_membership,
     fetch_compliance_bundle_systems, fetch_compliance_bundles, fetch_compliance_system_evidence,
     fetch_environments, fetch_policies, fetch_systems, import_xccdf, preview_compliance_assignment,
     preview_xccdf, publish_bundle_version, trust_bundle_version, update_compliance_bundle,
 };
 use crate::api::models::{
-    ComplianceBundleSummary, ComplianceBundleSystemsResponse, ComplianceEvidenceResponse,
-    CreateAssignmentRequest, CreateBundleDraftRequest, CreateComplianceBundleRequest,
-    DeploymentPolicySummary, EnvironmentSummary, ImportedBundlePlan, ImportedCustomCheck,
-    ImportedCustomCheckRule, ImportedEvidenceRequirement, ImportedPolicyCustomization,
-    PolicyValueOverride, PublishBundleVersionRequest, SortOrder, SystemSummary, SystemsListParams,
-    TrustBundleVersionRequest, UpdateComplianceBundleRequest, XccdfImportPlan, XccdfImportResponse,
-    UpdateAssignmentRequest, XccdfPreviewResponse, XccdfRuleImportAction,
+    BundleCoverageReport, BundleCoverageRow, ComplianceBundleSummary, ComplianceBundleSystemsResponse,
+    ComplianceEvidenceResponse, CreateAssignmentRequest, CreateBundleDraftRequest,
+    CreateComplianceBundleRequest, DeploymentPolicySummary, EnvironmentSummary,
+    ImportedBundlePlan, ImportedCustomCheck, ImportedCustomCheckRule, ImportedEvidenceRequirement,
+    ImportedPolicyCustomization, PolicyValueOverride, PublishBundleVersionRequest,
+    RequirementCoverage, SortOrder, SystemSummary, SystemsListParams,
+    TrustBundleVersionRequest, UpdateAssignmentRequest, UpdateComplianceBundleRequest,
+    XccdfImportPlan, XccdfImportResponse, XccdfPreviewResponse, XccdfRuleImportAction,
 };
 use crate::components::compliance::{
     BundleCatalog, BundleHeader, EvidenceDrawer, ImportReview, RefinePolicyStep,
@@ -63,6 +65,9 @@ pub fn ComplianceView() -> Element {
     let mut version_action_busy = use_signal(|| false);
     let mut version_action_error = use_signal(|| None::<String>);
     let mut policies = use_signal(Vec::<DeploymentPolicySummary>::new);
+    // Requirement coverage for the selected bundle version.
+    let mut coverage_report: Signal<Option<BundleCoverageReport>> = use_signal(|| None);
+    let mut coverage_expanded = use_signal(|| false);
     let mut environments = use_signal(Vec::<EnvironmentSummary>::new);
     let mut sys_filter = use_signal(|| "all".to_string());
     let mut selected_export_version_id = use_signal(|| None::<uuid::Uuid>);
@@ -514,15 +519,32 @@ pub fn ComplianceView() -> Element {
                                     div { style: "font-size:12px;", "Loading systems rollup…" }
                                 }
                              } else if let Some(resp) = systems.read().as_ref() {
-                                 ScoreStrip { totals: resp.totals.clone() }
-                                 SystemsMatrix {
-                                    systems: resp.systems.clone(),
-                                    on_evidence,
-                                    filter: sys_filter.read().clone(),
-                                     on_filter: move |f| sys_filter.set(f),
-                                 }
-                                 // Administrative assignment controls stay below operational posture.
-                                 if is_admin {
+                                  ScoreStrip { totals: resp.totals.clone() }
+                                  SystemsMatrix {
+                                     systems: resp.systems.clone(),
+                                     on_evidence,
+                                     filter: sys_filter.read().clone(),
+                                      on_filter: move |f| sys_filter.set(f),
+                                  }
+                                  // ── Requirement coverage card ───────────────
+                                  if let Some(vid) = *selected_export_version_id.read() {
+                                      {
+                                          // Lazy-load coverage when the version changes.
+                                          if coverage_report.read().as_ref().map(|r| r.bundle_version_id) != Some(vid) {
+                                              spawn(async move {
+                                                  if let Ok(report) = fetch_bundle_requirement_coverage(&vid).await {
+                                                      coverage_report.set(Some(report));
+                                                  }
+                                              });
+                                          }
+                                          rsx! { div {} }
+                                      }
+                                      if let Some(report) = coverage_report.read().clone() {
+                                          RequirementCoverageCard { report, expanded: coverage_expanded }
+                                      }
+                                  }
+                                  // Administrative assignment controls stay below operational posture.
+                                  if is_admin {
                                      if let Some(vid) = *selected_export_version_id.read() {
                                           button {
                                               class: "btn btn-primary focus-ring",
@@ -4267,5 +4289,90 @@ mod tests {
             import_action_from_rule(&rules[0]),
             XccdfRuleImportAction::CreateUnbound { .. }
         ));
+    }
+}
+
+// ── Requirement coverage card ─────────────────────────────────────────────────
+
+/// Renders the requirement coverage card for a selected bundle version.
+///
+/// Matches the design from commit 861fd877: three summary chips (full/partial/
+/// unmapped), expandable to show individual requirement rows grouped by parent.
+#[component]
+fn RequirementCoverageCard(
+    report: BundleCoverageReport,
+    expanded: Signal<bool>,
+) -> Element {
+    let total = report.total_requirements;
+    let full = report.full;
+    let partial = report.partial;
+    let unmapped = report.unmapped;
+
+    rsx! {
+        div { class: "card", style: "display:flex;flex-direction:column;gap:10px;",
+            // Header row with expand toggle.
+            div { style: "display:flex;align-items:center;justify-content:space-between;",
+                div { style: "font-size:13px;font-weight:600;", "Requirement coverage" }
+                button {
+                    class: "btn btn-ghost xs focus-ring",
+                    style: "font-size:11px;",
+                    onclick: move |_| {
+                        let current = *expanded.read();
+                        expanded.set(!current);
+                    },
+                    if *expanded.read() { "Collapse" } else { "Expand" }
+                }
+            }
+            // Summary chips.
+            div { style: "display:flex;gap:8px;flex-wrap:wrap;",
+                div { style: "display:flex;align-items:center;gap:4px;",
+                    span { class: "chip chip-success", "{full}" }
+                    span { style: "font-size:11px;color:var(--cf-text-muted);", "full" }
+                }
+                div { style: "display:flex;align-items:center;gap:4px;",
+                    span { class: "chip chip-warn", "{partial}" }
+                    span { style: "font-size:11px;color:var(--cf-text-muted);", "partial" }
+                }
+                div { style: "display:flex;align-items:center;gap:4px;",
+                    span { class: "chip chip-neutral", "{unmapped}" }
+                    span { style: "font-size:11px;color:var(--cf-text-muted);", "unmapped" }
+                }
+                div { style: "display:flex;align-items:center;gap:4px;margin-left:auto;",
+                    span { style: "font-size:11px;color:var(--cf-text-muted);", "{total} total" }
+                }
+            }
+            // Expanded requirement rows.
+            if *expanded.read() && !report.rows.is_empty() {
+                div { style: "display:flex;flex-direction:column;gap:2px;max-height:360px;overflow-y:auto;",
+                    for row in report.rows.iter() {
+                        {
+                            let row_id = row.requirement_version_id;
+                            let coverage_color = match row.coverage {
+                                RequirementCoverage::Full => "var(--cf-success)",
+                                RequirementCoverage::Partial => "var(--cf-warn)",
+                                RequirementCoverage::Unmapped => "var(--cf-text-muted)",
+                            };
+                            let coverage_label = match row.coverage {
+                                RequirementCoverage::Full => "Full",
+                                RequirementCoverage::Partial => "Partial",
+                                RequirementCoverage::Unmapped => "Unmapped",
+                            };
+                            rsx! {
+                                div { key: "{row_id}",
+                                    style: "display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;padding:5px 8px;border-radius:6px;font-size:11px;background:var(--cf-subtle-bg);",
+                                    span { class: "mono", style: "color:var(--cf-text-secondary);", "{row.external_id}" }
+                                    span { style: "color:var(--cf-text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                                        {row.title.as_deref().unwrap_or("-")}
+                                    }
+                                    span { style: "color:{coverage_color};font-weight:600;white-space:nowrap;", "{coverage_label}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if *expanded.read() && report.rows.is_empty() {
+                div { style: "font-size:11px;color:var(--cf-text-muted);", "No requirements in this bundle version's baseline." }
+            }
+        }
     }
 }

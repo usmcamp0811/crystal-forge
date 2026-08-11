@@ -3663,3 +3663,120 @@ mod tests {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TASK-418: Compliance Frameworks, Requirements, Mappings, and Coverage
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Summary of a compliance framework lineage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceFrameworkSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub publisher: Option<String>,
+    pub canonical_source_key: String,
+    pub description: Option<String>,
+    pub version_count: i64,
+}
+
+/// Summary of a specific framework version (release).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceFrameworkVersionSummary {
+    pub id: Uuid,
+    pub framework_id: Uuid,
+    pub version: String,
+    pub canonical_release_key: String,
+    pub title: Option<String>,
+    pub published_at: Option<String>,
+    pub semantic_digest: String,
+    pub requirement_count: i64,
+}
+
+/// A single requirement version row from a search or list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RequirementVersionSummary {
+    pub id: Uuid,
+    pub requirement_id: Uuid,
+    pub framework_version_id: Uuid,
+    pub external_id: String,
+    pub title: Option<String>,
+    pub kind: String,
+    pub severity: Option<String>,
+    pub parent_requirement_version_id: Option<Uuid>,
+    pub semantic_digest: String,
+}
+
+/// A policy-requirement mapping row returned by the list endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyMappingRow {
+    pub id: Uuid,
+    pub policy_version_id: Uuid,
+    pub requirement_version_id: Uuid,
+    pub relationship: String,
+    pub coverage: String,
+    pub rationale: Option<String>,
+    pub provenance: String,
+    pub trust_state: String,
+    // Joined framework/requirement data for display.
+    pub framework_id: Uuid,
+    pub framework_name: String,
+    pub framework_version_id: Uuid,
+    pub framework_version: String,
+    pub requirement_external_id: String,
+    pub requirement_title: Option<String>,
+}
+
+/// Coverage classification for a single requirement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementCoverage {
+    Full,
+    Partial,
+    Unmapped,
+}
+
+/// One row in the bundle requirement coverage report.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BundleCoverageRow {
+    pub requirement_version_id: Uuid,
+    pub external_id: String,
+    pub title: Option<String>,
+    pub kind: String,
+    pub parent_requirement_version_id: Option<Uuid>,
+    pub coverage: RequirementCoverage,
+    pub mapped_policy_version_ids: Vec<Uuid>,
+}
+
+/// Aggregated requirement coverage for a bundle version.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BundleCoverageReport {
+    pub bundle_version_id: Uuid,
+    pub total_requirements: i64,
+    pub full: i64,
+    pub partial: i64,
+    pub unmapped: i64,
+    pub rows: Vec<BundleCoverageRow>,
+}
+
+/// Request body for creating a requirement mapping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreatePolicyMappingRequest {
+    pub requirement_version_id: Uuid,
+    pub relationship: String,
+    pub coverage: String,
+    pub rationale: Option<String>,
+    #[serde(default = "default_provenance")]
+    pub provenance: String,
+}
+
+fn default_provenance() -> String {
+    "manual".to_string()
+}
+
+/// Request body for updating an existing mapping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdatePolicyMappingRequest {
+    pub relationship: String,
+    pub coverage: String,
+    pub rationale: Option<String>,
+}
