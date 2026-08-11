@@ -1722,8 +1722,7 @@ pub async fn activate_evaluated_system_build(
         None => {
             warn!(
                 commit_id,
-                derivation_id,
-                "system_build_job_activation_insert_filtered"
+                derivation_id, "system_build_job_activation_insert_filtered"
             );
 
             #[derive(sqlx::FromRow)]
@@ -1960,7 +1959,10 @@ pub(crate) async fn record_preparation_failure(
         }
         Ok(_) => {}
         Err(e) => {
-            error!(derivation_id, "record_preparation_failure: query failed: {e:#}");
+            error!(
+                derivation_id,
+                "record_preparation_failure: query failed: {e:#}"
+            );
         }
     }
 }
@@ -2016,7 +2018,12 @@ pub async fn finalize_evaluated_system(
                     );
                     warn!(derivation_id, "{}", msg);
                     record_preparation_failure(
-                        pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                        pool,
+                        derivation_id,
+                        commit_id,
+                        expected_attempt,
+                        &drv_path,
+                        &msg,
                     )
                     .await;
                     return Ok(SystemFinalizeOutcome::PreparationFailed {
@@ -2028,7 +2035,12 @@ pub async fn finalize_evaluated_system(
                     let msg = format!("Failed to create GC root: {err:#}");
                     warn!(derivation_id, "{}", msg);
                     record_preparation_failure(
-                        pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                        pool,
+                        derivation_id,
+                        commit_id,
+                        expected_attempt,
+                        &drv_path,
+                        &msg,
                     )
                     .await;
                     return Ok(SystemFinalizeOutcome::PreparationFailed {
@@ -2077,7 +2089,12 @@ pub async fn finalize_evaluated_system(
                         );
                         warn!(derivation_id, "{}", msg);
                         record_preparation_failure(
-                            pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                            pool,
+                            derivation_id,
+                            commit_id,
+                            expected_attempt,
+                            &drv_path,
+                            &msg,
                         )
                         .await;
                         Ok(SystemFinalizeOutcome::PreparationFailed {
@@ -2426,9 +2443,7 @@ async fn handle_system_finalize_outcome(
             Ok(SystemFinalizeAction::Recorded)
         }
 
-        SystemFinalizeOutcome::PreparationFailed {
-            ref error, ..
-        } => {
+        SystemFinalizeOutcome::PreparationFailed { ref error, .. } => {
             warn!("{}: build queue preparation failed: {}", system_name, error);
             // The derivation was persisted and build-eligible; the recovery
             // reconciler will retry activation with backoff.

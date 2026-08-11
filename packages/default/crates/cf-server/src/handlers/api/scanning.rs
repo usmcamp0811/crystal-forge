@@ -7,19 +7,25 @@ use sqlx::PgPool;
 use tracing::error;
 
 use crate::api::models::{
-    ScanSchedulePolicyResponse, ScanningActivityItemResponse, ScanningQueueItemResponse,
-    ScanningStatsResponse, ScanningSystemsItemResponse, UpdateScanSchedulePolicyRequest,
+    ScanSchedulePolicyResponse, ScanningActivityItemResponse, ScanningDeployedResponse,
+    ScanningQueueItemResponse, ScanningStatsResponse, ScanningSystemsItemResponse,
+    UpdateScanSchedulePolicyRequest,
 };
 use crate::handlers::api::rbac::require_admin;
 use crate::queries::scanning::{
-    ScanSchedulePolicyRow, get_scan_activity, get_scan_queue, get_scan_queue_for_system,
-    get_scan_schedule_policy, get_scan_stats, get_scan_systems, update_scan_schedule_policy,
+    InvalidCursorError, ScanSchedulePolicyRow, get_scan_activity, get_scan_deployed,
+    get_scan_queue, get_scan_queue_for_system, get_scan_schedule_policy, get_scan_stats,
+    get_scan_systems, update_scan_schedule_policy,
 };
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct ScanningListParams {
     #[serde(default = "default_limit")]
     pub limit: i64,
+    /// Keyset cursor for the deployed endpoint. Pass the `next_cursor` value
+    /// from the previous response to retrieve the next page.
+    #[serde(default)]
+    pub after: Option<String>,
 }
 
 fn default_limit() -> i64 {
@@ -84,7 +90,7 @@ fn scan_queue_row_to_response(
     r: crate::queries::scanning::ScanQueueRow,
 ) -> ScanningQueueItemResponse {
     ScanningQueueItemResponse {
-        scan_id: r.scan_id,
+        scan_id: r.scan_id, // Option<Uuid>: None for never-scanned deployed configs
         hostname: r.hostname,
         flake_name: r.flake_name,
         commit_hash: r.commit_hash,
@@ -96,7 +102,48 @@ fn scan_queue_row_to_response(
         medium_count: r.medium_count,
         freshness: r.freshness,
         is_current: r.is_current,
+        is_latest_per_flake: r.is_latest_per_flake,
         trigger: None,
+    }
+}
+
+pub async fn get_scanning_deployed(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Query(params): Query<ScanningListParams>,
+) -> impl IntoResponse {
+    if require_admin(&pool, &headers).await.is_none() {
+        return forbidden_admin();
+    }
+
+    match get_scan_deployed(&pool, params.limit.clamp(1, 1000), params.after.as_deref()).await {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(ScanningDeployedResponse {
+                items: result
+                    .rows
+                    .into_iter()
+                    .map(scan_queue_row_to_response)
+                    .collect(),
+                total: result.total,
+                has_more: result.has_more,
+                next_cursor: result.next_cursor,
+            }),
+        )
+            .into_response(),
+        Err(e) if e.downcast_ref::<InvalidCursorError>().is_some() => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(crate::api::models::ApiError {
+                error: "Bad Request".into(),
+                message: "Invalid or malformed pagination cursor.".into(),
+                details: None,
+            }),
+        )
+            .into_response(),
+        Err(e) => {
+            error!("scanning deployed query failed: {e:#}");
+            internal_error("Failed to load deployed scanning configurations")
+        }
     }
 }
 
@@ -366,7 +413,10 @@ mod tests {
         let response = get_scanning_queue(
             State(lazy_pool()),
             HeaderMap::new(),
-            Query(ScanningListParams { limit: 50 }),
+            Query(ScanningListParams {
+                limit: 50,
+                after: None,
+            }),
         )
         .await
         .into_response();
@@ -378,7 +428,10 @@ mod tests {
         let response = get_scanning_systems(
             State(lazy_pool()),
             HeaderMap::new(),
-            Query(ScanningListParams { limit: 50 }),
+            Query(ScanningListParams {
+                limit: 50,
+                after: None,
+            }),
         )
         .await
         .into_response();
@@ -390,7 +443,10 @@ mod tests {
         let response = get_scanning_activity(
             State(lazy_pool()),
             HeaderMap::new(),
-            Query(ScanningListParams { limit: 50 }),
+            Query(ScanningListParams {
+                limit: 50,
+                after: None,
+            }),
         )
         .await
         .into_response();
@@ -403,7 +459,10 @@ mod tests {
             State(lazy_pool()),
             HeaderMap::new(),
             Path(uuid::Uuid::nil()),
-            Query(ScanningListParams { limit: 50 }),
+            Query(ScanningListParams {
+                limit: 50,
+                after: None,
+            }),
         )
         .await
         .into_response();

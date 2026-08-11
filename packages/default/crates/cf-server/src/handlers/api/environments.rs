@@ -613,6 +613,7 @@ mod tests {
             role_assignment_count: None,
             cache: None,
             compliance_bundle: None,
+            compliance_assignments: Vec::new(),
         };
 
         let json = serde_json::to_value(&summary).unwrap();
@@ -621,6 +622,7 @@ mod tests {
         assert_eq!(json["system_count"], 12);
         assert_eq!(json["is_active"], true);
         assert_eq!(json["rollup"]["healthy"], 0);
+        assert_eq!(json["compliance_assignments"], serde_json::json!([]));
     }
 
     #[test]
@@ -640,6 +642,7 @@ mod tests {
             role_assignment_count: None,
             cache: None,
             compliance_bundle: None,
+            compliance_assignments: Vec::new(),
         };
 
         let json = serde_json::to_value(&summary).unwrap();

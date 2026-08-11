@@ -1,19 +1,28 @@
 use dioxus::prelude::*;
 
 use crate::api::client::{
-    create_compliance_bundle, delete_compliance_bundle, fetch_compliance_bundle_systems,
-    fetch_compliance_bundles, fetch_compliance_system_evidence, fetch_environments, fetch_policies,
-    update_compliance_bundle,
+    create_bundle_draft, create_compliance_assignment, create_compliance_bundle,
+    delete_compliance_bundle, fetch_bundle_version_policy_membership,
+    fetch_compliance_bundle_systems, fetch_compliance_bundles, fetch_compliance_system_evidence,
+    fetch_environments, fetch_policies, fetch_systems, import_xccdf, preview_compliance_assignment,
+    preview_xccdf, publish_bundle_version, trust_bundle_version, update_compliance_bundle,
 };
 use crate::api::models::{
     ComplianceBundleSummary, ComplianceBundleSystemsResponse, ComplianceEvidenceResponse,
-    CreateComplianceBundleRequest, DeploymentPolicySummary, EnvironmentSummary,
-    UpdateComplianceBundleRequest,
+    CreateAssignmentRequest, CreateBundleDraftRequest, CreateComplianceBundleRequest,
+    DeploymentPolicySummary, EnvironmentSummary, ImportedBundlePlan, ImportedCustomCheck,
+    ImportedCustomCheckRule, ImportedEvidenceRequirement, ImportedPolicyCustomization,
+    PolicyValueOverride, PublishBundleVersionRequest, SortOrder, SystemSummary, SystemsListParams,
+    TrustBundleVersionRequest, UpdateComplianceBundleRequest, XccdfImportPlan, XccdfImportResponse,
+    UpdateAssignmentRequest, XccdfPreviewResponse, XccdfRuleImportAction,
 };
 use crate::components::compliance::{
-    BundleCatalog, BundleHeader, EvidenceDrawer, ScoreStrip, SystemsMatrix,
+    BundleCatalog, BundleHeader, EvidenceDrawer, ImportReview, RefinePolicyStep,
+    RefinedPolicyDraft, RefinedRuleAction, RefinedStigRule, ScoreStrip, SourceCheck,
+    SourceCheckBodyPart, SourceStigRule, SystemsMatrix, action_to_import,
 };
 use crate::components::icon::{Icon, IconName};
+use crate::components::io_menu::{IOMenu, IOMenuItem};
 use crate::components::loading::DashboardLoadingSpinner;
 use crate::export::{
     ExportPayload, build_cf_json, build_csv, build_oscal, build_sarif, download_print_html,
@@ -50,9 +59,15 @@ pub fn ComplianceView() -> Element {
     let mut show_new_bundle = use_signal(|| false);
     let mut show_edit_bundle = use_signal(|| false);
     let mut show_import_stig = use_signal(|| false);
+    let mut import_mode_stig = use_signal(|| true); // true = STIG/XCCDF, false = CF-native bundle
+    let mut version_action_busy = use_signal(|| false);
+    let mut version_action_error = use_signal(|| None::<String>);
     let mut policies = use_signal(Vec::<DeploymentPolicySummary>::new);
     let mut environments = use_signal(Vec::<EnvironmentSummary>::new);
     let mut sys_filter = use_signal(|| "all".to_string());
+    let mut selected_export_version_id = use_signal(|| None::<uuid::Uuid>);
+    let mut export_version_pointers = use_signal(|| (None::<uuid::Uuid>, None::<uuid::Uuid>));
+    let mut show_assignment = use_signal(|| false);
 
     // Generation counters guard against stale async responses overwriting the
     // state of a subsequently-selected bundle or system.  Each spawn captures
@@ -70,14 +85,14 @@ pub fn ComplianceView() -> Element {
     // Spawn a systems fetch for `bundle_id`.  Increments `systems_gen` and
     // clears existing systems/error state before returning the new generation
     // so the caller can pass it into the async block.
-    let mut start_systems_fetch = move |bundle_id: uuid::Uuid| {
+    let mut start_systems_fetch = move |bundle_id: uuid::Uuid, version_id: Option<uuid::Uuid>| {
         let gen_id = *systems_gen.read() + 1;
         systems_gen.set(gen_id);
         systems.set(None);
         systems_error.set(None);
         systems_loading.set(true);
         spawn(async move {
-            match fetch_compliance_bundle_systems(&bundle_id).await {
+            match fetch_compliance_bundle_systems(&bundle_id, version_id.as_ref()).await {
                 Ok(resp) => {
                     if *systems_gen.read() == gen_id {
                         systems.set(Some(resp));
@@ -104,13 +119,17 @@ pub fn ComplianceView() -> Element {
             match fetch_compliance_bundles().await {
                 Ok(items) => {
                     let first_id = items.first().map(|b| b.id);
+                    let first_version_id = items.first().and_then(|b| {
+                        b.current_published_version_id
+                            .or(b.current_draft_version_id)
+                    });
                     bundles.set(items);
                     selected_bundle_id.set(first_id);
                     // loaded = true before the systems fetch so the bundle list
                     // renders immediately; systems has its own loading indicator.
                     loaded.set(true);
                     if let Some(bundle_id) = first_id {
-                        start_systems_fetch(bundle_id);
+                        start_systems_fetch(bundle_id, first_version_id);
                     }
                 }
                 Err(err) => {
@@ -142,8 +161,58 @@ pub fn ComplianceView() -> Element {
         let eg = *evidence_gen.read() + 1;
         evidence_gen.set(eg);
         sys_filter.set("all".to_string());
-        start_systems_fetch(bundle_id);
+        let version_id = bundles
+            .read()
+            .iter()
+            .find(|bundle| bundle.id == bundle_id)
+            .and_then(|bundle| {
+                bundle
+                    .current_published_version_id
+                    .or(bundle.current_draft_version_id)
+            });
+        start_systems_fetch(bundle_id, version_id);
     };
+
+    use_effect(move || {
+        let bundle_id = *selected_bundle_id.read();
+        let bundles_snapshot = bundles.read().clone();
+        let pointers = bundle_id
+            .and_then(|bid| bundles_snapshot.iter().find(|b| b.id == bid))
+            .map(|bundle| {
+                (
+                    bundle.current_published_version_id,
+                    bundle.current_draft_version_id,
+                )
+            })
+            .unwrap_or((None, None));
+        if *export_version_pointers.read() == pointers {
+            return;
+        }
+        export_version_pointers.set(pointers);
+
+        // Preserve an explicit choice while it remains available. If the
+        // selected bundle is refreshed or published and the old version is no
+        // longer one of the current pointers, prefer published, then draft.
+        let current = *selected_export_version_id.read();
+        let version_exists = bundle_id
+            .and_then(|bid| bundles_snapshot.iter().find(|bundle| bundle.id == bid))
+            .is_some_and(|bundle| {
+                current.is_some_and(|id| bundle.versions.iter().any(|v| v.id == id))
+            });
+        let next = if version_exists {
+            current
+        } else {
+            pointers.0.or(pointers.1).or_else(|| {
+                bundle_id.and_then(|bid| {
+                    bundles_snapshot
+                        .iter()
+                        .find(|bundle| bundle.id == bid)
+                        .and_then(|bundle| bundle.versions.first().map(|v| v.id))
+                })
+            })
+        };
+        selected_export_version_id.set(next);
+    });
 
     let on_evidence = move |system_id: uuid::Uuid| {
         if let Some(bundle_id) = *selected_bundle_id.read() {
@@ -151,8 +220,11 @@ pub fn ComplianceView() -> Element {
             evidence_error.set(None);
             let gen_id = *evidence_gen.read() + 1;
             evidence_gen.set(gen_id);
+            let version_id = *selected_export_version_id.read();
             spawn(async move {
-                match fetch_compliance_system_evidence(&bundle_id, &system_id).await {
+                match fetch_compliance_system_evidence(&bundle_id, &system_id, version_id.as_ref())
+                    .await
+                {
                     Ok(resp) => {
                         if *evidence_gen.read() == gen_id {
                             evidence.set(Some(resp));
@@ -178,29 +250,119 @@ pub fn ComplianceView() -> Element {
                         "Walk through compliance bundles, review per-control evidence, export for auditors."
                     }
                 }
-                div { style: "display:flex;gap:8px;",
-                    button {
-                        class: "btn btn-ghost focus-ring",
-                        onclick: move |_| show_export.set(true),
-                        Icon { name: IconName::Download, size: 14 }
-                        " Export evidence"
-                    }
-                    // Admin-only bundle management actions
+                div { style: "display:flex;gap:8px;align-items:center;",
+                    // Admin-only bundle management
                     if is_admin {
-                        button {
-                            class: "btn btn-ghost focus-ring",
-                            onclick: move |_| show_import_stig.set(true),
-                            span { style: "display:inline-flex;transform:rotate(180deg);",
-                                Icon { name: IconName::Download, size: 14 }
-                            }
-                            " Import STIG"
-                        }
                         button {
                             class: "btn btn-primary focus-ring",
                             onclick: move |_| show_new_bundle.set(true),
                             Icon { name: IconName::Plus, size: 14 }
                             " New bundle"
                         }
+                    }
+                    // Shared Import / Export menu (AC #25)
+                    IOMenu {
+                        trigger_label: "Import / Export".to_string(),
+                        trigger_class: "focus-ring".to_string(),
+                        items: {
+                            let mut items = vec![];
+                            if is_admin {
+                                items.push(IOMenuItem::action_with_icon(
+                                    "Import STIG or XCCDF (.xml/.zip)",
+                                    IconName::Download,
+                                ));
+                                // Import CF bundle: uses the same import flow as foreign XCCDF.
+                                items.push(IOMenuItem::action_with_icon(
+                                    "Import Crystal Forge bundle (.xml)",
+                                    IconName::Download,
+                                ));
+                                items.push(IOMenuItem::Separator);
+                            }
+                            // Export XCCDF: enabled when a bundle version is selected.
+                            let bundle_selected = selected_bundle_id.read().is_some();
+                            let has_version = selected_export_version_id.read().is_some();
+                            let export_label = selected_bundle.as_ref().and_then(|bundle| {
+                                let selected = *selected_export_version_id.read();
+                                if selected == bundle.current_published_version_id {
+                                    bundle.current_published_version.as_ref().map(|version| {
+                                        format!("Export XCCDF: {version} published")
+                                    })
+                                } else if selected == bundle.current_draft_version_id {
+                                    bundle.current_draft_version.as_ref().map(|version| {
+                                        format!("Export XCCDF: {version} draft")
+                                    })
+                                } else {
+                                    None
+                                }
+                            }).unwrap_or_else(|| "Export XCCDF".to_string());
+                            items.push(if bundle_selected && has_version {
+                                IOMenuItem::action_with_icon(
+                                    export_label,
+                                    IconName::Download,
+                                )
+                            } else if bundle_selected {
+                                IOMenuItem::disabled(
+                                    "Export this bundle (XCCDF .xml)",
+                                    "No published or draft version available",
+                                )
+                            } else {
+                                IOMenuItem::disabled(
+                                    "Export this bundle (XCCDF .xml)",
+                                    "Select a bundle first",
+                                )
+                            });
+                            items.push(IOMenuItem::action_with_icon(
+                                "Export evidence report…",
+                                IconName::Download,
+                            ));
+                            items
+                        },
+                        on_action: move |idx: usize| {
+                            if is_admin {
+                                match idx {
+                                    0 => {
+                                        import_mode_stig.set(true);
+                                        show_import_stig.set(true);
+                                    }
+                                    1 => {
+                                        import_mode_stig.set(false);
+                                        show_import_stig.set(true);
+                                    }
+                                    2 => {
+                                        // Export XCCDF: trigger a download of the selected bundle version.
+                                        if let Some(vid) = *selected_export_version_id.read() {
+                                            let url = format!(
+                                                "{}/api/v1/compliance/bundle-versions/{}/xccdf",
+                                                crate::api::client::base_url(),
+                                                vid
+                                            );
+                                            if let Some(win) = web_sys::window() {
+                                                let _ = win.location().set_href(&url);
+                                            }
+                                        }
+                                    }
+                                    3 => show_export.set(true),
+                                    _ => {}
+                                }
+                            } else {
+                                match idx {
+                                    0 => {
+                                        if let Some(vid) = *selected_export_version_id.read() {
+                                            let url = format!(
+                                                "{}/api/v1/compliance/bundle-versions/{}/xccdf",
+                                                crate::api::client::base_url(),
+                                                vid
+                                            );
+                                            if let Some(win) = web_sys::window() {
+                                                let _ = win.location().set_href(&url);
+                                            }
+                                        }
+                                    }
+                                    1 => show_export.set(true),
+                                    _ => {}
+                                }
+                            }
+                        },
                     }
                 }
             }
@@ -222,20 +384,113 @@ pub fn ComplianceView() -> Element {
                 div {
                     style: "display:grid;grid-template-columns:320px 1fr;gap:16px;align-items:start;",
                     // Left rail: catalog
-                    BundleCatalog {
-                        bundles: bundles.read().clone(),
-                        selected_id: *selected_bundle_id.read(),
-                        on_select: on_select_bundle,
-                    }
+                     BundleCatalog {
+                         bundles: bundles.read().clone(),
+                         selected_id: *selected_bundle_id.read(),
+                         on_select: on_select_bundle,
+                         selected_version_id: *selected_export_version_id.read(),
+                         on_select_version: move |version_id| {
+                             selected_export_version_id.set(Some(version_id));
+                             if let Some(bundle_id) = *selected_bundle_id.read() {
+                                 start_systems_fetch(bundle_id, Some(version_id));
+                             }
+                         },
+                     }
                     // Right: bundle content
                     if let Some(bundle) = selected_bundle {
                         div { style: "display:flex;flex-direction:column;gap:14px;min-width:0;",
-                            BundleHeader {
-                                bundle: bundle.clone(),
-                                on_edit: move |_| show_edit_bundle.set(true),
-                                is_admin,
-                            }
-                            if let Some(err) = systems_error.read().as_ref() {
+                             BundleHeader {
+                                 bundle: bundle.clone(),
+                                 on_edit: move |_| show_edit_bundle.set(true),
+                                 is_admin,
+                             }
+                             XccdfVersionSelector {
+                                 bundle: bundle.clone(),
+                                 selected_version_id: *selected_export_version_id.read(),
+                                   on_select: move |version_id| {
+                                       selected_export_version_id.set(version_id);
+                                       if let Some(bundle_id) = *selected_bundle_id.read() {
+                                           start_systems_fetch(bundle_id, version_id);
+                                       }
+                                   },
+                             }
+                             // ── Version lifecycle actions (admin-only) ─
+                             if is_admin {
+                                 BundleVersionActions {
+                                     bundle: bundle.clone(),
+                                     selected_version_id: *selected_export_version_id.read(),
+                                     busy: *version_action_busy.read(),
+                                     error: version_action_error.read().clone(),
+                                     on_trust: move |version_id: uuid::Uuid| {
+                                         version_action_busy.set(true);
+                                         version_action_error.set(None);
+                                         spawn(async move {
+                                             match trust_bundle_version(
+                                                 &version_id,
+                                                 &TrustBundleVersionRequest { trusted: true, review_note: None },
+                                             ).await {
+                                                 Ok(_) => {
+                                                     version_action_busy.set(false);
+                                                     if let Ok(items) = fetch_compliance_bundles().await {
+                                                         bundles.set(items);
+                                                     }
+                                                 }
+                                                 Err(err) => {
+                                                     version_action_busy.set(false);
+                                                     version_action_error.set(Some(format!("Trust failed: {err}")));
+                                                 }
+                                             }
+                                         });
+                                     },
+                                     on_publish: move |version_id: uuid::Uuid| {
+                                         version_action_busy.set(true);
+                                         version_action_error.set(None);
+                                         spawn(async move {
+                                             match publish_bundle_version(
+                                                 &version_id,
+                                                 &PublishBundleVersionRequest {
+                                                     auto_publish_draft_policies: Some(true),
+                                                     expected_semantic_digest: None,
+                                                 },
+                                             ).await {
+                                                 Ok(_) => {
+                                                     version_action_busy.set(false);
+                                                     if let Ok(items) = fetch_compliance_bundles().await {
+                                                         bundles.set(items);
+                                                     }
+                                                 }
+                                                 Err(err) => {
+                                                     version_action_busy.set(false);
+                                                     version_action_error.set(Some(format!("Publish failed: {err}")));
+                                                 }
+                                             }
+                                         });
+                                     },
+                                     on_create_draft: move |bundle_id: uuid::Uuid| {
+                                         version_action_busy.set(true);
+                                         version_action_error.set(None);
+                                         spawn(async move {
+                                             match create_bundle_draft(
+                                                 &bundle_id,
+                                                 &CreateBundleDraftRequest { new_version: None },
+                                             ).await {
+                                                 Ok(draft) => {
+                                                     version_action_busy.set(false);
+                                                     selected_export_version_id.set(Some(draft.version_id));
+                                                     if let Ok(items) = fetch_compliance_bundles().await {
+                                                         bundles.set(items);
+                                                     }
+                                                 }
+                                                 Err(err) => {
+                                                     version_action_busy.set(false);
+                                                     version_action_error.set(Some(format!("Draft creation failed: {err}")));
+                                                 }
+                                             }
+                                         });
+                                     },
+                                 }
+                             }
+                             if let Some(err) = systems_error.read().as_ref() {
                                 div { class: "sd-callout sd-callout-danger",
                                     Icon { name: IconName::X, size: 13 }
                                     div { style: "font-size:12px;display:flex;flex-direction:column;gap:6px;",
@@ -244,8 +499,8 @@ pub fn ComplianceView() -> Element {
                                             class: "btn btn-ghost focus-ring xs",
                                             style: "width:fit-content;",
                             onclick: move |_| {
-                                if let Some(bid) = *selected_bundle_id.read() {
-                                    start_systems_fetch(bid);
+                             if let Some(bid) = *selected_bundle_id.read() {
+                                     start_systems_fetch(bid, *selected_export_version_id.read());
                                 }
                             },
                                             Icon { name: IconName::Sync, size: 11 }
@@ -258,15 +513,33 @@ pub fn ComplianceView() -> Element {
                                     Icon { name: IconName::Shield, size: 13 }
                                     div { style: "font-size:12px;", "Loading systems rollup…" }
                                 }
-                            } else if let Some(resp) = systems.read().as_ref() {
-                                ScoreStrip { totals: resp.totals.clone() }
-                                SystemsMatrix {
+                             } else if let Some(resp) = systems.read().as_ref() {
+                                 ScoreStrip { totals: resp.totals.clone() }
+                                 SystemsMatrix {
                                     systems: resp.systems.clone(),
                                     on_evidence,
                                     filter: sys_filter.read().clone(),
-                                    on_filter: move |f| sys_filter.set(f),
-                                }
-                            }
+                                     on_filter: move |f| sys_filter.set(f),
+                                 }
+                                 // Administrative assignment controls stay below operational posture.
+                                 if is_admin {
+                                     if let Some(vid) = *selected_export_version_id.read() {
+                                          button {
+                                              class: "btn btn-primary focus-ring",
+                                              onclick: move |_| show_assignment.set(true),
+                                              "Assign bundle"
+                                          }
+                                          if *show_assignment.read() {
+                                              AssignmentCreatePanel {
+                                                   bundle: bundle.clone(),
+                                                   bundle_version_id: vid,
+                                                   environments: environments.read().clone(),
+                                                   policies: policies.read().clone(),
+                                               }
+                                          }
+                                     }
+                                 }
+                             }
                         }
                     }
                 }
@@ -330,10 +603,12 @@ pub fn ComplianceView() -> Element {
         if is_admin && *show_new_bundle.read() {
             NewBundleModal {
                 policies: policies.read().clone(),
+                bundles: bundles.read().clone(),
                 environments: environments.read().clone(),
                 on_close: move |_| show_new_bundle.set(false),
                 on_created: move |bundle: ComplianceBundleSummary| {
                     let id = bundle.id;
+                    let version_id = bundle.current_published_version_id.or(bundle.current_draft_version_id);
                     let mut next = bundles.read().clone();
                     next.push(bundle);
                     bundles.set(next);
@@ -343,7 +618,7 @@ pub fn ComplianceView() -> Element {
                     let eg = *evidence_gen.read() + 1;
                     evidence_gen.set(eg);
                     show_new_bundle.set(false);
-                    start_systems_fetch(id);
+                    start_systems_fetch(id, version_id);
                 },
             }
         }
@@ -356,22 +631,25 @@ pub fn ComplianceView() -> Element {
                 EditBundleModal {
                     bundle,
                     policies: policies.read().clone(),
+                    bundles: bundles.read().clone(),
                     environments: environments.read().clone(),
                     on_close: move |_| show_edit_bundle.set(false),
                     on_saved: move |updated: ComplianceBundleSummary| {
                         let id = updated.id;
+                        let version_id = updated.current_published_version_id.or(updated.current_draft_version_id);
                         let mut next = bundles.read().clone();
                         if let Some(pos) = next.iter().position(|b| b.id == id) {
                             next[pos] = updated;
                         }
                         bundles.set(next);
                         show_edit_bundle.set(false);
-                        start_systems_fetch(id);
+                        start_systems_fetch(id, version_id);
                     },
                     on_deleted: move |deleted_id: uuid::Uuid| {
                         let mut next = bundles.read().clone();
                         next.retain(|b| b.id != deleted_id);
-                        let next_id = next.first().map(|b| b.id);
+                        let next_bundle = next.first().cloned();
+                        let next_id = next_bundle.as_ref().map(|b| b.id);
                         bundles.set(next);
                         selected_bundle_id.set(next_id);
                         evidence.set(None);
@@ -379,8 +657,11 @@ pub fn ComplianceView() -> Element {
                         let eg = *evidence_gen.read() + 1;
                         evidence_gen.set(eg);
                         show_edit_bundle.set(false);
-                        if let Some(nid) = next_id {
-                            start_systems_fetch(nid);
+                        if let Some(bundle) = next_bundle {
+                            start_systems_fetch(
+                                bundle.id,
+                                bundle.current_published_version_id.or(bundle.current_draft_version_id),
+                            );
                         }
                     },
                 }
@@ -391,7 +672,158 @@ pub fn ComplianceView() -> Element {
         if is_admin && *show_import_stig.read() {
             ImportStigModal {
                 environments: environments.read().clone(),
+                existing_policies: policies.read().iter().filter_map(|policy| policy.version_id.map(|version_id| (version_id, policy.name.clone()))).collect(),
+                is_stig_import: *import_mode_stig.read(),
                 on_close: move |_| show_import_stig.set(false),
+                on_success: move |_| {
+                    // Refresh the bundle catalog after a successful import.
+                    spawn(async move {
+                        if let Ok(items) = fetch_compliance_bundles().await {
+                            let first_id = items.first().map(|b| b.id);
+                            bundles.set(items);
+                            if let Some(id) = first_id {
+                                selected_bundle_id.set(Some(id));
+                            }
+                        }
+                    });
+                },
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct XccdfVersionSelectorProps {
+    bundle: ComplianceBundleSummary,
+    selected_version_id: Option<uuid::Uuid>,
+    on_select: EventHandler<Option<uuid::Uuid>>,
+}
+
+#[component]
+fn XccdfVersionSelector(props: XccdfVersionSelectorProps) -> Element {
+    let bundle = &props.bundle;
+    let selected = props.selected_version_id;
+    let has_version = !bundle.versions.is_empty()
+        || bundle.current_published_version_id.is_some()
+        || bundle.current_draft_version_id.is_some();
+
+    rsx! {
+        if has_version {
+            div {
+                class: "sd-callout sd-callout-info",
+                style: "display:flex;align-items:center;gap:10px;",
+                label { style: "font-size:12px;font-weight:600;", "Selected XCCDF revision" }
+                select {
+                    class: "input focus-ring",
+                    style: "width:auto;min-width:260px;",
+                    value: selected.map(|id| id.to_string()).unwrap_or_default(),
+                    onchange: move |event| {
+                        props.on_select.call(uuid::Uuid::parse_str(&event.value()).ok());
+                    },
+                    for version in bundle.versions.iter() {
+                        option {
+                            value: "{version.id}",
+                            selected: selected == Some(version.id),
+                            "{version.version} · {version.publication_state}"
+                            if version.is_current_published { " · Current" }
+                            if version.is_current_draft { " · Draft" }
+                        }
+                    }
+                }
+            }
+        } else {
+            div {
+                class: "sd-callout sd-callout-warning",
+                style: "font-size:12px;",
+                "No published or draft version is available for XCCDF export."
+            }
+        }
+    }
+}
+
+// ─── Bundle version lifecycle actions (trust / publish / draft) ─────────────
+
+#[derive(Props, Clone, PartialEq)]
+struct BundleVersionActionsProps {
+    bundle: ComplianceBundleSummary,
+    selected_version_id: Option<uuid::Uuid>,
+    busy: bool,
+    error: Option<String>,
+    on_trust: EventHandler<uuid::Uuid>,
+    on_publish: EventHandler<uuid::Uuid>,
+    on_create_draft: EventHandler<uuid::Uuid>,
+}
+
+#[component]
+fn BundleVersionActions(props: BundleVersionActionsProps) -> Element {
+    let bundle = &props.bundle;
+    let vid = props.selected_version_id;
+
+    // Determine the publication state of the selected version.
+    let is_draft_selected = vid == bundle.current_draft_version_id;
+    let is_published_selected = vid == bundle.current_published_version_id;
+
+    if vid.is_none() {
+        return rsx! {};
+    }
+
+    rsx! {
+        div { class: "card", style: "padding:14px 16px;display:flex;flex-direction:column;gap:12px;",
+            div { style: "font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);",
+                "Version actions"
+            }
+
+            if let Some(err) = &props.error {
+                div { class: "sd-callout sd-callout-danger", style: "font-size:12px;", "{err}" }
+            }
+
+            div { style: "display:flex;flex-wrap:wrap;gap:8px;",
+                // ── Trust / untrust (draft versions only) ──────────────
+                if is_draft_selected {
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        disabled: props.busy,
+                        onclick: {
+                            let vid = vid.unwrap();
+                            move |_| props.on_trust.call(vid)
+                        },
+                        Icon { name: IconName::Check, size: 12 }
+                        " Mark trusted"
+                    }
+                }
+
+                // ── Publish (draft → accepted) ─────────────────────────
+                if is_draft_selected {
+                    button {
+                        class: "btn btn-primary focus-ring xs",
+                        disabled: props.busy,
+                        title: "Publish this draft as an immutable accepted version",
+                        onclick: {
+                            let vid = vid.unwrap();
+                            move |_| props.on_publish.call(vid)
+                        },
+                        if props.busy { "Publishing…" } else { "Publish version" }
+                    }
+                }
+
+                // ── Create draft (from accepted version) ───────────────
+                if is_published_selected {
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        disabled: props.busy,
+                        title: "Create a new mutable draft derived from this accepted version",
+                        onclick: {
+                            let bid = bundle.id;
+                            move |_| props.on_create_draft.call(bid)
+                        },
+                        if props.busy { "Creating…" } else { "Create draft" }
+                    }
+
+                    div { class: "sd-callout sd-callout-info", style: "font-size:12px;width:100%;",
+                        Icon { name: IconName::Shield, size: 12 }
+                        "This is an accepted (immutable) version. Edit by creating a new draft."
+                    }
+                }
             }
         }
     }
@@ -430,149 +862,887 @@ fn EmptyComplianceState(props: EmptyComplianceStateProps) -> Element {
     }
 }
 
+// ─── Assignment creation panel ───────────────────────────────────────────────
+
+fn parse_uuid_list(value: &str) -> Result<Vec<uuid::Uuid>, ()> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| uuid::Uuid::parse_str(item).map_err(|_| ()))
+        .collect()
+}
+
+/// Compact panel for creating a bundle assignment for a specific published version.
+#[derive(Props, Clone, PartialEq)]
+struct AssignmentCreatePanelProps {
+    bundle: ComplianceBundleSummary,
+    bundle_version_id: uuid::Uuid,
+    environments: Vec<EnvironmentSummary>,
+    policies: Vec<DeploymentPolicySummary>,
+}
+
+#[component]
+fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
+    let mut scope_type = use_signal(|| "environment".to_string());
+    let mut scope_id = use_signal(|| String::new());
+    let mut system_search = use_signal(String::new);
+    let mut enforcement_mode = use_signal(|| "enforce".to_string());
+    let mut exclusions = use_signal(Vec::<uuid::Uuid>::new);
+    let mut additions = use_signal(Vec::<uuid::Uuid>::new);
+    let mut busy = use_signal(|| false);
+    let mut success = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+    let mut preview = use_signal(|| None::<crate::api::models::EffectivePolicySetResponse>);
+    let mut previewed_request = use_signal(|| None::<CreateAssignmentRequest>);
+    let mut preview_busy = use_signal(|| false);
+
+    let membership = use_resource({
+        let bundle_version_id = props.bundle_version_id;
+        move || async move { fetch_bundle_version_policy_membership(&bundle_version_id).await }
+    });
+
+    let systems = use_resource({
+        let scope_type = scope_type;
+        let system_search = system_search;
+        move || {
+            let scope_type = scope_type.read().clone();
+            let search = system_search.read().trim().to_string();
+            async move {
+                if scope_type != "system" {
+                    return Ok(Vec::<SystemSummary>::new());
+                }
+                fetch_systems(&SystemsListParams {
+                    page: Some(1),
+                    per_page: Some(200),
+                    search: (!search.is_empty()).then_some(search),
+                    health_status: None,
+                    deployment_status: None,
+                    environment: None,
+                    sort_by: Some("hostname".to_string()),
+                    sort_order: Some(SortOrder::Asc),
+                })
+                .await
+                .map(|response| response.items)
+            }
+        }
+    });
+
+    let selected_version = props
+        .bundle
+        .versions
+        .iter()
+        .find(|version| version.id == props.bundle_version_id);
+    let revision_is_current = selected_version
+        .is_some_and(|version| version.is_current_published || version.is_current_draft);
+    let revision_label = selected_version
+        .map(|version| version.version.clone())
+        .unwrap_or_else(|| props.bundle.version.clone());
+    let revision_state = selected_version
+        .map(|version| version.publication_state.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let request = move || {
+        let scope_id = uuid::Uuid::parse_str(scope_id.read().trim()).ok()?;
+        Some(CreateAssignmentRequest {
+            bundle_version_id: props.bundle_version_id,
+            scope_type: scope_type.read().clone(),
+            scope_id,
+            enforcement_mode: Some(enforcement_mode.read().clone()),
+            exclusions: (!exclusions.read().is_empty()).then_some(exclusions.read().clone()),
+            additions: (!additions.read().is_empty()).then_some(additions.read().clone()),
+            value_overrides: None,
+        })
+    };
+
+    let current_request = request();
+    let can_preview = current_request.is_some() && !*preview_busy.read() && !*busy.read();
+    let can_submit = current_request.is_some()
+        && previewed_request.read().as_ref() == current_request.as_ref()
+        && preview.read().is_some()
+        && !*busy.read();
+    let created_scope_id = uuid::Uuid::parse_str(scope_id.read().trim()).ok();
+    let created_scope_type = scope_type.read().clone();
+    let exact_members = membership
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .cloned()
+        .unwrap_or_default();
+
+    rsx! {
+        div { class: "card", style: "padding:14px 16px;display:flex;flex-direction:column;gap:12px;",
+                 div { style: "font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);",
+                "Assign bundle revision {revision_label}"
+            }
+            div { style: "font-size:10px;color:var(--cf-text-muted);",
+                "Exact revision: " span { class: "mono", "{props.bundle_version_id}" }
+                " · {revision_state}"
+            }
+            if !revision_is_current {
+                div { class: "sd-callout sd-callout-warning", style: "font-size:11px;",
+                    Icon { name: IconName::Warn, size: 13 }
+                    "This is a non-current bundle revision. The assignment will use this exact revision, not the current pointer."
+                }
+            }
+
+            if *success.read() {
+                div { class: "sd-callout sd-callout-success", style: "font-size:12px;",
+                    Icon { name: IconName::Check, size: 13 }
+                    "Assignment created. The effective policy set is now active for the selected scope."
+                }
+                if let Some(created_scope_id) = created_scope_id {
+                    AssignmentListPanel {
+                        scope_type: created_scope_type.clone(),
+                        scope_id: created_scope_id,
+                    }
+                }
+            } else {
+                if let Some(err) = error.read().as_ref() {
+                    div { class: "sd-callout sd-callout-danger", style: "font-size:12px;", "{err}" }
+                }
+
+                div { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px;",
+                    // Scope type
+                    div { class: "field",
+                        label { "Scope type" }
+                        select {
+                            class: "input focus-ring",
+                            value: "{scope_type.read()}",
+                            onchange: move |e| {
+                                scope_type.set(e.value());
+                                scope_id.set(String::new());
+                                preview.set(None);
+                                previewed_request.set(None);
+                            },
+                            option { value: "environment", "Environment" }
+                            option { value: "system", "System" }
+                        }
+                    }
+
+                    // Enforcement mode
+                    div { class: "field",
+                        label { "Enforcement mode" }
+                        select {
+                            class: "input focus-ring",
+                            value: "{enforcement_mode.read()}",
+                            onchange: move |e| {
+                                enforcement_mode.set(e.value());
+                                preview.set(None);
+                                previewed_request.set(None);
+                            },
+                            option { value: "enforce", "Enforce (default)" }
+                            option { value: "report_only", "Report only" }
+                        }
+                    }
+                }
+                div { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px;",
+                    div { class: "field",
+                        label { "Exclude baseline policies" }
+                        div { style: "display:flex;flex-direction:column;gap:5px;max-height:130px;overflow:auto;",
+                            if exact_members.is_empty() {
+                                div { style: "font-size:11px;color:var(--cf-text-muted);", "Loading revision policies…" }
+                            } else {
+                                for member in exact_members.iter() {
+                                    {
+                                        let version_id = member.policy_version_id;
+                                        let name = member.name.clone();
+                                        rsx! {
+                                            label { style: "display:flex;gap:6px;align-items:center;font-size:11px;",
+                                                input {
+                                                    r#type: "checkbox",
+                                                    checked: exclusions.read().contains(&version_id),
+                                                    onchange: move |event| {
+                                                        if event.checked() {
+                                                            exclusions.with_mut(|ids| { if !ids.contains(&version_id) { ids.push(version_id); } });
+                                                        } else {
+                                                            exclusions.with_mut(|ids| ids.retain(|id| *id != version_id));
+                                                        }
+                                                        preview.set(None);
+                                                        previewed_request.set(None);
+                                                    },
+                                                }
+                                                "{name}"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "field",
+                        label { "Add policies" }
+                        div { style: "display:flex;flex-direction:column;gap:5px;max-height:130px;overflow:auto;",
+                            for policy in props.policies.iter() {
+                                if let Some(version_id) = policy.version_id {
+                                    label { style: "display:flex;gap:6px;align-items:center;font-size:11px;",
+                                        input {
+                                            r#type: "checkbox",
+                                            checked: additions.read().contains(&version_id),
+                                            onchange: move |event| {
+                                                if event.checked() {
+                                                    additions.with_mut(|ids| { if !ids.contains(&version_id) { ids.push(version_id); } });
+                                                } else {
+                                                    additions.with_mut(|ids| ids.retain(|id| *id != version_id));
+                                                }
+                                                preview.set(None);
+                                                previewed_request.set(None);
+                                            },
+                                        }
+                                        "{policy.name}"
+                                    }
+                                }
+                            }
+                        }
+                        if props.policies.iter().all(|policy| policy.version_id.is_none()) {
+                            div { style: "font-size:11px;color:var(--cf-text-muted);", "No versioned policies available." }
+                        }
+                    }
+                }
+
+                // Environment picker (when scope is environment)
+                if *scope_type.read() == "environment" {
+                    div { class: "field",
+                        label { "Environment" }
+                        select {
+                            class: "input focus-ring",
+                            value: "{scope_id.read()}",
+                            onchange: move |e| {
+                                scope_id.set(e.value());
+                                preview.set(None);
+                                previewed_request.set(None);
+                            },
+                            option { value: "", "Select an environment…" }
+                            for env in &props.environments {
+                                option { value: "{env.id}", "{env.name}" }
+                            }
+                        }
+                    }
+                } else {
+                    div { class: "field",
+                        label { "System" }
+                        input {
+                            class: "input focus-ring",
+                            placeholder: "Search by hostname",
+                            value: "{system_search.read()}",
+                            oninput: move |e| system_search.set(e.value()),
+                        }
+                        select {
+                            class: "input focus-ring",
+                            value: "{scope_id.read()}",
+                            onchange: move |e| {
+                                scope_id.set(e.value());
+                                preview.set(None);
+                                previewed_request.set(None);
+                            },
+                            option { value: "", "Select a system…" }
+                            match systems.read().as_ref() {
+                                Some(Ok(items)) => rsx! {
+                                    for system in items {
+                                        option { value: "{system.id}", "{system.hostname}" }
+                                    }
+                                },
+                                Some(Err(_)) => rsx! { option { value: "", "Unable to load systems" } },
+                                None => rsx! { option { value: "", "Loading systems…" } },
+                            }
+                        }
+                    }
+                }
+
+                button {
+                    class: "btn btn-ghost focus-ring xs",
+                    disabled: !can_preview,
+                    style: if !can_preview { "opacity:0.5;cursor:not-allowed;" } else { "" },
+                    onclick: move |_| {
+                        let Some(req) = request() else { return; };
+                        preview_busy.set(true);
+                        error.set(None);
+                        spawn(async move {
+                            match preview_compliance_assignment(&req).await {
+                                Ok(value) => {
+                                    preview.set(Some(value));
+                                    previewed_request.set(Some(req));
+                                }
+                                Err(err) => error.set(Some(format!("Preview failed: {err}"))),
+                            }
+                            preview_busy.set(false);
+                        });
+                    },
+                    if *preview_busy.read() { "Previewing…" } else { "Preview effective set" }
+                }
+                if let Some(value) = preview.read().as_ref() {
+                    div { class: "sd-callout sd-callout-info", style: "font-size:11px;",
+                        "Preview: {value.policies.len()} effective policies · digest "
+                        span { class: "mono", "{value.effective_set_digest}" }
+                        if !value.warnings.is_empty() {
+                            div { "Warnings: {value.warnings.join(\"; \")}" }
+                        }
+                    }
+                }
+                button {
+                    class: "btn btn-primary focus-ring xs",
+                    disabled: !can_submit,
+                    style: if !can_submit { "opacity:0.5;cursor:not-allowed;" } else { "" },
+                    onclick: move |_| {
+                        if !can_submit { return; }
+                         let Some(req) = request() else { return; };
+                         busy.set(true);
+                        error.set(None);
+                        spawn(async move {
+                            match create_compliance_assignment(&req).await {
+                                Ok(_) => {
+                                    busy.set(false);
+                                    success.set(true);
+                                }
+                                Err(err) => {
+                                    busy.set(false);
+                                    error.set(Some(format!("Assignment failed: {err}")));
+                                }
+                            }
+                        });
+                    },
+                    if *busy.read() { "Creating…" } else { "Create assignment" }
+                }
+            }
+        }
+    }
+}
+
+/// Panel listing and managing existing assignments for the selected scope.
+#[derive(Props, Clone, PartialEq)]
+struct AssignmentListPanelProps {
+    scope_type: String,
+    scope_id: uuid::Uuid,
+}
+
+#[component]
+fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
+    use crate::api::client::{
+        compliance_assignment_xccdf_url, delete_compliance_assignment,
+        fetch_environment_assignments, fetch_system_assignments,
+    };
+
+    let mut assignments = use_signal(Vec::<crate::api::models::AssignmentResponse>::new);
+    let mut loading = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+    let mut fetched = use_signal(|| false);
+    let mut effective_preview =
+        use_signal(|| None::<crate::api::models::EffectivePolicySetResponse>);
+    let mut preview_loading = use_signal(|| false);
+
+    if !*fetched.read() {
+        fetched.set(true);
+        loading.set(true);
+        let scope_type = props.scope_type.clone();
+        let scope_id = props.scope_id;
+        spawn(async move {
+            let result = if scope_type == "environment" {
+                fetch_environment_assignments(&scope_id).await
+            } else {
+                fetch_system_assignments(&scope_id).await
+            };
+            match result {
+                Ok(list) => assignments.set(list),
+                Err(err) => error.set(Some(err.to_string())),
+            }
+            loading.set(false);
+        });
+    }
+
+    if *loading.read() {
+        return rsx! { DashboardLoadingSpinner {} };
+    }
+
+    let list = assignments.read().clone();
+    if list.is_empty() {
+        return rsx! {
+            div { class: "card", style: "padding:10px 14px;",
+                div { style: "font-size:11px;color:var(--cf-text-muted);",
+                    "No assignments for this scope."
+                }
+            }
+        };
+    }
+
+    rsx! {
+        for assignment in list.iter() {
+            {
+                let assignment_id = assignment.id;
+                let current_mode = assignment.enforcement_mode.clone();
+                let current_version = assignment.current_version_id;
+                let current_exclusions_text = assignment
+                    .exclusions
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let current_additions_text = assignment
+                    .additions
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let current_overrides_text = serde_json::to_string(&assignment.value_overrides)
+                    .unwrap_or_else(|_| "[]".to_string());
+                let mut deleting = use_signal(|| false);
+                let mut editing = use_signal(|| false);
+                let mut edit_mode = use_signal(|| current_mode.clone());
+                let mut edit_exclusions = use_signal(|| {
+                    assignment
+                        .exclusions
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                });
+                let mut edit_additions = use_signal(|| {
+                    assignment
+                        .additions
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                });
+                let mut edit_overrides = use_signal(|| current_overrides_text.clone());
+                let mut edit_busy = use_signal(|| false);
+                let mut edit_error = use_signal(|| None::<String>);
+                let edits_dirty = *edit_mode.read() != current_mode
+                    || *edit_exclusions.read() != current_exclusions_text
+                    || *edit_additions.read() != current_additions_text
+                    || *edit_overrides.read() != current_overrides_text;
+                rsx! {
+                    div { class: "card", style: "padding:10px 14px;display:flex;flex-direction:column;gap:6px;",
+                        div { style: "display:flex;justify-content:space-between;align-items:center;",
+                            div { style: "font-size:12px;font-weight:600;",
+                                "Bundle version "
+                                span { class: "mono", style: "font-size:10px;", "{assignment.bundle_version_id}" }
+                                " · {assignment.enforcement_mode}"
+                            }
+                            div { style: "display:flex;gap:4px;",
+                                button {
+                                    class: "btn btn-ghost xs focus-ring",
+                                    style: "font-size:10px;",
+                                    disabled: *deleting.read() || *editing.read(),
+                                    onclick: move |_| {
+                                        let url = compliance_assignment_xccdf_url(&assignment_id);
+                                        if let Some(window) = web_sys::window() {
+                                            let _ = window.location().set_href(&url);
+                                        }
+                                    },
+                                    "Export effective assignment (XCCDF)"
+                                }
+                                button {
+                                    class: "btn btn-ghost xs focus-ring",
+                                    style: "font-size:10px;",
+                                    disabled: *deleting.read() || *editing.read(),
+                                    onclick: move |_| editing.set(true),
+                                    "Edit mode"
+                                }
+                                button {
+                                    class: "btn btn-ghost xs focus-ring",
+                                    style: "font-size:10px;color:var(--cf-text-muted);",
+                                    disabled: *deleting.read(),
+                                    onclick: {
+                                        let a_id = assignment_id;
+                                        move |_| {
+                                            deleting.set(true);
+                                            spawn(async move {
+                                                let _ = delete_compliance_assignment(&a_id).await;
+                                                assignments.with_mut(|list| list.retain(|a| a.id != a_id));
+                                            });
+                                        }
+                                    },
+                                    if *deleting.read() { "Deactivating…" } else { "Deactivate" }
+                                }
+                            }
+                        }
+                        div { style: "font-size:10px;color:var(--cf-text-muted);",
+                            "scope: {assignment.scope_type}:{assignment.scope_id}"
+                            " · version: " span { class: "mono", "{assignment.current_version_id}" }
+                        }
+                        if *editing.read() {
+                            if let Some(err) = edit_error.read().as_ref() {
+                                div { class: "sd-callout sd-callout-danger", style: "font-size:11px;", "{err}" }
+                            }
+                            div { style: "display:flex;gap:6px;align-items:center;",
+                                select {
+                                    class: "input xs",
+                                    style: "flex:1;",
+                                    value: "{edit_mode.read()}",
+                                    onchange: move |e| edit_mode.set(e.value()),
+                                    option { value: "enforce", "Enforce" }
+                                    option { value: "report_only", "Report only" }
+                                }
+                                input {
+                                    class: "input xs mono",
+                                    style: "flex:1;",
+                                    placeholder: "excluded version UUIDs",
+                                    value: "{edit_exclusions.read()}",
+                                    oninput: move |e| edit_exclusions.set(e.value()),
+                                }
+                                input {
+                                    class: "input xs mono",
+                                    style: "flex:1;",
+                                    placeholder: "added version UUIDs",
+                                    value: "{edit_additions.read()}",
+                                    oninput: move |e| edit_additions.set(e.value()),
+                                }
+                                textarea {
+                                    class: "input xs mono",
+                                    style: "flex:1;",
+                                    rows: "2",
+                                    placeholder: "typed overrides JSON",
+                                    value: "{edit_overrides.read()}",
+                                    oninput: move |e| edit_overrides.set(e.value()),
+                                }
+                                button {
+                                    class: "btn btn-primary xs focus-ring",
+                                    style: "font-size:10px;",
+                                    disabled: *edit_busy.read() || !edits_dirty,
+                                    onclick: {
+                                        let a_id = assignment_id;
+                                        let cm = current_version;
+                                        let scope_type = props.scope_type.clone();
+                                        let scope_id = props.scope_id;
+                                        let exclusions_text = edit_exclusions.read().clone();
+                                        let additions_text = edit_additions.read().clone();
+                                        let overrides_text = edit_overrides.read().clone();
+                                        move |_| {
+                                            let Ok(exclusions) = parse_uuid_list(&exclusions_text) else {
+                                                edit_error.set(Some("Exclusions must be comma-separated UUIDs".to_string()));
+                                                return;
+                                            };
+                                            let Ok(additions) = parse_uuid_list(&additions_text) else {
+                                                edit_error.set(Some("Additions must be comma-separated UUIDs".to_string()));
+                                                return;
+                                            };
+                                            let Ok(value_overrides) = serde_json::from_str::<Vec<PolicyValueOverride>>(&overrides_text) else {
+                                                edit_error.set(Some("Overrides must be a JSON array of typed values".to_string()));
+                                                return;
+                                            };
+                                            edit_busy.set(true);
+                                            edit_error.set(None);
+                                            let request = UpdateAssignmentRequest {
+                                                expected_version_id: cm,
+                                                enforcement_mode: Some((*edit_mode.read()).clone()),
+                                                exclusions: Some(exclusions),
+                                                additions: Some(additions),
+                                                value_overrides: Some(value_overrides),
+                                            };
+                                            let st = scope_type.clone();
+                                            let si = scope_id;
+                                            spawn(async move {
+                                                match crate::api::client::update_compliance_assignment(&a_id, &request).await {
+                                                    Ok(_) => {
+                                                        edit_busy.set(false);
+                                                        editing.set(false);
+                                                        spawn(async move {
+                                                            let result = if st == "environment" {
+                                                                fetch_environment_assignments(&si).await
+                                                            } else {
+                                                                fetch_system_assignments(&si).await
+                                                            };
+                                                            if let Ok(list) = result {
+                                                                assignments.set(list);
+                                                            }
+                                                        });
+                                                    }
+                                                    Err(e) => {
+                                                        edit_busy.set(false);
+                                                        edit_error.set(Some(format!("Update failed: {e}")));
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    },
+                                    if *edit_busy.read() { "Saving…" } else { "Save" }
+                                }
+                                button {
+                                    class: "btn btn-ghost xs focus-ring",
+                                    style: "font-size:10px;",
+                                    disabled: *edit_busy.read(),
+                                    onclick: move |_| editing.set(false),
+                                    "Cancel"
+                                }
+                            }
+                        }
+                        button {
+                            class: "btn btn-ghost xs focus-ring",
+                            disabled: *preview_loading.read(),
+                            onclick: {
+                                let bundle_version_id = assignment.bundle_version_id;
+                                let scope_type = assignment.scope_type.clone();
+                                let scope_id = assignment.scope_id;
+                                let mode = edit_mode.read().clone();
+                                let exclusions_text = edit_exclusions.read().clone();
+                                let additions_text = edit_additions.read().clone();
+                                let overrides_text = edit_overrides.read().clone();
+                                move |_| {
+                                    let Ok(exclusions) = parse_uuid_list(&exclusions_text) else {
+                                        edit_error.set(Some("Exclusions must be comma-separated UUIDs".to_string()));
+                                        return;
+                                    };
+                                    let Ok(additions) = parse_uuid_list(&additions_text) else {
+                                        edit_error.set(Some("Additions must be comma-separated UUIDs".to_string()));
+                                        return;
+                                    };
+                                    let Ok(value_overrides) = serde_json::from_str::<Vec<PolicyValueOverride>>(&overrides_text) else {
+                                        edit_error.set(Some("Overrides must be a JSON array of typed values".to_string()));
+                                        return;
+                                    };
+                                    let request = CreateAssignmentRequest {
+                                        bundle_version_id,
+                                        scope_type: scope_type.clone(),
+                                        scope_id,
+                                        enforcement_mode: Some(mode.clone()),
+                                        exclusions: Some(exclusions),
+                                        additions: Some(additions),
+                                        value_overrides: Some(value_overrides),
+                                    };
+                                    preview_loading.set(true);
+                                    spawn(async move {
+                                        match preview_compliance_assignment(&request).await {
+                                            Ok(value) => effective_preview.set(Some(value)),
+                                            Err(error) => edit_error.set(Some(format!("Preview failed: {error}"))),
+                                        }
+                                        preview_loading.set(false);
+                                    });
+                                }
+                            },
+                            if *preview_loading.read() { "Previewing…" } else { "Preview unsaved effective set" }
+                        }
+                        if let Some(preview) = effective_preview.read().as_ref() {
+                            div { class: "sd-callout sd-callout-info", style: "font-size:10px;",
+                                "Effective set: {preview.policies.len()} policies · digest "
+                                span { class: "mono", "{preview.effective_set_digest}" }
+                                if !preview.warnings.is_empty() {
+                                    div { "Warnings: {preview.warnings.join(\"; \" )}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ─── Import STIG modal ────────────────────────────────────────────────────────
 //
-// Implements the 4-step design reference (upload → review → refine → done).
-// The backend wiring (XCCDF parse + policy/bundle creation) is tracked in
-// TASK-365; for now the modal is fully interactive using sample data when
-// "Try with a sample RHEL 9 STIG" is clicked.  File upload advances to review
-// using the sample data (real XCCDF parsing requires TASK-365).
+// Implements the 4-step design reference (upload → review → commit → done).
+// Uses the real /api/v1/compliance/xccdf/preview and /xccdf/import endpoints.
 
+/// Local rule selection state derived from the XCCDF preview response.
 #[derive(Clone, PartialEq)]
 struct StigRule {
     rule_id: String,
-    stig_id: String,
+    vulnerability_id: String,
+    source_description: String,
+    group_id: String,
     severity: String, // "high" | "medium" | "low"
     title: String,
     fixtext: String,
     check: String,
     srg: String,
+    srg_ids: Vec<String>,
+    cci_ids: Vec<String>,
+    checks: Vec<SourceCheck>,
+    references: Vec<String>,
+    platforms: Vec<String>,
     selected: bool,
+    is_native: bool,
+    action: String,
+    local_name: String,
+    local_description: String,
+    implementation_note: String,
+    assertion_mode: String,
+    assertions: Vec<ImportedCustomCheckRule>,
+    evidence_requirements: Vec<ImportedEvidenceRequirement>,
+    mapped_policy_version_id: Option<uuid::Uuid>,
 }
 
-fn sample_stig_rules() -> Vec<StigRule> {
-    vec![
-        StigRule {
-            rule_id: "RHEL-09-255040".into(),
-            stig_id: "RHEL-09-255040".into(),
-            severity: "high".into(),
-            title: "RHEL 9 must disable SSH root login.".into(),
-            fixtext: "Set PermitRootLogin no in /etc/ssh/sshd_config.d/.".into(),
-            check: "Verify sshd -T | grep permitrootlogin returns no.".into(),
-            srg: "SRG-OS-000109".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-255095".into(),
-            stig_id: "RHEL-09-255095".into(),
-            severity: "medium".into(),
-            title: "RHEL 9 SSH must use FIPS-validated MACs.".into(),
-            fixtext: "Configure approved MACs (hmac-sha2-512, hmac-sha2-256).".into(),
-            check: "Verify MACs in sshd config.".into(),
-            srg: "SRG-OS-000250".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-211010".into(),
-            stig_id: "RHEL-09-211010".into(),
-            severity: "high".into(),
-            title: "RHEL 9 must enable FIPS mode.".into(),
-            fixtext: "Boot kernel with fips=1 and install dracut-fips.".into(),
-            check: "cat /proc/sys/crypto/fips_enabled returns 1.".into(),
-            srg: "SRG-OS-000478".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-654010".into(),
-            stig_id: "RHEL-09-654010".into(),
-            severity: "medium".into(),
-            title: "RHEL 9 must enable auditd.".into(),
-            fixtext: "systemctl enable --now auditd.".into(),
-            check: "systemctl is-active auditd returns active.".into(),
-            srg: "SRG-OS-000062".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-654155".into(),
-            stig_id: "RHEL-09-654155".into(),
-            severity: "medium".into(),
-            title: "RHEL 9 must audit execution of privileged functions.".into(),
-            fixtext: "Add execve audit rules for b32/b64.".into(),
-            check: "auditctl -l shows execve rules.".into(),
-            srg: "SRG-OS-000326".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-271010".into(),
-            stig_id: "RHEL-09-271010".into(),
-            severity: "medium".into(),
-            title: "RHEL 9 must display the Standard Mandatory DoD banner.".into(),
-            fixtext: "Set /etc/issue to the DoD consent banner.".into(),
-            check: "Verify /etc/issue contents.".into(),
-            srg: "SRG-OS-000023".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-251010".into(),
-            stig_id: "RHEL-09-251010".into(),
-            severity: "high".into(),
-            title: "RHEL 9 must enable the firewalld default-deny policy.".into(),
-            fixtext: "Set firewalld default zone to drop.".into(),
-            check: "firewall-cmd --get-default-zone returns drop.".into(),
-            srg: "SRG-OS-000480".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-411015".into(),
-            stig_id: "RHEL-09-411015".into(),
-            severity: "medium".into(),
-            title: "RHEL 9 must lock accounts after 3 failed logon attempts.".into(),
-            fixtext: "Configure pam_faillock deny=3.".into(),
-            check: "Verify faillock config.".into(),
-            srg: "SRG-OS-000021".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-412035".into(),
-            stig_id: "RHEL-09-412035".into(),
-            severity: "low".into(),
-            title: "RHEL 9 must set an idle session timeout.".into(),
-            fixtext: "Set TMOUT=600 in /etc/profile.d/.".into(),
-            check: "Verify TMOUT export.".into(),
-            srg: "SRG-OS-000163".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-672010".into(),
-            stig_id: "RHEL-09-672010".into(),
-            severity: "low".into(),
-            title: "RHEL 9 must synchronize time with an authoritative source.".into(),
-            fixtext: "Configure chrony with authorized servers.".into(),
-            check: "chronyc sources shows server.".into(),
-            srg: "SRG-OS-000355".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-231010".into(),
-            stig_id: "RHEL-09-231010".into(),
-            severity: "medium".into(),
-            title: "RHEL 9 must encrypt all non-boot partitions (LUKS).".into(),
-            fixtext: "Provision LUKS on data partitions.".into(),
-            check: "lsblk shows crypt devices.".into(),
-            srg: "SRG-OS-000405".into(),
-            selected: true,
-        },
-        StigRule {
-            rule_id: "RHEL-09-215015".into(),
-            stig_id: "RHEL-09-215015".into(),
-            severity: "low".into(),
-            title: "RHEL 9 must remove unauthorized package repositories.".into(),
-            fixtext: "Remove unapproved .repo files.".into(),
-            check: "dnf repolist matches baseline.".into(),
-            srg: "SRG-OS-000366".into(),
-            selected: true,
-        },
-    ]
+/// Convert the server's ordered source check parts without changing the XCCDF
+/// representation held by the import plan.
+fn source_check_body_parts(check: &serde_json::Value) -> Vec<SourceCheckBodyPart> {
+    let parts = check.get("body_parts").and_then(|value| value.as_array());
+    let Some(parts) = parts else {
+        return check
+            .get("inline_content")
+            .or_else(|| check.get("content"))
+            .and_then(|value| value.as_str())
+            .map(|content| vec![SourceCheckBodyPart::Inline(content.to_string())])
+            .unwrap_or_default();
+    };
+
+    parts
+        .iter()
+        .filter_map(
+            |part| match part.get("type").and_then(|value| value.as_str()) {
+                Some("inline") => part
+                    .get("content")
+                    .or_else(|| part.get("preview"))
+                    .and_then(|value| value.as_str())
+                    .map(|content| SourceCheckBodyPart::Inline(content.to_string())),
+                Some("reference") => {
+                    part.get("href")
+                        .and_then(|value| value.as_str())
+                        .map(|href| SourceCheckBodyPart::Reference {
+                            href: href.to_string(),
+                            name: part
+                                .get("name")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string),
+                        })
+                }
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
+    preview
+        .rules
+        .iter()
+        .map(|r| {
+            // Build a summary of identifiers for display
+            let identifier_values = r
+                .identifiers
+                .iter()
+                .filter_map(|i| {
+                    i.get("value")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>();
+            let vulnerability_id = identifier_values
+                .iter()
+                .find(|value| value.starts_with("V-"))
+                .cloned()
+                .unwrap_or_default();
+            let srg_ids = identifier_values
+                .iter()
+                .filter(|value| value.starts_with("SRG-"))
+                .cloned()
+                .collect::<Vec<_>>();
+            let cci_ids = identifier_values
+                .iter()
+                .filter(|value| value.starts_with("CCI-"))
+                .cloned()
+                .collect::<Vec<_>>();
+            let srg = srg_ids.first().cloned().unwrap_or_default();
+
+            let check_summary = r
+                .checks
+                .first()
+                .map(|c| {
+                    let sys = c.get("system").and_then(|v| v.as_str()).unwrap_or("");
+                    sys.to_string()
+                })
+                .unwrap_or_default();
+
+            let checks = r
+                .checks
+                .iter()
+                .map(|check| SourceCheck {
+                    system: check
+                        .get("system")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    selector: check
+                        .get("selector")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    references: check
+                        .get("references")
+                        .and_then(|v| v.as_array())
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| item.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    body_parts: source_check_body_parts(check),
+                })
+                .collect::<Vec<_>>();
+
+            // Use "content" (full text) if available; fall back to "preview" for
+            // backward compatibility with server responses that only had truncated text.
+            let fix_text = r
+                .fix
+                .as_ref()
+                .and_then(|f| {
+                    f.get("content")
+                        .or_else(|| f.get("preview"))
+                        .and_then(|v| v.as_str())
+                })
+                .unwrap_or("")
+                .to_string();
+
+            // Foreign source remains non-executable. The server may provide
+            // conservative structured suggestions from recognized fix literals.
+            let assertions: Vec<ImportedCustomCheckRule> = r
+                .inferred_assertions
+                .iter()
+                .filter_map(|a| {
+                    Some(ImportedCustomCheckRule {
+                        field_name: a.get("option_path")?.as_str()?.replace('.', "_"),
+                        expression: a.get("nix_expression")?.as_str()?.to_string(),
+                        description: a
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Inferred from official fix; review before importing.")
+                            .to_string(),
+                        strict: true,
+                    })
+                })
+                .collect();
+            let default_action = if r.is_native || !assertions.is_empty() {
+                "native"
+            } else {
+                "unbound"
+            };
+
+            StigRule {
+                rule_id: r.id.clone(),
+                vulnerability_id,
+                source_description: r.description.clone().unwrap_or_default(),
+                group_id: r.group_id.clone().unwrap_or_default(),
+                severity: r.severity.as_deref().unwrap_or("medium").to_string(),
+                title: r.title.as_deref().unwrap_or(&r.id).to_string(),
+                fixtext: fix_text,
+                check: check_summary,
+                srg,
+                srg_ids,
+                cci_ids,
+                checks,
+                references: r
+                    .references
+                    .iter()
+                    .filter_map(|reference| {
+                        reference
+                            .get("href")
+                            .or_else(|| reference.get("value"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    })
+                    .collect(),
+                platforms: r.platforms.clone(),
+                selected: true,
+                is_native: r.is_native,
+                action: default_action.to_string(),
+                local_name: r.title.as_deref().unwrap_or(&r.id).to_string(),
+                local_description: r.description.clone().unwrap_or_default(),
+                implementation_note: String::new(),
+                assertion_mode: "all".to_string(),
+                assertions,
+                evidence_requirements: Vec::new(),
+                mapped_policy_version_id: None,
+            }
+        })
+        .collect()
 }
 
 fn sev_color(sev: &str) -> &'static str {
@@ -597,17 +1767,117 @@ fn sev_label(sev: &str) -> &'static str {
     }
 }
 
+fn human_document_class(value: Option<&str>) -> &'static str {
+    match value.unwrap_or_default() {
+        "foreign" | "foreign_xccdf" => "Foreign XCCDF",
+        "cf_native_exact" => "CF-native exact",
+        "cf_native" => "CF-native",
+        _ => "XCCDF document",
+    }
+}
+
+fn human_fidelity(value: Option<&str>) -> &'static str {
+    match value.unwrap_or_default() {
+        "preserved_opaque" => "Preserved as opaque",
+        "native_exact" => "Native exact",
+        "normalized_complete" => "Normalized complete",
+        "degraded" => "Degraded",
+        _ => "Not classified",
+    }
+}
+
+fn import_action_from_rule(rule: &StigRule) -> XccdfRuleImportAction {
+    let customization = ImportedPolicyCustomization {
+        policy_name: Some(rule.local_name.clone()),
+        policy_description: Some(rule.local_description.clone()),
+        implementation_note: (!rule.implementation_note.trim().is_empty())
+            .then(|| rule.implementation_note.clone()),
+        policy_severity: Some(rule.severity.clone()),
+        policy_rationale: (!rule.fixtext.trim().is_empty()).then(|| rule.fixtext.clone()),
+    };
+    match rule.action.as_str() {
+        "native" => XccdfRuleImportAction::CreateNativeCustom {
+            rule_id: rule.rule_id.clone(),
+            customization,
+            custom_check: ImportedCustomCheck {
+                mode: rule.assertion_mode.clone(),
+                rules: rule.assertions.clone(),
+            },
+            evidence_requirements: rule.evidence_requirements.clone(),
+        },
+        "manual" => XccdfRuleImportAction::CreateManual {
+            rule_id: rule.rule_id.clone(),
+            customization,
+            evidence_requirements: rule.evidence_requirements.clone(),
+        },
+        "opaque" => XccdfRuleImportAction::PreserveOpaque {
+            rule_id: rule.rule_id.clone(),
+            customization,
+        },
+        "exclude" => XccdfRuleImportAction::Exclude {
+            rule_id: rule.rule_id.clone(),
+        },
+        _ => XccdfRuleImportAction::CreateUnbound {
+            rule_id: rule.rule_id.clone(),
+            customization,
+        },
+    }
+}
+
+fn refined_rules_from_rules(rules: &[StigRule]) -> Vec<RefinedStigRule> {
+    rules.iter().enumerate().map(|(rule_order, rule)| RefinedStigRule {
+        source: SourceStigRule {
+            rule_id: rule.rule_id.clone(),
+            group_id: (!rule.group_id.is_empty()).then(|| rule.group_id.clone()),
+            stig_id: (!rule.vulnerability_id.is_empty()).then(|| rule.vulnerability_id.clone()),
+            title: Some(rule.title.clone()),
+            description: (!rule.source_description.is_empty()).then(|| rule.source_description.clone()),
+            source_severity: Some(rule.severity.clone()),
+            fix_text: (!rule.fixtext.is_empty()).then(|| rule.fixtext.clone()),
+            checks: if rule.checks.is_empty() && !rule.check.is_empty() {
+                vec![SourceCheck { system: String::new(), selector: None, references: Vec::new(), body_parts: vec![SourceCheckBodyPart::Inline(rule.check.clone())] }]
+            } else {
+                rule.checks.clone()
+            },
+            identifiers: std::iter::once(rule.vulnerability_id.clone())
+                .chain(rule.srg_ids.iter().cloned())
+                .chain(rule.cci_ids.iter().cloned())
+                .filter(|identifier| !identifier.is_empty())
+                .collect(),
+            references: rule.references.clone(),
+            platforms: rule.platforms.clone(),
+            rule_order,
+        },
+        draft: RefinedPolicyDraft {
+            local_name: rule.local_name.clone(),
+            local_description: rule.local_description.clone(),
+            local_severity: rule.severity.clone(),
+            local_rationale: rule.fixtext.clone(),
+            implementation_note: rule.implementation_note.clone(),
+            action: match rule.action.as_str() { "native" => RefinedRuleAction::Native, "manual" => RefinedRuleAction::Manual, "opaque" => RefinedRuleAction::Opaque, _ => RefinedRuleAction::Unbound },
+            assertion_mode: rule.assertion_mode.clone(),
+            assertions: rule.assertions.iter().map(|assertion| crate::components::compliance::refine_policy::PolicyAssertionDraft::CustomExpression { field_name: assertion.field_name.clone(), expression: assertion.expression.clone(), failure_message: assertion.description.clone(), strict: assertion.strict }).collect(),
+            evidence_requirements: rule.evidence_requirements.iter().filter_map(|evidence| match evidence { ImportedEvidenceRequirement::Command { command, expected_output } => Some(crate::components::compliance::refine_policy::EvidenceRequirementDraft::Command { command: command.clone(), expected_output: expected_output.clone() }), ImportedEvidenceRequirement::Attestation { description } => Some(crate::components::compliance::refine_policy::EvidenceRequirementDraft::Attestation { description: description.clone() }), _ => None }).collect(),
+        },
+        selected: rule.selected,
+    }).collect()
+}
+
 #[derive(Props, Clone, PartialEq)]
 struct ImportStigModalProps {
     environments: Vec<EnvironmentSummary>,
+    existing_policies: Vec<(uuid::Uuid, String)>,
     on_close: EventHandler<()>,
+    on_success: EventHandler<()>,
+    is_stig_import: bool,
 }
 
 #[component]
 fn ImportStigModal(props: ImportStigModalProps) -> Element {
-    // step: "upload" | "review" | "refine" | "done"
+    // step: "upload" | "review" | "refine" | "committing" | "done"
     let mut step = use_signal(|| "upload".to_string());
     let mut rules = use_signal(|| Vec::<StigRule>::new());
+    let mut refined_rules = use_signal(|| Vec::<RefinedStigRule>::new());
     let mut bundle_name = use_signal(String::new);
     let mut file_name = use_signal(String::new);
     let mut bench_title = use_signal(String::new);
@@ -618,26 +1888,15 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
     // done-step summary
     let mut done_total = use_signal(|| 0usize);
 
-    let all_env_names: Vec<String> = props.environments.iter().map(|e| e.name.clone()).collect();
+    // Real API state
+    let mut file_bytes = use_signal(|| Vec::<u8>::new());
+    let mut preview_response = use_signal(|| None::<XccdfPreviewResponse>);
+    let mut import_result = use_signal(|| None::<XccdfImportResponse>);
+    let mut previewing = use_signal(|| false);
+    let mut committing = use_signal(|| false);
+    let mut import_error = use_signal(|| None::<String>);
 
-    let load_sample = {
-        let all_env_names = all_env_names.clone();
-        move |_| {
-            let sample = sample_stig_rules();
-            let title = "Red Hat Enterprise Linux 9 STIG".to_string();
-            let ver = "V1R5".to_string();
-            bundle_name.set(title.clone());
-            bench_title.set(title);
-            bench_ver.set(ver);
-            file_name.set("RHEL_9_STIG_V1R5.xml (sample)".to_string());
-            rules.set(sample);
-            parse_error.set(None);
-            // Pre-select all available environments so the flow works immediately,
-            // matching the design reference which defaults to ["production"].
-            selected_envs.set(all_env_names.clone());
-            step.set("review".to_string());
-        }
-    };
+    let all_env_names: Vec<String> = props.environments.iter().map(|e| e.name.clone()).collect();
 
     // Derived counts
     let selected_rules: Vec<StigRule> = rules
@@ -674,7 +1933,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
             class: "modal-backdrop",
             onclick: move |_| props.on_close.call(()),
             div {
-                class: "modal",
+                 class: "modal import-workflow-modal",
                 style: "width:min(720px,97vw);max-height:92vh;display:flex;flex-direction:column;",
                 onclick: move |e| e.stop_propagation(),
 
@@ -687,59 +1946,122 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                             span { style: "display:inline-flex;transform:rotate(180deg);",
                                 Icon { name: IconName::Download, size: 14 }
                             }
-                            "Import STIG"
+                            if props.is_stig_import {
+                                "Import STIG / XCCDF"
+                            } else {
+                                "Import Crystal Forge bundle"
+                            }
                         }
                         p {
-                            "Upload a DISA XCCDF benchmark ("
-                            span { class: "mono", ".xml" }
-                            "). Crystal Forge parses each rule into a policy and assembles them into a compliance bundle."
+                            if props.is_stig_import {
+                                "Upload a DISA XCCDF benchmark (.xml or .zip). Crystal Forge parses each rule into a policy and assembles them into a compliance bundle."
+                            } else {
+                                "Upload a Crystal Forge XCCDF bundle export (.xml). Existing policy versions are reused; new ones are created as drafts."
+                            }
                         }
                     }
                     div { class: "modal-body",
-                        // ── Not-yet-implemented notice ─────────────────
-                        div { class: "sd-callout sd-callout-warn", style: "margin-bottom:16px;",
-                            Icon { name: IconName::Warn, size: 14 }
-                            div { style: "font-size:12px;",
-                                strong { "File upload is not yet wired." }
-                                " XCCDF parsing and backend bundle creation are tracked in "
-                                span { class: "mono", style: "font-weight:600;", "TASK-365" }
-                                ". Use the sample below to preview the full import flow."
+                        if *previewing.read() {
+                            div { style: "text-align:center;padding:32px 0;",
+                                DashboardLoadingSpinner {}
+                                div { style: "font-size:13px;color:var(--cf-text-muted);margin-top:12px;",
+                                    "Parsing XCCDF document…"
+                                }
                             }
-                        }
+                        } else {
+                            // ── File input ────────────────────────────────
+                            label {
+                                class: "focus-ring",
+                                style: "display:block;border:2px dashed var(--cf-divider);background:var(--cf-card-bg);\
+                                        border-radius:12px;padding:38px 20px;text-align:center;cursor:pointer;",
+                                input {
+                                    r#type: "file",
+                                    accept: ".xml,.zip",
+                                    style: "display:none;",
+                                    onchange: move |event| {
+                                        let mut parse_error = parse_error;
+                                        let mut file_bytes = file_bytes;
+                                        let mut file_name = file_name;
+                                        let mut preview_response = preview_response;
+                                        let mut rules = rules;
+                                        let mut bundle_name = bundle_name;
+                                        let mut bench_title = bench_title;
+                                        let mut bench_ver = bench_ver;
+                                        let mut selected_envs = selected_envs;
+                                        let mut previewing = previewing;
+                                        let mut step = step;
+                                        let all_env_names = all_env_names.clone();
 
-                        // ── Drop zone (preview — file input disabled) ──
-                        div {
-                            class: "focus-ring",
-                            style: "border:2px dashed var(--cf-divider);background:var(--cf-card-bg);\
-                                    border-radius:12px;padding:38px 20px;text-align:center;\
-                                    opacity:0.55;cursor:not-allowed;",
-                            div { style: "font-size:30px;margin-bottom:8px;", "📄" }
-                            div { style: "font-size:14px;font-weight:600;",
-                                "Drop an XCCDF .xml here, or click to browse"
+                                        parse_error.set(None);
+                                        let files = event.files();
+                                        if let Some(file) = files.into_iter().next() {
+                                            let fname = file.name();
+                                            previewing.set(true);
+                                            spawn(async move {
+                                                match file.read_bytes().await {
+                                                    Ok(bytes) => {
+                                                        let bytes_vec = bytes.to_vec();
+                                                        match preview_xccdf(&bytes_vec, &fname).await {
+                                                            Ok(resp) => {
+                                                                let bm_title = resp.benchmark.as_ref()
+                                                                    .and_then(|b| b.title.clone())
+                                                                    .unwrap_or_else(|| fname.clone());
+                                                                let bm_ver = resp.benchmark.as_ref()
+                                                                    .and_then(|b| b.version.clone())
+                                                                    .unwrap_or_default();
+                                                                 // Branch on document class
+                                                                 let is_cf_native = resp.document_class.as_deref().unwrap_or("") == "cfnativeexact";
+                                                                 
+                                                                 bundle_name.set(bm_title.clone());
+                                                                 bench_title.set(bm_title);
+                                                                 bench_ver.set(bm_ver);
+                                                                 file_name.set(fname.clone());
+                                                                 file_bytes.set(bytes_vec);
+                                                                 preview_response.set(Some(resp));
+                                                                 previewing.set(false);
+                                                                 
+                                                                 if is_cf_native {
+                                                                     // Native workflow: skip rule refinement
+                                                                     step.set("native-review".to_string());
+                                                                 } else {
+                                                                     // Foreign XCCDF workflow: do rule processing
+                                                                     let parsed_rules = rules_from_preview(&preview_response.read().as_ref().unwrap());
+                                                                     rules.set(parsed_rules);
+                                                                     refined_rules.set(refined_rules_from_rules(&rules.read()));
+                                                                     selected_envs.set(all_env_names.clone());
+                                                                     step.set("review".to_string());
+                                                                 }
+                                                            }
+                                                            Err(err) => {
+                                                                previewing.set(false);
+                                                                parse_error.set(Some(format!("Preview failed: {err}")));
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(err) => {
+                                                        previewing.set(false);
+                                                        parse_error.set(Some(format!("Could not read file: {err}")));
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    },
+                                }
+                                div { style: "font-size:30px;margin-bottom:8px;", "📄" }
+                                div { style: "font-size:14px;font-weight:600;",
+                                    "Click to browse for an XCCDF .xml or .zip"
+                                }
+                                div { style: "font-size:12px;color:var(--cf-text-muted);margin-top:4px;",
+                                    "DISA STIG / SCAP benchmark"
+                                }
                             }
-                            div { style: "font-size:12px;color:var(--cf-text-muted);margin-top:4px;",
-                                "DISA STIG / SCAP benchmark · file parsing coming in TASK-365"
-                            }
-                        }
 
-                        if let Some(err) = parse_error.read().as_ref() {
-                            div { class: "sd-callout sd-callout-danger", style: "margin-top:12px;",
-                                Icon { name: IconName::Warn, size: 13 }
-                                div { style: "font-size:12px;", "{err}" }
+                            if let Some(err) = parse_error.read().as_ref() {
+                                div { class: "sd-callout sd-callout-danger", style: "margin-top:12px;",
+                                    Icon { name: IconName::Warn, size: 13 }
+                                    div { style: "font-size:12px;", "{err}" }
+                                }
                             }
-                        }
-
-                        div { style: "display:flex;align-items:center;gap:10px;margin:16px 0 4px;",
-                            div { style: "flex:1;height:1px;background:var(--cf-divider);" }
-                            span { style: "font-size:11px;color:var(--cf-text-muted);", "or" }
-                            div { style: "flex:1;height:1px;background:var(--cf-divider);" }
-                        }
-                        button {
-                            class: "btn btn-ghost focus-ring",
-                            style: "width:100%;",
-                            onclick: load_sample,
-                            Icon { name: IconName::Shield, size: 13 }
-                            " Try with a sample RHEL 9 STIG"
                         }
                     }
                     div { class: "modal-foot",
@@ -752,11 +2074,102 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                 }
 
                 // ══════════════════════════════════════════════════════
+                // STEP: native-review (CF-native only)
+                // ══════════════════════════════════════════════════════
+                if *step.read() == "native-review" {
+                    if let Some(prev) = preview_response.read().as_ref() {
+                        if let Some(recon) = prev.cf_native_reconciliation.as_ref() {
+                            div { class: "modal-head",
+                                h2 { style: "display:flex;align-items:center;gap:8px;",
+                                    Icon { name: IconName::Shield, size: 14 }
+                                    "Import Crystal Forge bundle"
+                                }
+                                p {
+                                    span { class: "mono", "{file_name.read()}" }
+                                    " · SHA: "
+                                    span { class: "mono", "{prev.sha256[..16].to_string()}…" }
+                                }
+                            }
+                            div { class: "modal-body",
+                                div { class: "card", style: "padding:12px;border-left:3px solid var(--cf-info-color);",
+                                    "Source: {prev.xccdf_version.as_deref().unwrap_or(\"XCCDF\")} · Fidelity: {human_fidelity(prev.fidelity.as_deref())}"
+                                }
+                                div { style: "margin-top:12px;font-weight:600;", "Bundle: " span { "{recon.bundle.name} v{recon.bundle.version}" } }
+                                div { style: "margin-top:8px;font-size:12px;", 
+                                    "Exact: {recon.policies.iter().filter(|p| p.reconciliation_state == \"exact_match\").count()} · "
+                                    "New version: {recon.policies.iter().filter(|p| p.reconciliation_state == \"new_version\").count()} · "
+                                    "New policy: {recon.policies.iter().filter(|p| p.reconciliation_state == \"new_lineage\").count()}"
+                                }
+                                if recon.has_blocking_conflicts {
+                                    div { class: "sd-callout sd-callout-danger", style: "margin-top:12px;",
+                                        Icon { name: IconName::Warn, size: 13 }
+                                        "Blocking conflicts must be resolved before import"
+                                    }
+                                }
+                            }
+                            div { class: "modal-foot",
+                                button {
+                                    class: "btn btn-ghost focus-ring",
+                                    onclick: move |_| step.set("upload".to_string()),
+                                    "Cancel"
+                                }
+                                button {
+                                    class: "btn btn-primary focus-ring",
+                                    disabled: recon.has_blocking_conflicts,
+                                    onclick: move |_| {
+                                        let mut step = step;
+                                        let mut committing = committing;
+                                        let mut file_bytes = file_bytes;
+                                        let mut preview_response = preview_response;
+                                        let mut import_error = import_error;
+                                        let mut import_result = import_result;
+                                        step.set("committing".to_string());
+                                        committing.set(true);
+                                        spawn(async move {
+                                            if let Some(preview) = preview_response.read().clone() {
+                                                let plan = XccdfImportPlan {
+                                                    expected_sha256: preview.sha256,
+                                                    selected_profile_id: None,
+                                                    selected_rule_ids: vec![],
+                                                    rule_actions: vec![],
+                                                    bundle: ImportedBundlePlan {
+                                                        name: String::new(),
+                                                        framework: "unknown".into(),
+                                                        version: "1.0.0".into(),
+                                                        layer: None,
+                                                        owner: None,
+                                                        description: None,
+                                                    },
+                                                };
+                                                match import_xccdf(&file_bytes.read(), "import.xccdf", &plan).await {
+                                                    Ok(result) => {
+                                                        committing.set(false);
+                                                        import_result.set(Some(result));
+                                                        step.set("done".to_string());
+                                                        props.on_success.call(());
+                                                    }
+                                                    Err(err) => {
+                                                        committing.set(false);
+                                                        import_error.set(Some(format!("Import failed: {err:?}")));
+                                                        step.set("native-review".to_string());
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    },
+                                    "Import as draft"
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ══════════════════════════════════════════════════════
                 // STEP: review
                 // ══════════════════════════════════════════════════════
                 if *step.read() == "review" {
                     div { class: "modal-head",
-                        h2 { style: "display:flex;align-items:center;gap:8px;",
+                        h2 { style: "display:flex;align-items:center;gap:8px;white-space:nowrap;",
                             Icon { name: IconName::Shield, size: 14 }
                             "Review imported controls"
                         }
@@ -766,7 +2179,13 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                             strong { "{bench_ver.read()}" }
                         }
                     }
-                    div { class: "modal-body", style: "overflow-y:auto;",
+                    div { class: "modal-body",
+                        if let Some(ref preview) = *preview_response.read() {
+                            {
+                                let namespace = preview.xccdf_version.as_deref().unwrap_or("XCCDF 1.2");
+                                rsx! { details { class: "xccdf-source-details", summary { "Import details" }, div { class: "card", style: "padding:10px;margin-top:8px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 14px;font-size:11px;", div { "Document class" strong { "{human_document_class(preview.document_class.as_deref())}" } }, div { "Fidelity" strong { "{human_fidelity(preview.fidelity.as_deref())}" } }, div { "Namespace" strong { "{namespace}" } }, div { "Source entry" strong { "{file_name.read()}" } }, div { "Profile count" strong { "{preview.profile_count}" } }, div { "Rule count" strong { "{preview.rule_count}" } }, div { "SHA-256" span { class: "mono", style: "word-break:break-all;", "{preview.sha256}" } }, if let Some(benchmark) = preview.benchmark.as_ref() { div { "Benchmark ID" span { class: "mono", "{benchmark.id}" } } } } } }
+                            }
+                        }
 
                         // ── Bundle name ────────────────────────────────
                         div { class: "field",
@@ -781,7 +2200,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         // ── Environment badges ─────────────────────────
                         div { class: "field",
                             label { "Applies to environments" }
-                            div { style: "display:flex;flex-wrap:wrap;gap:6px;",
+                            div { style: "display:flex;flex-wrap:wrap;gap:6px;align-items:center;",
                                 for env in props.environments.iter() {
                                     {
                                         let e_name  = env.name.clone();
@@ -789,7 +2208,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         let on = selected_envs.read().contains(&e_name);
                                         rsx! {
                                             button {
-                                                class: "focus-ring",
+                                                 class: "focus-ring environment-pill",
                                                 onclick: move |_| {
                                                     let mut envs = selected_envs.write();
                                                     if envs.contains(&e_name) {
@@ -861,14 +2280,14 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 }
                             }
 
-                            div { style: "display:flex;flex-direction:column;gap:5px;max-height:280px;overflow-y:auto;margin-top:8px;padding-right:2px;",
+                            div { class: "xccdf-controls-list", "data-testid": "xccdf-review-control-list", style: "display:flex;flex-direction:column;gap:5px;margin-top:8px;padding-right:2px;",
                                 for (i, rule) in rules.read().iter().enumerate() {
                                     {
                                         let is_sel = rule.selected;
                                         let color  = sev_color(&rule.severity);
                                         let cat    = sev_cat(&rule.severity);
                                         let title  = rule.title.clone();
-                                        let stig   = rule.stig_id.clone();
+                                        let vulnerability = if rule.vulnerability_id.is_empty() { rule.rule_id.clone() } else { rule.vulnerability_id.clone() };
                                         let srg    = rule.srg.clone();
                                         rsx! {
                                             button {
@@ -905,11 +2324,11 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                      background:color-mix(in oklab, {color} 14%, transparent);"),
                                                     "{cat}"
                                                 }
-                                                // Title + STIG ID
+                                                    // Title + portable source identity
                                                 span { style: "min-width:0;",
                                                     span { style: "font-size:12.5px;font-weight:600;display:block;line-height:1.4;", "{title}" }
                                                     span { class: "mono", style: "font-size:10.5px;color:var(--cf-text-muted);",
-                                                        "{stig}"
+                                                         "{vulnerability}"
                                                         if !srg.is_empty() { " · {srg}" }
                                                     }
                                                 }
@@ -921,13 +2340,20 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         }
 
                         // ── Info callout ───────────────────────────────
-                        div { class: "sd-callout sd-callout-info",
+                        div { class: "sd-callout sd-callout-info", "data-testid": "xccdf-review-summary",
                             Icon { name: IconName::Check, size: 13 }
                             div { style: "font-size:12px;",
                                 "Creates "
                                 strong { "{sel_count}" }
-                                if sel_count == 1 { " security policy" } else { " security policies" }
-                                " and one bundle. Each control maps to a policy with its check + fix as evidence requirements. Existing policies with the same ID are reused, not duplicated."
+                                if sel_count == 1 { " draft policy" } else { " draft policies" }
+                                " and one draft bundle. Policies begin untrusted, disabled, and unassigned. Refine policies to add native assertions, evidence requirements, manual handling, or exact-version mappings."
+                            }
+                        }
+
+                        if let Some(err) = import_error.read().as_ref() {
+                            div { class: "sd-callout sd-callout-danger", style: "margin-top:10px;",
+                                Icon { name: IconName::Warn, size: 13 }
+                                div { style: "font-size:12px;", "{err}" }
                             }
                         }
                     }
@@ -937,31 +2363,21 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                             onclick: move |_| {
                                 step.set("upload".to_string());
                                 rules.set(Vec::new());
+                                refined_rules.set(Vec::new());
                                 parse_error.set(None);
+                                preview_response.set(None);
                             },
                             Icon { name: IconName::ArrowLeft, size: 13 }
                             " Back"
                         }
                         div { style: "display:flex;gap:8px;",
                             button {
-                                class: "btn btn-ghost focus-ring",
-                                disabled: !can_advance,
-                                style: if !can_advance { "opacity:0.5;cursor:not-allowed;" } else { "" },
-                                title: "Create all selected policies as-is, skipping per-control review",
-                                onclick: move |_| {
-                                    if can_advance {
-                                        done_total.set(sel_count);
-                                        step.set("done".to_string());
-                                    }
-                                },
-                                "Skip & create all"
-                            }
-                            button {
                                 class: "btn btn-primary focus-ring",
-                                disabled: !can_advance,
-                                style: if !can_advance { "opacity:0.5;cursor:not-allowed;" } else { "" },
+                                "data-testid": "xccdf-review-refine-button",
+                                disabled: !can_advance || *committing.read(),
+                                style: if !can_advance || *committing.read() { "opacity:0.5;cursor:not-allowed;" } else { "" },
                                 onclick: move |_| {
-                                    if can_advance {
+                                    if can_advance && !*committing.read() {
                                         cursor.set(0);
                                         step.set("refine".to_string());
                                     }
@@ -970,244 +2386,134 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 if sel_count == 1 { "policy" } else { "policies" }
                                 Icon { name: IconName::ChevronRight, size: 13 }
                             }
+                            button {
+                                class: "btn btn-ghost focus-ring",
+                                disabled: !can_advance || *committing.read(),
+                                style: if !can_advance || *committing.read() { "opacity:0.5;cursor:not-allowed;" } else { "" },
+                                onclick: move |_| {
+                                    if !can_advance || *committing.read() { return; }
+                                    let selected_rule_ids: Vec<String> = rules
+                                        .read()
+                                        .iter()
+                                        .filter(|r| r.selected)
+                                        .map(|r| r.rule_id.clone())
+                                        .collect();
+                                    let rule_actions: Vec<XccdfRuleImportAction> = rules
+                                        .read()
+                                        .iter()
+                                        .filter(|r| r.selected)
+                                        .map(import_action_from_rule)
+                                        .collect();
+                                    let sha256 = preview_response
+                                        .read()
+                                        .as_ref()
+                                        .map(|p| p.sha256.clone())
+                                        .unwrap_or_default();
+                                    let plan = XccdfImportPlan {
+                                        expected_sha256: sha256,
+                                        selected_profile_id: None,
+                                        selected_rule_ids,
+                                        rule_actions,
+                                        bundle: ImportedBundlePlan {
+                                            name: bundle_name.read().trim().to_string(),
+                                            framework: "xccdf".to_string(),
+                                            version: bench_ver.read().clone(),
+                                            layer: None,
+                                            owner: None,
+                                            description: None,
+                                        },
+                                    };
+                                    let bytes = file_bytes.read().clone();
+                                    let fname = file_name.read().clone();
+                                    let mut committing = committing;
+                                    let mut import_error = import_error;
+                                    let mut import_result = import_result;
+                                    let mut done_total = done_total;
+                                    let mut step = step;
+                                    let on_success = props.on_success;
+                                    committing.set(true);
+                                    import_error.set(None);
+                                    spawn(async move {
+                                        match import_xccdf(&bytes, &fname, &plan).await {
+                                            Ok(result) => {
+                                                let total = result.created_policy_count + result.reused_policy_versions;
+                                                done_total.set(total as usize);
+                                                import_result.set(Some(result));
+                                                committing.set(false);
+                                                step.set("done".to_string());
+                                                on_success.call(());
+                                            }
+                                            Err(err) => {
+                                                committing.set(false);
+                                                import_error.set(Some(format!("Import failed: {err}")));
+                                            }
+                                        }
+                                    });
+                                },
+                                    if *committing.read() { "Importing…" } else {
+                                    "Skip & create all"
+                                }
+                            }
                         }
                     }
                 }
 
                 // ══════════════════════════════════════════════════════
-                // STEP: refine (per-control walkthrough)
+                // STEP: refine (structured per-control walkthrough)
                 // ══════════════════════════════════════════════════════
                 if *step.read() == "refine" {
                     {
-                        let sel: Vec<StigRule> = rules.read().iter().filter(|r| r.selected).cloned().collect();
-                        let total = sel.len();
-                        let cur   = (*cursor.read()).min(total.saturating_sub(1));
-                        let is_last = cur + 1 >= total;
+                        let refined_rules_signal = refined_rules;
+                        let cursor_signal = cursor;
+                        rsx! {
+                        RefinePolicyStep {
+                            rules: refined_rules_signal,
+                            cursor: cursor_signal,
+                            existing_policies: props.existing_policies.clone(),
+                            on_back: move |_| step.set("review".to_string()),
+                            on_review: move |_| step.set("final-review".to_string()),
+                        }
+                    }
+                }
 
-                        if let Some(rule) = sel.get(cur) {
-                            let rule = rule.clone();
-                            let rule_id  = rule.rule_id.clone();
-                            let rule_id2 = rule.rule_id.clone();
-                            let rule_id3 = rule.rule_id.clone();
-                            let rule_id4 = rule.rule_id.clone();
-                            let sev_col  = sev_color(&rule.severity).to_string();
-                            let cat_str  = format!("{} · {}", sev_cat(&rule.severity), sev_label(&rule.severity));
-                            let pct      = ((cur + 1) as f64 / total as f64 * 100.0) as u32;
-
-                            rsx! {
-                                div { class: "modal-head",
-                                    div { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;",
-                                        h2 { style: "display:flex;align-items:center;gap:8px;",
-                                            Icon { name: IconName::Shield, size: 14 }
-                                            "Refine policy {cur + 1} of {total}"
+                if *step.read() == "final-review" {
+                    ImportReview {
+                        rules: refined_rules,
+                        on_back: move |_| step.set("refine".to_string()),
+                        on_confirm: move |_| {
+                                if *committing.read() { return; }
+                                let selected_rule_ids = refined_rules.read().iter().filter(|rule| rule.selected).map(|rule| rule.source.rule_id.clone()).collect::<Vec<_>>();
+                                let rule_actions = refined_rules.read().iter().filter(|rule| rule.selected).map(action_to_import).collect::<Vec<_>>();
+                                let plan = XccdfImportPlan {
+                                    expected_sha256: preview_response.read().as_ref().map(|preview| preview.sha256.clone()).unwrap_or_default(),
+                                    selected_profile_id: None,
+                                    selected_rule_ids,
+                                    rule_actions,
+                                    bundle: ImportedBundlePlan { name: bundle_name.read().trim().to_string(), framework: "xccdf".into(), version: bench_ver.read().clone(), layer: None, owner: None, description: None },
+                                };
+                                let bytes = file_bytes.read().clone();
+                                let filename = file_name.read().clone();
+                                let mut committing = committing;
+                                let mut import_error = import_error;
+                                let mut import_result = import_result;
+                                let mut done_total = done_total;
+                                let mut step = step;
+                                committing.set(true);
+                                import_error.set(None);
+                                spawn(async move {
+                                    match import_xccdf(&bytes, &filename, &plan).await {
+                                        Ok(result) => {
+                                            done_total.set((result.created_policy_count + result.reused_policy_versions) as usize);
+                                            import_result.set(Some(result));
+                                            committing.set(false);
+                                            step.set("done".into());
+                                             props.on_success.call(());
                                         }
-                                        span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);",
-                                            "{rule.stig_id}"
-                                        }
+                                        Err(error) => { committing.set(false); import_error.set(Some(format!("Import failed: {error}"))); }
                                     }
-                                    // Progress bar
-                                    div { style: "height:4px;border-radius:99px;background:var(--cf-divider);margin-top:8px;overflow:hidden;",
-                                        div { style: "height:100%;width:{pct}%;background:var(--cf-brand-purple);transition:width .2s;" }
-                                    }
-                                }
-                                div { class: "modal-body", style: "overflow-y:auto;",
-                                    // Chips row
-                                    div { style: "display:flex;gap:8px;align-items:center;margin-bottom:12px;",
-                                        span { class: "chip chip-info", "Security & hardening" }
-                                        if !rule.srg.is_empty() {
-                                            span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{rule.srg}" }
-                                        }
-                                        div { style: "flex:1;" }
-                                        span { style: "font-size:11px;color:var(--cf-text-muted);",
-                                            "policy id: "
-                                            span { class: "mono", "stig-{rule.stig_id.to_lowercase().replace([' ', '_'], \"-\")}" }
-                                        }
-                                    }
-
-                                    // Policy name
-                                    div { class: "field",
-                                        label { "Policy name" }
-                                        input {
-                                            class: "input focus-ring mono",
-                                            value: "{rule.stig_id}",
-                                            oninput: move |e| {
-                                                let mut r = rules.write();
-                                                if let Some(rule) = r.iter_mut().find(|r| r.rule_id == rule_id) {
-                                                    rule.stig_id = e.value();
-                                                }
-                                            },
-                                        }
-                                    }
-
-                                    // Severity seg
-                                    div { class: "field",
-                                        label { "Severity" }
-                                        div { class: "seg", style: "width:fit-content;",
-                                            for sev in ["high", "medium", "low"] {
-                                                {
-                                                    let sev_s = sev.to_string();
-                                                    let is_active = rule.severity == sev;
-                                                    let c = sev_color(sev);
-                                                    let rid = rule_id2.clone();
-                                                    rsx! {
-                                                        button {
-                                                            class: if is_active { "active" } else { "" },
-                                                            style: if is_active { format!("color:{c};") } else { "".to_string() },
-                                                            onclick: move |_| {
-                                                                let mut r = rules.write();
-                                                                if let Some(rule) = r.iter_mut().find(|r| r.rule_id == rid) {
-                                                                    rule.severity = sev_s.clone();
-                                                                }
-                                                            },
-                                                            "{sev_cat(sev)} · {sev_label(sev)}"
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Description
-                                    div { class: "field",
-                                        label { "Description / control statement" }
-                                        textarea {
-                                            class: "input focus-ring",
-                                            rows: 2,
-                                            style: "resize:vertical;",
-                                            value: "{rule.title}",
-                                            oninput: move |e| {
-                                                let mut r = rules.write();
-                                                if let Some(rule) = r.iter_mut().find(|r| r.rule_id == rule_id3) {
-                                                    rule.title = e.value();
-                                                }
-                                            },
-                                        }
-                                    }
-
-                                    // Check
-                                    div { class: "field",
-                                        label {
-                                            "Compliance check "
-                                            span { style: "color:var(--cf-text-muted);font-weight:400;",
-                                                "· becomes the policy assertion"
-                                            }
-                                        }
-                                        textarea {
-                                            class: "input focus-ring mono",
-                                            rows: 3,
-                                            style: "resize:vertical;font-size:12px;",
-                                            placeholder: "How Crystal Forge verifies this control…",
-                                            value: "{rule.check}",
-                                            oninput: move |e| {
-                                                let mut r = rules.write();
-                                                if let Some(rule) = r.iter_mut().find(|r| r.rule_id == rule_id4) {
-                                                    rule.check = e.value();
-                                                }
-                                            },
-                                        }
-                                    }
-
-                                    // Fixtext
-                                    div { class: "field",
-                                        {
-                                            let rid = rule.rule_id.clone();
-                                            rsx! {
-                                                label {
-                                                    "Remediation / rationale "
-                                                    span { style: "color:var(--cf-text-muted);font-weight:400;",
-                                                        "· stored as policy rationale"
-                                                    }
-                                                }
-                                                textarea {
-                                                    class: "input focus-ring",
-                                                    rows: 2,
-                                                    style: "resize:vertical;font-size:12px;",
-                                                    value: "{rule.fixtext}",
-                                                    oninput: move |e| {
-                                                        let mut r = rules.write();
-                                                        if let Some(rule) = r.iter_mut().find(|r| r.rule_id == rid) {
-                                                            rule.fixtext = e.value();
-                                                        }
-                                                    },
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Info callout
-                                    div { class: "sd-callout sd-callout-info",
-                                        Icon { name: IconName::Check, size: 13 }
-                                        div { style: "font-size:12px;",
-                                            "Evidence required: "
-                                            strong { "command output" }
-                                            " matching the check, plus an "
-                                            strong { "agent attestation" }
-                                            " that the fix is applied. Edit evidence later from the Policies view."
-                                        }
-                                    }
-                                }
-                                div { class: "modal-foot", style: "justify-content:space-between;",
-                                    div { style: "display:flex;gap:8px;",
-                                        button {
-                                            class: "btn btn-ghost focus-ring",
-                                            onclick: move |_| {
-                                                if cur == 0 {
-                                                    step.set("review".to_string());
-                                                } else {
-                                                    cursor.set(cur - 1);
-                                                }
-                                            },
-                                            Icon { name: IconName::ArrowLeft, size: 13 }
-                                            if cur == 0 { " Back to list" } else { " Previous" }
-                                        }
-                                        button {
-                                            class: "btn btn-ghost focus-ring",
-                                            style: "color:#f87171;",
-                                            title: "Exclude this control from the bundle",
-                                            onclick: move |_| {
-                                                {
-                                                    let mut r = rules.write();
-                                                    if let Some(rule) = r.iter_mut().find(|r| r.rule_id == rule.rule_id) {
-                                                        rule.selected = false;
-                                                    }
-                                                }
-                                                let remaining = rules.read().iter().filter(|r| r.selected).count();
-                                                if remaining == 0 {
-                                                    step.set("review".to_string());
-                                                } else if is_last && cur > 0 {
-                                                    cursor.set(cur - 1);
-                                                }
-                                            },
-                                            "Exclude"
-                                        }
-                                    }
-                                    div { style: "display:flex;gap:8px;align-items:center;",
-                                        span { style: "font-size:11px;color:var(--cf-text-muted);",
-                                            "{cur + 1} / {total}"
-                                        }
-                                        if is_last {
-                                            button {
-                                                class: "btn btn-primary focus-ring",
-                                                onclick: move |_| {
-                                                    done_total.set(sel_count);
-                                                    step.set("done".to_string());
-                                                },
-                                                Icon { name: IconName::Check, size: 13 }
-                                                " Create bundle + {sel_count} "
-                                                if sel_count == 1 { "policy" } else { "policies" }
-                                            }
-                                        } else {
-                                            button {
-                                                class: "btn btn-primary focus-ring",
-                                                onclick: move |_| cursor.set(cur + 1),
-                                                "Next "
-                                                Icon { name: IconName::ChevronRight, size: 13 }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        } else { rsx! {} }
+                                });
+                            },
+                        }
                     }
                 }
 
@@ -1220,50 +2526,36 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                             span { style: "color:#34d399;display:inline-flex;",
                                 Icon { name: IconName::Check, size: 16 }
                             }
-                            "Bundle created"
+                            "Import complete"
                         }
                         p {
                             span { class: "mono", style: "font-weight:600;", "{bundle_name.read()}" }
-                            " is ready."
+                            " was created as a draft bundle."
                         }
                     }
                     div { class: "modal-body",
-                        // Stats grid — controls / new policies / reused
-                        div { style: "display:grid;grid-template-columns:repeat(3,1fr);gap:10px;",
-                            for (n, label) in [
-                                (*done_total.read(), "controls"),
-                                (*done_total.read(), "new policies"),
-                                (0usize, "reused"),
-                            ] {
-                                div { class: "card", style: "padding:14px 12px;text-align:center;",
-                                    div { style: "font-size:24px;font-weight:700;", "{n}" }
-                                    div { style: "font-size:11px;color:var(--cf-text-muted);", "{label}" }
+                        // Stats grid — created / reused / total
+                        {
+                            let created = import_result.read().as_ref().map(|r| r.created_policy_count).unwrap_or(0);
+                            let reused = import_result.read().as_ref().map(|r| r.reused_policy_versions).unwrap_or(0);
+                            let total = created + reused;
+                            rsx! {
+                                div { style: "display:grid;grid-template-columns:repeat(3,1fr);gap:10px;",
+                                    for (n, label) in [(total, "total controls"), (created, "new policies"), (reused, "reused")] {
+                                        div { class: "card", style: "padding:14px 12px;text-align:center;",
+                                            div { style: "font-size:24px;font-weight:700;", "{n}" }
+                                            div { style: "font-size:11px;color:var(--cf-text-muted);", "{label}" }
+                                        }
+                                    }
                                 }
                             }
                         }
                         div { class: "sd-callout sd-callout-info", style: "margin-top:12px;",
                             Icon { name: IconName::Shield, size: 13 }
                             div { style: "font-size:12px;",
-                                "New policies appear in the "
-                                strong { "Policies" }
-                                " view under "
-                                strong { "Security & hardening" }
-                                ". The bundle now gates the environments you selected"
-                                if !selected_envs.read().is_empty() {
-                                    ": "
-                                    strong { { selected_envs.read().join(", ") } }
-                                }
-                                "."
-                            }
-                        }
-                        // Honest note: backend wiring is TASK-365
-                        div { class: "sd-callout sd-callout-warn", style: "margin-top:10px;",
-                            Icon { name: IconName::Warn, size: 13 }
-                            div { style: "font-size:12px;",
-                                strong { "Preview only — bundle not yet saved." }
-                                " Backend persistence is tracked in "
-                                span { class: "mono", style: "font-weight:600;", "TASK-365" }
-                                ". The policies and bundle you reviewed will be used as the starting point when that work lands."
+                                "Imported policies are "
+                                strong { "draft, disabled, and untrusted" }
+                                ". Review and trust them in the Policies view before enabling enforcement."
                             }
                         }
                     }
@@ -1271,7 +2563,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         button {
                             class: "btn btn-primary focus-ring",
                             onclick: move |_| props.on_close.call(()),
-                            "View bundle"
+                            "Close"
                         }
                     }
                 }
@@ -1857,7 +3149,7 @@ fn ExportModal(props: ExportModalProps) -> Element {
                                     let mut all_evidence = Vec::new();
                                     let mut evidence_failures = Vec::new();
                                     for sys_id in &scoped_sys_ids {
-                                        match fetch_compliance_system_evidence(&bundle.id, sys_id).await {
+                                        match fetch_compliance_system_evidence(&bundle.id, sys_id, None).await {
                                             Ok(ev) => all_evidence.push(ev),
                                             Err(err) => {
                                                 let hostname = systems
@@ -1944,9 +3236,180 @@ fn ExportModal(props: ExportModalProps) -> Element {
 
 // ─── New bundle modal ─────────────────────────────────────────────────────────
 
+const STANDARD_BUNDLE_FRAMEWORKS: [&str; 4] =
+    ["DISA STIG", "NIST 800-53", "CMMC 2.0", "CIS Benchmark"];
+const STANDARD_BUNDLE_FRAMEWORK_ALIASES: [&str; 5] = [
+    "DISA STIG",
+    "NIST 800-53",
+    "CMMC",
+    "CMMC 2.0",
+    "CIS Benchmark",
+];
+const DEFINE_NEW_FRAMEWORK: &str = "__define_new_framework__";
+
+fn is_standard_bundle_framework(framework: &str) -> bool {
+    STANDARD_BUNDLE_FRAMEWORK_ALIASES
+        .iter()
+        .any(|standard| framework.trim().eq_ignore_ascii_case(standard))
+}
+
+fn custom_bundle_frameworks(
+    bundles: &[ComplianceBundleSummary],
+    policies: &[DeploymentPolicySummary],
+) -> Vec<String> {
+    custom_framework_values(
+        bundles
+            .iter()
+            .map(|bundle| bundle.framework.as_str())
+            .chain(
+                policies
+                    .iter()
+                    .filter_map(|policy| policy.framework.as_deref()),
+            ),
+    )
+}
+
+fn custom_framework_values<'a>(frameworks: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut frameworks = frameworks
+        .into_iter()
+        .map(str::trim)
+        .filter(|framework| !framework.is_empty() && !is_standard_bundle_framework(framework))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    frameworks.sort_by_key(|framework| framework.to_ascii_lowercase());
+    frameworks.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    frameworks
+}
+
+fn accept_new_bundle_framework(
+    mut framework: Signal<String>,
+    mut new_framework: Signal<String>,
+    mut accepted_frameworks: Signal<Vec<String>>,
+    mut defining_new: Signal<bool>,
+) {
+    let value = new_framework.read().trim().to_string();
+    if value.is_empty() {
+        return;
+    }
+    if !is_standard_bundle_framework(&value)
+        && !accepted_frameworks
+            .read()
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&value))
+    {
+        accepted_frameworks.write().push(value.clone());
+    }
+    framework.set(value);
+    new_framework.set(String::new());
+    defining_new.set(false);
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct BundleFrameworkFieldProps {
+    framework: Signal<String>,
+    custom_frameworks: Vec<String>,
+}
+
+#[component]
+fn BundleFrameworkField(props: BundleFrameworkFieldProps) -> Element {
+    let mut framework = props.framework;
+    let mut defining_new = use_signal(|| false);
+    let mut new_framework = use_signal(String::new);
+    let mut accepted_frameworks = use_signal(Vec::<String>::new);
+    let current_framework = framework.read().clone();
+    let legacy_cmmc_value = current_framework
+        .trim()
+        .eq_ignore_ascii_case("CMMC")
+        .then_some(current_framework.clone());
+    let mut custom_frameworks = props.custom_frameworks.clone();
+    custom_frameworks.extend(accepted_frameworks.read().iter().cloned());
+    custom_frameworks.sort_by_key(|framework| framework.to_ascii_lowercase());
+    custom_frameworks.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+
+    rsx! {
+        div { class: "field", style: "margin-top:0;",
+            label { "Framework" }
+            if *defining_new.read() {
+                div { style: "display:flex;gap:6px;",
+                    input {
+                        class: "input focus-ring",
+                        autofocus: true,
+                        placeholder: "e.g. Acme Internal Baseline",
+                        value: "{new_framework}",
+                        oninput: move |event| new_framework.set(event.value()),
+                        onkeydown: move |event| match event.key() {
+                            Key::Enter => accept_new_bundle_framework(
+                                framework,
+                                new_framework,
+                                accepted_frameworks,
+                                defining_new,
+                            ),
+                            Key::Escape => {
+                                new_framework.set(String::new());
+                                defining_new.set(false);
+                            }
+                            _ => {}
+                        },
+                    }
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        disabled: new_framework.read().trim().is_empty(),
+                        onclick: move |_| accept_new_bundle_framework(
+                            framework,
+                            new_framework,
+                            accepted_frameworks,
+                            defining_new,
+                        ),
+                        "Add"
+                    }
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        onclick: move |_| {
+                            new_framework.set(String::new());
+                            defining_new.set(false);
+                        },
+                        "Cancel"
+                    }
+                }
+            } else {
+                select {
+                    class: "input focus-ring",
+                    value: "{current_framework}",
+                    onchange: move |event| {
+                        let value = event.value();
+                        if value == DEFINE_NEW_FRAMEWORK {
+                            new_framework.set(String::new());
+                            defining_new.set(true);
+                        } else {
+                            framework.set(value);
+                        }
+                    },
+                    optgroup { label: "Standard",
+                        for standard in STANDARD_BUNDLE_FRAMEWORKS {
+                            option { value: "{standard}", "{standard}" }
+                        }
+                        if let Some(value) = legacy_cmmc_value {
+                            option { value: "{value}", "CMMC 2.0" }
+                        }
+                    }
+                    if !custom_frameworks.is_empty() {
+                        optgroup { label: "Custom",
+                            for custom in custom_frameworks {
+                                option { value: "{custom}", "{custom}" }
+                            }
+                        }
+                    }
+                    option { value: DEFINE_NEW_FRAMEWORK, "+ Define new framework…" }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Props, Clone, PartialEq)]
 struct NewBundleModalProps {
     policies: Vec<DeploymentPolicySummary>,
+    bundles: Vec<ComplianceBundleSummary>,
     environments: Vec<EnvironmentSummary>,
     on_close: EventHandler<()>,
     on_created: EventHandler<ComplianceBundleSummary>,
@@ -1963,6 +3426,7 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
     let mut query = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
     let mut saving = use_signal(|| false);
+    let framework_options = custom_bundle_frameworks(&props.bundles, &props.policies);
 
     let can_save = !name.read().trim().is_empty() && !selected_policy_ids.read().is_empty();
 
@@ -2008,7 +3472,7 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
 
                     // Name + version row
                     div { style: "display:grid;grid-template-columns:2fr 1fr;gap:14px;",
-                        div { class: "field",
+                        div { class: "field", style: "margin-top:0;",
                             label { "Bundle name" }
                             input {
                                 class: "input focus-ring",
@@ -2017,7 +3481,7 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
                                 oninput: move |e| name.set(e.value()),
                             }
                         }
-                        div { class: "field",
+                        div { class: "field", style: "margin-top:0;",
                             label { "Version / revision" }
                             input {
                                 class: "input focus-ring mono",
@@ -2030,19 +3494,9 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
                     }
 
                     // Framework + description row
-                    div { style: "display:grid;grid-template-columns:1fr 2fr;gap:14px;",
-                        div { class: "field",
-                            label { "Framework" }
-                            select {
-                                class: "input focus-ring",
-                                value: "{framework}",
-                                onchange: move |e| framework.set(e.value()),
-                                for opt in ["DISA STIG","NIST 800-53","CMMC","CIS Benchmark","Internal","Custom"] {
-                                    option { value: "{opt}", "{opt}" }
-                                }
-                            }
-                        }
-                        div { class: "field",
+                    div { style: "display:grid;grid-template-columns:1fr 2fr;gap:14px;margin-top:14px;",
+                        BundleFrameworkField { framework, custom_frameworks: framework_options }
+                        div { class: "field", style: "margin-top:0;",
                             label { "Description" }
                             input {
                                 class: "input focus-ring",
@@ -2207,6 +3661,7 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
 struct EditBundleModalProps {
     bundle: ComplianceBundleSummary,
     policies: Vec<DeploymentPolicySummary>,
+    bundles: Vec<ComplianceBundleSummary>,
     environments: Vec<EnvironmentSummary>,
     on_close: EventHandler<()>,
     on_saved: EventHandler<ComplianceBundleSummary>,
@@ -2229,6 +3684,21 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
     let mut error = use_signal(|| None::<String>);
     let mut saving = use_signal(|| false);
     let mut confirm_delete = use_signal(|| false);
+    let mut delete_busy = use_signal(|| false);
+    let mut eligibility: Signal<Option<crate::api::models::DeletionEligibility>> =
+        use_signal(|| None);
+    let mut eligibility_loading = use_signal(|| false);
+    let mut eligibility_error = use_signal(|| None::<String>);
+    let framework_options = custom_bundle_frameworks(&props.bundles, &props.policies);
+
+    // Local pre-check from data already in the bundle summary.
+    let has_immutable_history = props.bundle.versions.iter().any(|version| {
+        matches!(
+            version.publication_state.as_str(),
+            "accepted" | "deprecated"
+        )
+    });
+    let assigned_count = props.bundle.active_assignment_count;
 
     let can_save = !name.read().trim().is_empty() && !selected_policy_ids.read().is_empty();
 
@@ -2260,13 +3730,34 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                     DeleteBundleConfirm {
                         bundle_name: props.bundle.name.clone(),
                         policy_count: props.bundle.policy_ids.len(),
-                        on_cancel: move |_| confirm_delete.set(false),
+                        busy: *delete_busy.read(),
+                        error: error.read().clone(),
+                        on_cancel: move |_| {
+                            if !*delete_busy.read() {
+                                error.set(None);
+                                confirm_delete.set(false);
+                            }
+                        },
                         on_confirm: move |_| {
                             let bid = bundle_id;
+                            error.set(None);
+                            delete_busy.set(true);
                             spawn(async move {
                                 match delete_compliance_bundle(&bid).await {
-                                    Ok(()) => props.on_deleted.call(bid),
-                                    Err(err) => error.set(Some(err.to_string())),
+                                    Ok(()) => {
+                                        delete_busy.set(false);
+                                        props.on_deleted.call(bid)
+                                    }
+                                    Err(err) => {
+                                        web_sys::console::error_1(&format!("Failed to delete bundle: {err}").into());
+                                        delete_busy.set(false);
+                                        error.set(Some(match err {
+                                            crate::api::client::ApiClientError::Status { code, body } => {
+                                                format!("Delete failed (HTTP {code}): {body}")
+                                            }
+                                            other => format!("Failed to delete bundle: {other}"),
+                                        }));
+                                    }
                                 }
                             });
                         },
@@ -2277,10 +3768,10 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
 
                 div { class: "modal-head",
                     h2 {
-                        Icon { name: IconName::Shield, size: 14 }
+                        span { style: "margin-right:6px;vertical-align:text-bottom;display:inline-flex;", Icon { name: IconName::Shield, size: 14 } }
                         " Edit compliance bundle"
                     }
-                    p { "A bundle represents a standard assembled from granular policies that each assert one thing." }
+                    p { "A bundle represents a standard (a STIG, NIST baseline, or your own) — assembled from granular policies that each assert one thing." }
                 }
 
                 div { class: "modal-body", style: "overflow-y:auto;",
@@ -2292,16 +3783,16 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                     }
 
                     div { style: "display:grid;grid-template-columns:2fr 1fr;gap:14px;",
-                        div { class: "field",
+                        div { class: "field", style: "margin-top:0;",
                             label { "Bundle name" }
                             input {
                                 class: "input focus-ring",
                                 value: "{name}",
-                                placeholder: "e.g. DISA RHEL9 STIG (v1r5)",
+                                placeholder: "e.g. Anduril NixOS STIG (v1r2)",
                                 oninput: move |e| name.set(e.value()),
                             }
                         }
-                        div { class: "field",
+                        div { class: "field", style: "margin-top:0;",
                             label { "Version / revision" }
                             input {
                                 class: "input focus-ring mono",
@@ -2313,19 +3804,9 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                         }
                     }
 
-                    div { style: "display:grid;grid-template-columns:1fr 2fr;gap:14px;",
-                        div { class: "field",
-                            label { "Framework" }
-                            select {
-                                class: "input focus-ring",
-                                value: "{framework}",
-                                onchange: move |e| framework.set(e.value()),
-                                for opt in ["DISA STIG","NIST 800-53","CMMC","CIS Benchmark","Internal","Custom"] {
-                                    option { value: "{opt}", "{opt}" }
-                                }
-                            }
-                        }
-                        div { class: "field",
+                    div { style: "display:grid;grid-template-columns:1fr 2fr;gap:14px;margin-top:14px;",
+                        BundleFrameworkField { framework, custom_frameworks: framework_options }
+                        div { class: "field", style: "margin-top:0;",
                             label { "Description" }
                             input {
                                 class: "input focus-ring",
@@ -2419,7 +3900,7 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                                             div { style: "min-width:0;flex:1;",
                                                 div { style: "display:flex;align-items:center;gap:8px;",
                                                     span { class: "mono", style: "font-size:12px;font-weight:600;", "{pname}" }
-                                                    span { class: "chip chip-unknown", style: "font-size:9px;", "{ptype}" }
+                                                    span { class: if ptype == "builtin" { "chip chip-unknown" } else { "chip chip-info" }, style: "font-size:9px;", "{ptype}" }
                                                 }
                                                 div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{pdesc}" }
                                             }
@@ -2430,24 +3911,118 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                         }
                     }
 
-                    if !can_save && !name.read().trim().is_empty() {
+                    if selected_policy_ids.read().is_empty() {
                         div { class: "help", style: "color:#fbbf24;margin-top:8px;",
                             Icon { name: IconName::Warn, size: 10 }
-                            " Select at least one policy."
+                            " Select at least one policy. A bundle is a collection of policies that together represent a standard."
                         }
                     }
 
-                    // Danger zone
+                    // Danger zone. Use the server preflight when available;
+                    // fall back to local summary heuristics for the initial state.
                     div { style: "margin-top:10px;padding-top:14px;border-top:1px solid var(--cf-divider);",
                         div { style: "font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);margin-bottom:8px;",
                             "Danger zone"
                         }
-                        button {
-                            class: "btn btn-ghost focus-ring",
-                            style: "color:#f87171;border-color:rgba(248,113,113,0.3);",
-                            onclick: move |_| confirm_delete.set(true),
-                            Icon { name: IconName::Trash, size: 12 }
-                            " Delete bundle"
+
+                        if let Some(preflight_error) = eligibility_error.read().clone() {
+                            div { class: "sd-callout sd-callout-danger", style: "font-size:12px;",
+                                Icon { name: IconName::Warn, size: 13 }
+                                div {
+                                    p { style: "margin:0 0 6px;font-weight:600;", "Could not determine whether this item can be permanently deleted." }
+                                    p { style: "margin:0 0 8px;", "{preflight_error}" }
+                                    button { class: "btn btn-ghost xs focus-ring", disabled: *eligibility_loading.read(), onclick: move |_| {
+                                        eligibility_error.set(None);
+                                        eligibility_loading.set(true);
+                                        let bid = bundle_id;
+                                        spawn(async move {
+                                            match crate::api::client::fetch_bundle_deletion_eligibility(&bid).await {
+                                                Ok(result) => eligibility.set(Some(result)),
+                                                Err(error) => eligibility_error.set(Some(error.to_string())),
+                                            }
+                                            eligibility_loading.set(false);
+                                        });
+                                    }, "Retry" }
+                                }
+                            }
+                        } else if let Some(elig) = eligibility.read().clone() {
+                            // ── Authoritative eligibility from server preflight ──
+                            if elig.eligible {
+                                button {
+                                    class: "btn btn-ghost focus-ring",
+                                    style: "color:#f87171;border-color:rgba(248,113,113,0.3);",
+                                    onclick: move |_| confirm_delete.set(true),
+                                    Icon { name: IconName::Trash, size: 12 }
+                                    " Delete bundle"
+                                }
+                            } else if elig.permanently_blocked() {
+                                // Show the specific permanent blockers.
+                                div { class: "sd-callout sd-callout-danger", style: "font-size:12px;",
+                                    Icon { name: IconName::Warn, size: 13 }
+                                    div {
+                                        p { style: "margin:0 0 6px;font-weight:600;", "Permanent deletion unavailable" }
+                                        for blocker in elig.blockers.iter() {
+                                            p { style: "margin:0 0 4px;", "{blocker.message}" }
+                                        }
+                                        p { style: "margin:4px 0 0;color:var(--cf-text-muted);font-size:11px;",
+                                            "To stop using this bundle, deactivate active assignments and deprecate published versions. Historical records are retained for auditability."
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Removable blockers — tell user exactly what to fix.
+                                div { class: "sd-callout sd-callout-danger", style: "font-size:12px;",
+                                    Icon { name: IconName::Warn, size: 13 }
+                                    div {
+                                        p { style: "margin:0 0 6px;font-weight:600;", "Permanent deletion blocked" }
+                                        for blocker in elig.blockers.iter() {
+                                            p { style: "margin:0 0 4px;",
+                                                "{blocker.message}"
+                                                if let Some(count) = blocker.count { " ({count})" }
+                                            }
+                                        }
+                                        p { style: "margin:4px 0 0;color:var(--cf-text-muted);font-size:11px;",
+                                            "Remove these references, then try again."
+                                        }
+                                    }
+                                }
+                            }
+                        } else if has_immutable_history {
+                            // Fast local gate — matches server would return permanently_blocked.
+                            div { style: "font-size:12px;color:var(--cf-text-muted);",
+                                "This bundle has published compliance history (accepted or deprecated versions). "
+                                "Permanent deletion is unavailable. Deactivate assignments and deprecate the bundle to stop using it; historical records remain for auditability."
+                            }
+                        } else if assigned_count > 0 {
+                            // An active assignment already implies immutable assignment
+                            // history (the server reports `immutable_assignment_history`),
+                            // so permanent deletion is unavailable; no preflight needed.
+                            div { style: "font-size:12px;color:var(--cf-text-muted);",
+                                "This bundle has active assignments and therefore has immutable assignment history. "
+                                "Permanent deletion is unavailable. Deactivate assignments to stop using the bundle; "
+                                "historical assignment records are retained for auditability."
+                            }
+                        } else {
+                            // No local blockers detected — fetch authoritative check.
+                            button {
+                                class: "btn btn-ghost focus-ring",
+                                style: "color:#f87171;border-color:rgba(248,113,113,0.3);",
+                                disabled: *eligibility_loading.read(),
+                                onclick: move |_| {
+                                    eligibility_loading.set(true);
+                                    eligibility_error.set(None);
+                                    let bid = bundle_id;
+                                    spawn(async move {
+                                        match crate::api::client::fetch_bundle_deletion_eligibility(&bid).await {
+                                            Ok(result) => { eligibility.set(Some(result)); }
+                                            Err(error) => eligibility_error.set(Some(error.to_string())),
+                                        }
+                                        eligibility_loading.set(false);
+                                    });
+                                },
+                                Icon { name: IconName::Trash, size: 12 }
+                                if *eligibility_loading.read() { " Checking…" } else { " Check deletion eligibility" }
+                            }
                         }
                     }
                 }
@@ -2503,6 +4078,8 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
 struct DeleteBundleConfirmProps {
     bundle_name: String,
     policy_count: usize,
+    busy: bool,
+    error: Option<String>,
     on_cancel: EventHandler<()>,
     on_confirm: EventHandler<()>,
 }
@@ -2543,6 +4120,9 @@ fn DeleteBundleConfirm(props: DeleteBundleConfirmProps) -> Element {
                     }
                 }
             }
+            if let Some(error) = props.error.as_ref() {
+                div { class: "sd-callout sd-callout-danger", style: "margin-bottom:12px;", "{error}" }
+            }
             div { class: "field",
                 label {
                     "Type "
@@ -2561,6 +4141,7 @@ fn DeleteBundleConfirm(props: DeleteBundleConfirmProps) -> Element {
         div { class: "modal-foot",
             button {
                 class: "btn btn-ghost focus-ring",
+                disabled: props.busy,
                 onclick: move |_| props.on_cancel.call(()),
                 "Cancel"
             }
@@ -2571,10 +4152,10 @@ fn DeleteBundleConfirm(props: DeleteBundleConfirmProps) -> Element {
                 } else {
                     "background:var(--cf-subtle-bg);color:var(--cf-text-muted);"
                 },
-                disabled: !matches,
+                disabled: !matches || props.busy,
                 onclick: move |_| { if matches { props.on_confirm.call(()); } },
                 Icon { name: IconName::Trash, size: 13 }
-                " Delete bundle"
+                if props.busy { " Deleting…" } else { " Delete bundle" }
             }
         }
     }
@@ -2588,4 +4169,103 @@ fn toggle_uuid(signal: &mut Signal<Vec<uuid::Uuid>>, id: uuid::Uuid) {
         next.push(id);
     }
     signal.set(next);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_all_ordered_preview_check_body_parts() {
+        let check = serde_json::json!({
+            "body_parts": [
+                { "type": "inline", "content": "first inline" },
+                { "type": "inline", "content": "second inline" },
+                { "type": "reference", "href": "https://example.test/check", "name": "Vendor check" }
+            ]
+        });
+
+        assert_eq!(
+            source_check_body_parts(&check),
+            vec![
+                SourceCheckBodyPart::Inline("first inline".into()),
+                SourceCheckBodyPart::Inline("second inline".into()),
+                SourceCheckBodyPart::Reference {
+                    href: "https://example.test/check".into(),
+                    name: Some("Vendor check".into()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn custom_framework_catalog_excludes_standard_aliases_and_normalizes_values() {
+        assert_eq!(
+            custom_framework_values([
+                "DISA STIG",
+                "nist 800-53",
+                "CMMC",
+                "cmmc 2.0",
+                "CIS Benchmark",
+                "  Internal  ",
+                "internal",
+                "Custom Baseline",
+                "",
+            ]),
+            vec!["Custom Baseline", "Internal"]
+        );
+    }
+
+    #[test]
+    fn legacy_cmmc_is_a_standard_alias_without_normalizing_its_value() {
+        assert!(is_standard_bundle_framework("CMMC"));
+        assert!(!is_standard_bundle_framework("CMMC 3.0"));
+    }
+
+    #[test]
+    fn foreign_nix_looking_fix_defaults_to_unbound_without_assertions() {
+        let preview = XccdfPreviewResponse {
+            sha256: "a".repeat(64),
+            filename: Some("foreign.xml".into()),
+            document_class: Some("foreign_xccdf".into()),
+            fidelity: Some("preserved_opaque".into()),
+            fidelity_losses: vec![],
+            xccdf_version: Some("1.2".into()),
+            benchmark: None,
+            profiles: vec![],
+            rules: vec![crate::api::models::XccdfRuleInfo {
+                id: "foreign-firewall".into(),
+                title: Some("Firewall".into()),
+                description: Some("Foreign prose".into()),
+                severity: Some("medium".into()),
+                is_native: false,
+                version: None,
+                group_id: None,
+                platforms: vec![],
+                identifiers: vec![],
+                checks: vec![serde_json::json!({
+                    "content": "networking.firewall.enable = true;"
+                })],
+                fix: Some(serde_json::json!({
+                    "content": "networking.firewall.enable = true;"
+                })),
+                inferred_assertions: vec![],
+                references: vec![],
+                has_opaque_xml: true,
+            }],
+            rule_count: 1,
+            profile_count: 0,
+            errors: vec![],
+            warnings: vec![],
+            cf_native_reconciliation: None,
+        };
+
+        let rules = rules_from_preview(&preview);
+        assert_eq!(rules[0].action, "unbound");
+        assert!(rules[0].assertions.is_empty());
+        assert!(matches!(
+            import_action_from_rule(&rules[0]),
+            XccdfRuleImportAction::CreateUnbound { .. }
+        ));
+    }
 }

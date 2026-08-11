@@ -1373,7 +1373,21 @@
           "title": "Generation 198 activated",
           "color": "#34d399"
         }
-      ]
+      ],
+      "compliance": {
+        "assignments": [
+          {
+            "lineageId": "disa-nixos-stig",
+            "bundleId": "disa-rhel9-stig-r4",
+            "targetBundleId": "disa-rhel9-stig",
+            "status": "transitioning",
+            "reason": "Phased rollout — build farm is migrating to v1r2 in wave 2.",
+            "approvedBy": "ISSM — R. Chen",
+            "deadline": "2026-08-25",
+            "poam": null
+          }
+        ]
+      }
     },
     {
       "id": "sys-6",
@@ -1789,7 +1803,21 @@
           "title": "Generation 195 activated",
           "color": "#34d399"
         }
-      ]
+      ],
+      "compliance": {
+        "assignments": [
+          {
+            "lineageId": "disa-nixos-stig",
+            "bundleId": "disa-rhel9-stig-r1",
+            "targetBundleId": "disa-rhel9-stig",
+            "status": "exception",
+            "reason": "Legacy Oracle-compatible kernel module is incompatible with the v1r2 FIPS crypto requirement.",
+            "approvedBy": "AO — J. Alvarez",
+            "deadline": "2026-10-01",
+            "poam": "POAM-2026-014"
+          }
+        ]
+      }
     },
     {
       "id": "sys-12",
@@ -1923,7 +1951,21 @@
           "title": "Generation 72 activated",
           "color": "#34d399"
         }
-      ]
+      ],
+      "compliance": {
+        "assignments": [
+          {
+            "lineageId": "disa-nixos-stig",
+            "bundleId": "disa-rhel9-stig-r1",
+            "targetBundleId": "disa-rhel9-stig",
+            "status": "grandfathered",
+            "reason": "Disconnected staging node — offline, pending manual baseline refresh on next maintenance window.",
+            "approvedBy": "ISSM — R. Chen",
+            "deadline": null,
+            "poam": null
+          }
+        ]
+      }
     },
     {
       "id": "sys-14",
@@ -12495,7 +12537,11 @@
       "rationale": "Catches regressions surfaced by vulnix during eval. Critical = hard block.",
       "createdBy": "mreyes",
       "createdAt": "3mo ago",
-      "lastModified": "2w ago"
+      "lastModified": "2w ago",
+      "lineageId": "cve-gated",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-02-15"
     },
     {
       "id": "business-hours",
@@ -12528,7 +12574,11 @@
       "rationale": "Operator-coverage window. Outside hours, defer to manual.",
       "createdBy": "jpark",
       "createdAt": "5mo ago",
-      "lastModified": "1mo ago"
+      "lastModified": "1mo ago",
+      "lineageId": "business-hours",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-03-08"
     },
     {
       "id": "two-approver",
@@ -12553,7 +12603,11 @@
       "rationale": "For tier-0 systems (auth providers, secrets brokers). 4-eyes principle.",
       "createdBy": "security-team",
       "createdAt": "1mo ago",
-      "lastModified": "3d ago"
+      "lastModified": "3d ago",
+      "lineageId": "two-approver",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-07-05"
     },
     {
       "id": "canary-25",
@@ -12578,7 +12632,11 @@
       "rationale": "Staged rollout for the web tier. Disabled — pending observability integration.",
       "createdBy": "dchen",
       "createdAt": "2w ago",
-      "lastModified": "yesterday"
+      "lastModified": "yesterday",
+      "lineageId": "canary-25",
+      "revision": 1,
+      "publicationState": "draft",
+      "publishedDate": "2026-07-25"
     },
     {
       "id": "stig-sshd",
@@ -12638,7 +12696,23 @@
       ],
       "createdBy": "security-team",
       "createdAt": "2mo ago",
-      "lastModified": "1w ago"
+      "lastModified": "1w ago",
+      "lineageId": "stig-sshd",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-05-28",
+      "srgIds": [
+        "SRG-OS-000109",
+        "SRG-OS-000163",
+        "SRG-OS-000033"
+      ],
+      "cciIds": [
+        "CCI-000770",
+        "CCI-001133",
+        "CCI-000068"
+      ],
+      "controlFamily": "AC",
+      "framework": "DISA STIG"
     },
     {
       "id": "stig-auditd",
@@ -12687,7 +12761,21 @@
       ],
       "createdBy": "security-team",
       "createdAt": "2mo ago",
-      "lastModified": "5d ago"
+      "lastModified": "5d ago",
+      "lineageId": "stig-auditd",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-06-02",
+      "srgIds": [
+        "SRG-OS-000004",
+        "SRG-OS-000298"
+      ],
+      "cciIds": [
+        "CCI-000018",
+        "CCI-000366"
+      ],
+      "controlFamily": "AU",
+      "framework": "DISA STIG"
     },
     {
       "id": "stig-banner",
@@ -12725,7 +12813,19 @@
       ],
       "createdBy": "security-team",
       "createdAt": "2mo ago",
-      "lastModified": "3w ago"
+      "lastModified": "3w ago",
+      "lineageId": "stig-banner",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-06-18",
+      "srgIds": [
+        "SRG-OS-000023-GPOS-00006"
+      ],
+      "cciIds": [
+        "CCI-000048"
+      ],
+      "controlFamily": "AC",
+      "framework": "DISA STIG"
     },
     {
       "id": "stig-fips",
@@ -12767,7 +12867,21 @@
       ],
       "createdBy": "security-team",
       "createdAt": "6w ago",
-      "lastModified": "4d ago"
+      "lastModified": "4d ago",
+      "lineageId": "stig-fips",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-06-25",
+      "srgIds": [
+        "SRG-OS-000478",
+        "SRG-OS-000185"
+      ],
+      "cciIds": [
+        "CCI-002450",
+        "CCI-001199"
+      ],
+      "controlFamily": "SC",
+      "framework": "DISA STIG"
     },
     {
       "id": "stig-usbguard",
@@ -12805,7 +12919,19 @@
       ],
       "createdBy": "security-team",
       "createdAt": "5w ago",
-      "lastModified": "6d ago"
+      "lastModified": "6d ago",
+      "lineageId": "stig-usbguard",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-07-01",
+      "srgIds": [
+        "SRG-OS-000114"
+      ],
+      "cciIds": [
+        "CCI-001958"
+      ],
+      "controlFamily": "MP",
+      "framework": "DISA STIG"
     },
     {
       "id": "stig-pwquality",
@@ -12842,10 +12968,4329 @@
       ],
       "createdBy": "security-team",
       "createdAt": "4w ago",
-      "lastModified": "1w ago"
+      "lastModified": "1w ago",
+      "lineageId": "stig-pwquality",
+      "revision": 5,
+      "publicationState": "current",
+      "publishedDate": "2026-07-10",
+      "digest": "sha256:2b7e91",
+      "srgIds": [
+        "SRG-OS-000078",
+        "SRG-OS-000112"
+      ],
+      "cciIds": [
+        "CCI-000205",
+        "CCI-000196"
+      ],
+      "controlFamily": "IA",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-pwquality-r1",
+      "lineageId": "stig-pwquality",
+      "revision": 1,
+      "publicationState": "deprecated",
+      "publishedDate": "2026-03-02",
+      "digest": "sha256:9a10f4",
+      "srgIds": [
+        "SRG-OS-000078"
+      ],
+      "cciIds": [
+        "CCI-000205"
+      ],
+      "name": "stig-password-policy",
+      "category": "security",
+      "description": "Anduril NixOS STIG: enforce 10-character minimum password length (superseded by 15-char revision).",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": false,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.security.pam.services ? pwquality && config.security.pam.pwquality.minlen >= 10",
+          "message": "Minimum password length must be >= 10"
+        }
+      ],
+      "rationale": "V-268134 (10-char minimum length, prior revision). SRG-OS-000078.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "grep minlen /etc/security/pwquality.conf",
+          "expect": "minlen = 10"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "5mo ago",
+      "lastModified": "4mo ago",
+      "controlFamily": "IA",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-pwquality-r2",
+      "lineageId": "stig-pwquality",
+      "revision": 2,
+      "publicationState": "deprecated",
+      "publishedDate": "2026-04-01",
+      "digest": "sha256:5c9d02",
+      "srgIds": [
+        "SRG-OS-000078"
+      ],
+      "cciIds": [
+        "CCI-000205"
+      ],
+      "name": "stig-password-policy",
+      "category": "security",
+      "description": "Anduril NixOS STIG: enforce 12-character minimum password length.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": false,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.security.pam.services ? pwquality && config.security.pam.pwquality.minlen >= 12",
+          "message": "Minimum password length must be >= 12"
+        }
+      ],
+      "rationale": "V-268134 (12-char minimum length, interim revision). SRG-OS-000078.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "grep minlen /etc/security/pwquality.conf",
+          "expect": "minlen = 12"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "4mo ago",
+      "lastModified": "3mo ago",
+      "controlFamily": "IA",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-pwquality-r3",
+      "lineageId": "stig-pwquality",
+      "revision": 3,
+      "publicationState": "deprecated",
+      "publishedDate": "2026-05-05",
+      "digest": "sha256:6da813",
+      "srgIds": [
+        "SRG-OS-000078"
+      ],
+      "cciIds": [
+        "CCI-000205"
+      ],
+      "name": "stig-password-policy",
+      "category": "security",
+      "description": "Anduril NixOS STIG: enforce 13-character minimum password length.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": false,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.security.pam.services ? pwquality && config.security.pam.pwquality.minlen >= 13",
+          "message": "Minimum password length must be >= 13"
+        }
+      ],
+      "rationale": "V-268134 (13-char minimum length, interim revision). SRG-OS-000078.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "grep minlen /etc/security/pwquality.conf",
+          "expect": "minlen = 13"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "3mo ago",
+      "lastModified": "2mo ago",
+      "controlFamily": "IA",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-pwquality-r4",
+      "lineageId": "stig-pwquality",
+      "revision": 4,
+      "publicationState": "deprecated",
+      "publishedDate": "2026-06-02",
+      "digest": "sha256:7eb924",
+      "srgIds": [
+        "SRG-OS-000078",
+        "SRG-OS-000112"
+      ],
+      "cciIds": [
+        "CCI-000205",
+        "CCI-000196"
+      ],
+      "name": "stig-password-policy",
+      "category": "security",
+      "description": "Anduril NixOS STIG: enforce 14-character minimum password length and encrypted password storage.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": false,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.security.pam.services ? pwquality && config.security.pam.pwquality.minlen >= 14",
+          "message": "Minimum password length must be >= 14"
+        },
+        {
+          "kind": "custom_eval",
+          "expr": "builtins.elem config.security.pam.hashAlgorithm [\"yescrypt\" \"sha512\"]",
+          "message": "Passwords must be stored using yescrypt or sha512"
+        }
+      ],
+      "rationale": "V-268134 (14-char minimum length), V-268130 (encrypted password storage). SRG-OS-000078 / 000112.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "grep minlen /etc/security/pwquality.conf",
+          "expect": "minlen = 14"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "2mo ago",
+      "lastModified": "5w ago",
+      "controlFamily": "IA",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-ssh-daemon-0",
+      "lineageId": "stig-mock-ssh-daemon-0",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-01-01",
+      "srgIds": [
+        "SRG-OS-0184669"
+      ],
+      "cciIds": [
+        "CCI-005673"
+      ],
+      "name": "stig-ssh-daemon",
+      "category": "security",
+      "controlFamily": "AU",
+      "description": "Anduril NixOS STIG: enforce SSH daemon baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.ssh_daemon.enabled == true",
+          "message": "SSH daemon must be configured per STIG V-268202"
+        }
+      ],
+      "rationale": "V-268202 (SSH daemon). SRG-OS-0184669.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-ssh-daemon --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "1w ago",
+      "lastModified": "1d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-firewall-rules-1",
+      "lineageId": "stig-mock-firewall-rules-1",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-02-02",
+      "srgIds": [
+        "SRG-OS-0971192"
+      ],
+      "cciIds": [
+        "CCI-008757"
+      ],
+      "name": "stig-firewall-rules",
+      "category": "security",
+      "controlFamily": "IA",
+      "description": "Anduril NixOS STIG: enforce firewall rules baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.firewall_rules.enabled == true",
+          "message": "firewall rules must be configured per STIG V-268205"
+        }
+      ],
+      "rationale": "V-268205 (firewall rules). SRG-OS-0971192.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-firewall-rules --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "2w ago",
+      "lastModified": "2d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-audit-logging-2",
+      "lineageId": "stig-mock-audit-logging-2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-03-03",
+      "srgIds": [
+        "SRG-OS-0318831"
+      ],
+      "cciIds": [
+        "CCI-009798"
+      ],
+      "name": "stig-audit-logging",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce audit logging baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.audit_logging.enabled == true",
+          "message": "audit logging must be configured per STIG V-268208"
+        }
+      ],
+      "rationale": "V-268208 (audit logging). SRG-OS-0318831.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-audit-logging --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "3w ago",
+      "lastModified": "3d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-account-lockout-3",
+      "lineageId": "stig-mock-account-lockout-3",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-04",
+      "srgIds": [
+        "SRG-OS-0431189"
+      ],
+      "cciIds": [
+        "CCI-006779"
+      ],
+      "name": "stig-account-lockout",
+      "category": "security",
+      "controlFamily": "AU",
+      "description": "Anduril NixOS STIG: enforce account lockout baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.account_lockout.enabled == true",
+          "message": "account lockout must be configured per STIG V-268211"
+        }
+      ],
+      "rationale": "V-268211 (account lockout). SRG-OS-0431189.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-account-lockout --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "4w ago",
+      "lastModified": "4d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-password-complexity-4",
+      "lineageId": "stig-mock-password-complexity-4",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-05-05",
+      "srgIds": [
+        "SRG-OS-0591259"
+      ],
+      "cciIds": [
+        "CCI-002454"
+      ],
+      "name": "stig-password-complexity",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce password complexity baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.password_complexity.enabled == true",
+          "message": "password complexity must be configured per STIG V-268212"
+        }
+      ],
+      "rationale": "V-268212 (password complexity). SRG-OS-0591259.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-password-complexity --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "5w ago",
+      "lastModified": "5d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-kernel-hardening-5",
+      "lineageId": "stig-mock-kernel-hardening-5",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-06-06",
+      "srgIds": [
+        "SRG-OS-0173048"
+      ],
+      "cciIds": [
+        "CCI-008838"
+      ],
+      "name": "stig-kernel-hardening",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce kernel hardening baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.kernel_hardening.enabled == true",
+          "message": "kernel hardening must be configured per STIG V-268215"
+        }
+      ],
+      "rationale": "V-268215 (kernel hardening). SRG-OS-0173048.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-kernel-hardening --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "6w ago",
+      "lastModified": "6d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-filesystem-permissions-6",
+      "lineageId": "stig-mock-filesystem-permissions-6",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-07-07",
+      "srgIds": [
+        "SRG-OS-0886350"
+      ],
+      "cciIds": [
+        "CCI-007329"
+      ],
+      "name": "stig-filesystem-permissions",
+      "category": "security",
+      "controlFamily": "MP",
+      "description": "Anduril NixOS STIG: enforce filesystem permissions baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.filesystem_permissions.enabled == true",
+          "message": "filesystem permissions must be configured per STIG V-268219"
+        }
+      ],
+      "rationale": "V-268219 (filesystem permissions). SRG-OS-0886350.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-filesystem-permissions --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "7w ago",
+      "lastModified": "7d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-usb-device-control-7",
+      "lineageId": "stig-mock-usb-device-control-7",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-08-08",
+      "srgIds": [
+        "SRG-OS-0580155"
+      ],
+      "cciIds": [
+        "CCI-008186"
+      ],
+      "name": "stig-usb-device-control",
+      "category": "security",
+      "controlFamily": "AC",
+      "description": "Anduril NixOS STIG: enforce USB device control baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.usb_device_control.enabled == true",
+          "message": "USB device control must be configured per STIG V-268222"
+        }
+      ],
+      "rationale": "V-268222 (USB device control). SRG-OS-0580155.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-usb-device-control --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "8w ago",
+      "lastModified": "8d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-tls-cipher-suite-8",
+      "lineageId": "stig-mock-tls-cipher-suite-8",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-09-09",
+      "srgIds": [
+        "SRG-OS-0601200"
+      ],
+      "cciIds": [
+        "CCI-001993"
+      ],
+      "name": "stig-tls-cipher-suite",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce TLS cipher suite baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.tls_cipher_suite.enabled == true",
+          "message": "TLS cipher suite must be configured per STIG V-268226"
+        }
+      ],
+      "rationale": "V-268226 (TLS cipher suite). SRG-OS-0601200.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-tls-cipher-suite --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "9w ago",
+      "lastModified": "9d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-dns-resolver-9",
+      "lineageId": "stig-mock-dns-resolver-9",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-01-10",
+      "srgIds": [
+        "SRG-OS-0307171"
+      ],
+      "cciIds": [
+        "CCI-001529"
+      ],
+      "name": "stig-dns-resolver",
+      "category": "security",
+      "controlFamily": "SI",
+      "description": "Anduril NixOS STIG: enforce DNS resolver baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.dns_resolver.enabled == true",
+          "message": "DNS resolver must be configured per STIG V-268228"
+        }
+      ],
+      "rationale": "V-268228 (DNS resolver). SRG-OS-0307171.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-dns-resolver --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "10w ago",
+      "lastModified": "10d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-ntp-sync-10",
+      "lineageId": "stig-mock-ntp-sync-10",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-02-11",
+      "srgIds": [
+        "SRG-OS-0412917"
+      ],
+      "cciIds": [
+        "CCI-006851"
+      ],
+      "name": "stig-ntp-sync",
+      "category": "security",
+      "controlFamily": "IA",
+      "description": "Anduril NixOS STIG: enforce NTP sync baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.ntp_sync.enabled == true",
+          "message": "NTP sync must be configured per STIG V-268230"
+        }
+      ],
+      "rationale": "V-268230 (NTP sync). SRG-OS-0412917.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-ntp-sync --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "11w ago",
+      "lastModified": "11d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-syslog-forwarding-11",
+      "lineageId": "stig-mock-syslog-forwarding-11",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-03-12",
+      "srgIds": [
+        "SRG-OS-0896313"
+      ],
+      "cciIds": [
+        "CCI-008622"
+      ],
+      "name": "stig-syslog-forwarding",
+      "category": "security",
+      "controlFamily": "MP",
+      "description": "Anduril NixOS STIG: enforce syslog forwarding baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.syslog_forwarding.enabled == true",
+          "message": "syslog forwarding must be configured per STIG V-268235"
+        }
+      ],
+      "rationale": "V-268235 (syslog forwarding). SRG-OS-0896313.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-syslog-forwarding --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "12w ago",
+      "lastModified": "12d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-sudo-policy-12",
+      "lineageId": "stig-mock-sudo-policy-12",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-13",
+      "srgIds": [
+        "SRG-OS-0452093"
+      ],
+      "cciIds": [
+        "CCI-005328"
+      ],
+      "name": "stig-sudo-policy",
+      "category": "security",
+      "controlFamily": "IA",
+      "description": "Anduril NixOS STIG: enforce sudo policy baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.sudo_policy.enabled == true",
+          "message": "sudo policy must be configured per STIG V-268236"
+        }
+      ],
+      "rationale": "V-268236 (sudo policy). SRG-OS-0452093.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-sudo-policy --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "1w ago",
+      "lastModified": "13d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-pam-stack-13",
+      "lineageId": "stig-mock-pam-stack-13",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-05-14",
+      "srgIds": [
+        "SRG-OS-0550585"
+      ],
+      "cciIds": [
+        "CCI-004434"
+      ],
+      "name": "stig-pam-stack",
+      "category": "security",
+      "controlFamily": "CM",
+      "description": "Anduril NixOS STIG: enforce PAM stack baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.pam_stack.enabled == true",
+          "message": "PAM stack must be configured per STIG V-268241"
+        }
+      ],
+      "rationale": "V-268241 (PAM stack). SRG-OS-0550585.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-pam-stack --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "2w ago",
+      "lastModified": "14d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-selinux-apparmor-profile-14",
+      "lineageId": "stig-mock-selinux-apparmor-profile-14",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-06-15",
+      "srgIds": [
+        "SRG-OS-0577733"
+      ],
+      "cciIds": [
+        "CCI-008133"
+      ],
+      "name": "stig-selinux-apparmor-profile",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce SELinux/AppArmor profile baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": false,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.selinux_apparmor_profile.enabled == true",
+          "message": "SELinux/AppArmor profile must be configured per STIG V-268243"
+        }
+      ],
+      "rationale": "V-268243 (SELinux/AppArmor profile). SRG-OS-0577733.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-selinux-apparmor-profile --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "3w ago",
+      "lastModified": "15d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-boot-loader-integrity-15",
+      "lineageId": "stig-mock-boot-loader-integrity-15",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-07-16",
+      "srgIds": [
+        "SRG-OS-0196745"
+      ],
+      "cciIds": [
+        "CCI-003624"
+      ],
+      "name": "stig-boot-loader-integrity",
+      "category": "security",
+      "controlFamily": "AC",
+      "description": "Anduril NixOS STIG: enforce boot loader integrity baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.boot_loader_integrity.enabled == true",
+          "message": "boot loader integrity must be configured per STIG V-268247"
+        }
+      ],
+      "rationale": "V-268247 (boot loader integrity). SRG-OS-0196745.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-boot-loader-integrity --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "4w ago",
+      "lastModified": "16d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-disk-encryption-16",
+      "lineageId": "stig-mock-disk-encryption-16",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-08-17",
+      "srgIds": [
+        "SRG-OS-0123967"
+      ],
+      "cciIds": [
+        "CCI-005270"
+      ],
+      "name": "stig-disk-encryption",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce disk encryption baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.disk_encryption.enabled == true",
+          "message": "disk encryption must be configured per STIG V-268250"
+        }
+      ],
+      "rationale": "V-268250 (disk encryption). SRG-OS-0123967.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-disk-encryption --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "5w ago",
+      "lastModified": "17d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-service-isolation-17",
+      "lineageId": "stig-mock-service-isolation-17",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-09-18",
+      "srgIds": [
+        "SRG-OS-0645834"
+      ],
+      "cciIds": [
+        "CCI-003861"
+      ],
+      "name": "stig-service-isolation",
+      "category": "security",
+      "controlFamily": "MP",
+      "description": "Anduril NixOS STIG: enforce service isolation baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": false,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.service_isolation.enabled == true",
+          "message": "service isolation must be configured per STIG V-268253"
+        }
+      ],
+      "rationale": "V-268253 (service isolation). SRG-OS-0645834.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-service-isolation --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "6w ago",
+      "lastModified": "18d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-network-segmentation-18",
+      "lineageId": "stig-mock-network-segmentation-18",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-01-19",
+      "srgIds": [
+        "SRG-OS-0563849"
+      ],
+      "cciIds": [
+        "CCI-006172"
+      ],
+      "name": "stig-network-segmentation",
+      "category": "security",
+      "controlFamily": "MP",
+      "description": "Anduril NixOS STIG: enforce network segmentation baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.network_segmentation.enabled == true",
+          "message": "network segmentation must be configured per STIG V-268254"
+        }
+      ],
+      "rationale": "V-268254 (network segmentation). SRG-OS-0563849.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-network-segmentation --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "7w ago",
+      "lastModified": "19d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-container-runtime-19",
+      "lineageId": "stig-mock-container-runtime-19",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-02-20",
+      "srgIds": [
+        "SRG-OS-0934076"
+      ],
+      "cciIds": [
+        "CCI-005250"
+      ],
+      "name": "stig-container-runtime",
+      "category": "security",
+      "controlFamily": "SC",
+      "description": "Anduril NixOS STIG: enforce container runtime baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.container_runtime.enabled == true",
+          "message": "container runtime must be configured per STIG V-268258"
+        }
+      ],
+      "rationale": "V-268258 (container runtime). SRG-OS-0934076.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-container-runtime --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "8w ago",
+      "lastModified": "20d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-package-signing-20",
+      "lineageId": "stig-mock-package-signing-20",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-03-21",
+      "srgIds": [
+        "SRG-OS-0810562"
+      ],
+      "cciIds": [
+        "CCI-006108"
+      ],
+      "name": "stig-package-signing",
+      "category": "security",
+      "controlFamily": "AC",
+      "description": "Anduril NixOS STIG: enforce package signing baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.package_signing.enabled == true",
+          "message": "package signing must be configured per STIG V-268262"
+        }
+      ],
+      "rationale": "V-268262 (package signing). SRG-OS-0810562.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-package-signing --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "9w ago",
+      "lastModified": "21d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-update-cadence-21",
+      "lineageId": "stig-mock-update-cadence-21",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-22",
+      "srgIds": [
+        "SRG-OS-0501960"
+      ],
+      "cciIds": [
+        "CCI-005877"
+      ],
+      "name": "stig-update-cadence",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce update cadence baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.update_cadence.enabled == true",
+          "message": "update cadence must be configured per STIG V-268265"
+        }
+      ],
+      "rationale": "V-268265 (update cadence). SRG-OS-0501960.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-update-cadence --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "10w ago",
+      "lastModified": "22d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-session-timeout-22",
+      "lineageId": "stig-mock-session-timeout-22",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-05-23",
+      "srgIds": [
+        "SRG-OS-0751332"
+      ],
+      "cciIds": [
+        "CCI-002744"
+      ],
+      "name": "stig-session-timeout",
+      "category": "security",
+      "controlFamily": "SC",
+      "description": "Anduril NixOS STIG: enforce session timeout baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.session_timeout.enabled == true",
+          "message": "session timeout must be configured per STIG V-268268"
+        }
+      ],
+      "rationale": "V-268268 (session timeout). SRG-OS-0751332.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-session-timeout --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "11w ago",
+      "lastModified": "23d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-banner-text-23",
+      "lineageId": "stig-mock-banner-text-23",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-06-24",
+      "srgIds": [
+        "SRG-OS-0444321"
+      ],
+      "cciIds": [
+        "CCI-006238"
+      ],
+      "name": "stig-banner-text",
+      "category": "security",
+      "controlFamily": "AC",
+      "description": "Anduril NixOS STIG: enforce banner text baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.banner_text.enabled == true",
+          "message": "banner text must be configured per STIG V-268270"
+        }
+      ],
+      "rationale": "V-268270 (banner text). SRG-OS-0444321.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-banner-text --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "12w ago",
+      "lastModified": "24d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-log-rotation-24",
+      "lineageId": "stig-mock-log-rotation-24",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-07-25",
+      "srgIds": [
+        "SRG-OS-0484374"
+      ],
+      "cciIds": [
+        "CCI-004507"
+      ],
+      "name": "stig-log-rotation",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce log rotation baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.log_rotation.enabled == true",
+          "message": "log rotation must be configured per STIG V-268273"
+        }
+      ],
+      "rationale": "V-268273 (log rotation). SRG-OS-0484374.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-log-rotation --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "1w ago",
+      "lastModified": "25d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-core-dump-handling-25",
+      "lineageId": "stig-mock-core-dump-handling-25",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-08-26",
+      "srgIds": [
+        "SRG-OS-0639228"
+      ],
+      "cciIds": [
+        "CCI-008070"
+      ],
+      "name": "stig-core-dump-handling",
+      "category": "security",
+      "controlFamily": "AU",
+      "description": "Anduril NixOS STIG: enforce core dump handling baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.core_dump_handling.enabled == true",
+          "message": "core dump handling must be configured per STIG V-268277"
+        }
+      ],
+      "rationale": "V-268277 (core dump handling). SRG-OS-0639228.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-core-dump-handling --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "2w ago",
+      "lastModified": "26d ago",
+      "framework": "DISA STIG",
+      "cisSection": "1.1"
+    },
+    {
+      "id": "stig-mock-ipv6-stack-26",
+      "lineageId": "stig-mock-ipv6-stack-26",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-09-27",
+      "srgIds": [
+        "SRG-OS-0504178"
+      ],
+      "cciIds": [
+        "CCI-006139"
+      ],
+      "name": "stig-ipv6-stack",
+      "category": "security",
+      "controlFamily": "IA",
+      "description": "Anduril NixOS STIG: enforce IPv6 stack baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.ipv6_stack.enabled == true",
+          "message": "IPv6 stack must be configured per STIG V-268279"
+        }
+      ],
+      "rationale": "V-268279 (IPv6 stack). SRG-OS-0504178.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-ipv6-stack --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "3w ago",
+      "lastModified": "27d ago",
+      "framework": "DISA STIG",
+      "cisSection": "1.2"
+    },
+    {
+      "id": "stig-mock-usb-storage-27",
+      "lineageId": "stig-mock-usb-storage-27",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-01-01",
+      "srgIds": [
+        "SRG-OS-0138491"
+      ],
+      "cciIds": [
+        "CCI-008850"
+      ],
+      "name": "stig-usb-storage",
+      "category": "security",
+      "controlFamily": "AU",
+      "description": "Anduril NixOS STIG: enforce USB storage baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.usb_storage.enabled == true",
+          "message": "USB storage must be configured per STIG V-268283"
+        }
+      ],
+      "rationale": "V-268283 (USB storage). SRG-OS-0138491.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-usb-storage --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "4w ago",
+      "lastModified": "28d ago",
+      "framework": "DISA STIG",
+      "cisSection": "1.3"
+    },
+    {
+      "id": "stig-mock-bluetooth-radio-28",
+      "lineageId": "stig-mock-bluetooth-radio-28",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-02-02",
+      "srgIds": [
+        "SRG-OS-0655442"
+      ],
+      "cciIds": [
+        "CCI-003583"
+      ],
+      "name": "stig-bluetooth-radio",
+      "category": "security",
+      "controlFamily": "AU",
+      "description": "Anduril NixOS STIG: enforce Bluetooth radio baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.bluetooth_radio.enabled == true",
+          "message": "Bluetooth radio must be configured per STIG V-268284"
+        }
+      ],
+      "rationale": "V-268284 (Bluetooth radio). SRG-OS-0655442.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-bluetooth-radio --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "5w ago",
+      "lastModified": "29d ago",
+      "framework": "DISA STIG",
+      "cisSection": "2.1"
+    },
+    {
+      "id": "stig-mock-wireless-interface-29",
+      "lineageId": "stig-mock-wireless-interface-29",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-03-03",
+      "srgIds": [
+        "SRG-OS-0777606"
+      ],
+      "cciIds": [
+        "CCI-008978"
+      ],
+      "name": "stig-wireless-interface",
+      "category": "security",
+      "controlFamily": "AC",
+      "description": "Anduril NixOS STIG: enforce wireless interface baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.wireless_interface.enabled == true",
+          "message": "wireless interface must be configured per STIG V-268289"
+        }
+      ],
+      "rationale": "V-268289 (wireless interface). SRG-OS-0777606.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-wireless-interface --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "6w ago",
+      "lastModified": "30d ago",
+      "framework": "DISA STIG",
+      "cisSection": "2.2"
+    },
+    {
+      "id": "stig-mock-snmp-daemon-30",
+      "lineageId": "stig-mock-snmp-daemon-30",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-04",
+      "srgIds": [
+        "SRG-OS-0850977"
+      ],
+      "cciIds": [
+        "CCI-001086"
+      ],
+      "name": "stig-snmp-daemon",
+      "category": "security",
+      "controlFamily": "IA",
+      "description": "Anduril NixOS STIG: enforce SNMP daemon baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.snmp_daemon.enabled == true",
+          "message": "SNMP daemon must be configured per STIG V-268291"
+        }
+      ],
+      "rationale": "V-268291 (SNMP daemon). SRG-OS-0850977.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-snmp-daemon --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "7w ago",
+      "lastModified": "1d ago",
+      "framework": "DISA STIG",
+      "cisSection": "3.1"
+    },
+    {
+      "id": "stig-mock-nfs-export-31",
+      "lineageId": "stig-mock-nfs-export-31",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-05-05",
+      "srgIds": [
+        "SRG-OS-0237942"
+      ],
+      "cciIds": [
+        "CCI-001405"
+      ],
+      "name": "stig-nfs-export",
+      "category": "security",
+      "controlFamily": "IA",
+      "description": "Anduril NixOS STIG: enforce NFS export baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.nfs_export.enabled == true",
+          "message": "NFS export must be configured per STIG V-268293"
+        }
+      ],
+      "rationale": "V-268293 (NFS export). SRG-OS-0237942.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-nfs-export --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "8w ago",
+      "lastModified": "2d ago",
+      "framework": "DISA STIG",
+      "cisSection": "3.2"
+    },
+    {
+      "id": "stig-mock-samba-share-32",
+      "lineageId": "stig-mock-samba-share-32",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-06-06",
+      "srgIds": [
+        "SRG-OS-0923885"
+      ],
+      "cciIds": [
+        "CCI-006172"
+      ],
+      "name": "stig-samba-share",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce Samba share baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.samba_share.enabled == true",
+          "message": "Samba share must be configured per STIG V-268296"
+        }
+      ],
+      "rationale": "V-268296 (Samba share). SRG-OS-0923885.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-samba-share --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "9w ago",
+      "lastModified": "3d ago",
+      "framework": "DISA STIG",
+      "cisSection": "4.1"
+    },
+    {
+      "id": "stig-mock-cron-daemon-33",
+      "lineageId": "stig-mock-cron-daemon-33",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-07-07",
+      "srgIds": [
+        "SRG-OS-0168988"
+      ],
+      "cciIds": [
+        "CCI-001226"
+      ],
+      "name": "stig-cron-daemon",
+      "category": "security",
+      "controlFamily": "IA",
+      "description": "Anduril NixOS STIG: enforce cron daemon baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.cron_daemon.enabled == true",
+          "message": "cron daemon must be configured per STIG V-268300"
+        }
+      ],
+      "rationale": "V-268300 (cron daemon). SRG-OS-0168988.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-cron-daemon --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "10w ago",
+      "lastModified": "4d ago",
+      "framework": "DISA STIG",
+      "cisSection": "4.2"
+    },
+    {
+      "id": "stig-mock-mail-relay-34",
+      "lineageId": "stig-mock-mail-relay-34",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-08-08",
+      "srgIds": [
+        "SRG-OS-0359327"
+      ],
+      "cciIds": [
+        "CCI-005862"
+      ],
+      "name": "stig-mail-relay",
+      "category": "security",
+      "controlFamily": "AC",
+      "description": "Anduril NixOS STIG: enforce mail relay baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.mail_relay.enabled == true",
+          "message": "mail relay must be configured per STIG V-268304"
+        }
+      ],
+      "rationale": "V-268304 (mail relay). SRG-OS-0359327.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-mail-relay --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "11w ago",
+      "lastModified": "5d ago",
+      "framework": "DISA STIG",
+      "cisSection": "5.1"
+    },
+    {
+      "id": "stig-mock-x11-forwarding-35",
+      "lineageId": "stig-mock-x11-forwarding-35",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-09-09",
+      "srgIds": [
+        "SRG-OS-0753475"
+      ],
+      "cciIds": [
+        "CCI-008501"
+      ],
+      "name": "stig-x11-forwarding",
+      "category": "security",
+      "controlFamily": "AU",
+      "description": "Anduril NixOS STIG: enforce X11 forwarding baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.x11_forwarding.enabled == true",
+          "message": "X11 forwarding must be configured per STIG V-268307"
+        }
+      ],
+      "rationale": "V-268307 (X11 forwarding). SRG-OS-0753475.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-x11-forwarding --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "12w ago",
+      "lastModified": "6d ago",
+      "framework": "DISA STIG",
+      "cisSection": "5.2"
+    },
+    {
+      "id": "stig-mock-vnc-service-36",
+      "lineageId": "stig-mock-vnc-service-36",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-01-10",
+      "srgIds": [
+        "SRG-OS-0226194"
+      ],
+      "cciIds": [
+        "CCI-005288"
+      ],
+      "name": "stig-vnc-service",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce VNC service baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.vnc_service.enabled == true",
+          "message": "VNC service must be configured per STIG V-268308"
+        }
+      ],
+      "rationale": "V-268308 (VNC service). SRG-OS-0226194.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-vnc-service --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "1w ago",
+      "lastModified": "7d ago",
+      "framework": "DISA STIG",
+      "cisSection": "5.3"
+    },
+    {
+      "id": "stig-mock-container-image-scanning-37",
+      "lineageId": "stig-mock-container-image-scanning-37",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-02-11",
+      "srgIds": [
+        "SRG-OS-0573173"
+      ],
+      "cciIds": [
+        "CCI-002331"
+      ],
+      "name": "stig-container-image-scanning",
+      "category": "security",
+      "controlFamily": "SC",
+      "description": "Anduril NixOS STIG: enforce container image scanning baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.container_image_scanning.enabled == true",
+          "message": "container image scanning must be configured per STIG V-268311"
+        }
+      ],
+      "rationale": "V-268311 (container image scanning). SRG-OS-0573173.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-container-image-scanning --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "2w ago",
+      "lastModified": "8d ago",
+      "framework": "DISA STIG",
+      "cisSection": "6.1"
+    },
+    {
+      "id": "stig-mock-secrets-storage-38",
+      "lineageId": "stig-mock-secrets-storage-38",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-03-12",
+      "srgIds": [
+        "SRG-OS-0403996"
+      ],
+      "cciIds": [
+        "CCI-009594"
+      ],
+      "name": "stig-secrets-storage",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce secrets storage baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.secrets_storage.enabled == true",
+          "message": "secrets storage must be configured per STIG V-268316"
+        }
+      ],
+      "rationale": "V-268316 (secrets storage). SRG-OS-0403996.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-secrets-storage --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "3w ago",
+      "lastModified": "9d ago",
+      "framework": "DISA STIG",
+      "cisSection": "1.1"
+    },
+    {
+      "id": "stig-mock-key-rotation-39",
+      "lineageId": "stig-mock-key-rotation-39",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-13",
+      "srgIds": [
+        "SRG-OS-0608193"
+      ],
+      "cciIds": [
+        "CCI-007923"
+      ],
+      "name": "stig-key-rotation",
+      "category": "security",
+      "controlFamily": "IA",
+      "description": "Anduril NixOS STIG: enforce key rotation baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.key_rotation.enabled == true",
+          "message": "key rotation must be configured per STIG V-268318"
+        }
+      ],
+      "rationale": "V-268318 (key rotation). SRG-OS-0608193.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-key-rotation --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "4w ago",
+      "lastModified": "10d ago",
+      "framework": "DISA STIG",
+      "cisSection": "1.2"
+    },
+    {
+      "id": "stig-mock-certificate-validation-40",
+      "lineageId": "stig-mock-certificate-validation-40",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-05-14",
+      "srgIds": [
+        "SRG-OS-0275270"
+      ],
+      "cciIds": [
+        "CCI-007760"
+      ],
+      "name": "stig-certificate-validation",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce certificate validation baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.certificate_validation.enabled == true",
+          "message": "certificate validation must be configured per STIG V-268321"
+        }
+      ],
+      "rationale": "V-268321 (certificate validation). SRG-OS-0275270.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-certificate-validation --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "5w ago",
+      "lastModified": "11d ago",
+      "framework": "DISA STIG",
+      "cisSection": "1.3"
+    },
+    {
+      "id": "stig-mock-kernel-module-loading-41",
+      "lineageId": "stig-mock-kernel-module-loading-41",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-06-15",
+      "srgIds": [
+        "SRG-OS-0177591"
+      ],
+      "cciIds": [
+        "CCI-006211"
+      ],
+      "name": "stig-kernel-module-loading",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce kernel module loading baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.kernel_module_loading.enabled == true",
+          "message": "kernel module loading must be configured per STIG V-268324"
+        }
+      ],
+      "rationale": "V-268324 (kernel module loading). SRG-OS-0177591.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-kernel-module-loading --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "6w ago",
+      "lastModified": "12d ago",
+      "framework": "DISA STIG",
+      "cisSection": "2.1"
+    },
+    {
+      "id": "stig-mock-aslr-enforcement-42",
+      "lineageId": "stig-mock-aslr-enforcement-42",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-07-16",
+      "srgIds": [
+        "SRG-OS-0928839"
+      ],
+      "cciIds": [
+        "CCI-005743"
+      ],
+      "name": "stig-aslr-enforcement",
+      "category": "security",
+      "controlFamily": "SI",
+      "description": "Anduril NixOS STIG: enforce ASLR enforcement baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.aslr_enforcement.enabled == true",
+          "message": "ASLR enforcement must be configured per STIG V-268326"
+        }
+      ],
+      "rationale": "V-268326 (ASLR enforcement). SRG-OS-0928839.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-aslr-enforcement --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "7w ago",
+      "lastModified": "13d ago",
+      "framework": "DISA STIG",
+      "cisSection": "2.2"
+    },
+    {
+      "id": "stig-mock-stack-protector-43",
+      "lineageId": "stig-mock-stack-protector-43",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-08-17",
+      "srgIds": [
+        "SRG-OS-0304097"
+      ],
+      "cciIds": [
+        "CCI-002240"
+      ],
+      "name": "stig-stack-protector",
+      "category": "security",
+      "controlFamily": "SI",
+      "description": "Anduril NixOS STIG: enforce stack protector baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.stack_protector.enabled == true",
+          "message": "stack protector must be configured per STIG V-268329"
+        }
+      ],
+      "rationale": "V-268329 (stack protector). SRG-OS-0304097.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-stack-protector --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "8w ago",
+      "lastModified": "14d ago",
+      "framework": "DISA STIG",
+      "cisSection": "3.1"
+    },
+    {
+      "id": "stig-mock-ptrace-scope-44",
+      "lineageId": "stig-mock-ptrace-scope-44",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-09-18",
+      "srgIds": [
+        "SRG-OS-0394213"
+      ],
+      "cciIds": [
+        "CCI-001069"
+      ],
+      "name": "stig-ptrace-scope",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce ptrace scope baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.ptrace_scope.enabled == true",
+          "message": "ptrace scope must be configured per STIG V-268332"
+        }
+      ],
+      "rationale": "V-268332 (ptrace scope). SRG-OS-0394213.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-ptrace-scope --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "9w ago",
+      "lastModified": "15d ago",
+      "framework": "DISA STIG",
+      "cisSection": "3.2"
+    },
+    {
+      "id": "stig-mock-coredump-storage-45",
+      "lineageId": "stig-mock-coredump-storage-45",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-01-19",
+      "srgIds": [
+        "SRG-OS-0960777"
+      ],
+      "cciIds": [
+        "CCI-008374"
+      ],
+      "name": "stig-coredump-storage",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce coredump storage baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.coredump_storage.enabled == true",
+          "message": "coredump storage must be configured per STIG V-268335"
+        }
+      ],
+      "rationale": "V-268335 (coredump storage). SRG-OS-0960777.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-coredump-storage --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "10w ago",
+      "lastModified": "16d ago",
+      "framework": "DISA STIG",
+      "cisSection": "4.1"
+    },
+    {
+      "id": "stig-mock-swap-encryption-46",
+      "lineageId": "stig-mock-swap-encryption-46",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-02-20",
+      "srgIds": [
+        "SRG-OS-0202461"
+      ],
+      "cciIds": [
+        "CCI-004777"
+      ],
+      "name": "stig-swap-encryption",
+      "category": "security",
+      "controlFamily": "AC",
+      "description": "Anduril NixOS STIG: enforce swap encryption baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.swap_encryption.enabled == true",
+          "message": "swap encryption must be configured per STIG V-268339"
+        }
+      ],
+      "rationale": "V-268339 (swap encryption). SRG-OS-0202461.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-swap-encryption --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "11w ago",
+      "lastModified": "17d ago",
+      "framework": "DISA STIG",
+      "cisSection": "4.2"
+    },
+    {
+      "id": "stig-mock-tmp-mount-options-47",
+      "lineageId": "stig-mock-tmp-mount-options-47",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-03-21",
+      "srgIds": [
+        "SRG-OS-0932439"
+      ],
+      "cciIds": [
+        "CCI-002082"
+      ],
+      "name": "stig-tmp-mount-options",
+      "category": "security",
+      "controlFamily": "AU",
+      "description": "Anduril NixOS STIG: enforce tmp mount options baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.tmp_mount_options.enabled == true",
+          "message": "tmp mount options must be configured per STIG V-268341"
+        }
+      ],
+      "rationale": "V-268341 (tmp mount options). SRG-OS-0932439.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-tmp-mount-options --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "12w ago",
+      "lastModified": "18d ago",
+      "framework": "DISA STIG",
+      "cisSection": "5.1"
+    },
+    {
+      "id": "stig-mock-home-directory-perms-48",
+      "lineageId": "stig-mock-home-directory-perms-48",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-22",
+      "srgIds": [
+        "SRG-OS-0843859"
+      ],
+      "cciIds": [
+        "CCI-007354"
+      ],
+      "name": "stig-home-directory-perms",
+      "category": "security",
+      "controlFamily": "SI",
+      "description": "Anduril NixOS STIG: enforce home directory perms baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.home_directory_perms.enabled == true",
+          "message": "home directory perms must be configured per STIG V-268344"
+        }
+      ],
+      "rationale": "V-268344 (home directory perms). SRG-OS-0843859.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-home-directory-perms --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "1w ago",
+      "lastModified": "19d ago",
+      "framework": "DISA STIG",
+      "cisSection": "5.2"
+    },
+    {
+      "id": "stig-mock-shell-history-49",
+      "lineageId": "stig-mock-shell-history-49",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-05-23",
+      "srgIds": [
+        "SRG-OS-0699601"
+      ],
+      "cciIds": [
+        "CCI-005791"
+      ],
+      "name": "stig-shell-history",
+      "category": "security",
+      "controlFamily": "SI",
+      "description": "Anduril NixOS STIG: enforce shell history baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.shell_history.enabled == true",
+          "message": "shell history must be configured per STIG V-268349"
+        }
+      ],
+      "rationale": "V-268349 (shell history). SRG-OS-0699601.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-shell-history --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "2w ago",
+      "lastModified": "20d ago",
+      "framework": "DISA STIG",
+      "cisSection": "5.3"
+    },
+    {
+      "id": "stig-mock-login-banner-50",
+      "lineageId": "stig-mock-login-banner-50",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-06-24",
+      "srgIds": [
+        "SRG-OS-0367629"
+      ],
+      "cciIds": [
+        "CCI-008036"
+      ],
+      "name": "stig-login-banner",
+      "category": "security",
+      "controlFamily": "MP",
+      "description": "Anduril NixOS STIG: enforce login banner baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": false,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.login_banner.enabled == true",
+          "message": "login banner must be configured per STIG V-268351"
+        }
+      ],
+      "rationale": "V-268351 (login banner). SRG-OS-0367629.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-login-banner --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "3w ago",
+      "lastModified": "21d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-motd-content-51",
+      "lineageId": "stig-mock-motd-content-51",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-07-25",
+      "srgIds": [
+        "SRG-OS-0427827"
+      ],
+      "cciIds": [
+        "CCI-002120"
+      ],
+      "name": "stig-motd-content",
+      "category": "security",
+      "controlFamily": "AC",
+      "description": "Anduril NixOS STIG: enforce MOTD content baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": false,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.motd_content.enabled == true",
+          "message": "MOTD content must be configured per STIG V-268354"
+        }
+      ],
+      "rationale": "V-268354 (MOTD content). SRG-OS-0427827.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-motd-content --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "4w ago",
+      "lastModified": "22d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-idle-session-lock-52",
+      "lineageId": "stig-mock-idle-session-lock-52",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-08-26",
+      "srgIds": [
+        "SRG-OS-0244075"
+      ],
+      "cciIds": [
+        "CCI-008635"
+      ],
+      "name": "stig-idle-session-lock",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce idle session lock baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.idle_session_lock.enabled == true",
+          "message": "idle session lock must be configured per STIG V-268356"
+        }
+      ],
+      "rationale": "V-268356 (idle session lock). SRG-OS-0244075.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-idle-session-lock --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "5w ago",
+      "lastModified": "23d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-screen-lock-53",
+      "lineageId": "stig-mock-screen-lock-53",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-09-27",
+      "srgIds": [
+        "SRG-OS-0220245"
+      ],
+      "cciIds": [
+        "CCI-007461"
+      ],
+      "name": "stig-screen-lock",
+      "category": "security",
+      "controlFamily": "AU",
+      "description": "Anduril NixOS STIG: enforce screen lock baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.screen_lock.enabled == true",
+          "message": "screen lock must be configured per STIG V-268361"
+        }
+      ],
+      "rationale": "V-268361 (screen lock). SRG-OS-0220245.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-screen-lock --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "6w ago",
+      "lastModified": "24d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-ssh-daemon-54-dup2",
+      "lineageId": "stig-mock-ssh-daemon-54-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-01-01",
+      "srgIds": [
+        "SRG-OS-0784441"
+      ],
+      "cciIds": [
+        "CCI-005778"
+      ],
+      "name": "stig-ssh-daemon-v2",
+      "category": "security",
+      "controlFamily": "IA",
+      "description": "Anduril NixOS STIG: enforce SSH daemon baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": false,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.ssh_daemon.enabled == true",
+          "message": "SSH daemon must be configured per STIG V-268363"
+        }
+      ],
+      "rationale": "V-268363 (SSH daemon). SRG-OS-0784441.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-ssh-daemon --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "7w ago",
+      "lastModified": "25d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-firewall-rules-55-dup2",
+      "lineageId": "stig-mock-firewall-rules-55-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-02-02",
+      "srgIds": [
+        "SRG-OS-0566070"
+      ],
+      "cciIds": [
+        "CCI-003716"
+      ],
+      "name": "stig-firewall-rules-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce firewall rules baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.firewall_rules.enabled == true",
+          "message": "firewall rules must be configured per STIG V-268367"
+        }
+      ],
+      "rationale": "V-268367 (firewall rules). SRG-OS-0566070.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-firewall-rules --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "8w ago",
+      "lastModified": "26d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-audit-logging-56-dup2",
+      "lineageId": "stig-mock-audit-logging-56-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-03-03",
+      "srgIds": [
+        "SRG-OS-0588791"
+      ],
+      "cciIds": [
+        "CCI-004189"
+      ],
+      "name": "stig-audit-logging-v2",
+      "category": "security",
+      "controlFamily": "AC",
+      "description": "Anduril NixOS STIG: enforce audit logging baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.audit_logging.enabled == true",
+          "message": "audit logging must be configured per STIG V-268369"
+        }
+      ],
+      "rationale": "V-268369 (audit logging). SRG-OS-0588791.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-audit-logging --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "9w ago",
+      "lastModified": "27d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-account-lockout-57-dup2",
+      "lineageId": "stig-mock-account-lockout-57-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-04",
+      "srgIds": [
+        "SRG-OS-0692925"
+      ],
+      "cciIds": [
+        "CCI-001668"
+      ],
+      "name": "stig-account-lockout-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce account lockout baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.account_lockout.enabled == true",
+          "message": "account lockout must be configured per STIG V-268371"
+        }
+      ],
+      "rationale": "V-268371 (account lockout). SRG-OS-0692925.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-account-lockout --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "10w ago",
+      "lastModified": "28d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-password-complexity-58-dup2",
+      "lineageId": "stig-mock-password-complexity-58-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-05-05",
+      "srgIds": [
+        "SRG-OS-0767234"
+      ],
+      "cciIds": [
+        "CCI-008415"
+      ],
+      "name": "stig-password-complexity-v2",
+      "category": "security",
+      "controlFamily": "AU",
+      "description": "Anduril NixOS STIG: enforce password complexity baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.password_complexity.enabled == true",
+          "message": "password complexity must be configured per STIG V-268375"
+        }
+      ],
+      "rationale": "V-268375 (password complexity). SRG-OS-0767234.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-password-complexity --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "11w ago",
+      "lastModified": "29d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-kernel-hardening-59-dup2",
+      "lineageId": "stig-mock-kernel-hardening-59-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-06-06",
+      "srgIds": [
+        "SRG-OS-0405788"
+      ],
+      "cciIds": [
+        "CCI-003276"
+      ],
+      "name": "stig-kernel-hardening-v2",
+      "category": "security",
+      "controlFamily": "MP",
+      "description": "Anduril NixOS STIG: enforce kernel hardening baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.kernel_hardening.enabled == true",
+          "message": "kernel hardening must be configured per STIG V-268377"
+        }
+      ],
+      "rationale": "V-268377 (kernel hardening). SRG-OS-0405788.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-kernel-hardening --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "12w ago",
+      "lastModified": "30d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-filesystem-permissions-60-dup2",
+      "lineageId": "stig-mock-filesystem-permissions-60-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-07-07",
+      "srgIds": [
+        "SRG-OS-0954794"
+      ],
+      "cciIds": [
+        "CCI-002137"
+      ],
+      "name": "stig-filesystem-permissions-v2",
+      "category": "security",
+      "controlFamily": "SI",
+      "description": "Anduril NixOS STIG: enforce filesystem permissions baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.filesystem_permissions.enabled == true",
+          "message": "filesystem permissions must be configured per STIG V-268380"
+        }
+      ],
+      "rationale": "V-268380 (filesystem permissions). SRG-OS-0954794.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-filesystem-permissions --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "1w ago",
+      "lastModified": "1d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-usb-device-control-61-dup2",
+      "lineageId": "stig-mock-usb-device-control-61-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-08-08",
+      "srgIds": [
+        "SRG-OS-0870373"
+      ],
+      "cciIds": [
+        "CCI-005912"
+      ],
+      "name": "stig-usb-device-control-v2",
+      "category": "security",
+      "controlFamily": "MP",
+      "description": "Anduril NixOS STIG: enforce USB device control baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.usb_device_control.enabled == true",
+          "message": "USB device control must be configured per STIG V-268384"
+        }
+      ],
+      "rationale": "V-268384 (USB device control). SRG-OS-0870373.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-usb-device-control --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "2w ago",
+      "lastModified": "2d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-tls-cipher-suite-62-dup2",
+      "lineageId": "stig-mock-tls-cipher-suite-62-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-09-09",
+      "srgIds": [
+        "SRG-OS-0915252"
+      ],
+      "cciIds": [
+        "CCI-002940"
+      ],
+      "name": "stig-tls-cipher-suite-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce TLS cipher suite baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.tls_cipher_suite.enabled == true",
+          "message": "TLS cipher suite must be configured per STIG V-268388"
+        }
+      ],
+      "rationale": "V-268388 (TLS cipher suite). SRG-OS-0915252.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-tls-cipher-suite --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "3w ago",
+      "lastModified": "3d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-dns-resolver-63-dup2",
+      "lineageId": "stig-mock-dns-resolver-63-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-01-10",
+      "srgIds": [
+        "SRG-OS-0473756"
+      ],
+      "cciIds": [
+        "CCI-009276"
+      ],
+      "name": "stig-dns-resolver-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce DNS resolver baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.dns_resolver.enabled == true",
+          "message": "DNS resolver must be configured per STIG V-268390"
+        }
+      ],
+      "rationale": "V-268390 (DNS resolver). SRG-OS-0473756.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-dns-resolver --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "4w ago",
+      "lastModified": "4d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-ntp-sync-64-dup2",
+      "lineageId": "stig-mock-ntp-sync-64-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-02-11",
+      "srgIds": [
+        "SRG-OS-0604263"
+      ],
+      "cciIds": [
+        "CCI-008211"
+      ],
+      "name": "stig-ntp-sync-v2",
+      "category": "security",
+      "controlFamily": "MP",
+      "description": "Anduril NixOS STIG: enforce NTP sync baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.ntp_sync.enabled == true",
+          "message": "NTP sync must be configured per STIG V-268394"
+        }
+      ],
+      "rationale": "V-268394 (NTP sync). SRG-OS-0604263.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-ntp-sync --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "5w ago",
+      "lastModified": "5d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-syslog-forwarding-65-dup2",
+      "lineageId": "stig-mock-syslog-forwarding-65-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-03-12",
+      "srgIds": [
+        "SRG-OS-0570059"
+      ],
+      "cciIds": [
+        "CCI-001546"
+      ],
+      "name": "stig-syslog-forwarding-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce syslog forwarding baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.syslog_forwarding.enabled == true",
+          "message": "syslog forwarding must be configured per STIG V-268396"
+        }
+      ],
+      "rationale": "V-268396 (syslog forwarding). SRG-OS-0570059.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-syslog-forwarding --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "6w ago",
+      "lastModified": "6d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-sudo-policy-66-dup2",
+      "lineageId": "stig-mock-sudo-policy-66-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-13",
+      "srgIds": [
+        "SRG-OS-0337060"
+      ],
+      "cciIds": [
+        "CCI-005532"
+      ],
+      "name": "stig-sudo-policy-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce sudo policy baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.sudo_policy.enabled == true",
+          "message": "sudo policy must be configured per STIG V-268399"
+        }
+      ],
+      "rationale": "V-268399 (sudo policy). SRG-OS-0337060.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-sudo-policy --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "7w ago",
+      "lastModified": "7d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-pam-stack-67-dup2",
+      "lineageId": "stig-mock-pam-stack-67-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-05-14",
+      "srgIds": [
+        "SRG-OS-0594008"
+      ],
+      "cciIds": [
+        "CCI-006988"
+      ],
+      "name": "stig-pam-stack-v2",
+      "category": "security",
+      "controlFamily": "SI",
+      "description": "Anduril NixOS STIG: enforce PAM stack baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.pam_stack.enabled == true",
+          "message": "PAM stack must be configured per STIG V-268403"
+        }
+      ],
+      "rationale": "V-268403 (PAM stack). SRG-OS-0594008.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-pam-stack --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "8w ago",
+      "lastModified": "8d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-selinux-apparmor-profile-68-dup2",
+      "lineageId": "stig-mock-selinux-apparmor-profile-68-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-06-15",
+      "srgIds": [
+        "SRG-OS-0681063"
+      ],
+      "cciIds": [
+        "CCI-002712"
+      ],
+      "name": "stig-selinux-apparmor-profile-v2",
+      "category": "security",
+      "controlFamily": "MP",
+      "description": "Anduril NixOS STIG: enforce SELinux/AppArmor profile baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.selinux_apparmor_profile.enabled == true",
+          "message": "SELinux/AppArmor profile must be configured per STIG V-268404"
+        }
+      ],
+      "rationale": "V-268404 (SELinux/AppArmor profile). SRG-OS-0681063.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-selinux-apparmor-profile --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "9w ago",
+      "lastModified": "9d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-boot-loader-integrity-69-dup2",
+      "lineageId": "stig-mock-boot-loader-integrity-69-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-07-16",
+      "srgIds": [
+        "SRG-OS-0500170"
+      ],
+      "cciIds": [
+        "CCI-005082"
+      ],
+      "name": "stig-boot-loader-integrity-v2",
+      "category": "security",
+      "controlFamily": "AU",
+      "description": "Anduril NixOS STIG: enforce boot loader integrity baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.boot_loader_integrity.enabled == true",
+          "message": "boot loader integrity must be configured per STIG V-268409"
+        }
+      ],
+      "rationale": "V-268409 (boot loader integrity). SRG-OS-0500170.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-boot-loader-integrity --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "10w ago",
+      "lastModified": "10d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-disk-encryption-70-dup2",
+      "lineageId": "stig-mock-disk-encryption-70-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-08-17",
+      "srgIds": [
+        "SRG-OS-0568706"
+      ],
+      "cciIds": [
+        "CCI-003364"
+      ],
+      "name": "stig-disk-encryption-v2",
+      "category": "security",
+      "controlFamily": "SI",
+      "description": "Anduril NixOS STIG: enforce disk encryption baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.disk_encryption.enabled == true",
+          "message": "disk encryption must be configured per STIG V-268410"
+        }
+      ],
+      "rationale": "V-268410 (disk encryption). SRG-OS-0568706.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-disk-encryption --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "11w ago",
+      "lastModified": "11d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-service-isolation-71-dup2",
+      "lineageId": "stig-mock-service-isolation-71-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-09-18",
+      "srgIds": [
+        "SRG-OS-0360690"
+      ],
+      "cciIds": [
+        "CCI-005886"
+      ],
+      "name": "stig-service-isolation-v2",
+      "category": "security",
+      "controlFamily": "AC",
+      "description": "Anduril NixOS STIG: enforce service isolation baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.service_isolation.enabled == true",
+          "message": "service isolation must be configured per STIG V-268414"
+        }
+      ],
+      "rationale": "V-268414 (service isolation). SRG-OS-0360690.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-service-isolation --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "12w ago",
+      "lastModified": "12d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-network-segmentation-72-dup2",
+      "lineageId": "stig-mock-network-segmentation-72-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-01-19",
+      "srgIds": [
+        "SRG-OS-0900781"
+      ],
+      "cciIds": [
+        "CCI-004647"
+      ],
+      "name": "stig-network-segmentation-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce network segmentation baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.network_segmentation.enabled == true",
+          "message": "network segmentation must be configured per STIG V-268418"
+        }
+      ],
+      "rationale": "V-268418 (network segmentation). SRG-OS-0900781.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-network-segmentation --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "1w ago",
+      "lastModified": "13d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-container-runtime-73-dup2",
+      "lineageId": "stig-mock-container-runtime-73-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-02-20",
+      "srgIds": [
+        "SRG-OS-0229336"
+      ],
+      "cciIds": [
+        "CCI-006198"
+      ],
+      "name": "stig-container-runtime-v2",
+      "category": "security",
+      "controlFamily": "SC",
+      "description": "Anduril NixOS STIG: enforce container runtime baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.container_runtime.enabled == true",
+          "message": "container runtime must be configured per STIG V-268419"
+        }
+      ],
+      "rationale": "V-268419 (container runtime). SRG-OS-0229336.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-container-runtime --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "2w ago",
+      "lastModified": "14d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-package-signing-74-dup2",
+      "lineageId": "stig-mock-package-signing-74-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-03-21",
+      "srgIds": [
+        "SRG-OS-0885635"
+      ],
+      "cciIds": [
+        "CCI-001581"
+      ],
+      "name": "stig-package-signing-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce package signing baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.package_signing.enabled == true",
+          "message": "package signing must be configured per STIG V-268424"
+        }
+      ],
+      "rationale": "V-268424 (package signing). SRG-OS-0885635.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-package-signing --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "3w ago",
+      "lastModified": "15d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-update-cadence-75-dup2",
+      "lineageId": "stig-mock-update-cadence-75-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-22",
+      "srgIds": [
+        "SRG-OS-0454662"
+      ],
+      "cciIds": [
+        "CCI-007742"
+      ],
+      "name": "stig-update-cadence-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce update cadence baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.update_cadence.enabled == true",
+          "message": "update cadence must be configured per STIG V-268426"
+        }
+      ],
+      "rationale": "V-268426 (update cadence). SRG-OS-0454662.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-update-cadence --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "4w ago",
+      "lastModified": "16d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-session-timeout-76-dup2",
+      "lineageId": "stig-mock-session-timeout-76-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-05-23",
+      "srgIds": [
+        "SRG-OS-0234513"
+      ],
+      "cciIds": [
+        "CCI-007061"
+      ],
+      "name": "stig-session-timeout-v2",
+      "category": "security",
+      "controlFamily": "AC",
+      "description": "Anduril NixOS STIG: enforce session timeout baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.session_timeout.enabled == true",
+          "message": "session timeout must be configured per STIG V-268430"
+        }
+      ],
+      "rationale": "V-268430 (session timeout). SRG-OS-0234513.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-session-timeout --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "5w ago",
+      "lastModified": "17d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-banner-text-77-dup2",
+      "lineageId": "stig-mock-banner-text-77-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-06-24",
+      "srgIds": [
+        "SRG-OS-0600109"
+      ],
+      "cciIds": [
+        "CCI-006424"
+      ],
+      "name": "stig-banner-text-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce banner text baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.banner_text.enabled == true",
+          "message": "banner text must be configured per STIG V-268431"
+        }
+      ],
+      "rationale": "V-268431 (banner text). SRG-OS-0600109.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-banner-text --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "6w ago",
+      "lastModified": "18d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-log-rotation-78-dup2",
+      "lineageId": "stig-mock-log-rotation-78-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-07-25",
+      "srgIds": [
+        "SRG-OS-0308358"
+      ],
+      "cciIds": [
+        "CCI-004477"
+      ],
+      "name": "stig-log-rotation-v2",
+      "category": "security",
+      "controlFamily": "SC",
+      "description": "Anduril NixOS STIG: enforce log rotation baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.log_rotation.enabled == true",
+          "message": "log rotation must be configured per STIG V-268436"
+        }
+      ],
+      "rationale": "V-268436 (log rotation). SRG-OS-0308358.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-log-rotation --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "7w ago",
+      "lastModified": "19d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-core-dump-handling-79-dup2",
+      "lineageId": "stig-mock-core-dump-handling-79-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-08-26",
+      "srgIds": [
+        "SRG-OS-0303847"
+      ],
+      "cciIds": [
+        "CCI-003408"
+      ],
+      "name": "stig-core-dump-handling-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce core dump handling baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.core_dump_handling.enabled == true",
+          "message": "core dump handling must be configured per STIG V-268438"
+        }
+      ],
+      "rationale": "V-268438 (core dump handling). SRG-OS-0303847.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-core-dump-handling --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "8w ago",
+      "lastModified": "20d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-ipv6-stack-80-dup2",
+      "lineageId": "stig-mock-ipv6-stack-80-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-09-27",
+      "srgIds": [
+        "SRG-OS-0686408"
+      ],
+      "cciIds": [
+        "CCI-008558"
+      ],
+      "name": "stig-ipv6-stack-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce IPv6 stack baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.ipv6_stack.enabled == true",
+          "message": "IPv6 stack must be configured per STIG V-268442"
+        }
+      ],
+      "rationale": "V-268442 (IPv6 stack). SRG-OS-0686408.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-ipv6-stack --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "9w ago",
+      "lastModified": "21d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-usb-storage-81-dup2",
+      "lineageId": "stig-mock-usb-storage-81-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-01-01",
+      "srgIds": [
+        "SRG-OS-0686183"
+      ],
+      "cciIds": [
+        "CCI-005523"
+      ],
+      "name": "stig-usb-storage-v2",
+      "category": "security",
+      "controlFamily": "AU",
+      "description": "Anduril NixOS STIG: enforce USB storage baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": false,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.usb_storage.enabled == true",
+          "message": "USB storage must be configured per STIG V-268444"
+        }
+      ],
+      "rationale": "V-268444 (USB storage). SRG-OS-0686183.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-usb-storage --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "10w ago",
+      "lastModified": "22d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-bluetooth-radio-82-dup2",
+      "lineageId": "stig-mock-bluetooth-radio-82-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-02-02",
+      "srgIds": [
+        "SRG-OS-0901860"
+      ],
+      "cciIds": [
+        "CCI-002859"
+      ],
+      "name": "stig-bluetooth-radio-v2",
+      "category": "security",
+      "controlFamily": "IA",
+      "description": "Anduril NixOS STIG: enforce Bluetooth radio baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.bluetooth_radio.enabled == true",
+          "message": "Bluetooth radio must be configured per STIG V-268446"
+        }
+      ],
+      "rationale": "V-268446 (Bluetooth radio). SRG-OS-0901860.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-bluetooth-radio --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "11w ago",
+      "lastModified": "23d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-wireless-interface-83-dup2",
+      "lineageId": "stig-mock-wireless-interface-83-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-03-03",
+      "srgIds": [
+        "SRG-OS-0187333"
+      ],
+      "cciIds": [
+        "CCI-007289"
+      ],
+      "name": "stig-wireless-interface-v2",
+      "category": "security",
+      "controlFamily": "SC",
+      "description": "Anduril NixOS STIG: enforce wireless interface baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": false,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.wireless_interface.enabled == true",
+          "message": "wireless interface must be configured per STIG V-268449"
+        }
+      ],
+      "rationale": "V-268449 (wireless interface). SRG-OS-0187333.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-wireless-interface --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "12w ago",
+      "lastModified": "24d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-snmp-daemon-84-dup2",
+      "lineageId": "stig-mock-snmp-daemon-84-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-04",
+      "srgIds": [
+        "SRG-OS-0664954"
+      ],
+      "cciIds": [
+        "CCI-006003"
+      ],
+      "name": "stig-snmp-daemon-v2",
+      "category": "security",
+      "controlFamily": "MP",
+      "description": "Anduril NixOS STIG: enforce SNMP daemon baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.snmp_daemon.enabled == true",
+          "message": "SNMP daemon must be configured per STIG V-268452"
+        }
+      ],
+      "rationale": "V-268452 (SNMP daemon). SRG-OS-0664954.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-snmp-daemon --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "1w ago",
+      "lastModified": "25d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-nfs-export-85-dup2",
+      "lineageId": "stig-mock-nfs-export-85-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-05-05",
+      "srgIds": [
+        "SRG-OS-0993379"
+      ],
+      "cciIds": [
+        "CCI-007551"
+      ],
+      "name": "stig-nfs-export-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce NFS export baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.nfs_export.enabled == true",
+          "message": "NFS export must be configured per STIG V-268457"
+        }
+      ],
+      "rationale": "V-268457 (NFS export). SRG-OS-0993379.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-nfs-export --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "2w ago",
+      "lastModified": "26d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-samba-share-86-dup2",
+      "lineageId": "stig-mock-samba-share-86-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-06-06",
+      "srgIds": [
+        "SRG-OS-0668764"
+      ],
+      "cciIds": [
+        "CCI-003591"
+      ],
+      "name": "stig-samba-share-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce Samba share baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.samba_share.enabled == true",
+          "message": "Samba share must be configured per STIG V-268460"
+        }
+      ],
+      "rationale": "V-268460 (Samba share). SRG-OS-0668764.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-samba-share --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "3w ago",
+      "lastModified": "27d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-cron-daemon-87-dup2",
+      "lineageId": "stig-mock-cron-daemon-87-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-07-07",
+      "srgIds": [
+        "SRG-OS-0583227"
+      ],
+      "cciIds": [
+        "CCI-003502"
+      ],
+      "name": "stig-cron-daemon-v2",
+      "category": "security",
+      "controlFamily": "SI",
+      "description": "Anduril NixOS STIG: enforce cron daemon baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.cron_daemon.enabled == true",
+          "message": "cron daemon must be configured per STIG V-268463"
+        }
+      ],
+      "rationale": "V-268463 (cron daemon). SRG-OS-0583227.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-cron-daemon --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "4w ago",
+      "lastModified": "28d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-mail-relay-88-dup2",
+      "lineageId": "stig-mock-mail-relay-88-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-08-08",
+      "srgIds": [
+        "SRG-OS-0448017"
+      ],
+      "cciIds": [
+        "CCI-002412"
+      ],
+      "name": "stig-mail-relay-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce mail relay baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.mail_relay.enabled == true",
+          "message": "mail relay must be configured per STIG V-268464"
+        }
+      ],
+      "rationale": "V-268464 (mail relay). SRG-OS-0448017.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-mail-relay --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "5w ago",
+      "lastModified": "29d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-x11-forwarding-89-dup2",
+      "lineageId": "stig-mock-x11-forwarding-89-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-09-09",
+      "srgIds": [
+        "SRG-OS-0304365"
+      ],
+      "cciIds": [
+        "CCI-001612"
+      ],
+      "name": "stig-x11-forwarding-v2",
+      "category": "security",
+      "controlFamily": "MP",
+      "description": "Anduril NixOS STIG: enforce X11 forwarding baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.x11_forwarding.enabled == true",
+          "message": "X11 forwarding must be configured per STIG V-268468"
+        }
+      ],
+      "rationale": "V-268468 (X11 forwarding). SRG-OS-0304365.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-x11-forwarding --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "6w ago",
+      "lastModified": "30d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-vnc-service-90-dup2",
+      "lineageId": "stig-mock-vnc-service-90-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-01-10",
+      "srgIds": [
+        "SRG-OS-0336253"
+      ],
+      "cciIds": [
+        "CCI-002334"
+      ],
+      "name": "stig-vnc-service-v2",
+      "category": "security",
+      "controlFamily": "SI",
+      "description": "Anduril NixOS STIG: enforce VNC service baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.vnc_service.enabled == true",
+          "message": "VNC service must be configured per STIG V-268471"
+        }
+      ],
+      "rationale": "V-268471 (VNC service). SRG-OS-0336253.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-vnc-service --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "7w ago",
+      "lastModified": "1d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-container-image-scanning-91-dup2",
+      "lineageId": "stig-mock-container-image-scanning-91-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-02-11",
+      "srgIds": [
+        "SRG-OS-0560252"
+      ],
+      "cciIds": [
+        "CCI-001716"
+      ],
+      "name": "stig-container-image-scanning-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce container image scanning baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.container_image_scanning.enabled == true",
+          "message": "container image scanning must be configured per STIG V-268474"
+        }
+      ],
+      "rationale": "V-268474 (container image scanning). SRG-OS-0560252.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-container-image-scanning --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "8w ago",
+      "lastModified": "2d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-secrets-storage-92-dup2",
+      "lineageId": "stig-mock-secrets-storage-92-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-03-12",
+      "srgIds": [
+        "SRG-OS-0841633"
+      ],
+      "cciIds": [
+        "CCI-003038"
+      ],
+      "name": "stig-secrets-storage-v2",
+      "category": "security",
+      "controlFamily": "IA",
+      "description": "Anduril NixOS STIG: enforce secrets storage baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.secrets_storage.enabled == true",
+          "message": "secrets storage must be configured per STIG V-268477"
+        }
+      ],
+      "rationale": "V-268477 (secrets storage). SRG-OS-0841633.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-secrets-storage --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "9w ago",
+      "lastModified": "3d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-key-rotation-93-dup2",
+      "lineageId": "stig-mock-key-rotation-93-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-13",
+      "srgIds": [
+        "SRG-OS-0567135"
+      ],
+      "cciIds": [
+        "CCI-007295"
+      ],
+      "name": "stig-key-rotation-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce key rotation baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.key_rotation.enabled == true",
+          "message": "key rotation must be configured per STIG V-268480"
+        }
+      ],
+      "rationale": "V-268480 (key rotation). SRG-OS-0567135.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-key-rotation --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "10w ago",
+      "lastModified": "4d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-certificate-validation-94-dup2",
+      "lineageId": "stig-mock-certificate-validation-94-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-05-14",
+      "srgIds": [
+        "SRG-OS-0636723"
+      ],
+      "cciIds": [
+        "CCI-007466"
+      ],
+      "name": "stig-certificate-validation-v2",
+      "category": "security",
+      "controlFamily": "SI",
+      "description": "Anduril NixOS STIG: enforce certificate validation baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.certificate_validation.enabled == true",
+          "message": "certificate validation must be configured per STIG V-268482"
+        }
+      ],
+      "rationale": "V-268482 (certificate validation). SRG-OS-0636723.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-certificate-validation --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "11w ago",
+      "lastModified": "5d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-kernel-module-loading-95-dup2",
+      "lineageId": "stig-mock-kernel-module-loading-95-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-06-15",
+      "srgIds": [
+        "SRG-OS-0613106"
+      ],
+      "cciIds": [
+        "CCI-004692"
+      ],
+      "name": "stig-kernel-module-loading-v2",
+      "category": "security",
+      "controlFamily": "IA",
+      "description": "Anduril NixOS STIG: enforce kernel module loading baseline configuration.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.kernel_module_loading.enabled == true",
+          "message": "kernel module loading must be configured per STIG V-268486"
+        }
+      ],
+      "rationale": "V-268486 (kernel module loading). SRG-OS-0613106.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-kernel-module-loading --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "12w ago",
+      "lastModified": "6d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-aslr-enforcement-96-dup2",
+      "lineageId": "stig-mock-aslr-enforcement-96-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-07-16",
+      "srgIds": [
+        "SRG-OS-0432541"
+      ],
+      "cciIds": [
+        "CCI-008635"
+      ],
+      "name": "stig-aslr-enforcement-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce ASLR enforcement baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.aslr_enforcement.enabled == true",
+          "message": "ASLR enforcement must be configured per STIG V-268488"
+        }
+      ],
+      "rationale": "V-268488 (ASLR enforcement). SRG-OS-0432541.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-aslr-enforcement --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "1w ago",
+      "lastModified": "7d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-stack-protector-97-dup2",
+      "lineageId": "stig-mock-stack-protector-97-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-08-17",
+      "srgIds": [
+        "SRG-OS-0927235"
+      ],
+      "cciIds": [
+        "CCI-004805"
+      ],
+      "name": "stig-stack-protector-v2",
+      "category": "security",
+      "controlFamily": "AU",
+      "description": "Anduril NixOS STIG: enforce stack protector baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.stack_protector.enabled == true",
+          "message": "stack protector must be configured per STIG V-268491"
+        }
+      ],
+      "rationale": "V-268491 (stack protector). SRG-OS-0927235.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-stack-protector --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "2w ago",
+      "lastModified": "8d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-ptrace-scope-98-dup2",
+      "lineageId": "stig-mock-ptrace-scope-98-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-09-18",
+      "srgIds": [
+        "SRG-OS-0882206"
+      ],
+      "cciIds": [
+        "CCI-007199"
+      ],
+      "name": "stig-ptrace-scope-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce ptrace scope baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.ptrace_scope.enabled == true",
+          "message": "ptrace scope must be configured per STIG V-268496"
+        }
+      ],
+      "rationale": "V-268496 (ptrace scope). SRG-OS-0882206.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-ptrace-scope --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "3w ago",
+      "lastModified": "9d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-coredump-storage-99-dup2",
+      "lineageId": "stig-mock-coredump-storage-99-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-01-19",
+      "srgIds": [
+        "SRG-OS-0941556"
+      ],
+      "cciIds": [
+        "CCI-004500"
+      ],
+      "name": "stig-coredump-storage-v2",
+      "category": "security",
+      "controlFamily": "AC",
+      "description": "Anduril NixOS STIG: enforce coredump storage baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.coredump_storage.enabled == true",
+          "message": "coredump storage must be configured per STIG V-268499"
+        }
+      ],
+      "rationale": "V-268499 (coredump storage). SRG-OS-0941556.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-coredump-storage --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "4w ago",
+      "lastModified": "10d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-swap-encryption-100-dup2",
+      "lineageId": "stig-mock-swap-encryption-100-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-02-20",
+      "srgIds": [
+        "SRG-OS-0434480"
+      ],
+      "cciIds": [
+        "CCI-005913"
+      ],
+      "name": "stig-swap-encryption-v2",
+      "category": "security",
+      "controlFamily": "IA",
+      "description": "Anduril NixOS STIG: enforce swap encryption baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.swap_encryption.enabled == true",
+          "message": "swap encryption must be configured per STIG V-268500"
+        }
+      ],
+      "rationale": "V-268500 (swap encryption). SRG-OS-0434480.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-swap-encryption --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "5w ago",
+      "lastModified": "11d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-tmp-mount-options-101-dup2",
+      "lineageId": "stig-mock-tmp-mount-options-101-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-03-21",
+      "srgIds": [
+        "SRG-OS-0703743"
+      ],
+      "cciIds": [
+        "CCI-001774"
+      ],
+      "name": "stig-tmp-mount-options-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce tmp mount options baseline configuration.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.tmp_mount_options.enabled == true",
+          "message": "tmp mount options must be configured per STIG V-268505"
+        }
+      ],
+      "rationale": "V-268505 (tmp mount options). SRG-OS-0703743.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-tmp-mount-options --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "6w ago",
+      "lastModified": "12d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-home-directory-perms-102-dup2",
+      "lineageId": "stig-mock-home-directory-perms-102-dup2",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-22",
+      "srgIds": [
+        "SRG-OS-0632530"
+      ],
+      "cciIds": [
+        "CCI-005873"
+      ],
+      "name": "stig-home-directory-perms-v2",
+      "category": "security",
+      "controlFamily": null,
+      "description": "Anduril NixOS STIG: enforce home directory perms baseline configuration.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.mock.home_directory_perms.enabled == true",
+          "message": "home directory perms must be configured per STIG V-268506"
+        }
+      ],
+      "rationale": "V-268506 (home directory perms). SRG-OS-0632530.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "check-home-directory-perms --verify",
+          "expect": "pass"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "7w ago",
+      "lastModified": "13d ago",
+      "framework": "DISA STIG"
     }
   ],
   "compliance": [
+    {
+      "id": "disa-rhel9-stig-r1",
+      "lineageId": "disa-nixos-stig",
+      "name": "Anduril NixOS STIG (v1r1)",
+      "framework": "DISA STIG",
+      "version": "NixOS v1r1",
+      "revision": 1,
+      "publicationState": "deprecated",
+      "publishedDate": "2025-11-02",
+      "digest": "sha256:a1f92c",
+      "description": "Anduril NixOS Security Technical Implementation Guide — operating system controls (superseded).",
+      "layer": "system",
+      "owner": "security-team",
+      "lastReview": "2025-11-02",
+      "policyIds": [
+        "stig-ssh",
+        "stig-auditd",
+        "stig-banner",
+        "stig-fips",
+        "cve-gated"
+      ],
+      "requiredEnvs": []
+    },
+    {
+      "id": "disa-rhel9-stig-r2",
+      "lineageId": "disa-nixos-stig",
+      "name": "Anduril NixOS STIG (v1r2 draft)",
+      "framework": "DISA STIG",
+      "version": "NixOS v1r2-draft",
+      "revision": 2,
+      "publicationState": "deprecated",
+      "publishedDate": "2025-12-20",
+      "digest": "sha256:b204e7",
+      "description": "Anduril NixOS STIG — operating system controls (superseded).",
+      "layer": "system",
+      "owner": "security-team",
+      "lastReview": "2025-12-20",
+      "policyIds": [
+        "stig-ssh",
+        "stig-auditd",
+        "stig-banner",
+        "stig-fips",
+        "cve-gated"
+      ],
+      "requiredEnvs": []
+    },
+    {
+      "id": "disa-rhel9-stig-r3",
+      "lineageId": "disa-nixos-stig",
+      "name": "Anduril NixOS STIG (v1r3-rc)",
+      "framework": "DISA STIG",
+      "version": "NixOS v1r3-rc",
+      "revision": 3,
+      "publicationState": "deprecated",
+      "publishedDate": "2026-01-15",
+      "digest": "sha256:c317f8",
+      "description": "Anduril NixOS STIG — operating system controls (superseded).",
+      "layer": "system",
+      "owner": "security-team",
+      "lastReview": "2026-01-15",
+      "policyIds": [
+        "stig-ssh",
+        "stig-auditd",
+        "stig-banner",
+        "stig-usbguard",
+        "stig-fips",
+        "cve-gated"
+      ],
+      "requiredEnvs": []
+    },
+    {
+      "id": "disa-rhel9-stig-r4",
+      "lineageId": "disa-nixos-stig",
+      "name": "Anduril NixOS STIG (v1r4-rc)",
+      "framework": "DISA STIG",
+      "version": "NixOS v1r4-rc",
+      "revision": 4,
+      "publicationState": "deprecated",
+      "publishedDate": "2026-02-28",
+      "digest": "sha256:d428a9",
+      "description": "Anduril NixOS STIG — operating system controls (superseded).",
+      "layer": "system",
+      "owner": "security-team",
+      "lastReview": "2026-02-28",
+      "policyIds": [
+        "stig-ssh",
+        "stig-auditd",
+        "stig-banner",
+        "stig-usbguard",
+        "stig-pwquality",
+        "stig-fips",
+        "cve-gated"
+      ],
+      "requiredEnvs": []
+    },
     {
       "id": "disa-rhel9-stig",
       "name": "Anduril NixOS STIG (v1r2)",
@@ -12856,18 +17301,130 @@
       "owner": "security-team",
       "lastReview": "2026-04-12",
       "policyIds": [
-        "stig-ssh",
+        "stig-sshd",
         "stig-auditd",
         "stig-banner",
+        "stig-fips",
         "stig-usbguard",
         "stig-pwquality",
-        "stig-fips",
+        "stig-pwquality-r1",
+        "stig-pwquality-r2",
+        "stig-pwquality-r3",
+        "stig-pwquality-r4",
+        "stig-mock-ssh-daemon-0",
+        "stig-mock-firewall-rules-1",
+        "stig-mock-audit-logging-2",
+        "stig-mock-account-lockout-3",
+        "stig-mock-password-complexity-4",
+        "stig-mock-kernel-hardening-5",
+        "stig-mock-filesystem-permissions-6",
+        "stig-mock-usb-device-control-7",
+        "stig-mock-tls-cipher-suite-8",
+        "stig-mock-dns-resolver-9",
+        "stig-mock-ntp-sync-10",
+        "stig-mock-syslog-forwarding-11",
+        "stig-mock-sudo-policy-12",
+        "stig-mock-pam-stack-13",
+        "stig-mock-selinux-apparmor-profile-14",
+        "stig-mock-boot-loader-integrity-15",
+        "stig-mock-disk-encryption-16",
+        "stig-mock-service-isolation-17",
+        "stig-mock-network-segmentation-18",
+        "stig-mock-container-runtime-19",
+        "stig-mock-package-signing-20",
+        "stig-mock-update-cadence-21",
+        "stig-mock-session-timeout-22",
+        "stig-mock-banner-text-23",
+        "stig-mock-log-rotation-24",
+        "stig-mock-core-dump-handling-25",
+        "stig-mock-ipv6-stack-26",
+        "stig-mock-usb-storage-27",
+        "stig-mock-bluetooth-radio-28",
+        "stig-mock-wireless-interface-29",
+        "stig-mock-snmp-daemon-30",
+        "stig-mock-nfs-export-31",
+        "stig-mock-samba-share-32",
+        "stig-mock-cron-daemon-33",
+        "stig-mock-mail-relay-34",
+        "stig-mock-x11-forwarding-35",
+        "stig-mock-vnc-service-36",
+        "stig-mock-container-image-scanning-37",
+        "stig-mock-secrets-storage-38",
+        "stig-mock-key-rotation-39",
+        "stig-mock-certificate-validation-40",
+        "stig-mock-kernel-module-loading-41",
+        "stig-mock-aslr-enforcement-42",
+        "stig-mock-stack-protector-43",
+        "stig-mock-ptrace-scope-44",
+        "stig-mock-coredump-storage-45",
+        "stig-mock-swap-encryption-46",
+        "stig-mock-tmp-mount-options-47",
+        "stig-mock-home-directory-perms-48",
+        "stig-mock-shell-history-49",
+        "stig-mock-login-banner-50",
+        "stig-mock-motd-content-51",
+        "stig-mock-idle-session-lock-52",
+        "stig-mock-screen-lock-53",
+        "stig-mock-ssh-daemon-54",
+        "stig-mock-firewall-rules-55",
+        "stig-mock-audit-logging-56",
+        "stig-mock-account-lockout-57",
+        "stig-mock-password-complexity-58",
+        "stig-mock-kernel-hardening-59",
+        "stig-mock-filesystem-permissions-60",
+        "stig-mock-usb-device-control-61",
+        "stig-mock-tls-cipher-suite-62",
+        "stig-mock-dns-resolver-63",
+        "stig-mock-ntp-sync-64",
+        "stig-mock-syslog-forwarding-65",
+        "stig-mock-sudo-policy-66",
+        "stig-mock-pam-stack-67",
+        "stig-mock-selinux-apparmor-profile-68",
+        "stig-mock-boot-loader-integrity-69",
+        "stig-mock-disk-encryption-70",
+        "stig-mock-service-isolation-71",
+        "stig-mock-network-segmentation-72",
+        "stig-mock-container-runtime-73",
+        "stig-mock-package-signing-74",
+        "stig-mock-update-cadence-75",
+        "stig-mock-session-timeout-76",
+        "stig-mock-banner-text-77",
+        "stig-mock-log-rotation-78",
+        "stig-mock-core-dump-handling-79",
+        "stig-mock-ipv6-stack-80",
+        "stig-mock-usb-storage-81",
+        "stig-mock-bluetooth-radio-82",
+        "stig-mock-wireless-interface-83",
+        "stig-mock-snmp-daemon-84",
+        "stig-mock-nfs-export-85",
+        "stig-mock-samba-share-86",
+        "stig-mock-cron-daemon-87",
+        "stig-mock-mail-relay-88",
+        "stig-mock-x11-forwarding-89",
+        "stig-mock-vnc-service-90",
+        "stig-mock-container-image-scanning-91",
+        "stig-mock-secrets-storage-92",
+        "stig-mock-key-rotation-93",
+        "stig-mock-certificate-validation-94",
+        "stig-mock-kernel-module-loading-95",
+        "stig-mock-aslr-enforcement-96",
+        "stig-mock-stack-protector-97",
+        "stig-mock-ptrace-scope-98",
+        "stig-mock-coredump-storage-99",
+        "stig-mock-swap-encryption-100",
+        "stig-mock-tmp-mount-options-101",
+        "stig-mock-home-directory-perms-102",
         "cve-gated"
       ],
       "requiredEnvs": [
         "production",
         "staging"
-      ]
+      ],
+      "lineageId": "disa-nixos-stig",
+      "revision": 5,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "digest": "sha256:7be410"
     },
     {
       "id": "disa-app-stig",
@@ -12879,14 +17436,65 @@
       "owner": "security-team",
       "lastReview": "2026-03-18",
       "policyIds": [
-        "tls_min_version",
-        "two-approver",
-        "cve-gated",
-        "log_remote_forward"
+        "stig-sshd",
+        "stig-auditd",
+        "stig-banner",
+        "stig-fips",
+        "stig-usbguard",
+        "stig-pwquality",
+        "stig-pwquality-r1",
+        "stig-pwquality-r2",
+        "stig-pwquality-r3",
+        "stig-pwquality-r4",
+        "stig-mock-ssh-daemon-0",
+        "stig-mock-firewall-rules-1",
+        "stig-mock-audit-logging-2",
+        "stig-mock-account-lockout-3",
+        "stig-mock-password-complexity-4",
+        "stig-mock-kernel-hardening-5",
+        "stig-mock-filesystem-permissions-6",
+        "stig-mock-usb-device-control-7",
+        "stig-mock-tls-cipher-suite-8",
+        "stig-mock-dns-resolver-9",
+        "stig-mock-ntp-sync-10",
+        "stig-mock-syslog-forwarding-11",
+        "stig-mock-sudo-policy-12",
+        "stig-mock-pam-stack-13",
+        "stig-mock-selinux-apparmor-profile-14",
+        "stig-mock-boot-loader-integrity-15",
+        "stig-mock-disk-encryption-16",
+        "stig-mock-service-isolation-17",
+        "stig-mock-network-segmentation-18",
+        "stig-mock-container-runtime-19",
+        "stig-mock-package-signing-20",
+        "stig-mock-update-cadence-21",
+        "stig-mock-session-timeout-22",
+        "stig-mock-banner-text-23",
+        "stig-mock-log-rotation-24",
+        "stig-mock-core-dump-handling-25",
+        "stig-mock-ipv6-stack-26",
+        "stig-mock-usb-storage-27",
+        "stig-mock-bluetooth-radio-28",
+        "stig-mock-wireless-interface-29",
+        "stig-mock-snmp-daemon-30",
+        "stig-mock-nfs-export-31",
+        "stig-mock-samba-share-32",
+        "stig-mock-cron-daemon-33",
+        "stig-mock-mail-relay-34",
+        "stig-mock-x11-forwarding-35",
+        "stig-mock-vnc-service-36",
+        "stig-mock-container-image-scanning-37",
+        "stig-mock-secrets-storage-38",
+        "stig-mock-key-rotation-39"
       ],
       "requiredEnvs": [
         "production"
-      ]
+      ],
+      "lineageId": "disa-app-stig",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-03-18",
+      "digest": "sha256:d40c11"
     },
     {
       "id": "nist-800-53-mod",
@@ -12898,19 +17506,43 @@
       "owner": "compliance-team",
       "lastReview": "2026-02-04",
       "policyIds": [
-        "sshd_hardening",
-        "audit_rules",
-        "banner",
-        "pam_faillock",
-        "session_lockout",
-        "time_sync",
+        "stig-sshd",
+        "stig-banner",
+        "stig-mock-usb-device-control-7",
+        "stig-mock-boot-loader-integrity-15",
+        "stig-auditd",
+        "stig-mock-ssh-daemon-0",
+        "stig-mock-account-lockout-3",
+        "stig-mock-core-dump-handling-25",
+        "stig-fips",
+        "stig-mock-container-runtime-19",
+        "stig-mock-session-timeout-22",
+        "stig-mock-container-image-scanning-37",
+        "stig-usbguard",
+        "stig-mock-filesystem-permissions-6",
+        "stig-mock-syslog-forwarding-11",
+        "stig-mock-service-isolation-17",
+        "stig-pwquality",
+        "stig-pwquality-r1",
+        "stig-pwquality-r2",
+        "stig-pwquality-r3",
+        "stig-mock-dns-resolver-9",
+        "stig-mock-aslr-enforcement-42",
+        "stig-mock-stack-protector-43",
+        "stig-mock-home-directory-perms-48",
+        "stig-mock-pam-stack-13",
         "cve-gated"
       ],
       "requiredEnvs": [
         "production",
         "staging",
         "edge"
-      ]
+      ],
+      "lineageId": "nist-800-53-mod",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-02-04",
+      "digest": "sha256:9e2a08"
     },
     {
       "id": "internal-prod-baseline",
@@ -12931,7 +17563,117 @@
       ],
       "requiredEnvs": [
         "production"
-      ]
+      ],
+      "lineageId": "internal-prod-baseline",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-05-01",
+      "digest": "sha256:5cf873"
+    },
+    {
+      "id": "cmmc-l2-baseline",
+      "lineageId": "cmmc-l2-baseline",
+      "name": "CMMC 2.0 Level 2 Baseline",
+      "framework": "CMMC 2.0",
+      "version": "2.0",
+      "description": "Practices required for CMMC Level 2 (Advanced) certification — derived from the NIST SP 800-171 control set.",
+      "layer": "system",
+      "owner": "compliance-team",
+      "lastReview": "2026-05-12",
+      "policyIds": [
+        "stig-sshd",
+        "stig-auditd",
+        "stig-banner",
+        "stig-fips",
+        "stig-usbguard",
+        "stig-pwquality",
+        "stig-pwquality-r1",
+        "stig-pwquality-r2",
+        "stig-pwquality-r3",
+        "stig-pwquality-r4",
+        "stig-mock-ssh-daemon-0",
+        "stig-mock-firewall-rules-1",
+        "stig-mock-audit-logging-2",
+        "stig-mock-account-lockout-3",
+        "stig-mock-password-complexity-4",
+        "stig-mock-kernel-hardening-5",
+        "stig-mock-filesystem-permissions-6",
+        "stig-mock-usb-device-control-7",
+        "stig-mock-tls-cipher-suite-8",
+        "stig-mock-dns-resolver-9",
+        "stig-mock-ntp-sync-10",
+        "stig-mock-syslog-forwarding-11",
+        "stig-mock-sudo-policy-12",
+        "stig-mock-pam-stack-13",
+        "stig-mock-selinux-apparmor-profile-14",
+        "stig-mock-boot-loader-integrity-15",
+        "stig-mock-disk-encryption-16",
+        "stig-mock-service-isolation-17",
+        "stig-mock-network-segmentation-18",
+        "stig-mock-container-runtime-19",
+        "stig-mock-package-signing-20",
+        "stig-mock-update-cadence-21",
+        "stig-mock-session-timeout-22",
+        "stig-mock-banner-text-23",
+        "stig-mock-log-rotation-24",
+        "cve-gated"
+      ],
+      "requiredEnvs": [
+        "production",
+        "staging"
+      ],
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-05-12",
+      "digest": "sha256:cmmc01"
+    },
+    {
+      "id": "cis-benchmark-l1",
+      "lineageId": "cis-benchmark-l1",
+      "name": "CIS Benchmark Level 1 (Server)",
+      "framework": "CIS Benchmark",
+      "version": "v2.1.0",
+      "description": "CIS Level 1 server hardening benchmark — filesystem, network, logging, and access baseline.",
+      "layer": "system",
+      "owner": "compliance-team",
+      "lastReview": "2026-04-20",
+      "policyIds": [
+        "stig-mock-core-dump-handling-25",
+        "stig-mock-ipv6-stack-26",
+        "stig-mock-usb-storage-27",
+        "stig-mock-bluetooth-radio-28",
+        "stig-mock-wireless-interface-29",
+        "stig-mock-snmp-daemon-30",
+        "stig-mock-nfs-export-31",
+        "stig-mock-samba-share-32",
+        "stig-mock-cron-daemon-33",
+        "stig-mock-mail-relay-34",
+        "stig-mock-x11-forwarding-35",
+        "stig-mock-vnc-service-36",
+        "stig-mock-container-image-scanning-37",
+        "stig-mock-secrets-storage-38",
+        "stig-mock-key-rotation-39",
+        "stig-mock-certificate-validation-40",
+        "stig-mock-kernel-module-loading-41",
+        "stig-mock-aslr-enforcement-42",
+        "stig-mock-stack-protector-43",
+        "stig-mock-ptrace-scope-44",
+        "stig-mock-coredump-storage-45",
+        "stig-mock-swap-encryption-46",
+        "stig-mock-tmp-mount-options-47",
+        "stig-mock-home-directory-perms-48",
+        "stig-mock-shell-history-49"
+      ],
+      "requiredEnvs": [
+        "production",
+        "staging",
+        "dev",
+        "edge"
+      ],
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-20",
+      "digest": "sha256:cis0001"
     }
   ],
   "caches": [

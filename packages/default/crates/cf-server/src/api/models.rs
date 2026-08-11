@@ -313,7 +313,8 @@ pub struct ScanningStatsResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanningQueueItemResponse {
-    pub scan_id: Uuid,
+    /// `None` when the system is deployed but has never been scanned.
+    pub scan_id: Option<Uuid>,
     pub hostname: String,
     pub flake_name: Option<String>,
     pub commit_hash: Option<String>,
@@ -327,9 +328,29 @@ pub struct ScanningQueueItemResponse {
     pub freshness: String,
     /// True when this is the latest scan row for its derivation.
     pub is_current: bool,
+    /// True when this derivation's commit is the latest known commit for its flake.
+    #[serde(default)]
+    pub is_latest_per_flake: bool,
     /// What triggered the scan. Not yet tracked in the schema; always `None`
     /// until a trigger source column is added (tracked as follow-up).
     pub trigger: Option<String>,
+}
+
+/// Paginated deployed configurations response (AC #37).
+///
+/// `has_more` is `true` when the returned list was capped by the server's limit
+/// and more rows exist. Callers must not present a capped result as complete.
+/// Use `next_cursor` with a subsequent request to load the next page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanningDeployedResponse {
+    pub items: Vec<ScanningQueueItemResponse>,
+    /// Total deployed configurations known to the server.
+    pub total: i64,
+    /// True when `items.len() < total`.
+    pub has_more: bool,
+    /// Opaque cursor for the next page. Pass as `?after=<value>` in the next
+    /// request. `None` when this is the last page.
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1224,6 +1245,9 @@ pub struct EnvironmentSummary {
     pub cache: Option<EnvironmentCacheSummary>,
     #[serde(default)]
     pub compliance_bundle: Option<EnvironmentComplianceSummary>,
+    /// Active versioned bundle assignments, loaded with the environment list.
+    #[serde(default)]
+    pub compliance_assignments: Vec<AssignmentResponse>,
 }
 
 /// Request payload for creating an environment.
@@ -1269,10 +1293,123 @@ pub struct UpdateEnvironmentPoliciesRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentPolicySummary {
     pub id: uuid::Uuid,
+    pub version_id: Option<uuid::Uuid>,
     pub name: String,
     pub description: Option<String>,
     pub policy_type: String,
     pub config: serde_json::Value,
+    pub enabled: bool,
+    /// Policy category from current version's compliance_metadata
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Framework from current version's compliance_metadata
+    #[serde(default)]
+    pub framework: Option<String>,
+    /// Severity from current version's compliance_metadata
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// NIST 800-53 control family
+    #[serde(default)]
+    pub control_family: Option<String>,
+    /// CMMC 2.0 level
+    #[serde(default)]
+    pub cmmc_level: Option<i32>,
+    /// CIS Benchmark section
+    #[serde(default)]
+    pub cis_section: Option<String>,
+    /// Human-readable rationale
+    #[serde(default)]
+    pub rationale: Option<String>,
+}
+
+/// A retained record that prevents permanent deletion. These are returned by
+/// deletion preflight endpoints; DELETE reruns the same checks transactionally
+/// before it removes anything.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeletionBlocker {
+    /// Stable server-side classification used by preflight and DELETE conflicts.
+    pub kind: String,
+    pub code: String,
+    pub message: String,
+    /// True when DELETE will remove this draft-only dependent record in its
+    /// transaction. False means retained history or a protected record blocks it.
+    pub removable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub version_ids: Vec<Uuid>,
+}
+
+/// Whether a policy or bundle lineage can be permanently deleted without
+/// removing audit, source, publication, or assignment history.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeletionEligibility {
+    /// True when all listed dependent records are removable in this delete transaction.
+    pub eligible: bool,
+    #[serde(default)]
+    pub blockers: Vec<DeletionBlocker>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploymentPolicyVersionSummary {
+    pub id: Uuid,
+    pub policy_id: Uuid,
+    pub version: String,
+    pub publication_state: String,
+    #[serde(default)]
+    pub trust_state: String,
+    pub semantic_digest: String,
+    pub created_at: DateTime<Utc>,
+    pub published_at: Option<DateTime<Utc>>,
+    pub derived_from_version_id: Option<Uuid>,
+    #[serde(default)]
+    pub is_current_published: bool,
+    #[serde(default)]
+    pub is_current_draft: bool,
+    /// Version payload used by policy management to inspect historical revisions.
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
+    pub config: serde_json::Value,
+    pub enabled: bool,
+    /// Normalised SRG IDs for this exact version (derived from compliance_metadata).
+    #[serde(default)]
+    pub srg_ids: Vec<String>,
+    /// Normalised CCI IDs for this exact version (derived from compliance_metadata).
+    #[serde(default)]
+    pub cci_ids: Vec<String>,
+    /// Policy category: "deployment", "pipeline", "rollout", "security"
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Framework string, e.g. "DISA STIG", "NIST 800-53", "CMMC 2.0", "CIS Benchmark", or custom
+    #[serde(default)]
+    pub framework: Option<String>,
+    /// Severity: "high", "medium", "low" — None means unrated
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// NIST 800-53 control family, e.g. "AC", "AU", "CM", "IA", "SC", "SI", "MP"
+    #[serde(default)]
+    pub control_family: Option<String>,
+    /// CMMC 2.0 maturity level: 1, 2, or 3
+    #[serde(default)]
+    pub cmmc_level: Option<i32>,
+    /// CIS Benchmark section, e.g. "5.2.3"
+    #[serde(default)]
+    pub cis_section: Option<String>,
+    /// Human-readable rationale for this control
+    #[serde(default)]
+    pub rationale: Option<String>,
+}
+
+/// An exact policy-version member of a selected bundle version.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct BundleVersionPolicyMembership {
+    pub policy_version_id: Uuid,
+    pub policy_lineage_id: Uuid,
+    pub policy_order: i32,
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
     pub enabled: bool,
 }
 
@@ -1300,6 +1437,40 @@ pub struct EnvironmentPolicyMapEntry {
 // Compliance DTOs — /api/v1/compliance/*
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// A custom, server-managed group of compliance policies. Policy references are
+/// intentionally not resolved so a scheme can retain stale policy lineages.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComplianceGroupingSchemeGroup {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub query: String,
+    #[serde(default)]
+    pub pinned_policy_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub excluded_policy_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComplianceGroupingScheme {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub groups: Vec<ComplianceGroupingSchemeGroup>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceGroupingSchemeRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub groups: Vec<ComplianceGroupingSchemeGroup>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComplianceBundleSummary {
     pub id: uuid::Uuid,
@@ -1314,6 +1485,42 @@ pub struct ComplianceBundleSummary {
     pub required_envs: Vec<ComplianceEnvironmentRef>,
     pub control_count: i64,
     pub environment_count: i64,
+    /// Active versioned bundle assignments across environment and system scopes.
+    #[serde(default)]
+    pub active_assignment_count: i64,
+    /// Exact draft bundle-version ID, or `None` if no mutable draft exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_draft_version_id: Option<uuid::Uuid>,
+    /// Exact published (accepted) bundle-version ID, or `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_published_version_id: Option<uuid::Uuid>,
+    /// Human-readable version string for the current draft.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_draft_version: Option<String>,
+    /// Human-readable version string for the current published version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_published_version: Option<String>,
+    /// Immutable revisions belonging to this bundle lineage, ordered newest first.
+    #[serde(default)]
+    pub versions: Vec<ComplianceBundleVersionSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceBundleVersionSummary {
+    pub id: uuid::Uuid,
+    pub bundle_id: uuid::Uuid,
+    pub version: String,
+    pub publication_state: String,
+    pub trust_state: String,
+    pub semantic_digest: String,
+    pub created_at: DateTime<Utc>,
+    pub published_at: Option<DateTime<Utc>>,
+    pub derived_from_version_id: Option<uuid::Uuid>,
+    pub control_count: i64,
+    #[serde(default)]
+    pub is_current_published: bool,
+    #[serde(default)]
+    pub is_current_draft: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1326,6 +1533,8 @@ pub struct ComplianceEnvironmentRef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComplianceBundleSystemsResponse {
     pub bundle_id: uuid::Uuid,
+    #[serde(default)]
+    pub bundle_version_id: Option<uuid::Uuid>,
     pub systems: Vec<ComplianceSystemRollup>,
     pub totals: ComplianceRollupTotals,
 }
@@ -1340,6 +1549,10 @@ pub struct ComplianceBundleSystemsResponse {
 pub struct SystemComplianceBundlesResponse {
     pub system_id: uuid::Uuid,
     pub bundles: Vec<SystemComplianceBundle>,
+    /// Effective direct environment/system policies, excluding bundle members.
+    pub direct_rollup: ComplianceSystemRollup,
+    /// The authoritative deduplicated effective policy set for this system.
+    pub overall_rollup: ComplianceSystemRollup,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1381,7 +1594,23 @@ pub struct ComplianceSystemRollup {
     pub warn: i64,
     pub fail: i64,
     pub waiver: i64,
+    /// Selected controls with no applicable evidence.
+    #[serde(default)]
+    pub not_checked: i64,
+    /// Selected controls that do not apply to the target.
+    #[serde(default)]
+    pub not_applicable: i64,
+    /// Controls for which evaluation failed.
+    #[serde(default)]
+    pub error: i64,
+    /// Report-only controls in the effective set.
+    #[serde(default)]
+    pub report_only: i64,
     pub score: i64,
+    /// Resolution state for assignment-aware rollups. A conflict or unavailable
+    /// exact revision must not be presented as a baseline compliance score.
+    #[serde(default)]
+    pub resolution_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1391,14 +1620,27 @@ pub enum ComplianceControlStatus {
     Warn,
     Fail,
     Waiver,
+    /// Control is selected but no applicable evidence was found.
+    NotChecked,
+    /// Control does not apply to this target.
+    NotApplicable,
+    /// Evaluator encountered an error attempting to assess the control.
+    Error,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComplianceEvidenceResponse {
     pub bundle_id: uuid::Uuid,
+    #[serde(default)]
+    pub bundle_version_id: Option<uuid::Uuid>,
+    /// Framework from the exact bundle version used to produce this evidence.
+    #[serde(default)]
+    pub framework: Option<String>,
     pub system_id: uuid::Uuid,
     pub hostname: String,
     pub controls: Vec<ComplianceControlEvidence>,
+    #[serde(default)]
+    pub resolution_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1410,6 +1652,13 @@ pub struct ComplianceControlEvidence {
     pub summary: String,
     pub evidence_items: Vec<ComplianceEvidenceItem>,
     pub framework_mapping: String,
+    /// Grouping metadata from the exact policy version used for this control.
+    #[serde(default)]
+    pub control_family: Option<String>,
+    #[serde(default)]
+    pub cmmc_level: Option<i32>,
+    #[serde(default)]
+    pub cis_section: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2622,4 +2871,245 @@ pub struct ServerRuntimeInfoResponse {
     pub oidc_issuer_url: Option<String>,
     pub tls_status: String,
     pub tls_detail: String,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trust and Publication DTOs — Phase 1 Compliance Workflows
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Request to trust or reject a policy version.
+///
+/// Only admin users can trust/reject versions. A trust decision must include
+/// an optional review note documenting the rationale.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustPolicyVersionRequest {
+    /// true to trust, false to reject
+    pub trusted: bool,
+    /// Optional review note explaining the trust decision
+    pub review_note: Option<String>,
+}
+
+/// Response after trusting/rejecting a policy version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustPolicyVersionResponse {
+    pub version_id: Uuid,
+    pub publication_state: String,
+    pub trust_state: String,
+    pub trusted_by: Option<Uuid>,
+    pub trusted_at: Option<DateTime<Utc>>,
+}
+
+/// Request to trust or reject a bundle version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustBundleVersionRequest {
+    pub trusted: bool,
+    pub review_note: Option<String>,
+}
+
+/// Response after trusting/rejecting a bundle version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustBundleVersionResponse {
+    pub version_id: Uuid,
+    pub publication_state: String,
+    pub trust_state: String,
+    pub trusted_by: Option<Uuid>,
+    pub trusted_at: Option<DateTime<Utc>>,
+}
+
+/// Request to publish a policy version.
+///
+/// Publishing freezes the version as immutable. Only admin users can publish.
+/// Publishing may require that the version is trusted if it contains executable
+/// imported content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishPolicyVersionRequest {
+    /// Optional validation of the semantic digest to prevent accidental
+    /// publication of a modified version.
+    pub expected_semantic_digest: Option<String>,
+}
+
+/// Response after publishing a policy version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishPolicyVersionResponse {
+    pub version_id: Uuid,
+    pub publication_state: String,
+    pub published_at: DateTime<Utc>,
+    pub semantic_digest: String,
+}
+
+/// Request to create a new draft from a published policy version.
+///
+/// The draft inherits all metadata and configuration from the published version
+/// but gets a new version ID and `derived_from_version_id` pointer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreatePolicyDraftRequest {
+    /// Optional: override the version string (defaults to incrementing from published)
+    pub new_version: Option<String>,
+}
+
+/// Response when a draft is created from a published policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreatePolicyDraftResponse {
+    pub version_id: Uuid,
+    pub version: String,
+    pub publication_state: String,
+    pub derived_from_version_id: Uuid,
+}
+
+/// Request to publish a bundle version.
+///
+/// Bundle publication is atomic: all included policy versions must be
+/// published or the entire operation fails. The server may optionally
+/// auto-publish eligible draft policy versions included in the bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishBundleVersionRequest {
+    /// Optional: if true, attempt to auto-publish any included draft policies
+    pub auto_publish_draft_policies: Option<bool>,
+    /// Optional validation of the semantic digest
+    pub expected_semantic_digest: Option<String>,
+}
+
+/// Response after publishing a bundle version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishBundleVersionResponse {
+    pub version_id: Uuid,
+    pub publication_state: String,
+    pub published_at: DateTime<Utc>,
+    pub semantic_digest: String,
+    pub published_policy_count: i32,
+    pub auto_published_policy_count: i32,
+}
+
+/// Request to create a new draft from a published bundle version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateBundleDraftRequest {
+    /// Optional: override the version string
+    pub new_version: Option<String>,
+}
+
+/// Response when a draft is created from a published bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateBundleDraftResponse {
+    pub version_id: Uuid,
+    pub version: String,
+    pub publication_state: String,
+    pub derived_from_version_id: Uuid,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 2: Compliance Bundle Assignment DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single value override targeting one policy in the effective set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyValueOverride {
+    pub policy_version_id: Uuid,
+    /// JSON path within the policy config, e.g. "rules.0.expression"
+    pub value_path: String,
+    pub value: serde_json::Value,
+}
+
+/// Request to create a compliance bundle assignment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateAssignmentRequest {
+    /// Exact immutable bundle version ID (must be in 'accepted' state).
+    pub bundle_version_id: Uuid,
+    /// "environment" or "system"
+    pub scope_type: String,
+    /// UUID of the environment or system.
+    pub scope_id: Uuid,
+    /// "enforce" (default) or "report_only"
+    pub enforcement_mode: Option<String>,
+    /// Policy version IDs to exclude from the baseline.
+    pub exclusions: Option<Vec<Uuid>>,
+    /// Additional policy version IDs to add beyond the baseline.
+    pub additions: Option<Vec<Uuid>>,
+    /// Value overrides targeting policies in the effective set.
+    pub value_overrides: Option<Vec<PolicyValueOverride>>,
+}
+
+/// Response when an assignment is created.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssignmentResponse {
+    pub id: Uuid,
+    pub current_version_id: Uuid,
+    pub bundle_id: Uuid,
+    pub bundle_version_id: Uuid,
+    pub scope_type: String,
+    pub scope_id: Uuid,
+    pub enforcement_mode: String,
+    pub exclusions: Vec<Uuid>,
+    pub additions: Vec<Uuid>,
+    pub value_overrides: Vec<PolicyValueOverride>,
+    pub assignment_overlay_digest: String,
+    #[serde(default = "default_assignment_active")]
+    pub active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+fn default_assignment_active() -> bool {
+    true
+}
+
+/// Request to update an assignment (replaces exclusions, additions, overrides).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateAssignmentRequest {
+    /// Immutable assignment version this update is expected to replace.
+    pub expected_version_id: Uuid,
+    pub enforcement_mode: Option<String>,
+    pub exclusions: Option<Vec<Uuid>>,
+    pub additions: Option<Vec<Uuid>>,
+    pub value_overrides: Option<Vec<PolicyValueOverride>>,
+}
+
+/// Request to preview an assignment before saving.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewAssignmentRequest {
+    pub bundle_version_id: Uuid,
+    pub scope_type: String,
+    pub scope_id: Uuid,
+    pub enforcement_mode: Option<String>,
+    pub exclusions: Option<Vec<Uuid>>,
+    pub additions: Option<Vec<Uuid>>,
+    pub value_overrides: Option<Vec<PolicyValueOverride>>,
+}
+
+/// A single resolved policy in the effective set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectivePolicyDto {
+    pub policy_version_id: Uuid,
+    pub policy_lineage_id: Uuid,
+    pub policy_type: String,
+    /// "baseline" or "addition"
+    pub source: String,
+    pub baseline_order: Option<i32>,
+    pub addition_order: Option<i32>,
+    pub overrides: Vec<PolicyValueOverride>,
+    pub effective_config: serde_json::Value,
+    pub enforcement_mode: String,
+    #[serde(default)]
+    pub provenance: Vec<crate::compliance::resolver::ProvenanceEntry>,
+}
+
+/// Response containing the resolved effective policy set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectivePolicySetResponse {
+    pub bundle_version_id: Uuid,
+    pub assignment_id: Option<Uuid>,
+    pub scope_type: String,
+    pub scope_id: Uuid,
+    pub policies: Vec<EffectivePolicyDto>,
+    pub effective_set_digest: String,
+    pub warnings: Vec<String>,
+    /// Assignment-aware rollup totals computed from the resolved effective set.
+    #[serde(default)]
+    pub rollup: Option<ComplianceRollupTotals>,
+}
+
+/// Structured resolution conflict returned as part of a 422 response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolutionConflictDto {
+    pub code: String,
+    pub message: String,
 }

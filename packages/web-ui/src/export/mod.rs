@@ -374,6 +374,9 @@ pub fn build_sarif(p: &ExportPayload<'_>) -> String {
                     ComplianceControlStatus::Warn => ("review", "warning"),
                     ComplianceControlStatus::Fail => ("fail", "error"),
                     ComplianceControlStatus::Waiver => ("fail", "warning"),
+                    ComplianceControlStatus::NotChecked => ("open", "none"),
+                    ComplianceControlStatus::NotApplicable => ("notApplicable", "none"),
+                    ComplianceControlStatus::Error => ("open", "error"),
                 };
 
                 // Stable fingerprint: bundle:system:policy — allows consumers
@@ -648,6 +651,9 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                 ComplianceControlStatus::Warn => ("not-satisfied", "other"),
                 ComplianceControlStatus::Fail => ("not-satisfied", "fail-adjusted"),
                 ComplianceControlStatus::Waiver => ("not-satisfied", "accept-risk"),
+                ComplianceControlStatus::NotChecked => ("not-satisficed", "not-checked"),
+                ComplianceControlStatus::NotApplicable => ("not-applicable", "not-applicable"),
+                ComplianceControlStatus::Error => ("not-satisfied", "error"),
             };
 
             // Collect evidence items as relevant evidence
@@ -915,6 +921,9 @@ fn build_print_html(p: &ExportPayload<'_>) -> String {
                 ComplianceControlStatus::Warn => " class=\"warn-row\"",
                 ComplianceControlStatus::Pass => " class=\"pass-row\"",
                 ComplianceControlStatus::Waiver => "",
+                ComplianceControlStatus::NotChecked => " class=\"muted-row\"",
+                ComplianceControlStatus::NotApplicable => " class=\"muted-row\"",
+                ComplianceControlStatus::Error => " class=\"fail-row\"",
             };
             body.push_str(&format!(
                 "<tr{}><td class=\"mono\">{}</td><td><b>{}</b></td><td>{}</td><td class=\"mono\">{}</td><td>{}</td></tr>\n",
@@ -989,6 +998,9 @@ fn status_label(s: &ComplianceControlStatus) -> &'static str {
         ComplianceControlStatus::Warn => "warn",
         ComplianceControlStatus::Fail => "fail",
         ComplianceControlStatus::Waiver => "waiver",
+        ComplianceControlStatus::NotChecked => "not checked",
+        ComplianceControlStatus::NotApplicable => "not applicable",
+        ComplianceControlStatus::Error => "error",
     }
 }
 

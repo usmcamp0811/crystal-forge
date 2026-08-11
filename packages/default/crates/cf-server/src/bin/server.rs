@@ -6,6 +6,7 @@ use axum::http::{
 };
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     routing::{delete, get, patch, post, put},
 };
 use base64::{Engine as _, engine::general_purpose};
@@ -147,6 +148,13 @@ async fn main() -> anyhow::Result<()> {
     let background_pool = pool.clone();
     let deployment_pool = pool.clone();
     let flake_init_pool = pool.clone();
+
+    // Backfill any compliance digest rows set to 'pending' by migrations.
+    // This runs once at startup and fails fast if any row cannot be computed.
+    crystal_forge::compliance::digest::backfill_pending_digests(&pool)
+        .await
+        .context("Failed to backfill compliance semantic digests")?;
+
     // TODO: Update this to get the first N commits on the first time
     reset_non_terminal_derivations(&pool).await?;
     initialize_flake_commits(&flake_init_pool, &cfg.flakes.watched).await?;
@@ -285,6 +293,10 @@ async fn main() -> anyhow::Result<()> {
             get(scanning::get_scanning_schedule).put(scanning::put_scanning_schedule),
         )
         .route(
+            "/api/v1/scanning/deployed",
+            get(scanning::get_scanning_deployed),
+        )
+        .route(
             "/api/v1/hardening/summary",
             get(hardening::hardening_fleet_summary),
         )
@@ -400,15 +412,28 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/policies", get(environments::list_policies_handler))
         .route(
+            "/api/v1/compliance/grouping-schemes",
+            get(compliance::list_compliance_grouping_schemes)
+                .post(compliance::create_compliance_grouping_scheme),
+        )
+        .route(
+            "/api/v1/compliance/grouping-schemes/:id",
+            put(compliance::update_compliance_grouping_scheme)
+                .delete(compliance::delete_compliance_grouping_scheme),
+        )
+        .route(
             "/api/v1/compliance/bundles",
             get(compliance::list_compliance_bundles).post(compliance::create_compliance_bundle),
         )
         .route(
             "/api/v1/compliance/bundles/:id",
-            // GET is intentionally absent: use GET /bundles/:id/systems instead.
-            // Having GET here return the systems payload at both paths created a
-            // misleading API contract (reviewer finding #3).
-            put(compliance::update_compliance_bundle).delete(compliance::delete_compliance_bundle),
+            get(compliance::get_compliance_bundle)
+                .put(compliance::update_compliance_bundle)
+                .delete(compliance::delete_compliance_bundle),
+        )
+        .route(
+            "/api/v1/compliance/bundles/:id/deletion-eligibility",
+            get(compliance::get_compliance_bundle_deletion_eligibility),
         )
         .route(
             "/api/v1/compliance/bundles/:id/systems",
@@ -422,6 +447,108 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/systems/:system_id/compliance",
             get(compliance::get_system_compliance_bundles),
         )
+        // Phase 1: Trust and publication endpoints
+        .route(
+            "/api/v1/policy-versions/:version_id/trust",
+            post(compliance::trust_policy_version),
+        )
+        .route(
+            "/api/v1/policy-versions/:version_id/publish",
+            post(compliance::publish_policy_version),
+        )
+        .route(
+            "/api/v1/policy-versions/:version_id/export",
+            get(compliance::policy_version_interchange_export),
+        )
+        .route(
+            "/api/v1/policies/:policy_id/drafts",
+            post(compliance::create_policy_draft),
+        )
+        .route(
+            "/api/v1/compliance/bundle-versions/:version_id/trust",
+            post(compliance::trust_bundle_version),
+        )
+        .route(
+            "/api/v1/compliance/bundle-versions/:version_id/publish",
+            post(compliance::publish_bundle_version),
+        )
+        .route(
+            "/api/v1/compliance/bundles/:bundle_id/drafts",
+            post(compliance::create_bundle_draft),
+        )
+        .route(
+            "/api/v1/compliance/bundle-versions/:version_id/policies",
+            get(compliance::get_bundle_version_policy_membership),
+        )
+        // Phase 2: Bundle assignment endpoints
+        .route(
+            "/api/v1/compliance/assignments",
+            post(compliance::create_assignment),
+        )
+        .route(
+            "/api/v1/compliance/assignments/:id",
+            get(compliance::get_assignment)
+                .put(compliance::update_assignment)
+                .delete(compliance::delete_assignment),
+        )
+        .route(
+            "/api/v1/compliance/assignments/:id/effective-policies",
+            get(compliance::get_assignment_effective_policies),
+        )
+        .route(
+            "/api/v1/compliance/assignments/preview",
+            post(compliance::preview_assignment),
+        )
+        .route(
+            "/api/v1/environments/:id/compliance-assignments",
+            get(compliance::list_environment_assignments),
+        )
+        .route(
+            "/api/v1/systems/:id/compliance-assignments",
+            get(compliance::list_system_assignments),
+        )
+        .route(
+            "/api/v1/systems/:id/effective-policies",
+            get(compliance::get_system_effective_policies),
+        )
+        // CF-XCCDF import/export and bundle version endpoints
+        .route(
+            "/api/v1/compliance/xccdf/preview",
+            post(compliance::xccdf_preview).layer(DefaultBodyLimit::max(
+                crystal_forge::compliance::interchange::MAX_XCCDF_MULTIPART_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/compliance/xccdf/import",
+            post(compliance::xccdf_import).layer(DefaultBodyLimit::max(
+                crystal_forge::compliance::interchange::MAX_XCCDF_MULTIPART_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/compliance/bundle-versions/:version_id/xccdf",
+            get(compliance::export_bundle_xccdf),
+        )
+        .route(
+            "/api/v1/compliance/assignments/:assignment_id/xccdf",
+            get(compliance::export_assignment_xccdf),
+        )
+        // Policy interchange endpoints
+        .route(
+            "/api/v1/policies/interchange/export",
+            post(compliance::policy_interchange_export),
+        )
+        .route(
+            "/api/v1/policies/interchange/import",
+            post(compliance::policy_interchange_import).layer(DefaultBodyLimit::max(
+                crystal_forge::compliance::interchange::MAX_XCCDF_MULTIPART_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/policies/interchange/preview",
+            post(compliance::policy_interchange_preview).layer(DefaultBodyLimit::max(
+                crystal_forge::compliance::interchange::MAX_XCCDF_MULTIPART_BYTES,
+            )),
+        )
         // Deployment policies CRUD endpoints
         .route(
             "/api/v1/deployment-policies",
@@ -433,6 +560,10 @@ async fn main() -> anyhow::Result<()> {
             get(deployment_policies::get_deployment_policy)
                 .put(deployment_policies::update_deployment_policy)
                 .delete(deployment_policies::delete_deployment_policy),
+        )
+        .route(
+            "/api/v1/deployment-policies/:id/deletion-eligibility",
+            get(deployment_policies::get_deployment_policy_deletion_eligibility),
         )
         // Deployment policy workflow endpoints (approvals, rollout status)
         .route(

@@ -29,7 +29,7 @@ fn backend_origin_for_dev(window: &web_sys::Window, origin: &str) -> Option<Stri
 
 /// Base URL for the API. In production this is the same origin;
 /// during development it may point to a different port.
-fn base_url() -> String {
+pub fn base_url() -> String {
     let window = web_sys::window().expect("no global window");
     let location = window.location();
     let origin = location
@@ -105,6 +105,164 @@ pub async fn fetch_scanning_systems(
         url.push_str(&format!("?limit={}", limit.clamp(1, 500)));
     }
     fetch_json(&url).await
+}
+
+pub async fn fetch_scanning_deployed(
+    limit: Option<i64>,
+    after_cursor: Option<&str>,
+) -> Result<ScanningDeployedResponse, ApiClientError> {
+    let mut url = format!("{}/scanning/deployed", base_url());
+    let limit_val = limit.unwrap_or(500).clamp(1, 1000);
+    url.push_str(&format!("?limit={}", limit_val));
+    if let Some(cursor) = after_cursor {
+        url.push_str(&format!("&after={}", js_sys::encode_uri_component(cursor)));
+    }
+    fetch_json(&url).await
+}
+
+/// Export exact policy version IDs as canonical JSON or TOML.
+pub async fn export_policy_versions(
+    policy_version_ids: &[Uuid],
+    format: &str,
+) -> Result<String, ApiClientError> {
+    let url = format!("{}/policies/interchange/export", base_url());
+    let payload = serde_json::json!({
+        "policy_version_ids": policy_version_ids,
+        "format": format,
+    });
+    let (status, body) = send_request_with_csrf(
+        "POST",
+        &url,
+        Some(
+            &serde_json::to_string(&payload)
+                .map_err(|error| ApiClientError::Deserialize(error.to_string()))?,
+        ),
+    )
+    .await?;
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            body: decode_api_error_message(&body),
+        });
+    }
+    Ok(body)
+}
+
+pub async fn preview_policy_interchange(
+    bytes: &[u8],
+    filename: &str,
+) -> Result<PolicyInterchangePreviewResponse, ApiClientError> {
+    let url = format!("{}/policies/interchange/preview", base_url());
+    let (status, body) = send_policy_multipart(&url, bytes, filename, None).await?;
+    parse_policy_interchange_response(status, &body)
+}
+
+pub async fn import_policy_interchange(
+    bytes: &[u8],
+    filename: &str,
+    expected_sha256: &str,
+) -> Result<PolicyInterchangeImportResponse, ApiClientError> {
+    let url = format!("{}/policies/interchange/import", base_url());
+    let (status, body) =
+        send_policy_multipart(&url, bytes, filename, Some(expected_sha256)).await?;
+    parse_policy_interchange_response(status, &body)
+}
+
+async fn send_policy_multipart(
+    url: &str,
+    bytes: &[u8],
+    filename: &str,
+    expected_sha256: Option<&str>,
+) -> Result<(u16, String), ApiClientError> {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::JsValue;
+    use wasm_bindgen_futures::JsFuture;
+
+    let form =
+        web_sys::FormData::new().map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+    let array = js_sys::Uint8Array::from(bytes);
+    let parts = js_sys::Array::new();
+    parts.push(&array);
+    let blob = web_sys::Blob::new_with_u8_array_sequence(&parts)
+        .map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+    form.append_with_blob_and_filename("file", &blob, filename)
+        .map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+
+    let window =
+        web_sys::window().ok_or_else(|| ApiClientError::Network("no global window".into()))?;
+    let opts = web_sys::RequestInit::new();
+    opts.set_method("POST");
+    opts.set_body(form.as_ref());
+    let _ = js_sys::Reflect::set(
+        opts.as_ref(),
+        &JsValue::from_str("credentials"),
+        &JsValue::from_str("include"),
+    );
+    let request = web_sys::Request::new_with_str_and_init(url, &opts)
+        .map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+    request
+        .headers()
+        .set("Accept", "application/json")
+        .map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+    if let Some(expected) = expected_sha256 {
+        request
+            .headers()
+            .set("X-Policy-Source-SHA256", expected)
+            .map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+    }
+    add_csrf_header(&request, &window)?;
+    let response = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+    let response: web_sys::Response = response
+        .dyn_into()
+        .map_err(|_| ApiClientError::Network("response is not a Response".into()))?;
+    let status = response.status() as u16;
+    let text = JsFuture::from(
+        response
+            .text()
+            .map_err(|error| ApiClientError::Network(format!("{error:?}")))?,
+    )
+    .await
+    .map_err(|error| ApiClientError::Network(format!("{error:?}")))?
+    .as_string()
+    .unwrap_or_default();
+    Ok((status, text))
+}
+
+fn add_csrf_header(
+    request: &web_sys::Request,
+    window: &web_sys::Window,
+) -> Result<(), ApiClientError> {
+    let cookie_js = js_sys::eval("document.cookie").unwrap_or(wasm_bindgen::JsValue::NULL);
+    if let Some(cookie_str) = cookie_js.as_string() {
+        for cookie in cookie_str.split(';').map(str::trim) {
+            if let Some(value) = cookie.strip_prefix("__Host-cf-csrf=") {
+                request
+                    .headers()
+                    .set("X-CSRF-Token", value)
+                    .map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+                break;
+            }
+        }
+    }
+    let _ = window;
+    Ok(())
+}
+
+fn parse_policy_interchange_response<T: serde::de::DeserializeOwned>(
+    status: u16,
+    body: &str,
+) -> Result<T, ApiClientError> {
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            // Policy interchange has a small endpoint-specific error contract
+            // (including conflict details). Preserve it for the UI adapter.
+            body: body.to_string(),
+        });
+    }
+    serde_json::from_str(body).map_err(|error| ApiClientError::Deserialize(error.to_string()))
 }
 
 pub async fn fetch_scanning_system_scans(
@@ -997,10 +1155,58 @@ pub async fn fetch_compliance_bundles() -> Result<Vec<ComplianceBundleSummary>, 
     fetch_json(&url).await
 }
 
+/// Fetch custom policy grouping schemes visible to the authenticated user.
+pub async fn fetch_compliance_grouping_schemes(
+) -> Result<Vec<ComplianceGroupingScheme>, ApiClientError> {
+    let url = format!("{}/compliance/grouping-schemes", base_url());
+    fetch_json(&url).await
+}
+
+pub async fn create_compliance_grouping_scheme(
+    request: &ComplianceGroupingSchemeRequest,
+) -> Result<ComplianceGroupingScheme, ApiClientError> {
+    let url = format!("{}/compliance/grouping-schemes", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+pub async fn update_compliance_grouping_scheme(
+    id: &Uuid,
+    request: &ComplianceGroupingSchemeRequest,
+) -> Result<ComplianceGroupingScheme, ApiClientError> {
+    let url = format!("{}/compliance/grouping-schemes/{}", base_url(), id);
+    send_json_with_csrf("PUT", &url, Some(request)).await
+}
+
+pub async fn delete_compliance_grouping_scheme(id: &Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/compliance/grouping-schemes/{}", base_url(), id);
+    send_empty_with_csrf("DELETE", &url, None::<&()>).await
+}
+
+/// Fetch the exact policy-version membership for one bundle revision.
+pub async fn fetch_bundle_version_policy_membership(
+    bundle_version_id: &Uuid,
+) -> Result<Vec<BundleVersionPolicyMembership>, ApiClientError> {
+    let url = format!(
+        "{}/compliance/bundle-versions/{}/policies",
+        base_url(),
+        bundle_version_id
+    );
+    fetch_json(&url).await
+}
+
 pub async fn fetch_compliance_bundle_systems(
     bundle_id: &Uuid,
+    version_id: Option<&Uuid>,
 ) -> Result<ComplianceBundleSystemsResponse, ApiClientError> {
-    let url = format!("{}/compliance/bundles/{}/systems", base_url(), bundle_id);
+    let url = match version_id {
+        Some(version_id) => format!(
+            "{}/compliance/bundles/{}/systems?version_id={}",
+            base_url(),
+            bundle_id,
+            version_id
+        ),
+        None => format!("{}/compliance/bundles/{}/systems", base_url(), bundle_id),
+    };
     fetch_json(&url).await
 }
 
@@ -1016,13 +1222,23 @@ pub async fn fetch_system_compliance_bundles(
 pub async fn fetch_compliance_system_evidence(
     bundle_id: &Uuid,
     system_id: &Uuid,
+    version_id: Option<&Uuid>,
 ) -> Result<ComplianceEvidenceResponse, ApiClientError> {
-    let url = format!(
-        "{}/compliance/bundles/{}/systems/{}/evidence",
-        base_url(),
-        bundle_id,
-        system_id
-    );
+    let url = match version_id {
+        Some(version_id) => format!(
+            "{}/compliance/bundles/{}/systems/{}/evidence?version_id={}",
+            base_url(),
+            bundle_id,
+            system_id,
+            version_id
+        ),
+        None => format!(
+            "{}/compliance/bundles/{}/systems/{}/evidence",
+            base_url(),
+            bundle_id,
+            system_id
+        ),
+    };
     fetch_json(&url).await
 }
 
@@ -1044,6 +1260,18 @@ pub async fn update_compliance_bundle(
 pub async fn delete_compliance_bundle(bundle_id: &Uuid) -> Result<(), ApiClientError> {
     let url = format!("{}/compliance/bundles/{}", base_url(), bundle_id);
     send_empty_with_csrf::<()>("DELETE", &url, None).await
+}
+
+/// Fetch deletion eligibility for a compliance bundle without mutating anything.
+pub async fn fetch_bundle_deletion_eligibility(
+    bundle_id: &Uuid,
+) -> Result<DeletionEligibility, ApiClientError> {
+    let url = format!(
+        "{}/compliance/bundles/{}/deletion-eligibility",
+        base_url(),
+        bundle_id
+    );
+    fetch_json(&url).await
 }
 
 // =============================================================================
@@ -1097,6 +1325,14 @@ pub async fn update_deployment_policy(
 pub async fn delete_deployment_policy(id: &Uuid) -> Result<(), ApiClientError> {
     let url = format!("{}/deployment-policies/{}", base_url(), id);
     send_empty_with_csrf("DELETE", &url, None::<&()>).await
+}
+
+/// Fetch deletion eligibility for a deployment policy without mutating anything.
+pub async fn fetch_policy_deletion_eligibility(
+    id: &Uuid,
+) -> Result<DeletionEligibility, ApiClientError> {
+    let url = format!("{}/deployment-policies/{}/deletion-eligibility", base_url(), id);
+    fetch_json(&url).await
 }
 
 /// Fetch all flakes from registry.
@@ -1957,4 +2193,264 @@ pub async fn set_automatic_retry_policy(
 ) -> Result<AutomaticRetryPolicy, ApiClientError> {
     let url = format!("{}/admin/automatic-retry-policy", base_url());
     send_json_with_csrf("PUT", &url, Some(request)).await
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// XCCDF preview and import
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Preview an XCCDF XML/ZIP file without any durable writes.
+///
+/// Returns parsed benchmark metadata, profiles, rules, and diagnostics.
+pub async fn preview_xccdf(
+    bytes: &[u8],
+    filename: &str,
+) -> Result<XccdfPreviewResponse, ApiClientError> {
+    let url = format!("{}/compliance/xccdf/preview", base_url());
+    let (status, body) = send_xccdf_multipart(&url, bytes, filename, None).await?;
+    parse_json_response(status, &body)
+}
+
+/// Submit an XCCDF import plan along with the original file bytes.
+///
+/// The server reparses the file, verifies the digest in the plan, validates
+/// every rule action, and commits atomically.
+pub async fn import_xccdf(
+    bytes: &[u8],
+    filename: &str,
+    plan: &XccdfImportPlan,
+) -> Result<XccdfImportResponse, ApiClientError> {
+    let url = format!("{}/compliance/xccdf/import", base_url());
+    let plan_json =
+        serde_json::to_string(plan).map_err(|e| ApiClientError::Deserialize(e.to_string()))?;
+    let (status, body) = send_xccdf_multipart(&url, bytes, filename, Some(&plan_json)).await?;
+    parse_json_response(status, &body)
+}
+
+/// Send a multipart POST with one `file` field and an optional JSON `plan` field.
+async fn send_xccdf_multipart(
+    url: &str,
+    bytes: &[u8],
+    filename: &str,
+    plan_json: Option<&str>,
+) -> Result<(u16, String), ApiClientError> {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::JsValue;
+    use wasm_bindgen_futures::JsFuture;
+
+    let form = web_sys::FormData::new().map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
+    let array = js_sys::Uint8Array::from(bytes);
+    let parts = js_sys::Array::new();
+    parts.push(&array);
+    let blob = web_sys::Blob::new_with_u8_array_sequence(&parts)
+        .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
+    form.append_with_blob_and_filename("file", &blob, filename)
+        .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
+
+    if let Some(plan) = plan_json {
+        // Keep the import plan a normal multipart text field.  Supplying a
+        // filename makes browsers mark it as a file part, which the server
+        // correctly rejects because only the XCCDF payload may be a file.
+        form.append_with_str("plan", plan)
+            .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
+    }
+
+    let window =
+        web_sys::window().ok_or_else(|| ApiClientError::Network("no global window".into()))?;
+    let opts = web_sys::RequestInit::new();
+    opts.set_method("POST");
+    opts.set_body(form.as_ref());
+    let _ = js_sys::Reflect::set(
+        opts.as_ref(),
+        &JsValue::from_str("credentials"),
+        &JsValue::from_str("include"),
+    );
+    let request = web_sys::Request::new_with_str_and_init(url, &opts)
+        .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
+    request
+        .headers()
+        .set("Accept", "application/json")
+        .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
+    add_csrf_header(&request, &window)?;
+    let resp_value = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
+    let resp: web_sys::Response = resp_value
+        .dyn_into()
+        .map_err(|_| ApiClientError::Network("response is not a Response".into()))?;
+    let status = resp.status() as u16;
+    let text = JsFuture::from(
+        resp.text()
+            .map_err(|e| ApiClientError::Network(format!("{e:?}")))?,
+    )
+    .await
+    .map_err(|e| ApiClientError::Network(format!("{e:?}")))?
+    .as_string()
+    .unwrap_or_default();
+    Ok((status, text))
+}
+
+fn parse_json_response<T: serde::de::DeserializeOwned>(
+    status: u16,
+    body: &str,
+) -> Result<T, ApiClientError> {
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            body: body.to_string(),
+        });
+    }
+    serde_json::from_str(body).map_err(|e| ApiClientError::Deserialize(e.to_string()))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trust and publication
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Trust or reject a policy version.
+pub async fn trust_policy_version(
+    version_id: &Uuid,
+    request: &TrustPolicyVersionRequest,
+) -> Result<TrustPolicyVersionResponse, ApiClientError> {
+    let url = format!("{}/policy-versions/{}/trust", base_url(), version_id);
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+/// Publish a policy version (makes it immutable / accepted).
+pub async fn publish_policy_version(
+    version_id: &Uuid,
+) -> Result<serde_json::Value, ApiClientError> {
+    let url = format!("{}/policy-versions/{}/publish", base_url(), version_id);
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
+/// Create a new mutable draft from a published policy version.
+pub async fn create_policy_draft(policy_id: &Uuid) -> Result<serde_json::Value, ApiClientError> {
+    let url = format!("{}/policies/{}/drafts", base_url(), policy_id);
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
+/// Trust or reject a bundle version.
+pub async fn trust_bundle_version(
+    version_id: &Uuid,
+    request: &TrustBundleVersionRequest,
+) -> Result<TrustBundleVersionResponse, ApiClientError> {
+    let url = format!(
+        "{}/compliance/bundle-versions/{}/trust",
+        base_url(),
+        version_id
+    );
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+/// Publish a bundle version (makes it immutable / accepted).
+pub async fn publish_bundle_version(
+    version_id: &Uuid,
+    request: &PublishBundleVersionRequest,
+) -> Result<PublishBundleVersionResponse, ApiClientError> {
+    let url = format!(
+        "{}/compliance/bundle-versions/{}/publish",
+        base_url(),
+        version_id
+    );
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+/// Create a new mutable draft from a published bundle version.
+pub async fn create_bundle_draft(
+    bundle_id: &Uuid,
+    request: &CreateBundleDraftRequest,
+) -> Result<CreateBundleDraftResponse, ApiClientError> {
+    let url = format!("{}/compliance/bundles/{}/drafts", base_url(), bundle_id);
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Assignments
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Create a new bundle assignment for an environment or system.
+pub async fn create_compliance_assignment(
+    request: &CreateAssignmentRequest,
+) -> Result<AssignmentResponse, ApiClientError> {
+    let url = format!("{}/compliance/assignments", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+/// Preview an assignment overlay without persisting it.
+pub async fn preview_compliance_assignment(
+    request: &CreateAssignmentRequest,
+) -> Result<EffectivePolicySetResponse, ApiClientError> {
+    let url = format!("{}/compliance/assignments/preview", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+/// Fetch a single assignment by ID.
+pub async fn fetch_compliance_assignment(
+    assignment_id: &Uuid,
+) -> Result<AssignmentResponse, ApiClientError> {
+    let url = format!("{}/compliance/assignments/{}", base_url(), assignment_id);
+    fetch_json(&url).await
+}
+
+/// Fetch all assignments for an environment.
+/// The server returns `{ "assignments": [...] }`; this unwraps to the inner Vec.
+pub async fn fetch_environment_assignments(
+    environment_id: &Uuid,
+) -> Result<Vec<AssignmentResponse>, ApiClientError> {
+    let url = format!(
+        "{}/environments/{}/compliance-assignments",
+        base_url(),
+        environment_id
+    );
+    let wrapper: AssignmentListResponse = fetch_json(&url).await?;
+    Ok(wrapper.assignments)
+}
+
+/// Fetch all assignments for a system.
+/// The server returns `{ "assignments": [...] }`; this unwraps to the inner Vec.
+pub async fn fetch_system_assignments(
+    system_id: &Uuid,
+) -> Result<Vec<AssignmentResponse>, ApiClientError> {
+    let url = format!(
+        "{}/systems/{}/compliance-assignments",
+        base_url(),
+        system_id
+    );
+    let wrapper: AssignmentListResponse = fetch_json(&url).await?;
+    Ok(wrapper.assignments)
+}
+
+/// URL for downloading the server-generated effective XCCDF for an assignment.
+/// The assignment export includes its overlay and resolved policy configuration;
+/// XML generation remains entirely on the server.
+pub fn compliance_assignment_xccdf_url(assignment_id: &Uuid) -> String {
+    format!(
+        "{}/compliance/assignments/{}/xccdf",
+        base_url(),
+        assignment_id
+    )
+}
+
+/// Delete (deactivate) an assignment.
+pub async fn delete_compliance_assignment(assignment_id: &Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/compliance/assignments/{}", base_url(), assignment_id);
+    send_empty_with_csrf::<()>("DELETE", &url, None).await
+}
+
+/// Update an assignment (creates a new immutable version).
+pub async fn update_compliance_assignment(
+    assignment_id: &Uuid,
+    request: &UpdateAssignmentRequest,
+) -> Result<AssignmentResponse, ApiClientError> {
+    let url = format!("{}/compliance/assignments/{}", base_url(), assignment_id);
+    send_json_with_csrf("PUT", &url, Some(request)).await
+}
+
+/// Fetch the resolved effective policy set for a system.
+pub async fn fetch_system_effective_policies(
+    system_id: &Uuid,
+) -> Result<EffectivePolicySetResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/effective-policies", base_url(), system_id);
+    fetch_json(&url).await
 }

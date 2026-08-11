@@ -1,71 +1,50 @@
-//! API integration for policies view with fallback to mock data.
+//! API integration for the policies view.
 //!
-//! This module provides the adapter layer between the policies UI and the backend API,
-//! with graceful fallback to mock data when the API is unavailable.
-
-use std::collections::HashMap;
+//! This module provides the adapter layer between the policies UI and the
+//! backend API. Network and server errors are surfaced as `Err` so the view
+//! can render an explicit error state. Mock policy data is never returned to
+//! the caller (AC #34).
 
 use uuid::Uuid;
 
 use crate::api::client::{ApiClientError, fetch_deployment_policies};
 use crate::api::models::DeploymentPolicyRecord;
 use crate::components::policy::PolicyDefinition;
+use crate::components::policy::PolicyRevisionSummary;
 
-/// Fetch policies from the API with fallback to mock data.
+/// Result type for policy loading.
+pub enum PolicyLoadResult {
+    Ok(Vec<PolicyDefinition>),
+    /// Server or network error — the caller must display an error state.
+    /// Never returns mock data (AC #34).
+    Err(String),
+}
+
+/// Fetch policies from the API.
 ///
-/// Returns policies from the backend if available, otherwise returns
-/// mock data to ensure the UI remains functional during development
-/// or when the server is unavailable.
-pub async fn load_policies_with_fallback() -> Vec<PolicyDefinition> {
+/// Returns an explicit error on any failure; never falls back to mock data.
+pub async fn load_policies() -> PolicyLoadResult {
     match fetch_deployment_policies(Some(100), Some(0)).await {
         Ok(response) => {
-            web_sys::console::log_1(
-                &format!("Loaded {} policies from API", response.policies.len()).into(),
-            );
             let sys_counts = response.system_counts;
-            response
+            let definitions = response
                 .policies
                 .into_iter()
                 .map(|p| {
                     let count = sys_counts.get(&p.id).copied().unwrap_or(0);
                     policy_record_to_definition_with_count(p, count)
                 })
-                .collect()
+                .collect();
+            PolicyLoadResult::Ok(definitions)
         }
         Err(ApiClientError::Status { code, body }) => {
-            // Only use mock fallback for server-side failures (5xx).
-            // For auth/client errors (401/403/404/etc.), do not mask with mock data.
-            if (500..600).contains(&code) {
-                web_sys::console::warn_1(
-                    &format!(
-                        "API returned {}: {} - falling back to mock data",
-                        code, body
-                    )
-                    .into(),
-                );
-                mock_policies()
-            } else {
-                web_sys::console::warn_1(
-                    &format!("API returned {}: {} - showing empty policies", code, body).into(),
-                );
-                Vec::new()
-            }
+            PolicyLoadResult::Err(format!("Server returned {}: {}", code, body))
         }
         Err(ApiClientError::Network(msg)) => {
-            web_sys::console::warn_1(
-                &format!("Network error: {} - falling back to mock data", msg).into(),
-            );
-            mock_policies()
+            PolicyLoadResult::Err(format!("Network error: {}", msg))
         }
         Err(ApiClientError::Deserialize(msg)) => {
-            web_sys::console::error_1(
-                &format!(
-                    "Failed to deserialize API response: {} - showing empty policies",
-                    msg
-                )
-                .into(),
-            );
-            Vec::new()
+            PolicyLoadResult::Err(format!("Deserialize error: {}", msg))
         }
     }
 }
@@ -84,8 +63,86 @@ fn policy_record_to_definition_with_count(
     }))
     .unwrap_or_else(|_| "{}".to_string());
 
+    // Extract SRG/CCI and classification from the current version before consuming `record.versions`.
+    let current_version_id = record.current_version_id;
+    let (
+        current_srg_ids,
+        current_cci_ids,
+        current_category,
+        current_framework,
+        current_severity,
+        current_control_family,
+        current_cmmc_level,
+        current_cis_section,
+        current_rationale,
+    ) = record
+        .versions
+        .iter()
+        .find(|v| Some(v.id) == current_version_id)
+        .map(|v| {
+            (
+                v.srg_ids.clone(),
+                v.cci_ids.clone(),
+                v.category.clone(),
+                v.framework.clone(),
+                v.severity.clone(),
+                v.control_family.clone(),
+                v.cmmc_level,
+                v.cis_section.clone(),
+                v.rationale.clone(),
+            )
+        })
+        .unwrap_or_default();
+
+    let revision = record.versions.first().map(|v| v.version.clone());
+    let publication_state = record
+        .versions
+        .iter()
+        .find(|v| Some(v.id) == current_version_id)
+        .map(|v| v.publication_state.clone());
+    let semantic_digest = record
+        .versions
+        .iter()
+        .find(|v| Some(v.id) == current_version_id)
+        .map(|v| v.semantic_digest.clone());
+
+    let revisions: Vec<PolicyRevisionSummary> = record
+        .versions
+        .into_iter()
+        .map(|v| PolicyRevisionSummary {
+            id: v.id,
+            version: v.version,
+            publication_state: v.publication_state,
+            trust_state: v.trust_state,
+            semantic_digest: v.semantic_digest,
+            created_at: v.created_at.to_rfc3339(),
+            is_current_published: v.is_current_published,
+            is_current_draft: v.is_current_draft,
+            name: v.name,
+            description: v.description,
+            policy_type: v.policy_type,
+            config: v.config,
+            enabled: v.enabled,
+            srg_ids: v.srg_ids,
+            cci_ids: v.cci_ids,
+            category: v.category,
+            framework: v.framework,
+            severity: v.severity,
+            control_family: v.control_family,
+            cmmc_level: v.cmmc_level,
+            cis_section: v.cis_section,
+            rationale: v.rationale,
+        })
+        .collect();
+
     PolicyDefinition {
         id: record.id,
+        lineage_id: record.id,
+        version_id: current_version_id,
+        revision,
+        publication_state,
+        semantic_digest,
+        revisions,
         name: record.name,
         description: record
             .description
@@ -93,69 +150,16 @@ fn policy_record_to_definition_with_count(
         format: PolicyFormat::Json,
         body,
         policy_type: Some(record.policy_type),
+        updated_at: record.updated_at.to_rfc3339(),
         system_count,
+        srg_ids: current_srg_ids,
+        cci_ids: current_cci_ids,
+        category: current_category,
+        framework: current_framework,
+        severity: current_severity,
+        control_family: current_control_family,
+        cmmc_level: current_cmmc_level,
+        cis_section: current_cis_section,
+        rationale: current_rationale,
     }
-}
-
-/// Mock policies for fallback when API is unavailable.
-fn mock_policies() -> Vec<PolicyDefinition> {
-    use crate::components::policy::PolicyFormat;
-
-    let mock_count = 12i64;
-    vec![
-        PolicyDefinition {
-            id: Uuid::from_u128(1),
-            name: "Require Crystal Forge Agent".to_string(),
-            description: "This policy ensures the Crystal Forge agent and client services are enabled on the target system.".to_string(),
-            format: PolicyFormat::Toml,
-            body: r#"[[policy]]
-type = "require_crystal_forge_agent"
-strict = true
-"#.to_string(),
-            policy_type: Some("require_crystal_forge_agent".to_string()),
-            system_count: mock_count,
-        },
-        PolicyDefinition {
-            id: Uuid::from_u128(2),
-            name: "Require Firewall".to_string(),
-            description: "Ensure firewall is enabled on all systems.".to_string(),
-            format: PolicyFormat::Toml,
-            body: r#"[[policy]]
-type = "custom_check"
-expression = "config.networking.firewall.enable"
-description = "Firewall must be enabled"
-strict = true
-"#.to_string(),
-            policy_type: Some("custom_check".to_string()),
-            system_count: mock_count,
-        },
-        PolicyDefinition {
-            id: Uuid::from_u128(3),
-            name: "Require SSH Key Auth".to_string(),
-            description: "Require SSH key-only authentication (no passwords).".to_string(),
-            format: PolicyFormat::Toml,
-            body: r#"[[policy]]
-type = "custom_check"
-expression = "!config.services.openssh.settings.PasswordAuthentication"
-description = "Password authentication must be disabled"
-strict = false
-"#.to_string(),
-            policy_type: Some("custom_check".to_string()),
-            system_count: mock_count,
-        },
-        PolicyDefinition {
-            id: Uuid::from_u128(4),
-            name: "Require Auditd".to_string(),
-            description: "Require audit daemon for security compliance.".to_string(),
-            format: PolicyFormat::Toml,
-            body: r#"[[policy]]
-type = "custom_check"
-expression = "config.services.auditd.enable or false"
-description = "Audit daemon should be enabled"
-strict = false
-"#.to_string(),
-            policy_type: Some("custom_check".to_string()),
-            system_count: mock_count,
-        },
-    ]
 }

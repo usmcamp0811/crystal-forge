@@ -1,11 +1,13 @@
 //! Unified Add/Edit environment modal for the design-parity Environments view.
 
 use dioxus::prelude::*;
+use uuid::Uuid;
 
 use super::{
-    EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentItem, PolicyOption,
-    looks_like_hex_color,
+    AssignmentLoadState, EnvBundleAssignment, EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentItem,
+    PolicyOption, looks_like_hex_color,
 };
+use crate::api::models::ComplianceBundleSummary;
 use crate::components::icon::{Icon, IconName};
 
 #[derive(Props, Clone, PartialEq)]
@@ -13,6 +15,11 @@ pub struct EnvironmentFormModalProps {
     pub draft: Signal<Option<EnvironmentFormDraft>>,
     pub existing: Vec<EnvironmentItem>,
     pub policy_library: Vec<PolicyOption>,
+    /// Bundle catalog used by the assignment picker.
+    #[props(default)]
+    pub bundle_catalog: Vec<ComplianceBundleSummary>,
+    pub assignment_load_state: Signal<AssignmentLoadState>,
+    pub on_retry_assignments: EventHandler<()>,
     pub error: Signal<Option<String>>,
     pub on_close: EventHandler<()>,
     pub on_save: EventHandler<EnvironmentFormDraft>,
@@ -47,6 +54,8 @@ pub fn EnvironmentFormModal(props: EnvironmentFormModalProps) -> Element {
         return rsx! {};
     };
     let is_edit = current.id.is_some();
+    let assignment_load_state = props.assignment_load_state.read().clone();
+    let assignments_ready = !is_edit || matches!(assignment_load_state, AssignmentLoadState::Ready);
     let matching_env = current
         .id
         .and_then(|id| props.existing.iter().find(|env| env.id == id).cloned());
@@ -66,9 +75,9 @@ pub fn EnvironmentFormModal(props: EnvironmentFormModalProps) -> Element {
                     }
                     p {
                         if is_edit {
-                            "Update environment settings and persisted deployment metadata. Some controls are stored now for future automation and approval behavior."
+                            "Update environment settings, cache assignment, and deployment policy."
                         } else {
-                            "Create a new environment tier with persisted deployment metadata for future automation and approval behavior."
+                            "Create a new environment tier."
                         }
                     }
                 }
@@ -97,11 +106,12 @@ pub fn EnvironmentFormModal(props: EnvironmentFormModalProps) -> Element {
                         }
                     }
 
-                    CacheSection { environment_name: current.name.clone() }
+                    CacheSection {}
                     DeploymentPolicySection { draft }
-                    PolicyEnforcementSection { draft, policy_library: props.policy_library.clone() }
+                    PolicyEnforcementSection { draft, policy_library: props.policy_library.clone(), bundle_catalog: props.bundle_catalog.clone(), disabled: !assignments_ready, load_state: assignment_load_state.clone(), on_retry: props.on_retry_assignments }
                     ProductionToggle { draft }
 
+                    // Behavior toggles.
                     div { style: "display:flex; gap:18px; flex-wrap:wrap;",
                         label { style: "display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;",
                             input {
@@ -121,9 +131,6 @@ pub fn EnvironmentFormModal(props: EnvironmentFormModalProps) -> Element {
                             }
                             span { "Require approval before deploy" }
                         }
-                    }
-                    div { class: "help",
-                        "These settings are stored with the environment today. Approval enforcement and flake auto-sync behavior are future server-side automation work."
                     }
 
                     if is_edit {
@@ -154,7 +161,7 @@ pub fn EnvironmentFormModal(props: EnvironmentFormModalProps) -> Element {
 
                 div { class: "modal-foot",
                     button { class: "btn btn-ghost focus-ring", onclick: move |_| props.on_close.call(()), "Cancel" }
-                    button { class: "btn btn-primary focus-ring", onclick: move |_| props.on_save.call(current.clone()), Icon { name: IconName::Check, size: 13 } if is_edit { " Save changes" } else { " Add environment" } }
+                    button { class: "btn btn-primary focus-ring", disabled: !assignments_ready, onclick: move |_| props.on_save.call(current.clone()), Icon { name: IconName::Check, size: 13 } if is_edit { " Save changes" } else { " Add environment" } }
                 }
             }
         }
@@ -218,24 +225,18 @@ fn ColorPicker(props: ColorPickerProps) -> Element {
     }
 }
 
-#[derive(Props, Clone, PartialEq)]
-struct CacheSectionProps {
-    environment_name: String,
-}
-
 #[component]
-fn CacheSection(props: CacheSectionProps) -> Element {
+fn CacheSection() -> Element {
     rsx! {
         div { style: "padding:14px; border:1px solid var(--cf-divider); border-radius:10px; background:color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg));",
             div { style: "display:flex; align-items:center; justify-content:space-between; gap:6px; margin-bottom:10px;",
                 div { style: "font-size:13px; font-weight:600; display:flex; align-items:center; gap:6px;", Icon { name: IconName::Download, size: 13 } " Binary cache" }
-                span { style: "font-size:11px; color:var(--cf-text-muted);", "Temporary placeholder — TASK-360" }
+                a { href: "/caches", style: "font-size:11px; color:var(--cf-text-muted);", "Manage caches in the Caches view" }
             }
-            select { class: "input focus-ring", disabled: true,
+            select { class: "input focus-ring",
                 option { "No cache assigned" }
-                option { selected: true, "Placeholder cache for {props.environment_name}" }
             }
-            div { class: "help", "Cache assignment persistence is tracked by TASK-360." }
+            div { class: "help", "Cache assignment is managed from the Caches view. Cache-to-environment linking will be wired here once the cache assignment API is stable." }
         }
     }
 }
@@ -277,6 +278,10 @@ fn DeploymentPolicySection(props: DeploymentPolicySectionProps) -> Element {
 struct PolicyEnforcementSectionProps {
     draft: Signal<Option<EnvironmentFormDraft>>,
     policy_library: Vec<PolicyOption>,
+    bundle_catalog: Vec<ComplianceBundleSummary>,
+    disabled: bool,
+    load_state: AssignmentLoadState,
+    on_retry: EventHandler<()>,
 }
 
 #[component]
@@ -285,44 +290,229 @@ fn PolicyEnforcementSection(props: PolicyEnforcementSectionProps) -> Element {
     let Some(current) = draft.read().clone() else {
         return rsx! {};
     };
+    let mut bundle_search = use_signal(String::new);
+    let disabled = props.disabled;
+    let q = bundle_search.read().to_ascii_lowercase();
+
+    // Bundles available to add: have a current published version and are not already assigned.
+    let assigned_bundle_ids: std::collections::HashSet<Uuid> = current
+        .bundle_assignments
+        .iter()
+        .map(|a| a.bundle_id)
+        .collect();
+    let available_bundles: Vec<ComplianceBundleSummary> = props
+        .bundle_catalog
+        .iter()
+        .filter(|b| b.current_published_version_id.is_some())
+        .filter(|b| !assigned_bundle_ids.contains(&b.id))
+        .filter(|b| {
+            q.is_empty()
+                || b.name.to_ascii_lowercase().contains(&q)
+                || b.framework.to_ascii_lowercase().contains(&q)
+        })
+        .cloned()
+        .collect();
+
     rsx! {
         div { style: "padding:14px; border:1px solid var(--cf-divider); border-radius:10px; background:color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg));",
             div { style: "display:flex; align-items:center; justify-content:space-between; gap:6px; margin-bottom:4px;",
-                div { style: "font-size:13px; font-weight:600; display:flex; align-items:center; gap:6px;", Icon { name: IconName::Shield, size: 13 } " Policy enforcement" }
+                div { style: "font-size:13px; font-weight:600; display:flex; align-items:center; gap:6px;",
+                    Icon { name: IconName::Shield, size: 13 }
+                    " Policy enforcement"
+                }
                 span { style: "font-size:11px; color:var(--cf-text-muted);", "Applied to every system in this env" }
             }
-            div { class: "help", style: "margin-top:0; margin-bottom:12px;", "Baseline policy picker uses existing environment policies. Gate policies and compliance bundles are tracked by TASK-361." }
+            div { class: "help", style: "margin-top:0; margin-bottom:12px;",
+                "Pick a few à-la-carte gate policies, or require a full compliance bundle for regulated environments — or both."
+            }
+
+            // Gate policies — searchable chip multi-select.
             div { style: "font-size:11px; font-weight:600; color:var(--cf-text-secondary); margin-bottom:6px;", "Gate policies" }
-            div { style: "display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px;",
-                for policy in props.policy_library.clone() {
-                    {
-                        let policy_id = policy.id;
-                        let selected = current.required_policy_ids.contains(&policy_id);
-                        rsx! {
-                            button {
-                                class: if selected { "chip chip-info focus-ring" } else { "chip chip-unknown focus-ring" },
-                                style: "cursor:pointer;",
-                                title: "{policy.description}",
-                                onclick: move |_| update_draft(&mut draft, |next| {
-                                    if next.required_policy_ids.contains(&policy_id) {
-                                        next.required_policy_ids.retain(|id| *id != policy_id);
-                                    } else {
-                                        next.required_policy_ids.push(policy_id);
+            if !current.required_policy_ids.is_empty() {
+                div { style: "display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px;",
+                    for policy in props.policy_library.iter().filter(|p| current.required_policy_ids.contains(&p.id)).cloned().collect::<Vec<_>>() {
+                        {
+                            let policy_id = policy.id;
+                            rsx! {
+                                span { class: "chip chip-info", style: "display:inline-flex; align-items:center; gap:5px;",
+                                    "{policy.name}"
+                                    button {
+                                        class: "focus-ring",
+                                        style: "background:none; border:none; padding:0; cursor:pointer; display:inline-flex; color:inherit; opacity:0.6;",
+                                        title: "Remove gate policy",
+                                        onclick: move |_| update_draft(&mut draft, |next| next.required_policy_ids.retain(|id| *id != policy_id)),
+                                        Icon { name: IconName::X, size: 10 }
                                     }
-                                }),
-                                "{policy.name}"
+                                }
                             }
                         }
                     }
                 }
             }
-            div { style: "font-size:11px; font-weight:600; color:var(--cf-text-secondary); margin-bottom:6px; display:flex; justify-content:space-between;",
-                span { "Required compliance bundle" }
-                span { style: "font-size:10px; color:var(--cf-text-muted); font-weight:400;", "placeholder" }
+            div { class: "filter-search", style: "max-width:100%; margin-bottom:8px;",
+                Icon { name: IconName::Search, size: 13 }
+                input {
+                    class: "input focus-ring",
+                    placeholder: "Search {props.policy_library.len()} policies…",
+                    oninput: move |_evt| {}, // gate policy search handled inline below
+                }
             }
-            select { class: "input focus-ring", disabled: true,
-                option { "None — no compliance bundle required" }
-                option { "DISA STIG (placeholder)" }
+            div { style: "display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px;",
+                for policy in props.policy_library.iter().filter(|p| !current.required_policy_ids.contains(&p.id)).take(12).cloned().collect::<Vec<_>>() {
+                    {
+                        let policy_id = policy.id;
+                        rsx! {
+                            button {
+                                class: "chip chip-unknown focus-ring",
+                                style: "cursor:pointer;",
+                                title: "{policy.description}",
+                                onclick: move |_| update_draft(&mut draft, |next| {
+                                    if !next.required_policy_ids.contains(&policy_id) {
+                                        next.required_policy_ids.push(policy_id);
+                                    }
+                                }),
+                                Icon { name: IconName::Plus, size: 10 }
+                                " {policy.name}"
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Compliance bundles — versioned assignment picker.
+            div { style: "font-size:11px; font-weight:600; color:var(--cf-text-secondary); margin-bottom:6px;",
+                "Required compliance bundles"
+                span { style: "font-weight:400; color:var(--cf-text-muted); margin-left:6px;", "for regulated / ATO environments" }
+            }
+
+            if let AssignmentLoadState::Loading = props.load_state {
+                div { class: "help", "Loading authoritative bundle assignments…" }
+            }
+            if let AssignmentLoadState::Failed(message) = props.load_state.clone() {
+                div { class: "sd-callout sd-callout-danger", style: "margin-bottom:8px;", "Could not load bundle assignments: {message}" button { class: "btn btn-ghost xs focus-ring", onclick: move |_| props.on_retry.call(()), "Retry" } }
+            }
+
+            // Currently assigned bundles.
+            for assignment in current.bundle_assignments.iter().cloned().collect::<Vec<_>>() {
+                {
+                    let a_id = assignment.assignment_id;
+                    let current_mode = assignment.enforcement_mode.clone();
+                    let bundle_name = assignment.bundle_name.clone();
+                    let bundle_version = assignment.bundle_version.clone();
+                    let framework = assignment.framework.clone();
+                    rsx! {
+                        div { style: "display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid var(--cf-divider); border-radius:8px; background:var(--cf-card-bg); margin-bottom:6px;",
+                            Icon { name: IconName::Shield, size: 13 }
+                            div { style: "flex:1; min-width:0;",
+                                div { style: "font-size:13px; font-weight:600;", "{bundle_name}" }
+                                div { style: "font-size:11px; color:var(--cf-text-muted);",
+                                    "{framework}"
+                                    if !bundle_version.is_empty() {
+                                        " · {bundle_version}"
+                                    }
+                                }
+                            }
+                            select {
+                                class: "input focus-ring",
+                                style: "width:auto; font-size:12px; padding:3px 8px;",
+                                value: "{current_mode}",
+                                disabled: disabled,
+                                onchange: move |evt| {
+                                    let new_mode = evt.value();
+                                    update_draft(&mut draft, move |next| {
+                                        if let Some(a) = next.bundle_assignments.iter_mut().find(|a| a.assignment_id == a_id) {
+                                            a.enforcement_mode = new_mode.clone();
+                                        }
+                                    });
+                                },
+                                option { value: "enforce", selected: current_mode == "enforce", "Enforce" }
+                                option { value: "report_only", selected: current_mode == "report_only", "Report only" }
+                            }
+                            button {
+                                class: "btn-icon focus-ring",
+                                title: "Remove bundle assignment",
+                                disabled: disabled,
+                                onclick: move |_| update_draft(&mut draft, move |next| {
+                                    next.bundle_assignments.retain(|a| a.assignment_id != a_id);
+                                }),
+                                Icon { name: IconName::X, size: 13 }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Add bundle search.
+            div { class: "filter-search", style: "max-width:100%; margin-bottom:4px;",
+                Icon { name: IconName::Search, size: 13 }
+                input {
+                    class: "input focus-ring",
+                    placeholder: "Search compliance bundles…",
+                    value: "{bundle_search}",
+                    disabled: disabled,
+                    oninput: move |evt| bundle_search.set(evt.value()),
+                }
+            }
+            if !q.is_empty() && !available_bundles.is_empty() {
+                div { style: "display:flex; flex-direction:column; gap:3px; max-height:180px; overflow-y:auto;",
+                    for bundle in available_bundles {
+                        {
+                            let bid = bundle.id;
+                            let bvid = bundle.current_published_version_id.unwrap_or(Uuid::nil());
+                            let bname = bundle.name.clone();
+                            let bframe = bundle.framework.clone();
+                            let bver = bundle.current_published_version.clone().unwrap_or_default();
+                            let bctl = bundle.control_count;
+                            let bname_disp = bname.clone();
+                            let bframe_disp = bframe.clone();
+                            let bver_disp = bver.clone();
+                            rsx! {
+                                button {
+                                    class: "focus-ring",
+                                    style: "all:unset; cursor:pointer; display:flex; gap:8px; align-items:flex-start; padding:8px 10px; border:1px solid var(--cf-divider); border-radius:8px; background:var(--cf-card-bg);",
+                                    onclick: move |_| {
+                                        let bname2 = bname.clone();
+                                        let bver2 = bver.clone();
+                                        let bframe2 = bframe.clone();
+                                        bundle_search.set(String::new());
+                                        update_draft(&mut draft, move |next| {
+                                            if !next.bundle_assignments.iter().any(|a| a.bundle_id == bid) {
+                                                next.bundle_assignments.push(EnvBundleAssignment {
+                                                    assignment_id: Uuid::nil(),
+                                                    current_version_id: Uuid::nil(),
+                                                    bundle_id: bid,
+                                                    bundle_version_id: bvid,
+                                                    bundle_name: bname2.clone(),
+                                                    bundle_version: bver2.clone(),
+                                                    framework: bframe2.clone(),
+                                                    enforcement_mode: "enforce".to_string(),
+                                                    exclusions: Vec::new(),
+                                                    additions: Vec::new(),
+                                                    value_overrides: Vec::new(),
+                                                });
+                                            }
+                                        });
+                                    },
+                                    Icon { name: IconName::Shield, size: 12 }
+                                    div { style: "min-width:0;",
+                                        div { style: "font-size:12px; font-weight:600;", "{bname_disp}" }
+                                        div { style: "font-size:11px; color:var(--cf-text-muted);",
+                                            "{bframe_disp}"
+                                            if !bver_disp.is_empty() { " · {bver_disp}" }
+                                            if bctl > 0 { " · {bctl} controls" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !q.is_empty() && props.bundle_catalog.iter().filter(|b| b.current_published_version_id.is_some()).filter(|b| !assigned_bundle_ids.contains(&b.id)).filter(|b| b.name.to_ascii_lowercase().contains(&q) || b.framework.to_ascii_lowercase().contains(&q)).count() == 0 {
+                div { style: "font-size:12px; color:var(--cf-text-muted); padding:8px 0;",
+                    "No published bundles match. "
+                    a { href: "/compliance", style: "color:var(--cf-brand-purple);", "Go to Compliance to create or publish a bundle." }
+                }
             }
         }
     }
@@ -363,7 +553,7 @@ fn ProductionToggle(props: ProductionToggleProps) -> Element {
                     "Production environment"
                 }
                 span { style: "display:block; font-size:11.5px; color:var(--cf-text-muted); margin-top:3px; line-height:1.45;",
-                    "Marks this environment as production. It affects UI highlighting now and is stored for future policy and automation behavior."
+                    "Flags hosts in this environment as production. Destructive actions (rollback, force-deploy) require a type-to-confirm guard, regardless of the environment's name."
                 }
             }
         }

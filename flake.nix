@@ -43,6 +43,7 @@
           web-ui = channels.nixpkgs.crystal-forge.web-ui;
           oscal-fixture = channels.nixpkgs.crystal-forge.oscal-fixture;
           oscal-1-1-2-schemas = channels.nixpkgs.crystal-forge.oscal-1-1-2-schemas;
+          xccdf-1-2-schemas = channels.nixpkgs.crystal-forge.xccdf-1-2-schemas;
         };
         apps.generate-design-targets = import ./apps/generate-design-targets/default.nix {
           lib = channels.nixpkgs.lib;
