@@ -104,6 +104,8 @@ function ComplianceView({ onOpenSystem, selectedBundleId, onClearBundle }) {
               ))}
             </div>
 
+            <RequirementCoverageCard bundle={bundle}/>
+
             {/* Bundle nav: controls list + systems matrix */}
             <BundleDrilldown
               bundle={bundle}
@@ -253,6 +255,61 @@ function BundleCatalog({ bundles, selectedId, onSelect }) {
           onSelect={(id) => { onSelect(id); setPickerFor(null); }}
           onClose={() => setPickerFor(null)}
         />
+      )}
+    </div>
+  );
+}
+
+function RequirementCoverageCard({ bundle }) {
+  const [open, setOpen] = React.useState(false);
+  const coverage = typeof bundleRequirementCoverage === "function" ? bundleRequirementCoverage(bundle) : null;
+  if (!coverage) return null;
+  const { framework, total, full, partial, unmapped, rows } = coverage;
+  const byParent = new Map();
+  rows.forEach(r => {
+    const top = reqBreadcrumb(r.requirement.id)[0];
+    const key = top?.id || "other";
+    if (!byParent.has(key)) byParent.set(key, { top, items: [] });
+    byParent.get(key).items.push(r);
+  });
+  const statusColor = { full:"#34d399", partial:"#fbbf24", unmapped:"#6b7280" };
+  return (
+    <div className="card" style={{ padding:16 }}>
+      <button className="focus-ring" onClick={()=>setOpen(o=>!o)} style={{ all:"unset", cursor:"pointer", display:"flex", width:"100%", alignItems:"center", justifyContent:"space-between", gap:10 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+          <Icon name={open?"chevron-down":"chevron-right"} size={13}/>
+          <span style={{ fontSize:13, fontWeight:600 }}>Requirement coverage</span>
+          <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{framework.name} · derived from mapped policies, not policy tags</span>
+        </div>
+        <div style={{ display:"flex", gap:6, flexShrink:0 }}>
+          <span className="chip" style={{ fontSize:9.5, color:"#34d399", background:"color-mix(in oklab, #34d399 16%, transparent)" }}>{full} full</span>
+          <span className="chip" style={{ fontSize:9.5, color:"#fbbf24", background:"color-mix(in oklab, #fbbf24 16%, transparent)" }}>{partial} partial</span>
+          <span className="chip chip-unknown" style={{ fontSize:9.5 }}>{unmapped} unmapped</span>
+        </div>
+      </button>
+      {open && (
+        <div style={{ marginTop:14, display:"flex", flexDirection:"column", gap:14 }}>
+          {Array.from(byParent.values()).map(grp => (
+            <div key={grp.top?.id || "other"}>
+              <div style={{ fontSize:11.5, fontWeight:700, marginBottom:6 }}>{grp.top ? `${grp.top.externalId} — ${grp.top.title}` : "Other"}</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                {grp.items.map(({ requirement, mappings, status }) => (
+                  <div key={requirement.id} style={{ display:"flex", justifyContent:"space-between", gap:10, padding:"6px 9px", background:"var(--cf-subtle-bg)", borderRadius:7 }}>
+                    <div style={{ minWidth:0 }}>
+                      <span className="mono" style={{ fontSize:11.5, fontWeight:600 }}>{requirement.externalId}</span>
+                      <span style={{ fontSize:11, color:"var(--cf-text-secondary)", marginLeft:6 }}>{requirement.title}</span>
+                      {mappings.length > 0 && <div style={{ fontSize:10, color:"var(--cf-text-muted)", marginTop:2 }}>{mappings.map(m => POLICIES.find(p=>p.id===m.policyId)?.name).filter(Boolean).join(", ")}</div>}
+                    </div>
+                    <span className="chip" style={{ fontSize:9, flexShrink:0, height:"fit-content", color:statusColor[status], background:`color-mix(in oklab, ${statusColor[status]} 16%, transparent)` }}>
+                      {status === "full" ? "Fully covered" : status === "partial" ? "Partially covered" : "Unmapped"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+          {total === 0 && <div style={{ fontSize:12, color:"var(--cf-text-muted)" }}>No requirement catalog modeled for this framework yet.</div>}
+        </div>
       )}
     </div>
   );
@@ -1024,35 +1081,58 @@ function NewBundleModal({ onClose, bundle: editBundle, onDelete }) {
                 <input className="input focus-ring" placeholder="Filter policies…" value={query} onChange={e=>setQuery(e.target.value)}/>
               </div>
             </div>
-            <div style={{ display:"flex", flexDirection:"column", gap:4, maxHeight:260, overflowY:"auto" }}>
-              {filtered.map(p => {
-                const on = form.policyIds.includes(p.id);
-                return (
-                  <button key={p.id} className="focus-ring" onClick={()=>togglePolicy(p.id)}
-                    style={{
-                      all:"unset", cursor:"pointer", display:"flex", gap:10, alignItems:"flex-start",
-                      padding:"9px 11px", borderRadius:8,
-                      border:`1px solid ${on ? "var(--cf-brand-purple)" : "var(--cf-divider)"}`,
-                      background: on ? "color-mix(in oklab, var(--cf-brand-purple) 9%, var(--cf-card-bg))" : "var(--cf-card-bg)",
-                    }}>
-                    <div style={{
-                      width:16, height:16, borderRadius:5, flexShrink:0, marginTop:1,
-                      border:`1.5px solid ${on ? "var(--cf-brand-purple)" : "var(--cf-card-border)"}`,
-                      background: on ? "var(--cf-brand-purple)" : "transparent",
-                      display:"grid", placeItems:"center",
-                    }}>
-                      {on && <Icon name="check" size={11} style={{ color:"#fff" }}/>}
-                    </div>
-                    <div style={{ minWidth:0, flex:1 }}>
-                      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                        <span className="mono" style={{ fontSize:12, fontWeight:600 }}>{p.name}</span>
-                        <span className={`chip ${p.type === "builtin" ? "chip-unknown" : "chip-info"}`} style={{ fontSize:9 }}>{p.type}</span>
+            <div style={{ display:"flex", flexDirection:"column", gap:10, maxHeight:280, overflowY:"auto" }}>
+              {(() => {
+                const { mapped, other } = (typeof splitPoliciesForBundleFramework === "function")
+                  ? splitPoliciesForBundleFramework(filtered, form.framework)
+                  : { mapped: [], other: filtered };
+                const renderRow = (p, custom) => {
+                  const on = form.policyIds.includes(p.id);
+                  return (
+                    <button key={p.id} className="focus-ring" onClick={()=>togglePolicy(p.id)}
+                      style={{
+                        all:"unset", cursor:"pointer", display:"flex", gap:10, alignItems:"flex-start",
+                        padding:"9px 11px", borderRadius:8,
+                        border:`1px solid ${on ? "var(--cf-brand-purple)" : "var(--cf-divider)"}`,
+                        background: on ? "color-mix(in oklab, var(--cf-brand-purple) 9%, var(--cf-card-bg))" : "var(--cf-card-bg)",
+                      }}>
+                      <div style={{
+                        width:16, height:16, borderRadius:5, flexShrink:0, marginTop:1,
+                        border:`1.5px solid ${on ? "var(--cf-brand-purple)" : "var(--cf-card-border)"}`,
+                        background: on ? "var(--cf-brand-purple)" : "transparent",
+                        display:"grid", placeItems:"center",
+                      }}>
+                        {on && <Icon name="check" size={11} style={{ color:"#fff" }}/>}
                       </div>
-                      <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>{p.description}</div>
-                    </div>
-                  </button>
+                      <div style={{ minWidth:0, flex:1 }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+                          <span className="mono" style={{ fontSize:12, fontWeight:600 }}>{p.name}</span>
+                          <span className={`chip ${p.type === "builtin" ? "chip-unknown" : "chip-info"}`} style={{ fontSize:9 }}>{p.type}</span>
+                          {custom && <span className="chip chip-warning" style={{ fontSize:9 }}>Custom addition</span>}
+                        </div>
+                        <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>{p.description}</div>
+                        {custom && <div style={{ fontSize:10, color:"var(--cf-text-muted)", marginTop:2 }}>No mapping to {form.framework || "this framework"}</div>}
+                      </div>
+                    </button>
+                  );
+                };
+                return (
+                  <>
+                    {mapped.length > 0 && (
+                      <div>
+                        <div style={{ fontSize:10.5, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.06em", color:"var(--cf-text-muted)", margin:"2px 0 6px" }}>Mapped to {form.framework || "this framework"}</div>
+                        <div style={{ display:"flex", flexDirection:"column", gap:4 }}>{mapped.map(p=>renderRow(p,false))}</div>
+                      </div>
+                    )}
+                    {other.length > 0 && (
+                      <div>
+                        <div style={{ fontSize:10.5, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.06em", color:"var(--cf-text-muted)", margin:"2px 0 6px" }}>Other reusable policies</div>
+                        <div style={{ display:"flex", flexDirection:"column", gap:4 }}>{other.map(p=>renderRow(p,mapped.length>0))}</div>
+                      </div>
+                    )}
+                  </>
                 );
-              })}
+              })()}
               {filtered.length === 0 && (
                 <div style={{ fontSize:12, color:"var(--cf-text-muted)", padding:"16px 0", textAlign:"center" }}>No policies match. Define new policies in the Policies view.</div>
               )}
@@ -1128,7 +1208,7 @@ function DeleteBundleConfirm({ bundle, onCancel, onConfirm }) {
   );
 }
 
-Object.assign(window, { ComplianceView, ControlsEvidenceDrawer, ControlEvidenceCard, exportBundle, PubStateChip });
+Object.assign(window, { ComplianceView, ControlsEvidenceDrawer, ControlEvidenceCard, exportBundle, PubStateChip, RequirementCoverageCard });
 
 // ── Community bundle interchange — XCCDF 1.2 + a small Crystal Forge extension,
 // per the CF-XCCDF Interchange Profile draft. A bundle exports as one <Benchmark>:

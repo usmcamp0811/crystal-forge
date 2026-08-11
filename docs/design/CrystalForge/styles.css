@@ -201,6 +201,8 @@ select.input {
 .chip-critical { color: var(--cf-red); background: var(--cf-red-bg); }
 .chip-unknown { color: var(--cf-text-secondary); background: var(--cf-gray-bg); }
 .chip-info { color: var(--cf-blue); background: var(--cf-blue-bg); }
+.pol-adv-meta{border:1px solid var(--cf-divider);border-radius:9px;padding:10px 12px;background:var(--cf-subtle-bg)}
+.pol-adv-meta summary::-webkit-details-marker{display:none}
 
 :root[data-theme="light"] .chip-healthy { color: #047857; background: rgba(16,185,129,0.12); }
 :root[data-theme="light"] .chip-warning { color: #b45309; background: rgba(245,158,11,0.15); }

@@ -762,10 +762,10 @@ function PolicyCard({ group, onOpen, onEdit, selectMode, selected }) {
         </div>
       </div>
 
-      {(policy.srgIds?.length || policy.cciIds?.length) ? (
-        <div style={{ display:"flex", flexWrap:"wrap", gap:4 }}>
-          {(policy.srgIds||[]).map(s => <span key={s} className="chip chip-unknown mono" style={{ fontSize:9 }}>{s}</span>)}
-          {(policy.cciIds||[]).map(s => <span key={s} className="chip chip-unknown mono" style={{ fontSize:9 }}>{s}</span>)}
+      {(typeof mappingsForPolicy === "function" && (mappingsForPolicy(policy.id).length || (typeof bundlesUsingPolicy === "function" && bundlesUsingPolicy(policy.id).count))) ? (
+        <div style={{ display:"flex", flexWrap:"wrap", gap:5 }}>
+          {mappingsForPolicy(policy.id).length > 0 && <span className="chip chip-info" style={{ fontSize:9.5 }}>{mappingsForPolicy(policy.id).length} mapped requirement{mappingsForPolicy(policy.id).length===1?"":"s"}</span>}
+          {bundlesUsingPolicy(policy.id).count > 0 && <span className="chip chip-unknown" style={{ fontSize:9.5 }}>used by {bundlesUsingPolicy(policy.id).count} bundle{bundlesUsingPolicy(policy.id).count===1?"":"s"}</span>}
         </div>
       ) : null}
 
@@ -969,15 +969,67 @@ function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem, onSwitchPolicy, i
               <div style={{ fontSize:13, color:"var(--cf-text-primary)", lineHeight:1.5 }}>{policy.rationale}</div>
             </section>
           )}
-          {(policy.srgIds?.length || policy.cciIds?.length) ? (
-            <section>
-              <h3 style={{ fontSize:11, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", margin:"0 0 8px", fontWeight:600 }}>SRG / CCI mapping</h3>
-              <div style={{ display:"flex", flexWrap:"wrap", gap:5 }}>
-                {(policy.srgIds||[]).map(s => <span key={s} className="chip chip-unknown mono" style={{ fontSize:10 }}>{s}</span>)}
-                {(policy.cciIds||[]).map(s => <span key={s} className="chip chip-unknown mono" style={{ fontSize:10 }}>{s}</span>)}
+          <section>
+            <h3 style={{ fontSize:11, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", margin:"0 0 8px", fontWeight:600 }}>
+              Mapped Requirements · {mappingsForPolicy(policy.id).length}
+            </h3>
+            {mappingsForPolicy(policy.id).length === 0 ? (
+              <div className="sd-callout sd-callout-info">
+                <Icon name="check" size={13}/>
+                <div style={{ fontSize:12 }}>This policy is not currently mapped to an external compliance requirement. It can still be used as an operational or custom policy.</div>
               </div>
-            </section>
-          ) : null}
+            ) : (
+              <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+                {mappingsGroupedByFramework(policy.id).map(grp => (
+                  <div key={grp.framework?.id || "unknown"}>
+                    <div style={{ fontSize:11.5, fontWeight:700, color:"var(--cf-text-primary)", marginBottom:6 }}>{grp.framework?.name} <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>{grp.framework?.version}</span></div>
+                    <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                      {grp.rows.map(({ mapping, requirement }) => (
+                        <div key={mapping.id} style={{ padding:"9px 11px", background:"var(--cf-subtle-bg)", borderRadius:8, border:"1px solid var(--cf-divider)" }}>
+                          <div style={{ display:"flex", justifyContent:"space-between", gap:8 }}>
+                            <span className="mono" style={{ fontSize:12, fontWeight:600 }}>{requirement.externalId}</span>
+                            <span style={{ fontSize:9.5, color:"var(--cf-text-muted)" }}>{mapping.provenance === "imported" ? `Imported from ${mapping.importedFrom||"benchmark"}` : "Manual mapping"}</span>
+                          </div>
+                          <div style={{ fontSize:11.5, color:"var(--cf-text-secondary)", margin:"2px 0 5px" }}>{requirement.title}</div>
+                          <div style={{ fontSize:11, display:"flex", gap:6, alignItems:"center" }}>
+                            <span style={{ fontWeight:600, color:"var(--cf-text-primary)" }}>{relationshipMeta(mapping.relationship).label}</span>
+                            <span style={{ color:"var(--cf-text-muted)" }}>· {mapping.coverage === "full" ? "Full" : "Partial"} coverage</span>
+                          </div>
+                          {mapping.rationale && <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:5, lineHeight:1.4 }}>{mapping.rationale}</div>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {typeof suggestedForPolicy === "function" && suggestedForPolicy(policy.id).length > 0 && (
+              <div style={{ marginTop:12 }}>
+                <div style={{ fontSize:10.5, fontWeight:600, color:"var(--cf-text-muted)", marginBottom:6 }}>Suggested mappings</div>
+                {suggestedForPolicy(policy.id).map(s => { const req = reqById(s.requirementId); const fw = frameworkById(req?.frameworkId); return (
+                  <div key={s.id} style={{ padding:"8px 11px", background:"color-mix(in oklab, #a78bfa 8%, transparent)", borderRadius:8, border:"1px dashed color-mix(in oklab, #a78bfa 40%, transparent)", fontSize:11.5 }}>
+                    <span className="mono" style={{ fontWeight:600 }}>{fw?.name} · {req?.externalId}</span>
+                    <span style={{ color:"var(--cf-text-muted)", marginLeft:6 }}>Derived from {s.derivedFrom}</span>
+                  </div>
+                ); })}
+              </div>
+            )}
+          </section>
+          <section>
+            <h3 style={{ fontSize:11, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", margin:"0 0 8px", fontWeight:600 }}>
+              Used by bundles · {bundlesUsingPolicy(policy.id).count}
+            </h3>
+            {bundlesUsingPolicy(policy.id).count === 0 ? (
+              <div style={{ fontSize:12, color:"var(--cf-text-muted)" }}>Not part of any compliance bundle yet.</div>
+            ) : (
+              <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+                {[...new Set(bundlesUsingPolicy(policy.id).bundles.map(b=>b.lineageId||b.id))].map(lid => {
+                  const b = bundlesUsingPolicy(policy.id).bundles.find(x => (x.lineageId||x.id)===lid);
+                  return <span key={lid} className="chip chip-unknown" style={{ fontSize:10.5 }}>{b.name}</span>;
+                })}
+              </div>
+            )}
+          </section>
           <section>
             <h3 style={{ fontSize:11, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", margin:"0 0 8px", fontWeight:600 }}>Rules</h3>
             {policy.rules.length === 0 ? (
@@ -1080,6 +1132,7 @@ function PolicyFormModal({ mode, policy, onClose }) {
     enabled: policy.enabled !== false,
     rules: [...policy.rules],
     evidence: policy.evidence ? policy.evidence.map(e => ({ ...e })) : [],
+    mappings: (typeof mappingsForPolicy === "function" ? mappingsForPolicy(policy.id) : []).map(m => ({ ...m })),
   } : {
     name: "",
     description: "",
@@ -1095,10 +1148,14 @@ function PolicyFormModal({ mode, policy, onClose }) {
     enabled: true,
     rules: [{ kind:"eval_passed" }, { kind:"build_succeeded" }],
     evidence: [],
+    mappings: [],
   });
   const [confirmDelete, setConfirmDelete] = React.useState(false);
   const [tab, setTab] = React.useState("details");
+  const [mappingEditor, setMappingEditor] = React.useState(null); // { mapping } | { } for new
   const set = (k,v) => setForm(p => ({ ...p, [k]: v }));
+  const saveMapping = (m) => set("mappings", form.mappings.some(x=>x.id===m.id) ? form.mappings.map(x=>x.id===m.id?m:x) : [...form.mappings, m]);
+  const removeMapping = (id) => set("mappings", form.mappings.filter(x=>x.id!==id));
 
   const addRule = (kind) => {
     const defaults = {
@@ -1136,6 +1193,7 @@ function PolicyFormModal({ mode, policy, onClose }) {
   const doSave = () => {
     const srgIds = parseIdList(form.srgIds);
     const cciIds = parseIdList(form.cciIds);
+    const policyId = isEdit ? policy.id : `custom-${slugify(form.name) || Date.now()}`;
     if (isEdit) {
       Object.assign(policy, {
         name: form.name, description: form.description, category: form.category,
@@ -1148,9 +1206,8 @@ function PolicyFormModal({ mode, policy, onClose }) {
         lastModified: "just now",
       });
     } else {
-      const id = `custom-${slugify(form.name) || Date.now()}`;
       POLICIES.push({
-        id, lineageId: id, revision: 1, publicationState: "current", publishedDate: new Date().toISOString().slice(0,10),
+        id: policyId, lineageId: policyId, revision: 1, publicationState: "current", publishedDate: new Date().toISOString().slice(0,10),
         name: form.name, description: form.description, category: form.category,
         controlFamily: form.category === "security" ? (form.controlFamily || null) : null,
         cmmcLevel: form.category === "security" ? (form.cmmcLevel || null) : null,
@@ -1160,6 +1217,10 @@ function PolicyFormModal({ mode, policy, onClose }) {
         type: "custom", enabled: form.enabled, rules: form.rules, evidence: form.evidence,
         createdBy: "you", createdAt: "just now", lastModified: "just now",
       });
+    }
+    if (typeof POLICY_REQUIREMENT_MAPPINGS !== "undefined") {
+      for (let i = POLICY_REQUIREMENT_MAPPINGS.length - 1; i >= 0; i--) { if (POLICY_REQUIREMENT_MAPPINGS[i].policyId === policyId) POLICY_REQUIREMENT_MAPPINGS.splice(i,1); }
+      form.mappings.forEach(m => POLICY_REQUIREMENT_MAPPINGS.push({ ...m, policyId }));
     }
   };
   const doDelete = () => {
@@ -1186,6 +1247,7 @@ function PolicyFormModal({ mode, policy, onClose }) {
                 <div style={{ display:"flex", borderBottom:"1px solid var(--cf-divider)", background:"var(--cf-subtle-bg)" }}>
                   {[
                     { id:"details",    label:"Details", color:"var(--cf-text-primary)" },
+                    { id:"mappings",   label:`Mappings · ${form.mappings.length}`, color:"#34d399" },
                     { id:"rule",       label:`Enforcement · ${form.rules.length}`, color:"var(--cf-brand-purple)" },
                     { id:"evidence",   label:`Evidence · ${form.evidence.length}`, color:"#60a5fa" },
                   ].map(t => (
@@ -1261,6 +1323,11 @@ function PolicyFormModal({ mode, policy, onClose }) {
                 </div>
               )}
               {form.category === "security" && (
+                <details className="pol-adv-meta" style={{ margin:"4px 0 10px" }}>
+                  <summary style={{ cursor:"pointer", fontSize:11, fontWeight:600, color:"var(--cf-text-muted)", textTransform:"uppercase", letterSpacing:"0.06em" }}>Source metadata (advanced)</summary>
+                  <div style={{ fontSize:11.5, color:"var(--cf-text-muted)", margin:"8px 0 12px", lineHeight:1.5 }}>
+                    Retained for import fidelity and legacy grouping views — this policy's compliance meaning now lives in <strong>Mappings</strong>, not this framework/family tagging.
+                  </div>
                 <div className="field">
                   <label>Framework</label>
                   <select className="input focus-ring" value={form.framework||""} onChange={e=>set("framework", e.target.value)}>
@@ -1276,8 +1343,7 @@ function PolicyFormModal({ mode, policy, onClose }) {
                   </select>
                   <div className="help">Determines which grouping field applies below — e.g. NIST 800-53 asks for a control family, CMMC asks for a level.</div>
                 </div>
-              )}
-              {form.category === "security" && form.framework === "NIST 800-53" && (
+              {form.framework === "NIST 800-53" && (
                 <div className="field">
                   <label>NIST 800-53 control family <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· drives the "Group by → NIST family" view</span></label>
                   <select className="input focus-ring" value={form.controlFamily} onChange={e=>set("controlFamily", e.target.value)}>
@@ -1324,6 +1390,8 @@ function PolicyFormModal({ mode, policy, onClose }) {
               </div>
               </>
               )}
+              </details>
+              )}
               <div className="field">
                 <label>Severity</label>
                 <div className="seg seg-sev" style={{ width:"fit-content" }}>
@@ -1354,6 +1422,62 @@ function PolicyFormModal({ mode, policy, onClose }) {
                 <textarea className="input focus-ring" rows={2} value={form.rationale} onChange={e=>set("rationale",e.target.value)}
                   placeholder="Why this policy exists — shown in detail view" style={{ resize:"vertical" }}/>
               </div>
+              </>
+              )}
+
+              {tab === "mappings" && (
+              <>
+              <div style={{ fontSize:12, color:"var(--cf-text-secondary)", marginBottom:10, lineHeight:1.5 }}>
+                Map this policy to the compliance requirements it implements, supports, or provides evidence for. Policies can map to requirements from multiple frameworks.
+              </div>
+              {form.mappings.length === 0 ? (
+                <div className="sd-callout sd-callout-info" style={{ marginBottom:10 }}>
+                  <Icon name="check" size={13}/>
+                  <div style={{ fontSize:12 }}>No compliance mappings yet. This policy can still be used as an operational/custom policy with zero mappings.</div>
+                </div>
+              ) : (
+                <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom:10 }}>
+                  {form.mappings.map(m => { const req = reqById(m.requirementId); const fw = frameworkById(req?.frameworkId); const readOnly = m.provenance === "imported"; return (
+                    <div key={m.id} style={{ padding:"9px 11px", background:"var(--cf-subtle-bg)", borderRadius:8, border:"1px solid var(--cf-divider)" }}>
+                      <div style={{ display:"flex", justifyContent:"space-between", gap:8, alignItems:"flex-start" }}>
+                        <div style={{ minWidth:0 }}>
+                          <div style={{ fontSize:11, fontWeight:700, color:"var(--cf-text-muted)", textTransform:"uppercase", letterSpacing:"0.04em" }}>{fw?.name} {fw?.version}</div>
+                          <div className="mono" style={{ fontSize:12.5, fontWeight:600, marginTop:2 }}>{req?.externalId} <span className="mono" style={{ fontWeight:400, color:"var(--cf-text-secondary)" }}>· {req?.title}</span></div>
+                          <div style={{ fontSize:11, marginTop:4 }}><strong>{relationshipMeta(m.relationship).label}</strong> <span style={{ color:"var(--cf-text-muted)" }}>· {m.coverage === "full" ? "Full" : "Partial"} coverage</span></div>
+                          {m.rationale && <div style={{ fontSize:10.5, color:"var(--cf-text-muted)", marginTop:3 }}>{m.rationale}</div>}
+                          <div style={{ fontSize:9.5, color:"var(--cf-text-muted)", marginTop:4 }}>{readOnly ? `Imported from ${m.importedFrom||"benchmark"} · read-only` : "Manual mapping"}</div>
+                        </div>
+                        {!readOnly && (
+                          <div style={{ display:"flex", gap:4, flexShrink:0 }}>
+                            <button className="btn-icon focus-ring" title="Edit mapping" onClick={()=>setMappingEditor(mappingEditor?.mapping?.id===m.id ? null : { mapping:m })}><Icon name="gear" size={12}/></button>
+                            <button className="btn-icon focus-ring" title="Remove mapping" onClick={()=>removeMapping(m.id)}><Icon name="x" size={12}/></button>
+                          </div>
+                        )}
+                      </div>
+                      {mappingEditor?.mapping?.id === m.id && (
+                        <InlineMappingEditor
+                          initial={mappingEditor.mapping}
+                          existingMappings={form.mappings}
+                          onCancel={()=>setMappingEditor(null)}
+                          onSave={(mm)=>{ saveMapping(mm); setMappingEditor(null); }}
+                        />
+                      )}
+                    </div>
+                  ); })}
+                </div>
+              )}
+              {mappingEditor && !mappingEditor.mapping && (
+                <InlineMappingEditor
+                  existingMappings={form.mappings}
+                  onCancel={()=>setMappingEditor(null)}
+                  onSave={(mm)=>{ saveMapping(mm); setMappingEditor(null); }}
+                />
+              )}
+              {!mappingEditor && (
+                <button className="btn btn-ghost focus-ring" type="button" onClick={()=>setMappingEditor({})}>
+                  <Icon name="plus" size={12}/> Add mapping
+                </button>
+              )}
               </>
               )}
 
@@ -1463,6 +1587,97 @@ function PolicyFormModal({ mode, policy, onClose }) {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+function InlineMappingEditor({ initial, onCancel, onSave, existingMappings }) {
+  const initReq = initial ? reqById(initial.requirementId) : null;
+  const [frameworkId, setFrameworkId] = React.useState(initReq?.frameworkId || "");
+  const [query, setQuery] = React.useState("");
+  const [requirementId, setRequirementId] = React.useState(initial?.requirementId || "");
+  const [relationship, setRelationship] = React.useState(initial?.relationship || "implements");
+  const [coverage, setCoverage] = React.useState(initial?.coverage || "full");
+  const [rationale, setRationale] = React.useState(initial?.rationale || "");
+  const results = frameworkId ? reqSearch(frameworkId, query).filter(r => reqChildren(r.id).length === 0) : [];
+  const dup = requirementId && !initial && existingMappings.some(m => m.requirementId === requirementId);
+  const canSave = frameworkId && requirementId && relationship && coverage && !dup;
+  const req = requirementId ? reqById(requirementId) : null;
+  const doSave = () => {
+    onSave({ id: initial?.id || mapId(), requirementId, relationship, coverage, rationale: rationale.trim() || undefined, provenance:"manual" });
+  };
+  return (
+    <div style={{ border:"1px solid var(--cf-brand-purple)", borderRadius:10, padding:14, background:"color-mix(in oklab, var(--cf-brand-purple) 5%, var(--cf-card-bg))", display:"flex", flexDirection:"column", gap:14, marginTop:8 }}>
+        <div>
+          <div style={{ fontSize:12.5, fontWeight:600 }}>{initial ? "Edit mapping" : "Add mapping"}</div>
+          <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>Map this policy to a compliance requirement it implements, supports, or provides evidence for.</div>
+        </div>
+          <div className="field">
+            <label>Framework</label>
+            <select className="input focus-ring" value={frameworkId} onChange={e=>{ setFrameworkId(e.target.value); setRequirementId(""); setQuery(""); }}>
+              <option value="">Choose a framework…</option>
+              {COMPLIANCE_FRAMEWORKS.map(f => <option key={f.id} value={f.id}>{f.name} · {f.version}</option>)}
+            </select>
+          </div>
+          {frameworkId && (
+            <div className="field">
+              <label>Requirement</label>
+              {req && !query ? (
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"8px 10px", background:"var(--cf-subtle-bg)", borderRadius:8, border:"1px solid var(--cf-divider)" }}>
+                  <div>
+                    <div className="mono" style={{ fontSize:12.5, fontWeight:600 }}>{req.externalId} <span style={{ fontWeight:400, color:"var(--cf-text-secondary)" }}>· {req.title}</span></div>
+                    <div style={{ fontSize:10.5, color:"var(--cf-text-muted)", marginTop:2 }}>{reqBreadcrumb(req.id).slice(0,-1).map(r=>r.externalId).join(" › ") || frameworkById(req.frameworkId)?.name}</div>
+                  </div>
+                  <button className="btn btn-ghost focus-ring xs" onClick={()=>{ setRequirementId(""); setQuery(""); }}>Change</button>
+                </div>
+              ) : (
+                <>
+                  <input className="input focus-ring" autoFocus value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search by ID, title, or CCI…"/>
+                  <div style={{ maxHeight:220, overflowY:"auto", display:"flex", flexDirection:"column", gap:4, marginTop:6 }}>
+                    {results.slice(0,40).map(r => (
+                      <button key={r.id} className="focus-ring" onClick={()=>{ setRequirementId(r.id); setQuery(""); }}
+                        style={{ all:"unset", cursor:"pointer", textAlign:"left", padding:"7px 9px", borderRadius:7, background:"var(--cf-subtle-bg)" }}>
+                        <div className="mono" style={{ fontSize:12, fontWeight:600 }}>{r.externalId}</div>
+                        <div style={{ fontSize:11, color:"var(--cf-text-secondary)" }}>{r.title}</div>
+                        <div style={{ fontSize:9.5, color:"var(--cf-text-muted)", marginTop:1 }}>{reqBreadcrumb(r.id).slice(0,-1).map(x=>x.externalId).join(" › ") || r.kind}</div>
+                      </button>
+                    ))}
+                    {results.length === 0 && <div style={{ fontSize:11.5, color:"var(--cf-text-muted)", padding:"6px 2px" }}>No requirements match.</div>}
+                  </div>
+                </>
+              )}
+              {dup && <div className="help" style={{ color:"#fbbf24" }}><Icon name="warn" size={10} style={{ verticalAlign:"middle" }}/> Already mapped to this requirement.</div>}
+            </div>
+          )}
+          <div className="field">
+            <label>Relationship</label>
+            <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+              {RELATIONSHIPS.map(r => (
+                <button key={r.id} type="button" className="focus-ring" onClick={()=>setRelationship(r.id)}
+                  style={{ all:"unset", cursor:"pointer", display:"flex", flexDirection:"column", gap:2, padding:"8px 10px", borderRadius:8,
+                    background: relationship===r.id ? "color-mix(in oklab, var(--cf-brand-purple) 12%, transparent)" : "var(--cf-subtle-bg)",
+                    border: `1px solid ${relationship===r.id ? "var(--cf-brand-purple)" : "var(--cf-divider)"}` }}>
+                  <span style={{ fontSize:12, fontWeight:600 }}>{r.label}</span>
+                  <span style={{ fontSize:10.5, color:"var(--cf-text-muted)" }}>{r.blurb}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="field">
+            <label>Coverage</label>
+            <div className="seg" style={{ width:"fit-content" }}>
+              <button className={coverage==="full"?"active":""} onClick={()=>setCoverage("full")}>Full</button>
+              <button className={coverage==="partial"?"active":""} onClick={()=>setCoverage("partial")}>Partial</button>
+            </div>
+          </div>
+          <div className="field">
+            <label>Mapping rationale <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· optional</span></label>
+            <textarea className="input focus-ring" rows={2} value={rationale} onChange={e=>setRationale(e.target.value)} placeholder="Why this policy satisfies the requirement" style={{ resize:"vertical" }}/>
+          </div>
+        <div style={{ display:"flex", justifyContent:"flex-end", gap:8 }}>
+          <button className="btn btn-ghost focus-ring" type="button" onClick={onCancel}>Cancel</button>
+          <button className="btn btn-primary focus-ring" type="button" disabled={!canSave} onClick={()=>{ doSave(); }}><Icon name="check" size={13}/> Save mapping</button>
+        </div>
     </div>
   );
 }
@@ -1679,4 +1894,4 @@ function DeletePolicyConfirm({ policy, onCancel, onConfirm }) {
   );
 }
 
-Object.assign(window, { PoliciesView, RuleEditor, policyToExternal, externalToPolicy, slugify, downloadFile, exportPolicies, parsePolicyFile, ruleDescription, ImportPoliciesModal, RevisionPickerModal, AdminGroupingsModal });
+Object.assign(window, { PoliciesView, RuleEditor, policyToExternal, externalToPolicy, slugify, downloadFile, exportPolicies, parsePolicyFile, ruleDescription, ImportPoliciesModal, RevisionPickerModal, AdminGroupingsModal, InlineMappingEditor });

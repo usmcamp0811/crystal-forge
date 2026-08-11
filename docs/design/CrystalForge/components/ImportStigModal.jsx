@@ -125,6 +125,26 @@ function assertFilled(a) {
   return true;
 }
 
+// ── Reconciliation: before asking a human to review anything, ask what CF already
+// knows. A STIG rule maps to a requirement; a requirement may already have an
+// authoritative policy mapping, or the generated policy id may already exist —
+// either way, reuse, don't duplicate. Only rules with no enforcement at all need
+// a human's attention.
+function reconcileRule(rule) {
+  const policyId = "stig-" + _slug(rule.stigId || rule.title);
+  const existingPolicy = (typeof POLICIES !== "undefined") ? POLICIES.find(p => p.id === policyId) : null;
+  if (existingPolicy) return { state:"existing", reason:"A policy for this control already exists on file", policy:existingPolicy };
+  const req = typeof reqById === "function" ? reqById("stig-" + rule.stigId) : null;
+  const mappings = req && typeof mappingsForRequirement === "function" ? mappingsForRequirement(req.id) : [];
+  if (mappings.length) {
+    const p = (typeof POLICIES !== "undefined") ? POLICIES.find(pp => pp.id === mappings[0].policyId) : null;
+    if (p) return { state:"existing", reason:`Already mapped to an existing policy \u2014 "${p.name}"`, policy:p };
+  }
+  const asserts = (rule.assertions || []).filter(assertFilled);
+  if (asserts.length) return { state:"ready", reason:"Enforcement inferred from the STIG fix text" };
+  return { state:"review", reason:"No enforcement could be inferred \u2014 needs a human to author it" };
+}
+
 function stigRuleToPolicy(rule, framework) {
   const id = "stig-" + _slug(rule.stigId || rule.title);
   const assertions = (rule.assertions || []).filter(assertFilled);
@@ -188,6 +208,7 @@ function ImportStigModal({ onClose, onComplete }) {
   const [created, setCreated] = React.useState(null);
   const [cursor, setCursor] = React.useState(0);
   const [refineTab, setRefineTab] = React.useState("source");
+  const [refineRuleIds, setRefineRuleIds] = React.useState([]);
   const fileRef = React.useRef(null);
 
   const allEnvs = (typeof ENVIRONMENTS !== "undefined" ? ENVIRONMENTS : []);
@@ -228,6 +249,11 @@ function ImportStigModal({ onClose, onComplete }) {
 
   const selectedRules = parsed ? parsed.rules.filter(r => r.selected) : [];
   const counts = parsed ? ["high","medium","low"].map(s => ({ s, n: parsed.rules.filter(r => r.severity === s).length, sel: parsed.rules.filter(r => r.severity === s && r.selected).length })) : [];
+  const reconciliation = selectedRules.map(rule => ({ rule, ...reconcileRule(rule) }));
+  const needsReview = reconciliation.filter(x => x.state === "review");
+  const existingMatches = reconciliation.filter(x => x.state === "existing");
+  const readyToCreate = reconciliation.filter(x => x.state === "ready");
+  const enterRefine = (ruleIds) => { setRefineRuleIds(ruleIds); setCursor(0); setRefineTab("source"); setStep("refine"); };
 
   const doImport = () => {
     const framework = "DISA STIG";
@@ -401,18 +427,96 @@ function ImportStigModal({ onClose, onComplete }) {
                 </button>
                 <button className="btn btn-primary focus-ring" disabled={!selectedRules.length || !bundleName.trim() || !envs.length}
                   style={(!selectedRules.length || !bundleName.trim() || !envs.length) ? { opacity:0.5, cursor:"not-allowed" } : null}
-                  onClick={()=>{ setCursor(0); setRefineTab("source"); setStep("refine"); }}>
-                  Refine {selectedRules.length} {selectedRules.length === 1 ? "policy" : "policies"} <Icon name="chevron-right" size={13}/>
+                  onClick={()=>setStep("reconcile")}>
+                  Continue <Icon name="chevron-right" size={13}/>
                 </button>
               </div>
             </div>
           </>
         )}
 
+        {/* ---------- Reconcile: what CF already knows before asking a human ---------- */}
+        {step === "reconcile" && parsed && (
+          <>
+            <div className="modal-head">
+              <h2><Icon name="link" size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/>Reconciling {selectedRules.length} controls</h2>
+              <p>Checked each control against policies and mappings already on file before asking you to do anything.</p>
+            </div>
+            <div className="modal-body" style={{ overflowY:"auto" }}>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10, marginBottom:16 }}>
+                {[
+                  { n:existingMatches.length, l:"existing implementations reused", color:"#34d399" },
+                  { n:readyToCreate.length, l:"ready to create \u2014 enforcement inferred", color:"#60a5fa" },
+                  { n:needsReview.length, l:"need review \u2014 no enforcement inferred", color: needsReview.length ? "#fbbf24" : "var(--cf-text-muted)" },
+                ].map((s,i) => (
+                  <div key={i} className="card" style={{ padding:"14px 12px", textAlign:"center" }}>
+                    <div style={{ fontSize:24, fontWeight:700, color:s.color }}>{s.n}</div>
+                    <div style={{ fontSize:11, color:"var(--cf-text-muted)", lineHeight:1.4, marginTop:2 }}>{s.l}</div>
+                  </div>
+                ))}
+              </div>
+
+              {needsReview.length > 0 && (
+                <div className="field">
+                  <label>Requiring attention · {needsReview.length}</label>
+                  <div style={{ display:"flex", flexDirection:"column", gap:5, maxHeight:220, overflowY:"auto" }}>
+                    {needsReview.map(({ rule, reason }) => (
+                      <div key={rule.ruleId} style={{ display:"flex", gap:10, alignItems:"flex-start", padding:"8px 10px", borderRadius:8, border:"1px solid var(--cf-divider)" }}>
+                        <Icon name="warn" size={13} style={{ color:"#fbbf24", marginTop:2, flexShrink:0 }}/>
+                        <div style={{ minWidth:0 }}>
+                          <div style={{ fontSize:12.5, fontWeight:600, lineHeight:1.4 }}>{rule.title}</div>
+                          <div className="mono" style={{ fontSize:10.5, color:"var(--cf-text-muted)" }}>{rule.stigId}</div>
+                          <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>{reason}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {(existingMatches.length > 0 || readyToCreate.length > 0) && (
+                <details style={{ marginTop:4 }}>
+                  <summary style={{ cursor:"pointer", fontSize:11.5, fontWeight:600, color:"var(--cf-text-muted)" }}>Show {existingMatches.length + readyToCreate.length} auto-resolved controls</summary>
+                  <div style={{ display:"flex", flexDirection:"column", gap:5, marginTop:8, maxHeight:220, overflowY:"auto" }}>
+                    {[...existingMatches, ...readyToCreate].map(({ rule, reason, state }) => (
+                      <div key={rule.ruleId} style={{ display:"flex", gap:10, alignItems:"flex-start", padding:"7px 10px", borderRadius:8, background:"var(--cf-subtle-bg)" }}>
+                        <Icon name={state==="existing"?"check":"shield"} size={12} style={{ color: state==="existing" ? "#34d399" : "#60a5fa", marginTop:2, flexShrink:0 }}/>
+                        <div style={{ minWidth:0 }}>
+                          <div style={{ fontSize:12, fontWeight:600, lineHeight:1.4 }}>{rule.title}</div>
+                          <div style={{ fontSize:10.5, color:"var(--cf-text-muted)", marginTop:1 }}>{reason}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
+            </div>
+            <div className="modal-foot" style={{ justifyContent:"space-between" }}>
+              <button className="btn btn-ghost focus-ring" onClick={()=>setStep("review")}>← Back</button>
+              <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                <button className="btn btn-ghost focus-ring" onClick={()=>enterRefine(selectedRules.map(r=>r.ruleId))} title="Walk through every control, not just the ones needing attention">
+                  Refine all instead
+                </button>
+                {needsReview.length > 0 ? (
+                  <button className="btn btn-primary focus-ring" onClick={()=>enterRefine(needsReview.map(x=>x.rule.ruleId))}>
+                    Review {needsReview.length} {needsReview.length===1?"control":"controls"} <Icon name="chevron-right" size={13}/>
+                  </button>
+                ) : (
+                  <button className="btn btn-primary focus-ring" onClick={doImport}>
+                    <Icon name="check" size={13}/> Create bundle + {selectedRules.length} {selectedRules.length===1?"policy":"policies"}
+                  </button>
+                )}
+              </div>
+            </div>
+          </>
+        )}
+
         {/* ---------- Refine (per-control walkthrough) ---------- */}
-        {step === "refine" && parsed && selectedRules.length > 0 && (() => {
-          const rule = selectedRules[Math.min(cursor, selectedRules.length - 1)];
-          const total = selectedRules.length;
+        {step === "refine" && parsed && (() => {
+          const scopeRules = refineRuleIds.map(id => parsed.rules.find(r => r.ruleId === id)).filter(r => r && r.selected);
+          if (scopeRules.length === 0) return null;
+          const rule = scopeRules[Math.min(cursor, scopeRules.length - 1)];
+          const total = scopeRules.length;
           const isLast = cursor >= total - 1;
           const asserts = rule.assertions || [];
           const evlist = rule.evidence || [];
@@ -612,14 +716,14 @@ function ImportStigModal({ onClose, onComplete }) {
               </div>
               <div className="modal-foot" style={{ justifyContent:"space-between" }}>
                 <div style={{ display:"flex", gap:8 }}>
-                  <button className="btn btn-ghost focus-ring" onClick={()=> { setRefineTab("source"); cursor === 0 ? setStep("review") : setCursor(c => c - 1); }}>
-                    <Icon name="chevron-left" size={13}/> {cursor === 0 ? "Back to list" : "Previous"}
+                  <button className="btn btn-ghost focus-ring" onClick={()=> { setRefineTab("source"); cursor === 0 ? setStep("reconcile") : setCursor(c => c - 1); }}>
+                    <Icon name="chevron-left" size={13}/> {cursor === 0 ? "Back to summary" : "Previous"}
                   </button>
                   <button className="btn btn-ghost focus-ring" style={{ color:"#f87171" }}
                     title="Exclude this control from the bundle"
                     onClick={()=>{
                       editRule(rule.ruleId, { selected:false });
-                      if (total <= 1) { setStep("review"); }
+                      if (total <= 1) { setStep("reconcile"); }
                       else if (isLast) { setCursor(c => Math.max(0, c - 1)); }
                     }}>
                     Exclude
@@ -629,7 +733,7 @@ function ImportStigModal({ onClose, onComplete }) {
                   <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{cursor + 1} / {total}</span>
                   {isLast ? (
                     <button className="btn btn-primary focus-ring" onClick={doImport}>
-                      <Icon name="check" size={13}/> Create bundle + {total} {total === 1 ? "policy" : "policies"}
+                      <Icon name="check" size={13}/> Create bundle + {selectedRules.length} {selectedRules.length === 1 ? "policy" : "policies"}
                     </button>
                   ) : (
                     <button className="btn btn-primary focus-ring" onClick={()=>{ setRefineTab("source"); setCursor(c => Math.min(total - 1, c + 1)); }}>
