@@ -6,9 +6,11 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-11 17:37'
+updated_date: '2026-08-11 17:40'
 labels: []
 milestone: m-22
-dependencies: []
+dependencies:
+  - TASK-412
 priority: high
 type: enhancement
 ordinal: 412000
@@ -46,6 +48,32 @@ The production Dioxus UI must reproduce the relevant design states pixel-for-pix
 
 Do not copy mock-only architecture or legacy shortcuts from the design example where they conflict with this task's backend model.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 Policies are framework-neutral in the authoritative backend model — a policy may map to zero, one, or many requirements across multiple frameworks
+- [ ] #2 Normalized compliance_frameworks and compliance_framework_versions tables exist with uniqueness constraints and semantic digests; duplicate authoritative release identity returns a typed conflict rather than a silent duplicate
+- [ ] #3 Normalized compliance_requirements (lineages) and compliance_requirement_versions tables exist; a requirement appearing in multiple framework releases retains one lineage with separate immutable versions
+- [ ] #4 policy_requirement_mappings is a first-class many-to-many join between exact policy versions and requirement versions, supporting relationship (implements/supports/provides_evidence_for), coverage (full/partial), rationale, and provenance (manual/imported/inherited/inferred)
+- [ ] #5 Mappings on an accepted/published policy version are read-only; editing requires creating a derived draft per the !313 derived-draft workflow
+- [ ] #6 compliance_bundle_version_requirements provides explicit requirement membership for bundle versions, separate from policy membership
+- [ ] #7 Backend derives requirement coverage (full/partial/unmapped) from normalized mappings + bundle requirement membership + selected bundle policy versions; legacy policy.framework/control_family fields are not authoritative
+- [ ] #8 A DISA STIG import first creates/reconciles framework and requirement state before making policy decisions; policies are the secondary implementation step
+- [ ] #9 STIG import preview classifies each requirement as EXISTING_UNCHANGED / EXISTING_CHANGED / NEW_REQUIREMENT / REMOVED_FROM_RELEASE / IDENTITY_CONFLICT and proposes ordered policy candidates (authoritative mapping → inherited → exact technical match → related mapping → fuzzy suggestion → none)
+- [ ] #10 Atomic STIG commit re-validates artifact digest, re-parses bytes, re-computes all identities, acquires advisory locks, and rolls back completely on any failure (TOCTOU-safe, matching !313 guarantees)
+- [ ] #11 Exact re-import of the same artifact is fully idempotent — zero duplicate framework versions, requirement versions, policies, mappings, or bundle versions
+- [ ] #12 New framework release import reuses framework lineage and requirement lineages, inherits unchanged mappings, flags changed requirements for review, and only creates genuinely new policies
+- [ ] #13 Policy-to-requirement mapping CRUD APIs exist for mutable draft policy versions; read APIs for requirements, framework hierarchy, and bundle coverage are server-side with pagination
+- [ ] #14 Requirement search is server-side and scoped by framework/version, supporting external ID, title, CCI, and SRG
+- [ ] #15 Policy UI implements the mapping workflow matching commit 861fd877 pixel-for-pixel: policy cards, drawer, add/edit modal with Details/Mappings/Enforcement/Evidence tabs, inline mapping editor, framework selector, server-backed requirement search, requirement hierarchy breadcrumb, mapping display grouped by framework
+- [ ] #16 Compliance view implements the Requirement coverage card from commit 861fd877 with full/partial/unmapped counts backed by authoritative server data, not frontend calculation
+- [ ] #17 Bundle add/edit UI splits policy selection into 'Mapped to <framework>' and 'Custom addition / No mapping to <framework>' sections, matching the design pixel-for-pixel
+- [ ] #18 STIG import UI implements the reconciliation summary step before per-control refinement; normal path auto-resolves most controls and surfaces only those requiring attention; 'Refine all' escape hatch preserved
+- [ ] #19 Concurrent imports do not create duplicate framework lineages, requirement lineages, or mappings; concurrency tests cover identity races
+- [ ] #20 Legacy compliance metadata fields (framework, control_family, cci_ids, srg_ids, etc.) remain preserved as source/advanced metadata but are not presented as authoritative compliance ownership in any UI surface
+- [ ] #21 All required automated tests pass: framework CRUD/identity, release uniqueness, requirement lineage/hierarchy, mapping create/update/delete on draft, mapping blocked on accepted version, bundle coverage full/partial/unmapped, exact STIG re-import idempotency, new release reconciliation, inherited mapping, exact technical candidate, concurrent identity race, complete rollback on failure
+- [ ] #22 nix build .#web-ui passes; nix build .#server passes; nix flake check --keep-going passes; no println!/dbg!/eprintln! in production paths; cargo fmt --all --check passes; git diff --check passes
+<!-- AC:END -->
 
 ## Implementation Plan
 
