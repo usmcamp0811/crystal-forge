@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-11 19:32'
+updated_date: '2026-08-11 19:44'
 labels: []
 milestone: m-22
 dependencies:
@@ -410,4 +410,6 @@ Phase F (Web UI) complete. Added API models and client functions for frameworks,
 Resumed with user confirmation that no completion claim is valid until Policies and Compliance views have pixel-level parity with the design using real backend behavior. A read-only audit confirmed the STIG reconciliation path and mapped/custom bundle selection remain unimplemented.
 
 Implemented an in-progress requirement-aware DISA STIG path: foreign preview now returns server-computed framework/requirement/candidate reconciliation data; the modal renders the design-aligned reconciliation summary, attention-only path, and Refine all path; exact artifact commit now returns the prior bundle result rather than creating duplicates; DISA commits persist normalized framework, requirement, bundle-baseline, and mapping rows in the existing transaction. `SQLX_OFFLINE=true nix develop ../.. --command cargo check -p cf-server` and `nix develop ../.. --command cargo check` from `packages/web-ui` passed (existing warnings remain). Further work is still required for release-change/inherited mapping semantics, bundle mapped/custom selection, full Policies parity, and browser-level pixel verification.
+
+Committed and pushed `cbd8c72d feat(compliance): reconcile STIG imports and split bundle policies`. It includes the server-backed bulk framework mapping projection and design-aligned mapped/custom sections in both bundle add and edit flows. `cargo check` passed for server and web UI; warnings are pre-existing repository-wide warnings.
 <!-- SECTION:NOTES:END -->
