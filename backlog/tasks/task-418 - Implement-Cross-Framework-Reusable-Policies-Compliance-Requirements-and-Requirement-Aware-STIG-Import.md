@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-11 18:14'
+updated_date: '2026-08-11 19:02'
 labels: []
 milestone: m-22
 dependencies:
@@ -402,4 +402,6 @@ DATABASE_URL=... cargo test -p cf-server --lib -- --ignored queries::compliance_
 - `ab9e44f9` feat(compliance): add framework/requirement schema, domain models, and DISA STIG adapter
 - `a5e552ed` feat(compliance): add framework/requirement query layer and DB-gated tests
 - (staged: handlers + server routes — commit pending)
+
+Phase F (Web UI) complete. Added API models and client functions for frameworks, requirements, mappings, and coverage. Policy editor modal now has a Mappings tab with grouped display, inline editor (framework/version/requirement search/relationship/coverage), and server-backed CRUD. Compliance view has a RequirementCoverageCard with full/partial/unmapped chips and expandable rows. nix build .#web-ui and .#server both pass. cargo fmt --all --check passes. 1066 lib tests + 5 framework_requirements DB tests + 14 compliance_interchange DB tests all green. Commits: ab9e44f9 (schema+models+adapter), a5e552ed (query layer+DB tests), a2f2dfbd (API handlers), 3a78bf28 (web UI), eada567a (fmt). Pushed to origin/TASK-418-cross-framework-requirements.
 <!-- SECTION:NOTES:END -->
