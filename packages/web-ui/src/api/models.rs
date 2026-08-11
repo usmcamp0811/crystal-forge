@@ -1529,6 +1529,89 @@ pub struct XccdfPreviewResponse {
     pub errors: Vec<XccdfDiagnostic>,
     #[serde(default)]
     pub warnings: Vec<XccdfDiagnostic>,
+    /// CF-native reconciliation data (present only for CfNativeExact documents)
+    #[serde(default)]
+    pub cf_native_reconciliation: Option<CfNativeReconciliationPreview>,
+}
+
+/// CF-native reconciliation preview for import
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CfNativeReconciliationPreview {
+    pub bundle: CfNativeBundleReconciliation,
+    #[serde(default)]
+    pub policies: Vec<CfNativePolicyReconciliation>,
+    pub has_blocking_conflicts: bool,
+    #[serde(default)]
+    pub blocking_conflicts: Vec<CfNativeConflict>,
+    pub signature_status: String,
+    pub import_trust_state: String,
+}
+
+/// Bundle reconciliation state
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CfNativeBundleReconciliation {
+    pub lineage_id: String,
+    pub version_id: String,
+    pub name: String,
+    pub version: String,
+    pub semantic_digest: String,
+    pub source_publication_state: String,
+    pub reconciliation_state: String,
+    #[serde(default)]
+    pub local_lineage_id: Option<String>,
+    #[serde(default)]
+    pub local_version_id: Option<String>,
+    #[serde(default)]
+    pub local_semantic_digest: Option<String>,
+    #[serde(default)]
+    pub local_publication_state: Option<String>,
+    #[serde(default)]
+    pub local_trust_state: Option<String>,
+    pub name_collision: bool,
+    #[serde(default)]
+    pub blocking_conflicts: Vec<CfNativeConflict>,
+}
+
+/// Individual policy reconciliation state
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CfNativePolicyReconciliation {
+    pub lineage_id: String,
+    pub version_id: String,
+    pub name: String,
+    pub version: String,
+    pub policy_type: String,
+    pub implementation_state: String,
+    pub semantic_digest: String,
+    pub enabled_by_default: bool,
+    pub reconciliation_state: String,
+    #[serde(default)]
+    pub local_lineage_id: Option<String>,
+    #[serde(default)]
+    pub local_version_id: Option<String>,
+    #[serde(default)]
+    pub local_semantic_digest: Option<String>,
+    #[serde(default)]
+    pub local_publication_state: Option<String>,
+    #[serde(default)]
+    pub local_trust_state: Option<String>,
+    #[serde(default)]
+    pub local_enabled: Option<bool>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    pub has_opaque_content: bool,
+    pub name_collision: bool,
+    #[serde(default)]
+    pub blocking_conflicts: Vec<CfNativeConflict>,
+}
+
+/// Individual conflict during reconciliation
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CfNativeConflict {
+    pub code: String,
+    pub summary: String,
+    pub blocking: bool,
+    #[serde(default)]
+    pub details: serde_json::Value,
 }
 
 /// Single rule action in an XCCDF import plan.
