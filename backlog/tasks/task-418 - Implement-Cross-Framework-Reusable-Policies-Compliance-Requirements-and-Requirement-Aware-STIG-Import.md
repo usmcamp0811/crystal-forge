@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-11 20:21'
+updated_date: '2026-08-11 20:23'
 labels: []
 milestone: m-22
 dependencies:
@@ -362,6 +362,8 @@ DATABASE_URL=... cargo test -p cf-server --lib -- --ignored queries::compliance_
 2026-08-11 confirmed follow-up scope: preserve the full trusted inherited mapping contract (relationship, coverage, rationale) on the derived draft; make commit eligibility exactly match preview (accepted and current published only); deduplicate effective policy versions for bundle membership while retaining per-requirement mappings; correct actual creation/reuse result counts; add the listed DB integration cases and execute both DB suites before proceeding to exact technical-match candidates.
 
 2026-08-11 validation correction: MapExisting is now explicitly restricted to a trusted mapping on the unchanged prior requirement where the submitted policy version is both accepted and the lineage's current published version. Every accepted source is then resolved through `ensure_policy_draft(..., EnsureMutable)`; client-submitted mutable versions are rejected. Add a complete DB integration fixture covering shared-policy reuse, preservation of mapping semantics, derived draft membership/mapping, deterministic membership order, accounting, and rejected superseded/deprecated/stale versions before starting technical matching.
+
+2026-08-11 DB-proof slice: do not start technical, fuzzy, or crosswalk matching. Add focused DB-gated lifecycle tests for inherited MapExisting success, exact mapping-semantics inheritance, existing draft reuse, source rejection cases, multi-requirement dedup/order/accounting, and full transaction rollback. Run the complete existing compliance interchange and framework requirements ignored suites, formatting/diff checks, and prescribed server build/check; commit and push this test slice separately only after green.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
