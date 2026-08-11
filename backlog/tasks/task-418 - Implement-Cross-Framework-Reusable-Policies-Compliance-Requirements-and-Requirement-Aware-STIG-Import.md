@@ -3,10 +3,11 @@ id: TASK-418
 title: >-
   Implement Cross-Framework Reusable Policies, Compliance Requirements, and
   Requirement-Aware STIG Import
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-11 17:40'
+updated_date: '2026-08-11 17:44'
 labels: []
 milestone: m-22
 dependencies:
