@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-11 20:24'
+updated_date: '2026-08-11 20:32'
 labels: []
 milestone: m-22
 dependencies:
@@ -431,4 +431,6 @@ Committed and pushed `cbd8c72d feat(compliance): reconcile STIG imports and spli
 Implemented release-diff preview work: adapter-derived requirement semantic digests now classify incoming requirements as unchanged, changed, or new against the preceding release; prior-only requirements are emitted as removed; candidate lookup differentiates exact-version authoritative mappings from inherited mappings. Added a DB-gated changed/removed classification test. Verified with the targeted ignored DB test and server/web `cargo check`; existing repository warnings remain.
 
 Implemented and pushed immutable STIG policy reuse: `MapExisting` is revalidated against a trusted mapping for the unchanged prior requirement, accepted selected policies are converted to the existing mutable derived-draft workflow, and the effective draft is used consistently for membership, mappings, and source-object provenance. Reuse candidates are now restricted to current accepted versions, preventing a deprecated/non-current implementation from being silently substituted. `SQLX_OFFLINE=true nix develop ../.. --command cargo check -p cf-server`, targeted rustfmt checks, and `git diff --check` passed; DB integration coverage for this commit-time path remains to be added. Commits: `6ebaf6ca`, `e22332d8`.
+
+2026-08-11 MapExisting DB-proof slice: added three ignored DB-gated STIG commit-path tests in `packages/default/crates/cf-server/src/queries/compliance_interchange.rs`. They prove current accepted trusted inherited reuse, supports/partial/rationale preservation, shared draft reuse/membership deduplication/order/accounting, mutable/suggested/superseded/deprecated/changed rejection, and rollback after a late invalid source selection. Verified with `DATABASE_URL=postgres://crystal_forge:password@127.0.0.1:3042/crystal_forge nix develop ../.. --command cargo test -p cf-server --lib -- --ignored map_existing_stig` from `packages/default`: 3 passed. `nix develop ../.. --command cargo fmt --all --check` and `git diff --check` passed. No commit or push. The worktree also contains an unrelated concurrent modification to `packages/default/crates/cf-server/src/handlers/api/framework_requirements.rs`, left untouched.
 <!-- SECTION:NOTES:END -->
