@@ -407,29 +407,24 @@ pub async fn commit_foreign_import(
                 };
                 inherited_mappings.insert(rec.source_rule_id.clone(), inherited_mapping);
             }
-            let effective_policy_version_id = if matches!(
-                publication_state.as_str(),
-                "incomplete" | "draft" | "interim"
-            ) {
-                mapped_version_id
-            } else {
-                if current_published_version_id != Some(mapped_version_id) {
-                    anyhow::bail!(
-                        "IMPORT_REUSE_INELIGIBLE: immutable policy version {} is not the current published version of policy {}",
-                        mapped_version_id,
-                        policy_id
-                    );
-                }
-                ensure_policy_draft(
-                    &mut tx,
-                    policy_id,
-                    Some(importing_user_id),
-                    None,
-                    PolicyDraftIntent::EnsureMutable,
-                )
-                .await
-                .context("failed to derive mutable policy draft for STIG requirement reuse")?
-            };
+            if publication_state != "accepted"
+                || current_published_version_id != Some(mapped_version_id)
+            {
+                anyhow::bail!(
+                    "IMPORT_REUSE_INELIGIBLE: policy version {} must be the current accepted version of policy {}",
+                    mapped_version_id,
+                    policy_id
+                );
+            }
+            let effective_policy_version_id = ensure_policy_draft(
+                &mut tx,
+                policy_id,
+                Some(importing_user_id),
+                None,
+                PolicyDraftIntent::EnsureMutable,
+            )
+            .await
+            .context("failed to derive mutable policy draft for STIG requirement reuse")?;
             effective_mapped_policy_versions.insert(mapped_version_id, effective_policy_version_id);
             continue;
         }
