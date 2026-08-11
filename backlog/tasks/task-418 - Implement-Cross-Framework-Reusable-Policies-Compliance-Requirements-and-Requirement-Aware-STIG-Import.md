@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-11 19:50'
+updated_date: '2026-08-11 19:57'
 labels: []
 milestone: m-22
 dependencies:
@@ -414,4 +414,6 @@ Resumed with user confirmation that no completion claim is valid until Policies 
 Implemented an in-progress requirement-aware DISA STIG path: foreign preview now returns server-computed framework/requirement/candidate reconciliation data; the modal renders the design-aligned reconciliation summary, attention-only path, and Refine all path; exact artifact commit now returns the prior bundle result rather than creating duplicates; DISA commits persist normalized framework, requirement, bundle-baseline, and mapping rows in the existing transaction. `SQLX_OFFLINE=true nix develop ../.. --command cargo check -p cf-server` and `nix develop ../.. --command cargo check` from `packages/web-ui` passed (existing warnings remain). Further work is still required for release-change/inherited mapping semantics, bundle mapped/custom selection, full Policies parity, and browser-level pixel verification.
 
 Committed and pushed `cbd8c72d feat(compliance): reconcile STIG imports and split bundle policies`. It includes the server-backed bulk framework mapping projection and design-aligned mapped/custom sections in both bundle add and edit flows. `cargo check` passed for server and web UI; warnings are pre-existing repository-wide warnings.
+
+Implemented release-diff preview work: adapter-derived requirement semantic digests now classify incoming requirements as unchanged, changed, or new against the preceding release; prior-only requirements are emitted as removed; candidate lookup differentiates exact-version authoritative mappings from inherited mappings. Added a DB-gated changed/removed classification test. Verified with the targeted ignored DB test and server/web `cargo check`; existing repository warnings remain.
 <!-- SECTION:NOTES:END -->
