@@ -604,53 +604,73 @@ pub async fn commit_cf_native_import(
     let bundle_id = bundle_meta.bundle_id;
     let bundle_version_id = bundle_meta.bundle_version_id;
 
-    // Load existing bundle version and membership (or lineage if version doesn't exist)
-    let existing_bundle_version: Option<(Uuid, String)> = sqlx::query_as(
-        "SELECT bundle_id, semantic_digest FROM compliance_bundle_versions WHERE id = $1",
+    // Load existing bundle version: match the exact portable version id
+    // first, then fall back to the lineage's latest version so a new version
+    // of an existing lineage plans as CreateVersionInExistingLineage
+    // (design 18.2 step 4) instead of a brand-new lineage insert.
+    let existing_bundle_version: Option<(Uuid, Uuid, String)> = match sqlx::query_as(
+        "SELECT id, bundle_id, semantic_digest FROM compliance_bundle_versions WHERE id = $1",
     )
     .bind(bundle_version_id)
     .fetch_optional(&mut *tx)
     .await
-    .context("failed to load CF-native bundle version")?;
-
-    let existing_bundle_lineage: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM compliance_bundles WHERE id = $1",
-    )
-    .bind(bundle_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .context("failed to inspect CF-native bundle lineage")?;
-
-    // Build existing bundle identity if version exists
-    let existing_bundle_identity = if let Some((local_bundle_id, local_digest)) = existing_bundle_version {
-        let local_membership: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT policy_version_id FROM compliance_bundle_version_policies \
-             WHERE bundle_version_id = $1 ORDER BY policy_order",
+    .context("failed to load CF-native bundle version")?
+    {
+        Some(found) => Some(found),
+        None => sqlx::query_as(
+            "SELECT id, bundle_id, semantic_digest FROM compliance_bundle_versions \
+             WHERE bundle_id = $1 ORDER BY created_at DESC LIMIT 1",
         )
-        .bind(bundle_version_id)
-        .fetch_all(&mut *tx)
+        .bind(bundle_id)
+        .fetch_optional(&mut *tx)
         .await
-        .context("failed to load CF-native bundle membership")?;
-        Some(crate::compliance::xccdf::reconciliation::ExistingBundleIdentity {
-            lineage_id: local_bundle_id,
-            version_id: bundle_version_id,
-            semantic_digest: local_digest,
-            policy_version_ids: local_membership,
-        })
-    } else {
-        None
+        .context("failed to load CF-native bundle lineage version")?,
     };
 
-    // Build imported bundle identity
-    let imported_policy_version_ids: Vec<Uuid> = policy_records
+    // Build existing bundle identity if a version of the lineage exists
+    let existing_bundle_identity =
+        if let Some((local_version_id, local_bundle_id, local_digest)) = existing_bundle_version {
+            let local_membership: Vec<(Uuid, bool)> = sqlx::query_as(
+                "SELECT policy_version_id, selected FROM compliance_bundle_version_policies \
+             WHERE bundle_version_id = $1 ORDER BY policy_order",
+            )
+            .bind(local_version_id)
+            .fetch_all(&mut *tx)
+            .await
+            .context("failed to load CF-native bundle membership")?;
+            Some(
+                crate::compliance::xccdf::reconciliation::ExistingBundleIdentity {
+                    lineage_id: local_bundle_id,
+                    version_id: local_version_id,
+                    semantic_digest: local_digest,
+                    members: local_membership,
+                },
+            )
+        } else {
+            None
+        };
+
+    // Build imported bundle identity: (resolved policy_version_id, selected) ordered by policy_order
+    let mut imported_members: Vec<(Uuid, bool, i32)> = policy_records
         .iter()
-        .map(|r| resolved_by_version[&r.policy_version_id])
+        .map(|r| {
+            (
+                resolved_by_version[&r.policy_version_id],
+                r.selected,
+                r.policy_order,
+            )
+        })
+        .collect();
+    imported_members.sort_by_key(|(_, _, order)| *order);
+    let imported_members: Vec<(Uuid, bool)> = imported_members
+        .into_iter()
+        .map(|(version_id, selected, _)| (version_id, selected))
         .collect();
     let imported_bundle_identity = crate::compliance::xccdf::reconciliation::NativeBundleIdentity {
         lineage_id: bundle_id,
         version_id: bundle_version_id,
         semantic_digest: bundle_digest.clone(),
-        policy_version_ids: imported_policy_version_ids,
+        members: imported_members,
     };
 
     // Plan bundle reconciliation using shared planner
@@ -1189,11 +1209,38 @@ mod tests {
     }
 
     fn native_fixture_bytes() -> (Vec<u8>, Uuid, Uuid, Uuid, Uuid) {
-        use crate::compliance::digest::{BundleVersionCanonical, PolicyVersionCanonical};
         let bundle_id = Uuid::new_v4();
         let bundle_version_id = Uuid::new_v4();
         let policy_id = Uuid::new_v4();
         let policy_version_id = Uuid::new_v4();
+        let bytes = native_fixture_bytes_with(
+            bundle_id,
+            bundle_version_id,
+            policy_id,
+            policy_version_id,
+            true,
+        );
+        (
+            bytes,
+            bundle_id,
+            bundle_version_id,
+            policy_id,
+            policy_version_id,
+        )
+    }
+
+    /// Build a CF-native fixture with explicit identities.
+    ///
+    /// `strict` toggles a field inside the policy config so callers can
+    /// produce a same-identity document whose semantic digest differs.
+    fn native_fixture_bytes_with(
+        bundle_id: Uuid,
+        bundle_version_id: Uuid,
+        policy_id: Uuid,
+        policy_version_id: Uuid,
+        strict: bool,
+    ) -> Vec<u8> {
+        use crate::compliance::digest::{BundleVersionCanonical, PolicyVersionCanonical};
         let bundle_name = format!("Native Fixture Bundle {bundle_id}");
         let policy_name = format!("Native Agent Requirement {policy_id}");
         let config = serde_json::json!({
@@ -1204,7 +1251,7 @@ mod tests {
                 "field_name": "agentEnabled",
                 "description": "The agent is enabled",
                 "expression": "cfg.config.services.crystal-forge-agent.enable",
-                "strict": true
+                "strict": strict
             }]
         });
         let metadata = serde_json::json!({});
@@ -1252,13 +1299,7 @@ mod tests {
   </Rule>
 </Benchmark>"#
         );
-        (
-            xml.into_bytes(),
-            bundle_id,
-            bundle_version_id,
-            policy_id,
-            policy_version_id,
-        )
+        xml.into_bytes()
     }
 
     /// Insert a test user and return its UUID. The user owns the imported
@@ -1793,6 +1834,199 @@ mod tests {
         assert_eq!(
             policy_versions, 1,
             "should not create duplicate policy versions"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn cf_native_preview_exact_match_after_commit() {
+        use crate::handlers::api::compliance::compute_cf_native_reconciliation;
+
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let (bytes, _bundle_id, bundle_version_id, _policy_id, policy_version_id) =
+            native_fixture_bytes();
+
+        let pkg = make_package(bytes.clone());
+        let (validated, records) =
+            crate::compliance::xccdf::importer::validate_cf_native_document(&pkg.parsed)
+                .expect("native fixture should validate");
+        commit_cf_native_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("native import should succeed");
+
+        let preview_pkg = make_package(bytes);
+        let preview = compute_cf_native_reconciliation(&pool, &preview_pkg.parsed)
+            .await
+            .expect("reconciliation should succeed")
+            .expect("cf-native document should produce a preview");
+
+        assert_eq!(preview.bundle.reconciliation_state, "exact_match");
+        assert_eq!(
+            preview.bundle.local_version_id.as_deref(),
+            Some(bundle_version_id.to_string().as_str())
+        );
+        assert!(
+            !preview.has_blocking_conflicts,
+            "exact match must not report conflicts"
+        );
+        assert_eq!(preview.policies.len(), 1);
+        assert_eq!(preview.policies[0].reconciliation_state, "exact_match");
+        assert_eq!(
+            preview.policies[0].local_version_id.as_deref(),
+            Some(policy_version_id.to_string().as_str())
+        );
+        assert!(preview.policies[0].blocking_conflicts.is_empty());
+        assert_eq!(preview.signature_status, "not_supported");
+        assert_eq!(preview.import_trust_state, "untrusted");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn cf_native_preview_new_version_same_lineage() {
+        use crate::handlers::api::compliance::compute_cf_native_reconciliation;
+
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let (bytes, bundle_id, _bundle_version_id, policy_id, _policy_version_id) =
+            native_fixture_bytes();
+
+        let pkg = make_package(bytes.clone());
+        let (validated, records) =
+            crate::compliance::xccdf::importer::validate_cf_native_document(&pkg.parsed)
+                .expect("native fixture should validate");
+        commit_cf_native_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("native import should succeed");
+
+        // Same lineages, brand new version IDs.
+        let new_bundle_version_id = Uuid::new_v4();
+        let new_policy_version_id = Uuid::new_v4();
+        let new_bytes = native_fixture_bytes_with(
+            bundle_id,
+            new_bundle_version_id,
+            policy_id,
+            new_policy_version_id,
+            true,
+        );
+        let preview_pkg = make_package(new_bytes);
+        let preview = compute_cf_native_reconciliation(&pool, &preview_pkg.parsed)
+            .await
+            .expect("reconciliation should succeed")
+            .expect("cf-native document should produce a preview");
+
+        assert_eq!(preview.bundle.reconciliation_state, "new_version");
+        assert_eq!(preview.policies[0].reconciliation_state, "new_version");
+        assert_eq!(
+            preview.policies[0].local_lineage_id.as_deref(),
+            Some(policy_id.to_string().as_str())
+        );
+        assert_eq!(preview.policies[0].local_version_id.as_deref(), None);
+        assert!(
+            !preview.has_blocking_conflicts,
+            "new version of an existing lineage must not block"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn cf_native_preview_reports_blocking_digest_conflict() {
+        use crate::handlers::api::compliance::compute_cf_native_reconciliation;
+
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let (bytes, bundle_id, bundle_version_id, policy_id, policy_version_id) =
+            native_fixture_bytes();
+
+        let pkg = make_package(bytes.clone());
+        let (validated, records) =
+            crate::compliance::xccdf::importer::validate_cf_native_document(&pkg.parsed)
+                .expect("native fixture should validate");
+        commit_cf_native_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("native import should succeed");
+
+        // Same identities, different content => semantic digest conflict.
+        let conflicting = native_fixture_bytes_with(
+            bundle_id,
+            bundle_version_id,
+            policy_id,
+            policy_version_id,
+            false,
+        );
+        let preview_pkg = make_package(conflicting);
+        let preview = compute_cf_native_reconciliation(&pool, &preview_pkg.parsed)
+            .await
+            .expect("reconciliation should succeed")
+            .expect("cf-native document should produce a preview");
+
+        assert!(
+            preview.has_blocking_conflicts,
+            "digest conflict must be reported as blocking"
+        );
+        assert_eq!(
+            preview.policies[0].reconciliation_state,
+            "identity_conflict"
+        );
+        assert!(
+            !preview.policies[0].blocking_conflicts.is_empty(),
+            "policy must carry its blocking conflict"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn cf_native_preview_is_mutation_free() {
+        use crate::handlers::api::compliance::compute_cf_native_reconciliation;
+
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let _user_id = ensure_test_user(&pool).await;
+        let (bytes, bundle_id, _bundle_version_id, policy_id, _policy_version_id) =
+            native_fixture_bytes();
+
+        let bundle_count_before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundles WHERE id = $1")
+                .bind(bundle_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let policy_count_before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies WHERE id = $1")
+                .bind(policy_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(bundle_count_before, 0);
+        assert_eq!(policy_count_before, 0);
+
+        let preview_pkg = make_package(bytes);
+        let preview = compute_cf_native_reconciliation(&pool, &preview_pkg.parsed)
+            .await
+            .expect("reconciliation should succeed")
+            .expect("cf-native document should produce a preview");
+
+        assert_eq!(preview.bundle.reconciliation_state, "new_lineage");
+        assert_eq!(preview.policies[0].reconciliation_state, "new_lineage");
+
+        let bundle_count_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundles WHERE id = $1")
+                .bind(bundle_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let policy_count_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies WHERE id = $1")
+                .bind(policy_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            bundle_count_before, bundle_count_after,
+            "preview must not insert bundles"
+        );
+        assert_eq!(
+            policy_count_before, policy_count_after,
+            "preview must not insert policies"
         );
     }
 }

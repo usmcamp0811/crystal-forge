@@ -3477,7 +3477,7 @@ pub struct CfNativeReconciliationPreview {
 }
 
 /// Compute CF-native reconciliation data for preview.
-async fn compute_cf_native_reconciliation(
+pub(crate) async fn compute_cf_native_reconciliation(
     pool: &PgPool,
     parsed: &crate::compliance::xccdf::models::ParsedXccdf,
 ) -> Result<Option<CfNativeReconciliationPreview>, String> {
@@ -3517,19 +3517,41 @@ async fn compute_cf_native_reconciliation(
         }
     };
 
-    // Load existing bundle version if it exists
-    let existing_bundle: Option<(Uuid, String, Vec<Uuid>)> = sqlx::query_as(
-        "SELECT cbv.bundle_id, cbv.semantic_digest, \
-         COALESCE(array_agg(cbvp.policy_version_id ORDER BY cbvp.policy_order), ARRAY[]::uuid[]) \
-         FROM compliance_bundle_versions cbv \
-         LEFT JOIN compliance_bundle_version_policies cbvp ON cbvp.bundle_version_id = cbv.id \
-         WHERE cbv.id = $1 \
-         GROUP BY cbv.id, cbv.bundle_id, cbv.semantic_digest",
+    // Load existing bundle version: match the exact portable version id
+    // first, then fall back to the lineage's latest version so a new version
+    // of an existing lineage plans as CreateVersionInExistingLineage
+    // (design 18.2 step 4) instead of a brand-new lineage.
+    let existing_bundle: Option<(Uuid, Uuid, String)> = match sqlx::query_as(
+        "SELECT id, bundle_id, semantic_digest FROM compliance_bundle_versions WHERE id = $1",
     )
     .bind(bundle_meta.bundle_version_id)
     .fetch_optional(pool)
     .await
-    .map_err(|e| format!("failed to load existing bundle: {}", e))?;
+    .map_err(|e| format!("failed to load existing bundle: {}", e))?
+    {
+        Some(found) => Some(found),
+        None => sqlx::query_as(
+            "SELECT id, bundle_id, semantic_digest FROM compliance_bundle_versions \
+             WHERE bundle_id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(bundle_meta.bundle_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("failed to load existing bundle lineage: {}", e))?,
+    };
+
+    // Load existing bundle membership (ordered by policy_order, with selected)
+    let existing_bundle_members: Vec<(Uuid, bool)> = match &existing_bundle {
+        Some((existing_version_id, _, _)) => sqlx::query_as(
+            "SELECT policy_version_id, selected FROM compliance_bundle_version_policies \
+             WHERE bundle_version_id = $1 ORDER BY policy_order",
+        )
+        .bind(existing_version_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("failed to load existing bundle membership: {}", e))?,
+        None => vec![],
+    };
 
     // Load existing policy versions
     let lineage_ids: Vec<Uuid> = policy_records.iter().map(|r| r.policy_id).collect();
@@ -3593,21 +3615,30 @@ async fn compute_cf_native_reconciliation(
     .collect();
 
     // Plan bundle reconciliation
-    let existing_bundle_identity = existing_bundle.as_ref().map(|(lineage_id, digest, member_ids)| {
+    let existing_bundle_identity = existing_bundle.as_ref().map(|(version_id, lineage_id, digest)| {
         ExistingBundleIdentity {
             lineage_id: *lineage_id,
-            version_id: bundle_meta.bundle_version_id,
+            version_id: *version_id,
             semantic_digest: digest.clone(),
-            policy_version_ids: member_ids.clone(),
+            members: existing_bundle_members.clone(),
         }
     });
 
     let bundle_digest = bundle_meta.digest.clone().unwrap_or_default();
+    let mut imported_members: Vec<(Uuid, bool, i32)> = policy_records
+        .iter()
+        .map(|r| (r.policy_version_id, r.selected, r.policy_order))
+        .collect();
+    imported_members.sort_by_key(|(_, _, order)| *order);
+    let imported_members: Vec<(Uuid, bool)> = imported_members
+        .into_iter()
+        .map(|(version_id, selected, _)| (version_id, selected))
+        .collect();
     let imported_bundle_identity = NativeBundleIdentity {
         lineage_id: bundle_meta.bundle_id,
         version_id: bundle_meta.bundle_version_id,
         semantic_digest: bundle_digest.clone(),
-        policy_version_ids: imported_identities.iter().map(|i| i.version_id).collect(),
+        members: imported_members,
     };
 
     let bundle_plan =
@@ -3788,9 +3819,13 @@ async fn compute_cf_native_reconciliation(
             reconciliation_state: bundle_state.into(),
             local_lineage_id: existing_bundle
                 .as_ref()
-                .map(|(lineage_id, _, _)| lineage_id.to_string()),
-            local_version_id: existing_bundle.as_ref().map(|_| bundle_meta.bundle_version_id.to_string()),
-            local_semantic_digest: existing_bundle.as_ref().map(|(_, digest, _)| digest.clone()),
+                .map(|(_, lineage_id, _)| lineage_id.to_string()),
+            local_version_id: existing_bundle
+                .as_ref()
+                .map(|(version_id, _, _)| version_id.to_string()),
+            local_semantic_digest: existing_bundle
+                .as_ref()
+                .map(|(_, _, digest)| digest.clone()),
             local_publication_state: None,
             local_trust_state: Some("untrusted".into()),
             name_collision: bundle_name_collision,

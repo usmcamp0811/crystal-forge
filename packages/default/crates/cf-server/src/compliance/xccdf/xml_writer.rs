@@ -2872,6 +2872,7 @@ mod tests {
 
     use super::super::models::CheckBodyPart;
     use super::super::models::DocumentClass;
+    use super::super::models::Fidelity;
     use super::super::parser::parse_xccdf;
     use crate::compliance::interchange::InterchangeLimits;
 
@@ -3096,21 +3097,26 @@ mod tests {
         }
     }
 
-    /// Round-trip: write → parse → verify CF-native classification.
+    /// Round-trip: write → parse → verify exact CF-native classification.
+    ///
+    /// The writer only emits elements defined by the vendored cf-xccdf-1.xsd
+    /// schema, so a server-authored export must classify as `CfNativeExact`
+    /// (never `CfNativeUnsupportedExtension`) or production re-import is
+    /// rejected by the class gate.
     #[test]
     fn round_trip_classifies_as_cf_native() {
         let snap = full_test_snapshot();
         let xml = write_bundle_xccdf_export(&snap).unwrap();
         let limits = InterchangeLimits::default();
         let parsed = parse_xccdf(xml.as_bytes(), Some("export.xml"), &limits).unwrap();
-        assert!(
-            matches!(
-                parsed.class,
-                DocumentClass::CfNativeExact | DocumentClass::CfNativeUnsupportedExtension
-            ),
-            "Expected CF-native classification, got {:?}",
+        assert_eq!(
+            parsed.class,
+            DocumentClass::CfNativeExact,
+            "Server-authored export must classify as exact CF-native, got {:?}; \
+             unknown CF elements downgrade re-import",
             parsed.class
         );
+        assert_eq!(parsed.fidelity, Fidelity::NativeExact);
     }
 
     /// Round-trip: benchmark_id survives.

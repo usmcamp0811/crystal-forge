@@ -328,7 +328,8 @@ pub struct NativeBundleIdentity {
     pub lineage_id: Uuid,
     pub version_id: Uuid,
     pub semantic_digest: String,
-    pub policy_version_ids: Vec<Uuid>,
+    /// Ordered bundle membership: (policy_version_id, selected) sorted by policy_order.
+    pub members: Vec<(Uuid, bool)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,7 +337,8 @@ pub struct ExistingBundleIdentity {
     pub lineage_id: Uuid,
     pub version_id: Uuid,
     pub semantic_digest: String,
-    pub policy_version_ids: Vec<Uuid>,
+    /// Ordered bundle membership: (policy_version_id, selected) sorted by policy_order.
+    pub members: Vec<(Uuid, bool)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -407,7 +409,7 @@ pub fn plan_bundle_reconciliation(
             if local.lineage_id == imported.lineage_id
                 && local.version_id == imported.version_id
                 && local.semantic_digest == imported.semantic_digest
-                && local.policy_version_ids == imported.policy_version_ids
+                && local.members == imported.members
             {
                 BundleReconciliationPlan {
                     decision: Some(BundleReconcileDecision::ReuseExact {
@@ -425,14 +427,17 @@ pub fn plan_bundle_reconciliation(
                         version_id: imported.version_id,
                         actual_lineage_id: local.lineage_id,
                     });
-                } else if local.semantic_digest != imported.semantic_digest
-                    || local.policy_version_ids != imported.policy_version_ids
-                {
+                } else if local.semantic_digest != imported.semantic_digest {
                     conflicts.push(BundleReconcileConflict::VersionDigestMismatch {
                         lineage_id: imported.lineage_id,
                         version_id: imported.version_id,
                         local_digest: local.semantic_digest.clone(),
                         imported_digest: imported.semantic_digest.clone(),
+                    });
+                } else if local.members != imported.members {
+                    conflicts.push(BundleReconcileConflict::BundleMembershipMismatch {
+                        lineage_id: imported.lineage_id,
+                        version_id: imported.version_id,
                     });
                 }
                 BundleReconciliationPlan {
@@ -482,7 +487,7 @@ mod bundle_tests {
             lineage_id: Uuid::from_u128(lineage),
             version_id: Uuid::from_u128(version),
             semantic_digest: digest.into(),
-            policy_version_ids: members.into_iter().map(|m| Uuid::from_u128(m)).collect(),
+            members: members.into_iter().map(|m| (Uuid::from_u128(m), true)).collect(),
         }
     }
 
@@ -496,7 +501,28 @@ mod bundle_tests {
             lineage_id: Uuid::from_u128(lineage),
             version_id: Uuid::from_u128(version),
             semantic_digest: digest.into(),
-            policy_version_ids: members.into_iter().map(|m| Uuid::from_u128(m)).collect(),
+            members: members
+                .into_iter()
+                .map(|m| (Uuid::from_u128(m), true))
+                .collect(),
+        }
+    }
+
+    /// Build an existing bundle with explicit (member, selected) pairs in order.
+    fn existing_bundle_with_selection(
+        lineage: u128,
+        version: u128,
+        digest: &str,
+        members: Vec<(u128, bool)>,
+    ) -> ExistingBundleIdentity {
+        ExistingBundleIdentity {
+            lineage_id: Uuid::from_u128(lineage),
+            version_id: Uuid::from_u128(version),
+            semantic_digest: digest.into(),
+            members: members
+                .into_iter()
+                .map(|(m, selected)| (Uuid::from_u128(m), selected))
+                .collect(),
         }
     }
 
@@ -570,7 +596,7 @@ mod bundle_tests {
         assert_eq!(plan.conflicts.len(), 1);
         assert!(matches!(
             plan.conflicts[0],
-            BundleReconcileConflict::VersionDigestMismatch { .. }
+            BundleReconcileConflict::BundleMembershipMismatch { .. }
         ));
     }
 
@@ -583,7 +609,7 @@ mod bundle_tests {
         assert_eq!(plan.conflicts.len(), 1);
         assert!(matches!(
             plan.conflicts[0],
-            BundleReconcileConflict::VersionDigestMismatch { .. }
+            BundleReconcileConflict::BundleMembershipMismatch { .. }
         ));
     }
 
@@ -599,5 +625,21 @@ mod bundle_tests {
         let imported = bundle(0, 2, "digest-a", vec![10, 20]);
         let plan = plan_bundle_reconciliation(&imported, None);
         assert!(plan.decision.is_none());
+    }
+
+    #[test]
+    fn same_version_digest_membership_different_selected_conflict() {
+        // Same lineage, same version ID, same digest, same members, same order,
+        // but a different `selected` value: must be a membership conflict.
+        let imported = bundle(1, 2, "digest-a", vec![10, 20]);
+        let existing =
+            existing_bundle_with_selection(1, 2, "digest-a", vec![(10, true), (20, false)]);
+        let plan = plan_bundle_reconciliation(&imported, Some(&existing));
+        assert!(plan.decision.is_none());
+        assert_eq!(plan.conflicts.len(), 1);
+        assert!(matches!(
+            plan.conflicts[0],
+            BundleReconcileConflict::BundleMembershipMismatch { .. }
+        ));
     }
 }

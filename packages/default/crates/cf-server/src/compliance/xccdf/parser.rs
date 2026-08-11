@@ -698,6 +698,34 @@ impl ParserState {
                 }
                 ParseControl::Continue
             }
+            // Remaining schema-valid CF elements (cf-xccdf-1.xsd). These are
+            // supplementary human-readable forms of data already carried in
+            // config-json / compliance-metadata-json / dependencies-json and
+            // in identity attributes, so the parser only has to recognise them
+            // (never treat them as unknown) to keep classification exact.
+            (ElementNamespace::CrystalForge, b"rule")
+            | (ElementNamespace::CrystalForge, b"description")
+            | (ElementNamespace::CrystalForge, b"expression")
+            | (ElementNamespace::CrystalForge, b"dependencies")
+            | (ElementNamespace::CrystalForge, b"nix-option")
+            | (ElementNamespace::CrystalForge, b"module-ref")
+            | (ElementNamespace::CrystalForge, b"package")
+            | (ElementNamespace::CrystalForge, b"health-check")
+            | (ElementNamespace::CrystalForge, b"threshold")
+            | (ElementNamespace::CrystalForge, b"day")
+            | (ElementNamespace::CrystalForge, b"max-high")
+            | (ElementNamespace::CrystalForge, b"expires-after-hours")
+            | (ElementNamespace::CrystalForge, b"opaque-xml")
+            | (ElementNamespace::CrystalForge, b"source-mappings")
+            | (ElementNamespace::CrystalForge, b"source")
+            | (ElementNamespace::CrystalForge, b"object-kind")
+            | (ElementNamespace::CrystalForge, b"source-identity")
+            | (ElementNamespace::CrystalForge, b"source-group-id")
+            | (ElementNamespace::CrystalForge, b"fidelity")
+            | (ElementNamespace::CrystalForge, b"profile-role") => {
+                self.saw_supported_cf_content = true;
+                ParseControl::Continue
+            }
             // Unknown CF-namespace element: marks the document as using an
             // unsupported CF extension so classification is downgraded.
             (ElementNamespace::CrystalForge, _) => {
