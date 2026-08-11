@@ -41,6 +41,7 @@ use crate::compliance::xccdf::reconciliation::{
     ExistingPolicyIdentity, NativePolicyIdentity, NativeReconcileFailure, ReconcileConflict,
     ReconcileDecision, plan_policy_reconciliation,
 };
+use crate::queries::compliance::{PolicyDraftIntent, ensure_policy_draft};
 use crate::queries::framework_requirements::{
     insert_bundle_version_requirement, insert_framework_version, insert_policy_mapping_in_tx,
     insert_requirement_version, upsert_framework_lineage, upsert_requirement_lineage,
@@ -66,6 +67,12 @@ pub async fn commit_foreign_import(
     validated: ValidatedImportPlan,
     policy_records: Vec<ImportedPolicyRecord>,
 ) -> Result<XccdfCommittedImportResult> {
+    #[derive(Debug, Clone, Copy)]
+    struct NormalizedRequirementImport {
+        requirement_version_id: Uuid,
+        previous_requirement_version_id: Option<Uuid>,
+        unchanged_from_previous_release: bool,
+    }
     let mut tx = pool
         .begin()
         .await
@@ -247,6 +254,15 @@ pub async fn commit_foreign_import(
             identity.title.as_deref(),
         )
         .await?;
+        let previous_framework_version_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM compliance_framework_versions \
+             WHERE framework_id = $1 \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(framework_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("failed to load prior framework release for STIG reconciliation")?;
         let framework_version_id = insert_framework_version(
             &mut tx,
             framework_id,
@@ -278,11 +294,26 @@ pub async fn commit_foreign_import(
             let canonical_key = canonical_key_for_rule(rule);
             let requirement_id =
                 upsert_requirement_lineage(&mut tx, framework_id, &canonical_key).await?;
+            let canonical = canonical_for_rule(rule, &canonical_key);
+            let previous_requirement_version: Option<(Uuid, String)> =
+                if let Some(previous_framework_version_id) = previous_framework_version_id {
+                    sqlx::query_as(
+                        "SELECT id, semantic_digest FROM compliance_requirement_versions \
+                         WHERE requirement_id = $1 AND framework_version_id = $2",
+                    )
+                    .bind(requirement_id)
+                    .bind(previous_framework_version_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .context("failed to load prior requirement version for STIG reconciliation")?
+                } else {
+                    None
+                };
             let requirement_version_id = insert_requirement_version(
                 &mut tx,
                 requirement_id,
                 framework_version_id,
-                &canonical_for_rule(rule, &canonical_key),
+                &canonical,
                 None,
             )
             .await?;
@@ -293,7 +324,18 @@ pub async fn commit_foreign_import(
                 requirement_order as i32,
             )
             .await?;
-            requirement_versions.insert(record.source_rule_id.clone(), requirement_version_id);
+            let (previous_requirement_version_id, unchanged_from_previous_release) =
+                previous_requirement_version
+                    .map(|(id, digest)| (Some(id), digest == canonical.compute_digest()))
+                    .unwrap_or((None, false));
+            requirement_versions.insert(
+                record.source_rule_id.clone(),
+                NormalizedRequirementImport {
+                    requirement_version_id,
+                    previous_requirement_version_id,
+                    unchanged_from_previous_release,
+                },
+            );
         }
         Some(requirement_versions)
     } else {
@@ -305,21 +347,76 @@ pub async fn commit_foreign_import(
         (validated.rules_to_import.len() as u32).saturating_sub(policy_records.len() as u32);
 
     let mut created_policy_version_ids: Vec<Uuid> = Vec::new();
+    let mut effective_mapped_policy_versions = std::collections::HashMap::new();
 
     for rec in &policy_records {
         if let Some(mapped_version_id) = rec.mapped_policy_version_id {
-            let exists: Option<Uuid> =
-                sqlx::query_scalar("SELECT id FROM deployment_policy_versions WHERE id = $1")
-                    .bind(mapped_version_id)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .context("failed to verify mapped policy version")?;
-            if exists.is_none() {
+            let selected: Option<(Uuid, String)> = sqlx::query_as(
+                "SELECT policy_id, publication_state FROM deployment_policy_versions WHERE id = $1",
+            )
+            .bind(mapped_version_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("failed to verify mapped policy version")?;
+            let Some((policy_id, publication_state)) = selected else {
                 anyhow::bail!(
                     "IMPORT_POLICY_VERSION_NOT_FOUND: mapped policy version {} does not exist",
                     mapped_version_id
                 );
+            };
+            if let Some(requirement_versions) = &normalized_requirements {
+                let requirement = requirement_versions.get(&rec.source_rule_id).ok_or_else(
+                    || {
+                        anyhow::anyhow!(
+                            "IMPORT_REQUIREMENT_NOT_FOUND: missing normalized requirement for {}",
+                            rec.source_rule_id
+                        )
+                    },
+                )?;
+                let eligible = if requirement.unchanged_from_previous_release {
+                    let previous_requirement_version_id =
+                        requirement.previous_requirement_version_id.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "IMPORT_REUSE_INELIGIBLE: missing prior requirement version"
+                            )
+                        })?;
+                    sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS(SELECT 1 FROM policy_requirement_mappings \
+                         WHERE policy_version_id = $1 AND requirement_version_id = $2 \
+                           AND trust_state = 'trusted')",
+                    )
+                    .bind(mapped_version_id)
+                    .bind(previous_requirement_version_id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .context("failed to validate selected policy reuse")?
+                } else {
+                    false
+                };
+                if !eligible {
+                    anyhow::bail!(
+                        "IMPORT_REUSE_INELIGIBLE: policy version {} is not a trusted mapping for an unchanged prior requirement",
+                        mapped_version_id
+                    );
+                }
             }
+            let effective_policy_version_id = if matches!(
+                publication_state.as_str(),
+                "incomplete" | "draft" | "interim"
+            ) {
+                mapped_version_id
+            } else {
+                ensure_policy_draft(
+                    &mut tx,
+                    policy_id,
+                    Some(importing_user_id),
+                    None,
+                    PolicyDraftIntent::EnsureMutable,
+                )
+                .await
+                .context("failed to derive mutable policy draft for STIG requirement reuse")?
+            };
+            effective_mapped_policy_versions.insert(mapped_version_id, effective_policy_version_id);
             continue;
         }
         // Insert policy lineage.
@@ -391,6 +488,7 @@ pub async fn commit_foreign_import(
     for (policy_order, rec) in policy_records.iter().enumerate() {
         let policy_version_id = rec
             .mapped_policy_version_id
+            .and_then(|id| effective_mapped_policy_versions.get(&id).copied())
             .unwrap_or(rec.policy_version_id);
         sqlx::query(
             r#"
@@ -407,9 +505,8 @@ pub async fn commit_foreign_import(
         .context("failed to insert bundle membership row")?;
 
         if let Some(requirement_versions) = &normalized_requirements {
-            let requirement_version_id = requirement_versions
+            let requirement = requirement_versions
                 .get(&rec.source_rule_id)
-                .copied()
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "IMPORT_REQUIREMENT_NOT_FOUND: missing normalized requirement for {}",
@@ -419,11 +516,15 @@ pub async fn commit_foreign_import(
             insert_policy_mapping_in_tx(
                 &mut tx,
                 policy_version_id,
-                requirement_version_id,
+                requirement.requirement_version_id,
                 "implements",
                 "full",
                 None,
-                "imported",
+                if rec.mapped_policy_version_id.is_some() {
+                    "inherited"
+                } else {
+                    "imported"
+                },
                 Some(source_artifact_id),
                 importing_user_id,
             )
@@ -454,6 +555,7 @@ pub async fn commit_foreign_import(
     for rec in &policy_records {
         let policy_version_id = rec
             .mapped_policy_version_id
+            .and_then(|id| effective_mapped_policy_versions.get(&id).copied())
             .unwrap_or(rec.policy_version_id);
         sqlx::query(
             r#"
