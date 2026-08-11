@@ -3411,6 +3411,408 @@ struct NormalizedPolicyImport {
     semantic_digest: String,
 }
 
+// ── CF-native reconciliation DTOs ──────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CfNativeConflict {
+    pub code: String,
+    pub summary: String,
+    pub blocking: bool,
+    pub details: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CfNativePolicyReconciliation {
+    pub lineage_id: String,
+    pub version_id: String,
+    pub name: String,
+    pub version: String,
+    pub policy_type: String,
+    pub implementation_state: String,
+    pub semantic_digest: String,
+    pub enabled_by_default: bool,
+
+    pub reconciliation_state: String, // exact_match | new_lineage | new_version | identity_conflict
+    pub local_lineage_id: Option<String>,
+    pub local_version_id: Option<String>,
+    pub local_semantic_digest: Option<String>,
+    pub local_publication_state: Option<String>,
+    pub local_trust_state: Option<String>,
+    pub local_enabled: Option<bool>,
+
+    pub dependencies: Vec<String>,
+    pub has_opaque_content: bool,
+    pub name_collision: bool,
+    pub blocking_conflicts: Vec<CfNativeConflict>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CfNativeBundleReconciliation {
+    pub lineage_id: String,
+    pub version_id: String,
+    pub name: String,
+    pub version: String,
+    pub semantic_digest: String,
+    pub source_publication_state: String,
+
+    pub reconciliation_state: String, // exact_match | new_lineage | new_version | identity_conflict
+    pub local_lineage_id: Option<String>,
+    pub local_version_id: Option<String>,
+    pub local_semantic_digest: Option<String>,
+    pub local_publication_state: Option<String>,
+    pub local_trust_state: Option<String>,
+
+    pub name_collision: bool,
+    pub blocking_conflicts: Vec<CfNativeConflict>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CfNativeReconciliationPreview {
+    pub bundle: CfNativeBundleReconciliation,
+    pub policies: Vec<CfNativePolicyReconciliation>,
+    pub has_blocking_conflicts: bool,
+    pub blocking_conflicts: Vec<CfNativeConflict>,
+    pub signature_status: String, // not_supported | not_present | not_verified
+    pub import_trust_state: String, // untrusted
+}
+
+/// Compute CF-native reconciliation data for preview.
+async fn compute_cf_native_reconciliation(
+    pool: &PgPool,
+    parsed: &crate::compliance::xccdf::models::ParsedXccdf,
+) -> Result<Option<CfNativeReconciliationPreview>, String> {
+    use crate::compliance::xccdf::models::DocumentClass;
+    use crate::compliance::xccdf::reconciliation::{
+        ExistingBundleIdentity, ExistingPolicyIdentity, NativeBundleIdentity, NativePolicyIdentity,
+        plan_bundle_reconciliation, plan_policy_reconciliation,
+    };
+
+    if !matches!(parsed.class, DocumentClass::CfNativeExact) {
+        return Ok(None);
+    }
+
+    // Validate CF-native document to get policy records
+    let (_validated, policy_records) = validate_cf_native_document(parsed)
+        .map_err(|e| format!("CF-native validation failed: {}", e.message))?;
+
+    let bundle_meta = match &parsed.cf_bundle_meta {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+
+    // Load bundle name and framework from compliance_bundles (for display)
+    let bundle_info: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT name, framework, version FROM compliance_bundles WHERE id = $1",
+    )
+    .bind(bundle_meta.bundle_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("failed to load bundle info: {}", e))?;
+
+    let (bundle_name, bundle_framework, bundle_version) = match bundle_info {
+        Some((n, f, v)) => (n, f, v),
+        None => {
+            // New bundle, use defaults
+            ("".into(), "unknown".into(), "1.0.0".into())
+        }
+    };
+
+    // Load existing bundle version if it exists
+    let existing_bundle: Option<(Uuid, String, Vec<Uuid>)> = sqlx::query_as(
+        "SELECT cbv.bundle_id, cbv.semantic_digest, \
+         COALESCE(array_agg(cbvp.policy_version_id ORDER BY cbvp.policy_order), ARRAY[]::uuid[]) \
+         FROM compliance_bundle_versions cbv \
+         LEFT JOIN compliance_bundle_version_policies cbvp ON cbvp.bundle_version_id = cbv.id \
+         WHERE cbv.id = $1 \
+         GROUP BY cbv.id, cbv.bundle_id, cbv.semantic_digest",
+    )
+    .bind(bundle_meta.bundle_version_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("failed to load existing bundle: {}", e))?;
+
+    // Load existing policy versions
+    let lineage_ids: Vec<Uuid> = policy_records.iter().map(|r| r.policy_id).collect();
+    let version_ids: Vec<Uuid> = policy_records.iter().map(|r| r.policy_version_id).collect();
+
+    let existing_policies: Vec<(Uuid, Uuid, String, String, String)> = sqlx::query_as(
+        "SELECT dpv.policy_id, dpv.id, dpv.policy_type, dpv.semantic_digest, dpv.publication_state \
+         FROM deployment_policy_versions dpv \
+         WHERE dpv.id = ANY($1) OR dpv.policy_id = ANY($2)",
+    )
+    .bind(&version_ids)
+    .bind(&lineage_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("failed to load existing policies: {}", e))?;
+
+    // Build existing policy identities
+    let existing_identities: Vec<ExistingPolicyIdentity> = existing_policies
+        .iter()
+        .map(|(lineage_id, version_id, policy_type, semantic_digest, _)| {
+            ExistingPolicyIdentity {
+                lineage_id: *lineage_id,
+                version_id: *version_id,
+                policy_type: policy_type.clone(),
+                semantic_digest: semantic_digest.clone(),
+            }
+        })
+        .collect();
+
+    // Build imported policy identities from policy records
+    let imported_identities: Vec<NativePolicyIdentity> = policy_records
+        .iter()
+        .map(|r| NativePolicyIdentity {
+            lineage_id: r.policy_id,
+            version_id: r.policy_version_id,
+            policy_type: r.policy_type.clone(),
+            semantic_digest: r.semantic_digest.clone().unwrap_or_default(),
+            source_rule_id: r.source_rule_id.clone(),
+        })
+        .collect();
+
+    // Plan policy reconciliation
+    let policy_plan = plan_policy_reconciliation(&imported_identities, &existing_identities);
+
+    // Check for policy name collisions
+    let policy_names: Vec<String> = policy_records
+        .iter()
+        .map(|r| r.name.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let policy_name_collisions: std::collections::HashSet<String> = sqlx::query_scalar(
+        "SELECT name FROM deployment_policies WHERE name = ANY($1)",
+    )
+    .bind(&policy_names)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("failed to check policy name collisions: {}", e))?
+    .into_iter()
+    .collect();
+
+    // Plan bundle reconciliation
+    let existing_bundle_identity = existing_bundle.as_ref().map(|(lineage_id, digest, member_ids)| {
+        ExistingBundleIdentity {
+            lineage_id: *lineage_id,
+            version_id: bundle_meta.bundle_version_id,
+            semantic_digest: digest.clone(),
+            policy_version_ids: member_ids.clone(),
+        }
+    });
+
+    let bundle_digest = bundle_meta.digest.clone().unwrap_or_default();
+    let imported_bundle_identity = NativeBundleIdentity {
+        lineage_id: bundle_meta.bundle_id,
+        version_id: bundle_meta.bundle_version_id,
+        semantic_digest: bundle_digest.clone(),
+        policy_version_ids: imported_identities.iter().map(|i| i.version_id).collect(),
+    };
+
+    let bundle_plan =
+        plan_bundle_reconciliation(&imported_bundle_identity, existing_bundle_identity.as_ref());
+
+    // Check for bundle name collision
+    let bundle_name_collision: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM compliance_bundles WHERE name = $1 AND id != $2)",
+    )
+    .bind(&bundle_name)
+    .bind(bundle_meta.bundle_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("failed to check bundle name collision: {}", e))?;
+
+    // Collect all blocking conflicts
+    let mut all_conflicts = Vec::new();
+    for conflict in policy_plan.conflicts.iter() {
+        let (code, summary) = match conflict {
+            crate::compliance::xccdf::reconciliation::ReconcileConflict::VersionDigestMismatch {
+                source_rule_id,
+                ..
+            } => (
+                "POLICY_VERSION_DIGEST_CONFLICT",
+                format!("Policy {} has conflicting semantic digest", source_rule_id),
+            ),
+            crate::compliance::xccdf::reconciliation::ReconcileConflict::VersionBelongsToDifferentLineage { .. } => (
+                "POLICY_IDENTITY_CONFLICT",
+                "Policy version belongs to a different lineage".into(),
+            ),
+            _ => (conflict.code(), "Conflict detected".into()),
+        };
+        all_conflicts.push(CfNativeConflict {
+            code: code.into(),
+            summary,
+            blocking: true,
+            details: serde_json::json!({}),
+        });
+    }
+
+    for conflict in bundle_plan.conflicts.iter() {
+        let (code, summary) = match conflict {
+            crate::compliance::xccdf::reconciliation::BundleReconcileConflict::VersionDigestMismatch { .. } => (
+                "BUNDLE_DIGEST_CONFLICT",
+                "Bundle semantic digest conflict".into(),
+            ),
+            crate::compliance::xccdf::reconciliation::BundleReconcileConflict::BundleMembershipMismatch { .. } => (
+                "BUNDLE_MEMBERSHIP_CONFLICT",
+                "Bundle membership mismatch".into(),
+            ),
+            _ => (conflict.code(), "Bundle conflict detected".into()),
+        };
+        all_conflicts.push(CfNativeConflict {
+            code: code.into(),
+            summary,
+            blocking: true,
+            details: serde_json::json!({}),
+        });
+    }
+
+    // Build reconciliation state for bundle
+    use crate::compliance::xccdf::reconciliation::BundleReconcileDecision;
+    let bundle_state = match &bundle_plan.decision {
+        Some(BundleReconcileDecision::ReuseExact { .. }) => "exact_match",
+        Some(BundleReconcileDecision::CreateLineageAndVersion { .. }) => "new_lineage",
+        Some(BundleReconcileDecision::CreateVersionInExistingLineage { .. }) => "new_version",
+        None => "identity_conflict",
+    };
+
+    // Build reconciliation state for policies
+    use crate::compliance::xccdf::reconciliation::ReconcileDecision;
+    let decisions_by_version: std::collections::HashMap<Uuid, (&NativePolicyIdentity, &ReconcileDecision)> =
+        policy_plan
+            .decisions
+            .iter()
+            .map(|(ident, decision)| (ident.version_id, (ident, decision)))
+            .collect();
+
+    // Build policy reconciliation objects from policy_records
+    let policies: Vec<CfNativePolicyReconciliation> = policy_records
+        .iter()
+        .map(|record| {
+            let (state, local_lineage, local_version, local_digest, local_state, local_trust) =
+                if let Some((_, decision)) = decisions_by_version.get(&record.policy_version_id) {
+                    match decision {
+                        ReconcileDecision::ReuseExact { local_lineage_id, local_version_id } => (
+                            "exact_match",
+                            Some(local_lineage_id.to_string()),
+                            Some(local_version_id.to_string()),
+                            existing_policies
+                                .iter()
+                                .find(|(l, v, _, _, _)| l == local_lineage_id && v == local_version_id)
+                                .map(|(_, _, _, digest, _)| digest.clone()),
+                            existing_policies
+                                .iter()
+                                .find(|(l, v, _, _, _)| l == local_lineage_id && v == local_version_id)
+                                .map(|(_, _, _, _, state)| state.clone()),
+                            Some("untrusted".into()),
+                        ),
+                        ReconcileDecision::CreateLineageAndVersion { .. } => (
+                            "new_lineage",
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                        ReconcileDecision::CreateVersionInExistingLineage { local_lineage_id, .. } => (
+                            "new_version",
+                            Some(local_lineage_id.to_string()),
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                    }
+                } else {
+                    ("identity_conflict", None, None, None, None, None)
+                };
+
+            let name_collision = policy_name_collisions.contains(&record.name);
+            let has_conflicts = policy_plan.conflicts.iter().any(|c| {
+                if let crate::compliance::xccdf::reconciliation::ReconcileConflict::VersionDigestMismatch {
+                    source_rule_id,
+                    ..
+                } = c
+                {
+                    source_rule_id == &record.source_rule_id
+                } else {
+                    false
+                }
+            });
+
+            CfNativePolicyReconciliation {
+                lineage_id: record.policy_id.to_string(),
+                version_id: record.policy_version_id.to_string(),
+                name: record.name.clone(),
+                version: record.version.clone().unwrap_or_default(),
+                policy_type: record.policy_type.clone(),
+                implementation_state: record.implementation_state.clone(),
+                semantic_digest: record.semantic_digest.clone().unwrap_or_default(),
+                enabled_by_default: record.enabled_by_default,
+                reconciliation_state: state.into(),
+                local_lineage_id: local_lineage,
+                local_version_id: local_version,
+                local_semantic_digest: local_digest,
+                local_publication_state: local_state,
+                local_trust_state: local_trust,
+                local_enabled: None,
+                dependencies: serde_json::from_value::<Vec<String>>(record.dependencies.clone())
+                    .unwrap_or_default(),
+                has_opaque_content: record.opaque_xml.is_some(),
+                name_collision,
+                blocking_conflicts: if has_conflicts {
+                    vec![CfNativeConflict {
+                        code: "POLICY_CONFLICT".into(),
+                        summary: format!("Policy {} has a conflict", record.source_rule_id),
+                        blocking: true,
+                        details: serde_json::json!({}),
+                    }]
+                } else {
+                    vec![]
+                },
+            }
+        })
+        .collect();
+
+    let has_blocking = !all_conflicts.is_empty() || bundle_name_collision;
+
+    Ok(Some(CfNativeReconciliationPreview {
+        bundle: CfNativeBundleReconciliation {
+            lineage_id: bundle_meta.bundle_id.to_string(),
+            version_id: bundle_meta.bundle_version_id.to_string(),
+            name: bundle_name.clone(),
+            version: bundle_version.clone(),
+            semantic_digest: bundle_digest,
+            source_publication_state: bundle_meta.publication_state.clone(),
+            reconciliation_state: bundle_state.into(),
+            local_lineage_id: existing_bundle
+                .as_ref()
+                .map(|(lineage_id, _, _)| lineage_id.to_string()),
+            local_version_id: existing_bundle.as_ref().map(|_| bundle_meta.bundle_version_id.to_string()),
+            local_semantic_digest: existing_bundle.as_ref().map(|(_, digest, _)| digest.clone()),
+            local_publication_state: None,
+            local_trust_state: Some("untrusted".into()),
+            name_collision: bundle_name_collision,
+            blocking_conflicts: bundle_plan
+                .conflicts
+                .iter()
+                .map(|c| CfNativeConflict {
+                    code: c.code().into(),
+                    summary: "Bundle conflict".into(),
+                    blocking: true,
+                    details: serde_json::json!({}),
+                })
+                .collect(),
+        },
+        policies,
+        has_blocking_conflicts: has_blocking,
+        blocking_conflicts: all_conflicts,
+        signature_status: "not_supported".into(),
+        import_trust_state: "untrusted".into(),
+    }))
+}
+
 /// `POST /api/v1/compliance/xccdf/preview`
 ///
 /// Accepts multipart XML upload, parses XCCDF 1.2 and CF-XCCDF content,
@@ -3466,6 +3868,21 @@ pub async fn xccdf_preview(
         )
             .into_response();
     }
+
+     // Compute CF-native reconciliation data for CfNativeExact documents
+    let cf_native_reconciliation = match compute_cf_native_reconciliation(&pool, &parsed).await {
+        Ok(recon) => recon,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "CF-native reconciliation failed",
+                    "message": e,
+                })),
+            )
+                .into_response();
+        }
+    };
 
     let rule_summaries: Vec<serde_json::Value> = parsed
         .rules
@@ -3594,7 +4011,7 @@ pub async fn xccdf_preview(
         })
         .collect();
 
-    let response = serde_json::json!({
+    let mut response = serde_json::json!({
         "sha256": original_sha256,
         "source": package_source_json,
         "filename": xml_filename,
@@ -3631,6 +4048,13 @@ pub async fn xccdf_preview(
             "code": w.code, "summary": w.summary,
         })).collect::<Vec<_>>(),
     });
+    
+    // Add CF-native reconciliation if available
+    if let Some(recon) = cf_native_reconciliation {
+        response["cf_native_reconciliation"] = serde_json::to_value(recon)
+            .unwrap_or(serde_json::Value::Null);
+    }
+    
     (StatusCode::OK, Json(response)).into_response()
 }
 

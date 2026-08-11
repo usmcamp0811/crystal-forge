@@ -320,3 +320,284 @@ mod tests {
         }
     }
 }
+
+// ── Bundle reconciliation ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeBundleIdentity {
+    pub lineage_id: Uuid,
+    pub version_id: Uuid,
+    pub semantic_digest: String,
+    pub policy_version_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExistingBundleIdentity {
+    pub lineage_id: Uuid,
+    pub version_id: Uuid,
+    pub semantic_digest: String,
+    pub policy_version_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BundleReconcileDecision {
+    ReuseExact {
+        local_lineage_id: Uuid,
+        local_version_id: Uuid,
+    },
+    CreateLineageAndVersion {
+        portable_lineage_id: Uuid,
+        portable_version_id: Uuid,
+    },
+    CreateVersionInExistingLineage {
+        local_lineage_id: Uuid,
+        portable_version_id: Uuid,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BundleReconcileConflict {
+    VersionDigestMismatch {
+        lineage_id: Uuid,
+        version_id: Uuid,
+        local_digest: String,
+        imported_digest: String,
+    },
+    VersionBelongsToDifferentLineage {
+        lineage_id: Uuid,
+        version_id: Uuid,
+        actual_lineage_id: Uuid,
+    },
+    BundleMembershipMismatch {
+        lineage_id: Uuid,
+        version_id: Uuid,
+    },
+}
+
+impl BundleReconcileConflict {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::VersionDigestMismatch { .. } => "CF_NATIVE_BUNDLE_DIGEST_CONFLICT",
+            Self::VersionBelongsToDifferentLineage { .. } => "CF_NATIVE_BUNDLE_IDENTITY_CONFLICT",
+            Self::BundleMembershipMismatch { .. } => "CF_NATIVE_BUNDLE_MEMBERSHIP_CONFLICT",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundleReconciliationPlan {
+    pub decision: Option<BundleReconcileDecision>,
+    pub conflicts: Vec<BundleReconcileConflict>,
+}
+
+pub fn plan_bundle_reconciliation(
+    imported: &NativeBundleIdentity,
+    existing: Option<&ExistingBundleIdentity>,
+) -> BundleReconciliationPlan {
+    if imported.lineage_id.is_nil() || imported.version_id.is_nil() {
+        return BundleReconciliationPlan {
+            decision: None,
+            conflicts: vec![],
+        };
+    }
+
+    match existing {
+        Some(local) => {
+            // Exact match: same lineage, version, digest, and membership
+            if local.lineage_id == imported.lineage_id
+                && local.version_id == imported.version_id
+                && local.semantic_digest == imported.semantic_digest
+                && local.policy_version_ids == imported.policy_version_ids
+            {
+                BundleReconciliationPlan {
+                    decision: Some(BundleReconcileDecision::ReuseExact {
+                        local_lineage_id: local.lineage_id,
+                        local_version_id: local.version_id,
+                    }),
+                    conflicts: vec![],
+                }
+            } else if local.version_id == imported.version_id {
+                // Same version ID but different lineage, digest, or membership = conflict
+                let mut conflicts = vec![];
+                if local.lineage_id != imported.lineage_id {
+                    conflicts.push(BundleReconcileConflict::VersionBelongsToDifferentLineage {
+                        lineage_id: imported.lineage_id,
+                        version_id: imported.version_id,
+                        actual_lineage_id: local.lineage_id,
+                    });
+                } else if local.semantic_digest != imported.semantic_digest
+                    || local.policy_version_ids != imported.policy_version_ids
+                {
+                    conflicts.push(BundleReconcileConflict::VersionDigestMismatch {
+                        lineage_id: imported.lineage_id,
+                        version_id: imported.version_id,
+                        local_digest: local.semantic_digest.clone(),
+                        imported_digest: imported.semantic_digest.clone(),
+                    });
+                }
+                BundleReconciliationPlan {
+                    decision: None,
+                    conflicts,
+                }
+            } else if local.lineage_id == imported.lineage_id {
+                // Same lineage, new version
+                BundleReconciliationPlan {
+                    decision: Some(BundleReconcileDecision::CreateVersionInExistingLineage {
+                        local_lineage_id: local.lineage_id,
+                        portable_version_id: imported.version_id,
+                    }),
+                    conflicts: vec![],
+                }
+            } else {
+                // Different lineage, different version = conflict
+                BundleReconciliationPlan {
+                    decision: None,
+                    conflicts: vec![BundleReconcileConflict::VersionBelongsToDifferentLineage {
+                        lineage_id: imported.lineage_id,
+                        version_id: imported.version_id,
+                        actual_lineage_id: local.lineage_id,
+                    }],
+                }
+            }
+        }
+        None => {
+            // New lineage and version
+            BundleReconciliationPlan {
+                decision: Some(BundleReconcileDecision::CreateLineageAndVersion {
+                    portable_lineage_id: imported.lineage_id,
+                    portable_version_id: imported.version_id,
+                }),
+                conflicts: vec![],
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod bundle_tests {
+    use super::*;
+
+    fn bundle(lineage: u128, version: u128, digest: &str, members: Vec<u128>) -> NativeBundleIdentity {
+        NativeBundleIdentity {
+            lineage_id: Uuid::from_u128(lineage),
+            version_id: Uuid::from_u128(version),
+            semantic_digest: digest.into(),
+            policy_version_ids: members.into_iter().map(|m| Uuid::from_u128(m)).collect(),
+        }
+    }
+
+    fn existing_bundle(
+        lineage: u128,
+        version: u128,
+        digest: &str,
+        members: Vec<u128>,
+    ) -> ExistingBundleIdentity {
+        ExistingBundleIdentity {
+            lineage_id: Uuid::from_u128(lineage),
+            version_id: Uuid::from_u128(version),
+            semantic_digest: digest.into(),
+            policy_version_ids: members.into_iter().map(|m| Uuid::from_u128(m)).collect(),
+        }
+    }
+
+    #[test]
+    fn new_lineage_and_version() {
+        let imported = bundle(1, 2, "digest-a", vec![10, 20]);
+        let plan = plan_bundle_reconciliation(&imported, None);
+        assert!(matches!(
+            plan.decision,
+            Some(BundleReconcileDecision::CreateLineageAndVersion { .. })
+        ));
+        assert!(plan.conflicts.is_empty());
+    }
+
+    #[test]
+    fn existing_lineage_new_version() {
+        let imported = bundle(1, 2, "digest-a", vec![10, 20]);
+        let existing = existing_bundle(1, 3, "digest-b", vec![10, 20]);
+        let plan = plan_bundle_reconciliation(&imported, Some(&existing));
+        assert!(matches!(
+            plan.decision,
+            Some(BundleReconcileDecision::CreateVersionInExistingLineage { .. })
+        ));
+        assert!(plan.conflicts.is_empty());
+    }
+
+    #[test]
+    fn exact_match_version_and_digest_and_membership() {
+        let imported = bundle(1, 2, "digest-a", vec![10, 20]);
+        let existing = existing_bundle(1, 2, "digest-a", vec![10, 20]);
+        let plan = plan_bundle_reconciliation(&imported, Some(&existing));
+        assert!(matches!(
+            plan.decision,
+            Some(BundleReconcileDecision::ReuseExact { .. })
+        ));
+        assert!(plan.conflicts.is_empty());
+    }
+
+    #[test]
+    fn same_version_wrong_lineage_conflict() {
+        let imported = bundle(1, 2, "digest-a", vec![10, 20]);
+        let existing = existing_bundle(99, 2, "digest-a", vec![10, 20]);
+        let plan = plan_bundle_reconciliation(&imported, Some(&existing));
+        assert!(plan.decision.is_none());
+        assert_eq!(plan.conflicts.len(), 1);
+        assert!(matches!(
+            plan.conflicts[0],
+            BundleReconcileConflict::VersionBelongsToDifferentLineage { .. }
+        ));
+    }
+
+    #[test]
+    fn same_version_different_digest_conflict() {
+        let imported = bundle(1, 2, "digest-new", vec![10, 20]);
+        let existing = existing_bundle(1, 2, "digest-old", vec![10, 20]);
+        let plan = plan_bundle_reconciliation(&imported, Some(&existing));
+        assert!(plan.decision.is_none());
+        assert_eq!(plan.conflicts.len(), 1);
+        assert!(matches!(
+            plan.conflicts[0],
+            BundleReconcileConflict::VersionDigestMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn same_version_digest_different_membership_conflict() {
+        let imported = bundle(1, 2, "digest-a", vec![10, 20, 30]);
+        let existing = existing_bundle(1, 2, "digest-a", vec![10, 20]);
+        let plan = plan_bundle_reconciliation(&imported, Some(&existing));
+        assert!(plan.decision.is_none());
+        assert_eq!(plan.conflicts.len(), 1);
+        assert!(matches!(
+            plan.conflicts[0],
+            BundleReconcileConflict::VersionDigestMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn same_version_digest_different_order_conflict() {
+        let imported = bundle(1, 2, "digest-a", vec![10, 20]);
+        let existing = existing_bundle(1, 2, "digest-a", vec![20, 10]);
+        let plan = plan_bundle_reconciliation(&imported, Some(&existing));
+        assert!(plan.decision.is_none());
+        assert_eq!(plan.conflicts.len(), 1);
+        assert!(matches!(
+            plan.conflicts[0],
+            BundleReconcileConflict::VersionDigestMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn nil_version_id_does_not_crash() {
+        let imported = bundle(1, 0, "digest-a", vec![10, 20]);
+        let plan = plan_bundle_reconciliation(&imported, None);
+        assert!(plan.decision.is_none());
+    }
+
+    #[test]
+    fn nil_lineage_id_does_not_crash() {
+        let imported = bundle(0, 2, "digest-a", vec![10, 20]);
+        let plan = plan_bundle_reconciliation(&imported, None);
+        assert!(plan.decision.is_none());
+    }
+}

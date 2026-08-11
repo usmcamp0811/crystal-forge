@@ -603,69 +603,121 @@ pub async fn commit_cf_native_import(
     let bundle_digest = bundle_meta.digest.clone().unwrap_or_default();
     let bundle_id = bundle_meta.bundle_id;
     let bundle_version_id = bundle_meta.bundle_version_id;
-    let existing_bundle: Option<(Uuid, String)> = sqlx::query_as(
+
+    // Load existing bundle version and membership (or lineage if version doesn't exist)
+    let existing_bundle_version: Option<(Uuid, String)> = sqlx::query_as(
         "SELECT bundle_id, semantic_digest FROM compliance_bundle_versions WHERE id = $1",
     )
     .bind(bundle_version_id)
     .fetch_optional(&mut *tx)
     .await
-    .context("failed to load CF-native bundle identity")?;
-    if let Some((local_bundle_id, local_digest)) = existing_bundle.as_ref() {
-        if *local_bundle_id != bundle_id || *local_digest != bundle_digest {
-            return Err(anyhow::Error::new(NativeReconcileFailure {
-                conflicts: vec![ReconcileConflict::VersionDigestMismatch {
-                    lineage_id: bundle_id,
-                    version_id: bundle_version_id,
-                    local_digest: local_digest.clone(),
-                    imported_digest: bundle_digest,
-                    source_rule_id: "bundle".into(),
-                }],
-            }));
-        }
-        let local_membership: Vec<(Uuid, bool)> = sqlx::query_as(
-            "SELECT policy_version_id, selected FROM compliance_bundle_version_policies \
+    .context("failed to load CF-native bundle version")?;
+
+    let existing_bundle_lineage: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM compliance_bundles WHERE id = $1",
+    )
+    .bind(bundle_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("failed to inspect CF-native bundle lineage")?;
+
+    // Build existing bundle identity if version exists
+    let existing_bundle_identity = if let Some((local_bundle_id, local_digest)) = existing_bundle_version {
+        let local_membership: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT policy_version_id FROM compliance_bundle_version_policies \
              WHERE bundle_version_id = $1 ORDER BY policy_order",
         )
         .bind(bundle_version_id)
         .fetch_all(&mut *tx)
         .await
         .context("failed to load CF-native bundle membership")?;
-        let mut expected_membership: Vec<(Uuid, bool, i32)> = policy_records
-            .iter()
-            .map(|record| {
-                (
-                    resolved_by_version[&record.policy_version_id],
-                    record.selected,
-                    record.policy_order,
-                )
-            })
-            .collect();
-        expected_membership.sort_by_key(|(_, _, order)| *order);
-        let expected_membership: Vec<(Uuid, bool)> = expected_membership
-            .into_iter()
-            .map(|(version_id, selected, _)| (version_id, selected))
-            .collect();
-        if local_membership != expected_membership {
-            return Err(anyhow::Error::new(NativeReconcileFailure {
-                conflicts: vec![ReconcileConflict::VersionDigestMismatch {
-                    lineage_id: bundle_id,
-                    version_id: bundle_version_id,
-                    local_digest: "bundle membership differs".into(),
-                    imported_digest: bundle_digest,
-                    source_rule_id: "bundle".into(),
-                }],
-            }));
-        }
+        Some(crate::compliance::xccdf::reconciliation::ExistingBundleIdentity {
+            lineage_id: local_bundle_id,
+            version_id: bundle_version_id,
+            semantic_digest: local_digest,
+            policy_version_ids: local_membership,
+        })
+    } else {
+        None
+    };
+
+    // Build imported bundle identity
+    let imported_policy_version_ids: Vec<Uuid> = policy_records
+        .iter()
+        .map(|r| resolved_by_version[&r.policy_version_id])
+        .collect();
+    let imported_bundle_identity = crate::compliance::xccdf::reconciliation::NativeBundleIdentity {
+        lineage_id: bundle_id,
+        version_id: bundle_version_id,
+        semantic_digest: bundle_digest.clone(),
+        policy_version_ids: imported_policy_version_ids,
+    };
+
+    // Plan bundle reconciliation using shared planner
+    let bundle_plan = crate::compliance::xccdf::reconciliation::plan_bundle_reconciliation(
+        &imported_bundle_identity,
+        existing_bundle_identity.as_ref(),
+    );
+
+    // Reject if there are conflicts
+    if !bundle_plan.conflicts.is_empty() {
+        return Err(anyhow::Error::new(NativeReconcileFailure {
+            conflicts: bundle_plan.conflicts.into_iter().map(|c| {
+                match c {
+                    crate::compliance::xccdf::reconciliation::BundleReconcileConflict::VersionDigestMismatch {
+                        lineage_id,
+                        version_id,
+                        local_digest,
+                        imported_digest,
+                    } => ReconcileConflict::VersionDigestMismatch {
+                        lineage_id,
+                        version_id,
+                        local_digest,
+                        imported_digest,
+                        source_rule_id: "bundle".into(),
+                    },
+                    crate::compliance::xccdf::reconciliation::BundleReconcileConflict::VersionBelongsToDifferentLineage {
+                        lineage_id,
+                        version_id,
+                        actual_lineage_id,
+                    } => ReconcileConflict::VersionBelongsToDifferentLineage {
+                        lineage_id,
+                        version_id,
+                        actual_lineage_id,
+                    },
+                    crate::compliance::xccdf::reconciliation::BundleReconcileConflict::BundleMembershipMismatch {
+                        lineage_id,
+                        version_id,
+                    } => ReconcileConflict::VersionDigestMismatch {
+                        lineage_id,
+                        version_id,
+                        local_digest: "bundle membership differs".into(),
+                        imported_digest: bundle_digest.clone(),
+                        source_rule_id: "bundle".into(),
+                    },
+                }
+            }).collect(),
+        }));
     }
-    let bundle_version_created = existing_bundle.is_none();
-    let lineage_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM compliance_bundles WHERE id = $1)")
-            .bind(bundle_id)
-            .fetch_one(&mut *tx)
-            .await
-            .context("failed to inspect CF-native bundle lineage")?;
-    if bundle_version_created {
-        if lineage_exists {
+
+    // Apply the bundle reconciliation decision
+    let (bundle_version_created, bundle_lineage_created) = match &bundle_plan.decision {
+        Some(crate::compliance::xccdf::reconciliation::BundleReconcileDecision::ReuseExact { .. }) => {
+            (false, false)
+        }
+        Some(crate::compliance::xccdf::reconciliation::BundleReconcileDecision::CreateLineageAndVersion { .. }) => {
+            create_native_bundle_lineage(
+                &mut tx,
+                importing_user_id,
+                &validated,
+                bundle_id,
+                bundle_version_id,
+                &bundle_digest,
+            )
+            .await?;
+            (true, true)
+        }
+        Some(crate::compliance::xccdf::reconciliation::BundleReconcileDecision::CreateVersionInExistingLineage { .. }) => {
             let current_draft: Option<Uuid> = sqlx::query_scalar(
                 "SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1 FOR UPDATE",
             )
@@ -684,18 +736,6 @@ pub async fn commit_cf_native_import(
                     }],
                 }));
             }
-        } else {
-            create_native_bundle_lineage(
-                &mut tx,
-                importing_user_id,
-                &validated,
-                bundle_id,
-                bundle_version_id,
-                &bundle_digest,
-            )
-            .await?;
-        }
-        if lineage_exists {
             insert_native_bundle_version(
                 &mut tx,
                 importing_user_id,
@@ -705,7 +745,14 @@ pub async fn commit_cf_native_import(
                 &bundle_digest,
             )
             .await?;
+            (true, false)
         }
+        None => {
+            return Err(anyhow::anyhow!("bundle reconciliation plan has no decision"));
+        }
+    };
+
+    if bundle_version_created {
         sqlx::query("UPDATE compliance_bundle_versions SET source_artifact_id = $1 WHERE id = $2")
             .bind(source_artifact_id)
             .bind(bundle_version_id)
@@ -785,10 +832,10 @@ pub async fn commit_cf_native_import(
         "bundle_id": bundle_id,
         "bundle_version_id": bundle_version_id,
         "created_policy_lineages": created_lineages,
-        "created_policy_versions": created_versions,
-        "reused_policy_versions": reused_versions,
-        "bundle_lineage_created": !lineage_exists,
-        "bundle_version_created": bundle_version_created,
+         "created_policy_versions": created_versions,
+         "reused_policy_versions": reused_versions,
+         "bundle_lineage_created": bundle_lineage_created,
+         "bundle_version_created": bundle_version_created,
         "conflict_count": 0,
         "trust_state": "untrusted",
         "publication_state": "draft"
@@ -815,7 +862,7 @@ pub async fn commit_cf_native_import(
         created_policy_lineages: created_lineages,
         created_policy_versions: created_versions,
         reused_policy_versions: reused_versions,
-        bundle_lineage_created: !lineage_exists,
+        bundle_lineage_created,
         bundle_version_created,
         excluded_rule_count: 0,
         created_policy_version_ids: created_version_ids,
