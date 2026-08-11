@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-11 20:08'
+updated_date: '2026-08-11 20:12'
 labels: []
 milestone: m-22
 dependencies:
@@ -358,6 +358,8 @@ DATABASE_URL=... cargo test -p cf-server --lib -- --ignored queries::compliance_
 2026-08-11 continuation plan: complete the mutation-free release-diff projection first. Pass adapter-derived requirement canonicals/digests into reconciliation, compare against the prior framework release even when previewing a new release, return changed and removed states, and offer inherited candidates only for unchanged requirements. Add focused query tests. Defer commit-time reuse of immutable accepted policy versions until its required derived-draft behavior is confirmed against existing workflow, because silently mutating accepted versions would violate the task's immutability criterion.
 
 2026-08-11 reuse increment: at foreign-import commit, resolve each `MapExisting` source policy version to a mutable derived draft using the established `ensure_policy_draft(..., EnsureMutable)` workflow when the source version is immutable. Use the effective draft version consistently for bundle membership, normalized mapping, source-object mappings, and reuse counts. Validate that the selected source is an eligible trusted mapping for the relevant previous requirement version before deriving or persisting. Add DB-gated coverage for immutable selected-policy reuse.
+
+2026-08-11 confirmed follow-up scope: preserve the full trusted inherited mapping contract (relationship, coverage, rationale) on the derived draft; make commit eligibility exactly match preview (accepted and current published only); deduplicate effective policy versions for bundle membership while retaining per-requirement mappings; correct actual creation/reuse result counts; add the listed DB integration cases and execute both DB suites before proceeding to exact technical-match candidates.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
