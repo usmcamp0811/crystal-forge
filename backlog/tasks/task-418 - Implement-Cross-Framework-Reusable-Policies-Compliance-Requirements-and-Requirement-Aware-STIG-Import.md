@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-11 20:23'
+updated_date: '2026-08-11 20:24'
 labels: []
 milestone: m-22
 dependencies:
@@ -364,6 +364,11 @@ DATABASE_URL=... cargo test -p cf-server --lib -- --ignored queries::compliance_
 2026-08-11 validation correction: MapExisting is now explicitly restricted to a trusted mapping on the unchanged prior requirement where the submitted policy version is both accepted and the lineage's current published version. Every accepted source is then resolved through `ensure_policy_draft(..., EnsureMutable)`; client-submitted mutable versions are rejected. Add a complete DB integration fixture covering shared-policy reuse, preservation of mapping semantics, derived draft membership/mapping, deterministic membership order, accounting, and rejected superseded/deprecated/stale versions before starting technical matching.
 
 2026-08-11 DB-proof slice: do not start technical, fuzzy, or crosswalk matching. Add focused DB-gated lifecycle tests for inherited MapExisting success, exact mapping-semantics inheritance, existing draft reuse, source rejection cases, multi-requirement dedup/order/accounting, and full transaction rollback. Run the complete existing compliance interchange and framework requirements ignored suites, formatting/diff checks, and prescribed server build/check; commit and push this test slice separately only after green.
+
+### 2026-08-11 MapExisting DB-proof slice
+- Extend `cf-server`'s existing ignored `queries::compliance_interchange` database fixtures and commit-path tests only; do not alter production matching behavior.
+- Cover accepted/current trusted inherited reuse, inherited semantics and existing-draft preservation, rejection of invalid source states/content, shared effective-draft bundle deduplication/order/accounting, and transaction rollback.
+- Verify with the requested isolated `DATABASE_URL` against the targeted ignored DB suite, plus formatting and diff checks.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
