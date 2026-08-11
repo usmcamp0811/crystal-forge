@@ -47,30 +47,13 @@ fn is_srg_id(ident: &StandardIdentifier) -> bool {
 
 /// Returns `true` if the parsed XCCDF document appears to be a DISA STIG.
 ///
-/// Detection heuristics (any is sufficient):
-/// 1. Benchmark ID contains `"STIG"` (case-insensitive).
-/// 2. At least one rule has an identifier starting with `V-`.
-/// 3. Benchmark title or description contains `"STIG"`.
+/// Strong attribution evidence is required: an official DISA benchmark
+/// namespace/prefix or a V-ID carried by a recognized DISA/STIG identifier
+/// system. Display text alone is deliberately not authoritative.
 pub fn is_disa_stig(parsed: &ParsedXccdf) -> bool {
     if let Some(bm) = &parsed.benchmark {
-        if bm.id.to_uppercase().contains("STIG") {
-            return true;
-        }
-        if bm
-            .title
-            .as_deref()
-            .unwrap_or("")
-            .to_uppercase()
-            .contains("STIG")
-        {
-            return true;
-        }
-        if bm
-            .description
-            .as_deref()
-            .unwrap_or("")
-            .to_uppercase()
-            .contains("STIG")
+        if bm.id.starts_with("xccdf_mil.disa.stig_benchmark_")
+            || bm.id.starts_with("xccdf_mil.disa.fso_benchmark_")
         {
             return true;
         }
@@ -78,7 +61,7 @@ pub fn is_disa_stig(parsed: &ParsedXccdf) -> bool {
     parsed
         .rules
         .iter()
-        .any(|r| r.identifiers.iter().any(|i| i.value.starts_with("V-")))
+        .any(|r| r.identifiers.iter().any(is_stig_vuln_id))
 }
 
 // ── Canonical framework identity ──────────────────────────────────────────────

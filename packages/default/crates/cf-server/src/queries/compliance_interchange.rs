@@ -241,10 +241,9 @@ pub async fn commit_foreign_import(
     // DISA STIGs have a stable framework/release identity and requirement
     // lineages.  Persist those authoritative objects before choosing policy
     // implementations; the legacy policy metadata remains source provenance.
-    let normalized_requirements = if is_disa_stig(&pkg.parsed) {
-        let identity = identify_framework(&pkg.parsed).ok_or_else(|| {
-            anyhow::anyhow!("IMPORT_FRAMEWORK_IDENTITY_UNAVAILABLE: DISA STIG has no stable identity")
-        })?;
+    let normalized_requirements = if is_disa_stig(&pkg.parsed)
+        && let Some(identity) = identify_framework(&pkg.parsed)
+    {
         let framework_name = identity
             .title
             .as_deref()
@@ -2463,7 +2462,8 @@ mod tests {
         // Force a failure mid-transaction to prove atomicity.
         let pool = test_pool().await.expect("DATABASE_URL required");
         let user_id = ensure_test_user(&pool).await;
-        let bytes = minimal_xccdf_bytes();
+        let mut bytes = minimal_xccdf_bytes();
+        bytes.extend_from_slice(format!("<!-- {} -->", Uuid::new_v4()).as_bytes());
         let pkg = make_package(bytes);
         let artifact_count_before: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1",
