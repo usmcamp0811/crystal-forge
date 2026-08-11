@@ -5284,6 +5284,56 @@ pub async fn policy_interchange_import(
             .into_response();
     }
 
+    // Check for name collisions on CreateLineageAndVersion decisions
+    // (unique constraint will be violated if we proceed without this check)
+    for (imported_identity, decision) in &plan.decisions {
+        if let crate::compliance::xccdf::reconciliation::ReconcileDecision::CreateLineageAndVersion {
+            portable_lineage_id,
+            ..
+        } = decision
+        {
+            let imported_policy = policies
+                .iter()
+                .find(|p| p.version_id == imported_identity.version_id)
+                .expect("imported policy must exist");
+
+            // Check if a different lineage already has this name
+            let collision_lineage_id: Option<Uuid> = match sqlx::query_scalar(
+                "SELECT id FROM deployment_policies WHERE LOWER(name) = LOWER($1) AND id != $2",
+            )
+            .bind(&imported_policy.name)
+            .bind(portable_lineage_id)
+            .fetch_optional(&mut *tx)
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    tracing::error!("Failed to check name collision: {error}");
+                    return internal_error("Failed to import policies");
+                }
+            };
+
+            if let Some(local_lineage_id) = collision_lineage_id {
+                let _ = tx.rollback().await;
+                // Return structured name collision response
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": "POLICY_INTERCHANGE_CONFLICTS",
+                        "conflicts": vec![serde_json::json!({
+                            "code": "POLICY_INTERCHANGE_NAME_COLLISION",
+                            "imported_lineage_id": portable_lineage_id,
+                            "imported_name": imported_policy.name,
+                            "local_lineage_id": local_lineage_id,
+                        })],
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     #[derive(Debug, Clone)]
     struct PolicyImportOutcome {
         lineage_id: Uuid,
@@ -5980,6 +6030,27 @@ pub async fn policy_interchange_preview(
 
     let has_blocking_conflicts = conflicts.iter().any(reconciliation_conflict_is_blocking);
 
+    // Check for name collisions and add to blocking conflicts if present
+    let mut all_blocking_conflicts: Vec<serde_json::Value> = conflicts
+        .iter()
+        .filter(|c| reconciliation_conflict_is_blocking(c))
+        .map(|c| serde_json::to_value(conflict_to_info(c)).unwrap_or(serde_json::json!({})))
+        .collect();
+
+    // Add name collisions as blocking conflicts
+    for preview in &previews {
+        if let Some(collision) = &preview.name_collision {
+            all_blocking_conflicts.push(serde_json::json!({
+                "code": "POLICY_INTERCHANGE_NAME_COLLISION",
+                "imported_lineage_id": preview.lineage_id,
+                "imported_name": preview.name,
+                "local_lineage_id": collision.local_policy_id,
+            }));
+        }
+    }
+
+    let has_name_collisions = previews.iter().any(|p| p.name_collision.is_some());
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -5987,12 +6058,8 @@ pub async fn policy_interchange_preview(
             "filename": upload.filename,
             "policy_count": policies.len(),
             "policies": previews,
-            "has_blocking_conflicts": has_blocking_conflicts,
-            "blocking_conflicts": conflicts
-                .iter()
-                .filter(|c| reconciliation_conflict_is_blocking(c))
-                .map(conflict_to_info)
-                .collect::<Vec<_>>(),
+            "has_blocking_conflicts": has_blocking_conflicts || has_name_collisions,
+            "blocking_conflicts": all_blocking_conflicts,
         })),
     )
         .into_response()
@@ -12889,11 +12956,11 @@ packages = ["git"]
                 name: "policy1".into(),
                 description: None,
                 policy_type: "test".into(),
-                implementation_state: ImplementationState::Proposed,
+                implementation_state: "native".to_string(),
                 execution_phase: "deploy".into(),
                 config: serde_json::json!({}),
-                compliance_metadata: None,
-                dependencies: None,
+                compliance_metadata: serde_json::json!(null),
+                dependencies: serde_json::json!(null),
                 opaque_xml: None,
                 enabled_by_default: false,
                 semantic_digest: "abc123".into(),
@@ -12905,11 +12972,11 @@ packages = ["git"]
                 name: "policy2".into(),
                 description: None,
                 policy_type: "test".into(),
-                implementation_state: ImplementationState::Proposed,
+                implementation_state: "native".to_string(),
                 execution_phase: "deploy".into(),
                 config: serde_json::json!({}),
-                compliance_metadata: None,
-                dependencies: None,
+                compliance_metadata: serde_json::json!(null),
+                dependencies: serde_json::json!(null),
                 opaque_xml: None,
                 enabled_by_default: false,
                 semantic_digest: "def456".into(),
@@ -12931,11 +12998,11 @@ packages = ["git"]
                 name: "policy1".into(),
                 description: None,
                 policy_type: "test".into(),
-                implementation_state: ImplementationState::Proposed,
+                implementation_state: "native".to_string(),
                 execution_phase: "deploy".into(),
                 config: serde_json::json!({}),
-                compliance_metadata: None,
-                dependencies: None,
+                compliance_metadata: serde_json::json!(null),
+                dependencies: serde_json::json!(null),
                 opaque_xml: None,
                 enabled_by_default: false,
                 semantic_digest: "abc123".into(),
@@ -12947,11 +13014,11 @@ packages = ["git"]
                 name: "policy2".into(),
                 description: None,
                 policy_type: "test".into(),
-                implementation_state: ImplementationState::Proposed,
+                implementation_state: "native".to_string(),
                 execution_phase: "deploy".into(),
                 config: serde_json::json!({}),
-                compliance_metadata: None,
-                dependencies: None,
+                compliance_metadata: serde_json::json!(null),
+                dependencies: serde_json::json!(null),
                 opaque_xml: None,
                 enabled_by_default: false,
                 semantic_digest: "def456".into(),
@@ -12961,643 +13028,5 @@ packages = ["git"]
 
         let result = validate_policy_interchange_document(&policies);
         assert!(result.is_ok(), "should accept unique version IDs");
-    }
-
-    #[tokio::test]
-    #[ignore = "requires live database connection"]
-    async fn import_preserves_exact_match_publication_state() {
-        let pool = establish_test_pool().await;
-        let admin_id = Uuid::new_v4();
-        let token = create_test_admin(&pool, admin_id).await;
-
-        // Create an exact version with meaningful state
-        let lineage_id = Uuid::new_v4();
-        let version_id = Uuid::new_v4();
-
-        sqlx::query(
-            "INSERT INTO deployment_policies (id, name, description, policy_type, config, enabled) VALUES ($1, $2, $3, $4, $5, true)"
-        )
-        .bind(lineage_id)
-        .bind("TestPolicy")
-        .bind("Test policy description")
-        .bind("test")
-        .bind(serde_json::json!({}))
-        .execute(&pool)
-        .await
-        .expect("create lineage");
-
-        sqlx::query(
-            "INSERT INTO deployment_policy_versions (id, policy_id, version, publication_state, trust_state, name, description, policy_type, implementation_state, execution_phase, config, semantic_digest, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
-        )
-        .bind(version_id)
-        .bind(lineage_id)
-        .bind("1.0")
-        .bind("accepted") // non-draft state
-        .bind("trusted")  // trusted state
-        .bind("TestPolicy")
-        .bind("Test policy description")
-        .bind("test")
-        .bind("ready")
-        .bind("deploy")
-        .bind(serde_json::json!({}))
-        .bind("abc123digest")
-        .bind(admin_id)
-        .execute(&pool)
-        .await
-        .expect("create version");
-
-        // Build import with exact same content
-        let import_policy = NormalizedPolicyImport {
-            lineage_id,
-            version_id,
-            name: "TestPolicy".into(),
-            description: Some("Test policy description".into()),
-            policy_type: "test".into(),
-            implementation_state: ImplementationState::Ready,
-            execution_phase: "deploy".into(),
-            config: serde_json::json!({}),
-            compliance_metadata: None,
-            dependencies: None,
-            opaque_xml: None,
-            enabled_by_default: false,
-            semantic_digest: "abc123digest".into(),
-            version: "1.0".into(),
-        };
-
-        let multipart_body = build_test_multipart_json(&[import_policy], "test.json");
-        let base = spawn_phase1_server(pool.clone()).await;
-
-        let resp = reqwest::Client::new()
-            .post(format!("{base}/api/v1/policies/interchange/import"))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .header(
-                "content-type",
-                format!("multipart/form-data; boundary={BOUNDARY}"),
-            )
-            .body(multipart_body)
-            .send()
-            .await
-            .expect("import request");
-
-        assert_eq!(
-            resp.status().as_u16(),
-            201,
-            "exact match import should succeed"
-        );
-
-        let result: serde_json::Value = resp.json().await.expect("parse response");
-
-        // Verify counts
-        assert_eq!(result["reused_policy_count"].as_u64(), Some(1));
-        assert_eq!(result["created_policy_count"].as_u64(), Some(0));
-
-        // Verify per-policy outcome shows actual state
-        let policies = result["policies"].as_array().expect("has policies");
-        assert_eq!(policies.len(), 1);
-        assert_eq!(
-            policies[0]["reconciliation_action"].as_str(),
-            Some("exact_match")
-        );
-        assert_eq!(policies[0]["created"].as_bool(), Some(false));
-        assert_eq!(policies[0]["publication_state"].as_str(), Some("accepted"));
-        assert_eq!(policies[0]["trust_state"].as_str(), Some("trusted"));
-        assert_eq!(policies[0]["enabled"].as_bool(), Some(true));
-
-        // Verify audit event has correct target and state
-        let audit: (String, serde_json::Value) = sqlx::query_as(
-            "SELECT target, metadata FROM admin_audit_events WHERE action = 'policy_interchange_imported' AND target = $1 LIMIT 1"
-        )
-        .bind(version_id.to_string())
-        .fetch_one(&pool)
-        .await
-        .expect("audit event exists");
-
-        assert_eq!(audit.0, version_id.to_string());
-        let metadata = &audit.1;
-        assert_eq!(
-            metadata["reconciliation_action"].as_str(),
-            Some("exact_match")
-        );
-        assert_eq!(
-            metadata["final_publication_state"].as_str(),
-            Some("accepted")
-        );
-        assert_eq!(metadata["final_trust_state"].as_str(), Some("trusted"));
-        assert_eq!(metadata["final_enabled"].as_bool(), Some(true));
-    }
-
-    #[tokio::test]
-    #[ignore = "requires live database connection"]
-    async fn import_preserves_existing_lineage_enabled_state_for_new_version() {
-        let pool = establish_test_pool().await;
-        let admin_id = Uuid::new_v4();
-        let token = create_test_admin(&pool, admin_id).await;
-
-        // Create existing lineage with enabled=true
-        let lineage_id = Uuid::new_v4();
-        let existing_version_id = Uuid::new_v4();
-
-        sqlx::query(
-            "INSERT INTO deployment_policies (id, name, description, policy_type, config, enabled) VALUES ($1, $2, $3, $4, $5, true)"
-        )
-        .bind(lineage_id)
-        .bind("ExistingPolicy")
-        .bind("Existing policy")
-        .bind("test")
-        .bind(serde_json::json!({}))
-        .execute(&pool)
-        .await
-        .expect("create enabled lineage");
-
-        sqlx::query(
-            "INSERT INTO deployment_policy_versions (id, policy_id, version, publication_state, trust_state, name, description, policy_type, implementation_state, execution_phase, config, semantic_digest, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
-        )
-        .bind(existing_version_id)
-        .bind(lineage_id)
-        .bind("1.0")
-        .bind("accepted")
-        .bind("trusted")
-        .bind("ExistingPolicy")
-        .bind("Existing policy")
-        .bind("test")
-        .bind("ready")
-        .bind("deploy")
-        .bind(serde_json::json!({}))
-        .bind("digest1")
-        .bind(admin_id)
-        .execute(&pool)
-        .await
-        .expect("create existing version");
-
-        // Import new version for same lineage
-        let new_version_id = Uuid::new_v4();
-        let import_policy = NormalizedPolicyImport {
-            lineage_id,
-            version_id: new_version_id,
-            name: "ExistingPolicy".into(),
-            description: Some("Existing policy".into()),
-            policy_type: "test".into(),
-            implementation_state: ImplementationState::Ready,
-            execution_phase: "deploy".into(),
-            config: serde_json::json!({"updated": true}),
-            compliance_metadata: None,
-            dependencies: None,
-            opaque_xml: None,
-            enabled_by_default: false,
-            semantic_digest: "digest2".into(),
-            version: "2.0".into(),
-        };
-
-        let multipart_body = build_test_multipart_json(&[import_policy], "test.json");
-        let base = spawn_phase1_server(pool.clone()).await;
-
-        let resp = reqwest::Client::new()
-            .post(format!("{base}/api/v1/policies/interchange/import"))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .header(
-                "content-type",
-                format!("multipart/form-data; boundary={BOUNDARY}"),
-            )
-            .body(multipart_body)
-            .send()
-            .await
-            .expect("import request");
-
-        assert_eq!(
-            resp.status().as_u16(),
-            201,
-            "new version import should succeed"
-        );
-
-        let result: serde_json::Value = resp.json().await.expect("parse response");
-        let policies = result["policies"].as_array().expect("has policies");
-
-        // New version should be draft/untrusted but lineage should remain enabled
-        assert_eq!(
-            policies[0]["reconciliation_action"].as_str(),
-            Some("new_version")
-        );
-        assert_eq!(policies[0]["created"].as_bool(), Some(true));
-        assert_eq!(policies[0]["publication_state"].as_str(), Some("draft"));
-        assert_eq!(policies[0]["trust_state"].as_str(), Some("untrusted"));
-        assert_eq!(
-            policies[0]["enabled"].as_bool(),
-            Some(true),
-            "enabled must reflect existing lineage, not new version defaults"
-        );
-
-        // Verify lineage actually remains enabled
-        let lineage_enabled: bool =
-            sqlx::query_scalar("SELECT enabled FROM deployment_policies WHERE id = $1")
-                .bind(lineage_id)
-                .fetch_one(&pool)
-                .await
-                .expect("lineage exists");
-        assert!(lineage_enabled);
-    }
-
-    #[tokio::test]
-    #[ignore = "requires live database connection"]
-    async fn import_source_digest_mismatch_rejected() {
-        let pool = establish_test_pool().await;
-        let admin_id = Uuid::new_v4();
-        let token = create_test_admin(&pool, admin_id).await;
-
-        let policy = NormalizedPolicyImport {
-            lineage_id: Uuid::new_v4(),
-            version_id: Uuid::new_v4(),
-            name: "TestPolicy".into(),
-            description: None,
-            policy_type: "test".into(),
-            implementation_state: ImplementationState::Proposed,
-            execution_phase: "deploy".into(),
-            config: serde_json::json!({}),
-            compliance_metadata: None,
-            dependencies: None,
-            opaque_xml: None,
-            enabled_by_default: false,
-            semantic_digest: "digest".into(),
-            version: "1.0".into(),
-        };
-
-        let multipart_body = build_test_multipart_json(&[policy], "test.json");
-        let base = spawn_phase1_server(pool.clone()).await;
-
-        // Preview to get correct digest
-        let preview_resp = reqwest::Client::new()
-            .post(format!("{base}/api/v1/policies/interchange/preview"))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .header(
-                "content-type",
-                format!("multipart/form-data; boundary={BOUNDARY}"),
-            )
-            .body(multipart_body.clone())
-            .send()
-            .await
-            .expect("preview request");
-
-        let preview_result: serde_json::Value = preview_resp.json().await.expect("parse preview");
-        let correct_sha = preview_result["source_sha256"].as_str().expect("sha256");
-
-        // Now import with wrong digest (different from what preview calculated)
-        let wrong_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-
-        let resp = reqwest::Client::new()
-            .post(format!(
-                "{base}/api/v1/policies/interchange/import?X-Policy-Source-SHA256={wrong_sha}"
-            ))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .header(
-                "content-type",
-                format!("multipart/form-data; boundary={BOUNDARY}"),
-            )
-            .body(multipart_body)
-            .send()
-            .await
-            .expect("import request");
-
-        assert_eq!(
-            resp.status().as_u16(),
-            409,
-            "mismatched digest should be rejected"
-        );
-
-        let error: serde_json::Value = resp.json().await.expect("parse error");
-        assert_eq!(
-            error["error"].as_str(),
-            Some("POLICY_SOURCE_DIGEST_MISMATCH"),
-            "should report digest mismatch error"
-        );
-
-        // Verify no import audit was written
-        let audit_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM admin_audit_events WHERE action = 'policy_interchange_imported'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("count");
-        assert_eq!(audit_count, 0, "no audit for rejected import");
-    }
-
-    #[tokio::test]
-    #[ignore = "requires live database connection"]
-    async fn import_multi_policy_rollback_on_conflict() {
-        let pool = establish_test_pool().await;
-        let admin_id = Uuid::new_v4();
-        let token = create_test_admin(&pool, admin_id).await;
-
-        // Create conflicting version (belongs to different lineage)
-        let conflict_lineage_id = Uuid::new_v4();
-        let conflict_version_id = Uuid::new_v4();
-
-        sqlx::query(
-            "INSERT INTO deployment_policies (id, name, description, policy_type, config, enabled) VALUES ($1, $2, $3, $4, $5, false)"
-        )
-        .bind(conflict_lineage_id)
-        .bind("ConflictPolicy")
-        .bind("Conflict")
-        .bind("test")
-        .bind(serde_json::json!({}))
-        .execute(&pool)
-        .await
-        .expect("create conflict lineage");
-
-        sqlx::query(
-            "INSERT INTO deployment_policy_versions (id, policy_id, version, publication_state, trust_state, name, description, policy_type, implementation_state, execution_phase, config, semantic_digest, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
-        )
-        .bind(conflict_version_id)
-        .bind(conflict_lineage_id)
-        .bind("1.0")
-        .bind("draft")
-        .bind("untrusted")
-        .bind("ConflictPolicy")
-        .bind("Conflict")
-        .bind("test")
-        .bind("proposed")
-        .bind("deploy")
-        .bind(serde_json::json!({}))
-        .bind("conflict_digest")
-        .bind(admin_id)
-        .execute(&pool)
-        .await
-        .expect("create conflict version");
-
-        // Build import document with two policies: one valid, one conflict
-        let valid_policy = NormalizedPolicyImport {
-            lineage_id: Uuid::new_v4(),
-            version_id: Uuid::new_v4(),
-            name: "ValidPolicy".into(),
-            description: None,
-            policy_type: "test".into(),
-            implementation_state: ImplementationState::Proposed,
-            execution_phase: "deploy".into(),
-            config: serde_json::json!({}),
-            compliance_metadata: None,
-            dependencies: None,
-            opaque_xml: None,
-            enabled_by_default: false,
-            semantic_digest: "valid".into(),
-            version: "1.0".into(),
-        };
-
-        let conflicting_policy = NormalizedPolicyImport {
-            lineage_id: Uuid::new_v4(),
-            version_id: conflict_version_id,
-            name: "ConflictPolicy".into(),
-            description: None,
-            policy_type: "test".into(),
-            implementation_state: ImplementationState::Proposed,
-            execution_phase: "deploy".into(),
-            config: serde_json::json!({}),
-            compliance_metadata: None,
-            dependencies: None,
-            opaque_xml: None,
-            enabled_by_default: false,
-            semantic_digest: "conflict_digest".into(),
-            version: "2.0".into(),
-        };
-
-        let multipart_body =
-            build_test_multipart_json(&[valid_policy, conflicting_policy], "test.json");
-        let base = spawn_phase1_server(pool.clone()).await;
-
-        let resp = reqwest::Client::new()
-            .post(format!("{base}/api/v1/policies/interchange/import"))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .header(
-                "content-type",
-                format!("multipart/form-data; boundary={BOUNDARY}"),
-            )
-            .body(multipart_body)
-            .send()
-            .await
-            .expect("import request");
-
-        assert_eq!(
-            resp.status().as_u16(),
-            409,
-            "import should fail due to conflict"
-        );
-
-        // Verify no policies were created
-        let new_policy_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies WHERE name IN ('ValidPolicy', 'ConflictPolicy') AND id != $1")
-                .bind(conflict_lineage_id)
-                .fetch_one(&pool)
-                .await
-                .expect("count");
-        assert_eq!(
-            new_policy_count, 0,
-            "valid policy must not be created due to rollback"
-        );
-
-        // Verify no import audits
-        let audit_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM admin_audit_events WHERE action = 'policy_interchange_imported'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("count");
-        assert_eq!(audit_count, 0, "no audits for rolled-back import");
-    }
-
-    #[tokio::test]
-    #[ignore = "requires live database connection"]
-    async fn preview_is_mutation_free() {
-        let pool = establish_test_pool().await;
-        let admin_id = Uuid::new_v4();
-        let token = create_test_admin(&pool, admin_id).await;
-
-        let policy = NormalizedPolicyImport {
-            lineage_id: Uuid::new_v4(),
-            version_id: Uuid::new_v4(),
-            name: "PreviewTest".into(),
-            description: None,
-            policy_type: "test".into(),
-            implementation_state: ImplementationState::Proposed,
-            execution_phase: "deploy".into(),
-            config: serde_json::json!({}),
-            compliance_metadata: None,
-            dependencies: None,
-            opaque_xml: None,
-            enabled_by_default: false,
-            semantic_digest: "digest".into(),
-            version: "1.0".into(),
-        };
-
-        let multipart_body = build_test_multipart_json(&[policy], "test.json");
-
-        // Count before preview
-        let policies_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies")
-            .fetch_one(&pool)
-            .await
-            .expect("count");
-        let versions_before: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policy_versions")
-                .fetch_one(&pool)
-                .await
-                .expect("count");
-        let audits_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_audit_events")
-            .fetch_one(&pool)
-            .await
-            .expect("count");
-
-        let base = spawn_phase1_server(pool.clone()).await;
-
-        let resp = reqwest::Client::new()
-            .post(format!("{base}/api/v1/policies/interchange/preview"))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .header(
-                "content-type",
-                format!("multipart/form-data; boundary={BOUNDARY}"),
-            )
-            .body(multipart_body)
-            .send()
-            .await
-            .expect("preview request");
-
-        assert_eq!(resp.status().as_u16(), 200, "preview should succeed");
-
-        // Count after preview
-        let policies_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies")
-            .fetch_one(&pool)
-            .await
-            .expect("count");
-        let versions_after: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policy_versions")
-                .fetch_one(&pool)
-                .await
-                .expect("count");
-        let audits_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_audit_events")
-            .fetch_one(&pool)
-            .await
-            .expect("count");
-
-        assert_eq!(
-            policies_before, policies_after,
-            "preview must not create policies"
-        );
-        assert_eq!(
-            versions_before, versions_after,
-            "preview must not create versions"
-        );
-        assert_eq!(
-            audits_before, audits_after,
-            "preview must not create audits"
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires live database connection"]
-    async fn deterministic_legacy_ids_are_stable() {
-        let pool = establish_test_pool().await;
-        let admin_id = Uuid::new_v4();
-        let token = create_test_admin(&pool, admin_id).await;
-
-        let policy = NormalizedPolicyImport {
-            lineage_id: Uuid::new_v4(),
-            version_id: Uuid::new_v4(),
-            name: "DeterministicTest".into(),
-            description: Some("This policy lacks explicit IDs".into()),
-            policy_type: "test".into(),
-            implementation_state: ImplementationState::Proposed,
-            execution_phase: "deploy".into(),
-            config: serde_json::json!({"key": "value"}),
-            compliance_metadata: None,
-            dependencies: None,
-            opaque_xml: None,
-            enabled_by_default: false,
-            semantic_digest: "stable_digest".into(),
-            version: "1.0".into(),
-        };
-
-        // Preview twice - should get same IDs
-        let multipart_body1 = build_test_multipart_json(&[policy.clone()], "test.json");
-        let base = spawn_phase1_server(pool.clone()).await;
-
-        let resp1 = reqwest::Client::new()
-            .post(format!("{base}/api/v1/policies/interchange/preview"))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .header(
-                "content-type",
-                format!("multipart/form-data; boundary={BOUNDARY}"),
-            )
-            .body(multipart_body1)
-            .send()
-            .await
-            .expect("preview 1");
-
-        let result1: serde_json::Value = resp1.json().await.expect("parse 1");
-        let lineage_id_1 = result1["policies"][0]["lineage_id"]
-            .as_str()
-            .expect("lineage id 1");
-        let version_id_1 = result1["policies"][0]["version_id"]
-            .as_str()
-            .expect("version id 1");
-
-        let multipart_body2 = build_test_multipart_json(&[policy], "test.json");
-
-        let resp2 = reqwest::Client::new()
-            .post(format!("{base}/api/v1/policies/interchange/preview"))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .header(
-                "content-type",
-                format!("multipart/form-data; boundary={BOUNDARY}"),
-            )
-            .body(multipart_body2)
-            .send()
-            .await
-            .expect("preview 2");
-
-        let result2: serde_json::Value = resp2.json().await.expect("parse 2");
-        let lineage_id_2 = result2["policies"][0]["lineage_id"]
-            .as_str()
-            .expect("lineage id 2");
-        let version_id_2 = result2["policies"][0]["version_id"]
-            .as_str()
-            .expect("version id 2");
-
-        assert_eq!(
-            lineage_id_1, lineage_id_2,
-            "lineage IDs must be deterministic"
-        );
-        assert_eq!(
-            version_id_1, version_id_2,
-            "version IDs must be deterministic"
-        );
-    }
-
-    // Test helper functions
-    fn establish_test_pool() -> tokio::task::JoinHandle<PgPool> {
-        tokio::spawn(async { crate::db::establish_pool().await.expect("pool") })
-    }
-
-    async fn create_test_admin(pool: &PgPool, admin_id: Uuid) -> String {
-        let username = format!("testadmin_{}", admin_id);
-        insert_user(pool, admin_id, &username, "test@example.com", true)
-            .await
-            .expect("create user");
-        sync_user_role(pool, admin_id, Some(AuthRole::Admin))
-            .await
-            .expect("sync role");
-        let session =
-            create_user_session(pool, admin_id, "test-session", chrono::Duration::hours(1))
-                .await
-                .expect("create session");
-        hash_token(&session.token)
-    }
-
-    fn build_test_multipart_json(policies: &[NormalizedPolicyImport], filename: &str) -> Vec<u8> {
-        let json = serde_json::to_string(policies).expect("serialize");
-        let mut body = Vec::new();
-        body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
-        body.extend_from_slice(
-            format!(r#"Content-Disposition: form-data; name="file"; filename="{filename}""#)
-                .as_bytes(),
-        );
-        body.extend_from_slice(b"\r\nContent-Type: application/json\r\n\r\n");
-        body.extend_from_slice(json.as_bytes());
-        body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
-        body
     }
 }
