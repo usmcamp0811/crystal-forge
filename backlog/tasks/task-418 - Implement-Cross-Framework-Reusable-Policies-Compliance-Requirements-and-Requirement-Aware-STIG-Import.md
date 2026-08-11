@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-11 17:49'
+updated_date: '2026-08-11 18:14'
 labels: []
 milestone: m-22
 dependencies:
@@ -353,3 +353,53 @@ DATABASE_URL=... cargo test -p cf-server --lib -- --ignored queries::compliance_
 - Requirement search must be bounded (`LIMIT 50` max) and indexed — no full table scan on a large STIG catalog
 - UI mapping editor must handle the offline state gracefully (failed search, failed create) without optimistic mutation
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## Progress log
+
+**2026-08-11**
+
+### Phase A — Migrations (complete)
+- `0211_compliance_frameworks.sql`: `compliance_frameworks` + `compliance_framework_versions` tables with uniqueness constraints and digest sentinel
+- `0212_compliance_requirements.sql`: `compliance_requirements` + `compliance_requirement_versions` with GIN + FTS indexes
+- `0213_policy_requirement_mappings.sql`: `policy_requirement_mappings` (with immutability trigger) + `compliance_bundle_version_requirements` (with immutability trigger)
+- All three migrations applied against dev DB and verified (3 tables confirmed in DB)
+
+### Phase B — Rust domain models (complete)
+- `src/compliance/framework_model.rs`: `FrameworkVersionCanonical`, `write_framework_version_digest`
+- `src/compliance/requirement_model.rs`: `RequirementVersionCanonical`, `write_requirement_version_digest`, reconciliation enums (`RequirementReconciliationState`, `FrameworkReconciliationState`, `PolicyCandidateMatchType`), DTOs
+- Registered in `src/compliance/mod.rs`
+
+### Phase C — DISA STIG adapter (complete)
+- `src/compliance/xccdf/disa_stig_adapter.rs`: `is_disa_stig`, `identify_framework`, `canonical_key_for_rule`, `requirement_metadata`, `canonical_for_rule`, `hierarchy_nodes_for_rule`
+- 7 unit tests: all pass
+
+### Phase D — Query layer (complete)
+- `src/queries/framework_requirements.rs`: 1468 lines
+  - `list_frameworks`, `list_framework_versions`, `search_requirements`, `list_requirement_children`
+  - `list_policy_mappings`, `create_policy_mapping`, `update_policy_mapping`, `delete_policy_mapping`
+  - `compute_bundle_requirement_coverage`
+  - `upsert_framework_lineage`, `insert_framework_version`, `upsert_requirement_lineage`, `insert_requirement_version`, `insert_bundle_version_requirement`, `insert_policy_mapping_in_tx`
+  - `preview_framework_reconciliation`, `preview_requirement_reconciliation`, `find_policy_candidates`
+- 5 DB-gated tests: all pass
+  - `framework_lineage_is_idempotent` ✅
+  - `framework_version_release_conflict` ✅ (returns FRAMEWORK_RELEASE_CONFLICT)
+  - `requirement_lineage_is_idempotent` ✅
+  - `mapping_blocked_on_accepted_policy_version` ✅ (returns POLICY_MAPPING_IMMUTABLE)
+  - `bundle_coverage_full_partial_unmapped` ✅
+- SQLx offline metadata updated and committed
+
+### Phase E — API handlers (complete)
+- `src/handlers/api/framework_requirements.rs`: all 9 route handlers
+- Registered in `mod.rs` and `bin/server.rs`
+- `SQLX_OFFLINE=true cargo check` passes
+
+### Remaining: Phase F (Web UI), Phase G (more tests), Phase H (full verification + nix build)
+
+**Commits so far:**
+- `ab9e44f9` feat(compliance): add framework/requirement schema, domain models, and DISA STIG adapter
+- `a5e552ed` feat(compliance): add framework/requirement query layer and DB-gated tests
+- (staged: handlers + server routes — commit pending)
+<!-- SECTION:NOTES:END -->
