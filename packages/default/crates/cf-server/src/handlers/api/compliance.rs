@@ -23,7 +23,9 @@ use crate::api::models::{
 };
 use crate::compliance::interchange::{InterchangeLimits, MAX_XCCDF_UPLOAD_BYTES};
 use crate::compliance::resolver::ResolutionOutcome;
-use crate::compliance::xccdf::disa_stig_adapter::{canonical_key_for_rule, identify_framework};
+use crate::compliance::xccdf::disa_stig_adapter::{
+    canonical_for_rule, canonical_key_for_rule, identify_framework,
+};
 use crate::compliance::xccdf::export_models::{
     GroupProjectionError, ImportedCheckError, ImportedFixError, XccdfBundleExport,
     XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
@@ -3868,37 +3870,57 @@ async fn compute_foreign_stig_reconciliation(
     let framework = preview_framework_reconciliation(pool, &identity, source_sha256)
         .await
         .map_err(|error| format!("failed to reconcile framework release: {error}"))?;
-    let canonical_keys: Vec<String> = parsed.rules.iter().map(canonical_key_for_rule).collect();
-    let requirements = match framework.existing_framework_id {
+    let proposed_requirements = parsed
+        .rules
+        .iter()
+        .map(|rule| {
+            let canonical_key = canonical_key_for_rule(rule);
+            canonical_for_rule(rule, &canonical_key)
+        })
+        .collect::<Vec<_>>();
+    let reconciliation = match framework.existing_framework_id {
         Some(framework_id) => preview_requirement_reconciliation(
             pool,
             framework_id,
             framework.existing_framework_version_id,
-            &canonical_keys,
+            &proposed_requirements,
         )
         .await
         .map_err(|error| format!("failed to reconcile requirements: {error}"))?,
-        None => canonical_keys
+        None => crate::compliance::requirement_model::RequirementReconciliationPreview {
+            requirements: proposed_requirements
             .iter()
-            .map(|key| crate::compliance::requirement_model::RequirementReconciliation {
-                canonical_requirement_key: key.clone(),
-                external_id: key.clone(),
+            .map(|requirement| crate::compliance::requirement_model::RequirementReconciliation {
+                canonical_requirement_key: requirement.canonical_requirement_key.clone(),
+                external_id: requirement.external_id.clone(),
                 state: crate::compliance::requirement_model::RequirementReconciliationState::NewRequirement,
                 existing_requirement_id: None,
                 existing_requirement_version_id: None,
                 existing_digest: None,
             })
             .collect(),
+            removed_requirements: vec![],
+        },
     };
 
     let mut rows = Vec::with_capacity(parsed.rules.len());
-    for (rule, requirement) in parsed.rules.iter().zip(requirements.iter()) {
-        let candidates = match requirement.existing_requirement_id {
-            Some(requirement_id) => find_policy_candidates(pool, requirement_id)
-                .await
-                .map_err(|error| format!("failed to find policy candidates: {error}"))?,
-            None => vec![],
-        };
+    for (rule, requirement) in parsed.rules.iter().zip(reconciliation.requirements.iter()) {
+        let is_existing_release = matches!(
+            &framework.state,
+            crate::compliance::requirement_model::FrameworkReconciliationState::ExistingRelease
+                | crate::compliance::requirement_model::FrameworkReconciliationState::ExactArtifact
+        );
+        let candidates = find_policy_candidates(
+            pool,
+            is_existing_release.then_some(requirement.existing_requirement_version_id).flatten(),
+            (!is_existing_release
+                && requirement.state
+                    == crate::compliance::requirement_model::RequirementReconciliationState::ExistingUnchanged)
+                .then_some(requirement.existing_requirement_version_id)
+                .flatten(),
+        )
+        .await
+        .map_err(|error| format!("failed to find policy candidates: {error}"))?;
         let inferred_enforcement = rule
             .fix
             .as_ref()
@@ -3912,6 +3934,7 @@ async fn compute_foreign_stig_reconciliation(
             crate::compliance::requirement_model::RequirementReconciliationState::ExistingUnchanged => "existing_unchanged",
             crate::compliance::requirement_model::RequirementReconciliationState::ExistingChanged => "existing_changed",
             crate::compliance::requirement_model::RequirementReconciliationState::NewRequirement => "new_requirement",
+            crate::compliance::requirement_model::RequirementReconciliationState::RemovedFromRelease => "removed_from_release",
             crate::compliance::requirement_model::RequirementReconciliationState::IdentityConflict => "identity_conflict",
         };
         rows.push(serde_json::json!({
@@ -3951,6 +3974,10 @@ async fn compute_foreign_stig_reconciliation(
             },
         },
         "requirements": rows,
+        "removed_requirements": reconciliation.removed_requirements.into_iter().map(|requirement| serde_json::json!({
+            "external_id": requirement.external_id,
+            "state": "removed_from_release",
+        })).collect::<Vec<_>>(),
     })))
 }
 

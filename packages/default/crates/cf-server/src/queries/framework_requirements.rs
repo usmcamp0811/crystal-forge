@@ -28,7 +28,8 @@ use crate::compliance::framework_model::{
 use crate::compliance::requirement_model::{
     FrameworkReconciliation, FrameworkReconciliationState, PolicyCandidate,
     PolicyCandidateMatchType, PolicyReconciliation, RequirementReconciliation,
-    RequirementReconciliationState, RequirementVersionCanonical, write_requirement_version_digest,
+    RequirementReconciliationPreview, RequirementReconciliationState, RequirementVersionCanonical,
+    write_requirement_version_digest,
 };
 use crate::compliance::xccdf::disa_stig_adapter::DisaStigFrameworkIdentity;
 
@@ -719,11 +720,19 @@ pub async fn preview_requirement_reconciliation(
     pool: &PgPool,
     framework_id: Uuid,
     framework_version_id: Option<Uuid>,
-    canonical_keys: &[String],
-) -> Result<Vec<RequirementReconciliation>> {
-    if canonical_keys.is_empty() {
-        return Ok(vec![]);
+    proposed: &[RequirementVersionCanonical],
+) -> Result<RequirementReconciliationPreview> {
+    if proposed.is_empty() {
+        return Ok(RequirementReconciliationPreview {
+            requirements: vec![],
+            removed_requirements: vec![],
+        });
     }
+
+    let canonical_keys: Vec<&str> = proposed
+        .iter()
+        .map(|requirement| requirement.canonical_requirement_key.as_str())
+        .collect();
 
     // Batch: fetch existing requirement lineages for this framework.
     let existing_lineages: Vec<(String, Uuid)> = sqlx::query_as(
@@ -733,7 +742,7 @@ pub async fn preview_requirement_reconciliation(
            AND canonical_requirement_key = ANY($2)",
     )
     .bind(framework_id)
-    .bind(canonical_keys)
+    .bind(&canonical_keys)
     .fetch_all(pool)
     .await
     .context("failed to batch-query existing requirement lineages")?;
@@ -743,61 +752,61 @@ pub async fn preview_requirement_reconciliation(
 
     // Batch: fetch existing requirement versions for the previous framework version
     // (to detect changes).
-    let prev_versions: HashMap<Uuid, (Uuid, String)> = if let Some(fv_id) = framework_version_id {
-        // Find the most recent earlier version for the same framework.
-        let prev_fv_id: Option<Uuid> = sqlx::query_scalar(
+    let comparison_fv_id = match framework_version_id {
+        Some(existing_fv_id) => Some(existing_fv_id),
+        None => sqlx::query_scalar(
             "SELECT id FROM compliance_framework_versions \
-             WHERE framework_id = $1 AND id != $2 \
-             ORDER BY created_at DESC LIMIT 1",
+              WHERE framework_id = $1 \
+              ORDER BY created_at DESC LIMIT 1",
         )
         .bind(framework_id)
-        .bind(fv_id)
         .fetch_optional(pool)
         .await
-        .context("failed to find previous framework version")?;
+        .context("failed to find previous framework version")?,
+    };
 
-        if let Some(prev_id) = prev_fv_id {
-            let rows: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
+    let prev_versions: HashMap<Uuid, (Uuid, String, String)> =
+        if let Some(comparison_fv_id) = comparison_fv_id {
+            let rows: Vec<(Uuid, Uuid, String, String)> = sqlx::query_as(
                 "SELECT rv.requirement_id, rv.id, rv.semantic_digest \
+                       , rv.external_id \
                  FROM compliance_requirement_versions rv \
                  WHERE rv.framework_version_id = $1",
             )
-            .bind(prev_id)
+            .bind(comparison_fv_id)
             .fetch_all(pool)
             .await
             .context("failed to fetch previous requirement versions")?;
             rows.into_iter()
-                .map(|(req_id, rv_id, digest)| (req_id, (rv_id, digest)))
+                .map(|(req_id, rv_id, digest, external_id)| (req_id, (rv_id, digest, external_id)))
                 .collect()
         } else {
             HashMap::new()
-        }
-    } else {
-        HashMap::new()
-    };
+        };
 
     // Build per-rule reconciliation.
-    let mut results = Vec::with_capacity(canonical_keys.len());
-    for key in canonical_keys {
+    let mut results = Vec::with_capacity(proposed.len());
+    for canonical in proposed {
+        let key = &canonical.canonical_requirement_key;
         let rec = if let Some(&req_id) = lineage_map.get(key) {
             // Check if this requirement has a version in the previous release.
             match prev_versions.get(&req_id) {
-                Some((_prev_rv_id, _prev_digest)) => {
-                    // Requirement existed in a previous release.
-                    // (Full digest comparison would happen in commit path.)
-                    RequirementReconciliation {
-                        canonical_requirement_key: key.clone(),
-                        external_id: key.clone(),
-                        state: RequirementReconciliationState::ExistingUnchanged,
-                        existing_requirement_id: Some(req_id),
-                        existing_requirement_version_id: None,
-                        existing_digest: None,
-                    }
-                }
+                Some((prev_rv_id, prev_digest, _)) => RequirementReconciliation {
+                    canonical_requirement_key: key.clone(),
+                    external_id: canonical.external_id.clone(),
+                    state: if canonical.compute_digest() == *prev_digest {
+                        RequirementReconciliationState::ExistingUnchanged
+                    } else {
+                        RequirementReconciliationState::ExistingChanged
+                    },
+                    existing_requirement_id: Some(req_id),
+                    existing_requirement_version_id: Some(*prev_rv_id),
+                    existing_digest: Some(prev_digest.clone()),
+                },
                 None => RequirementReconciliation {
                     canonical_requirement_key: key.clone(),
-                    external_id: key.clone(),
-                    state: RequirementReconciliationState::ExistingUnchanged,
+                    external_id: canonical.external_id.clone(),
+                    state: RequirementReconciliationState::NewRequirement,
                     existing_requirement_id: Some(req_id),
                     existing_requirement_version_id: None,
                     existing_digest: None,
@@ -806,7 +815,7 @@ pub async fn preview_requirement_reconciliation(
         } else {
             RequirementReconciliation {
                 canonical_requirement_key: key.clone(),
-                external_id: key.clone(),
+                external_id: canonical.external_id.clone(),
                 state: RequirementReconciliationState::NewRequirement,
                 existing_requirement_id: None,
                 existing_requirement_version_id: None,
@@ -815,7 +824,32 @@ pub async fn preview_requirement_reconciliation(
         };
         results.push(rec);
     }
-    Ok(results)
+
+    let proposed_requirement_ids: std::collections::HashSet<Uuid> = results
+        .iter()
+        .filter_map(|requirement| requirement.existing_requirement_id)
+        .collect();
+    let removed_requirements = prev_versions
+        .into_iter()
+        .filter_map(
+            |(requirement_id, (requirement_version_id, digest, external_id))| {
+                (!proposed_requirement_ids.contains(&requirement_id)).then_some(
+                    RequirementReconciliation {
+                        canonical_requirement_key: external_id.clone(),
+                        external_id,
+                        state: RequirementReconciliationState::RemovedFromRelease,
+                        existing_requirement_id: Some(requirement_id),
+                        existing_requirement_version_id: Some(requirement_version_id),
+                        existing_digest: Some(digest),
+                    },
+                )
+            },
+        )
+        .collect();
+    Ok(RequirementReconciliationPreview {
+        requirements: results,
+        removed_requirements,
+    })
 }
 
 /// Find policy candidates for a requirement (for the reconciliation preview).
@@ -828,48 +862,77 @@ pub async fn preview_requirement_reconciliation(
 /// Returns candidates with `match_type` and `confidence` for UI display.
 pub async fn find_policy_candidates(
     pool: &PgPool,
-    requirement_id: Uuid,
+    authoritative_requirement_version_id: Option<Uuid>,
+    inherited_requirement_version_id: Option<Uuid>,
 ) -> Result<Vec<PolicyCandidate>> {
-    // Check for authoritative mappings on accepted policy versions.
-    struct CandidateRow {
-        policy_id: Uuid,
-        policy_version_id: Uuid,
-        policy_name: String,
+    let mut candidates = Vec::new();
+    if let Some(requirement_version_id) = authoritative_requirement_version_id {
+        let rows: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
+            r#"
+            SELECT DISTINCT dp.id, pv.id, pv.name
+            FROM policy_requirement_mappings m
+            JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id
+            JOIN deployment_policies dp ON dp.id = pv.policy_id
+            WHERE m.requirement_version_id = $1
+              AND m.trust_state = 'trusted'
+              AND pv.publication_state IN ('accepted', 'deprecated')
+            ORDER BY pv.name
+            "#,
+        )
+        .bind(requirement_version_id)
+        .fetch_all(pool)
+        .await
+        .context("failed to find authoritative policy candidates")?;
+
+        candidates.extend(
+            rows.into_iter().map(
+                |(policy_id, policy_version_id, policy_name)| PolicyCandidate {
+                    policy_id,
+                    policy_version_id,
+                    policy_name,
+                    match_type: PolicyCandidateMatchType::AuthoritativeMapping,
+                    confidence: 100,
+                    match_reasons: vec![
+                        "Authoritative policy-requirement mapping exists.".to_string(),
+                    ],
+                },
+            ),
+        );
     }
 
-    let rows: Vec<CandidateRow> = sqlx::query_as!(
-        CandidateRow,
-        r#"
-        SELECT DISTINCT
-            dp.id  AS "policy_id!",
-            pv.id  AS "policy_version_id!",
-            pv.name AS "policy_name!"
-        FROM policy_requirement_mappings m
-        JOIN compliance_requirement_versions rv ON rv.id = m.requirement_version_id
-        JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id
-        JOIN deployment_policies dp ON dp.id = pv.policy_id
-        WHERE rv.requirement_id = $1
-          AND m.trust_state = 'trusted'
-          AND pv.publication_state IN ('accepted', 'deprecated')
-        ORDER BY pv.name
-        "#,
-        requirement_id
-    )
-    .fetch_all(pool)
-    .await
-    .context("failed to find authoritative policy candidates")?;
-
-    let candidates = rows
-        .into_iter()
-        .map(|r| PolicyCandidate {
-            policy_id: r.policy_id,
-            policy_version_id: r.policy_version_id,
-            policy_name: r.policy_name,
-            match_type: PolicyCandidateMatchType::AuthoritativeMapping,
-            confidence: 100,
-            match_reasons: vec!["Authoritative policy-requirement mapping exists.".to_string()],
-        })
-        .collect();
+    if let Some(requirement_version_id) = inherited_requirement_version_id {
+        let rows: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
+            r#"
+            SELECT DISTINCT dp.id, pv.id, pv.name
+            FROM policy_requirement_mappings m
+            JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id
+            JOIN deployment_policies dp ON dp.id = pv.policy_id
+            WHERE m.requirement_version_id = $1
+              AND m.trust_state = 'trusted'
+              AND pv.publication_state IN ('accepted', 'deprecated')
+            ORDER BY pv.name
+            "#,
+        )
+        .bind(requirement_version_id)
+        .fetch_all(pool)
+        .await
+        .context("failed to find inherited policy candidates")?;
+        candidates.extend(
+            rows.into_iter().map(
+                |(policy_id, policy_version_id, policy_name)| PolicyCandidate {
+                    policy_id,
+                    policy_version_id,
+                    policy_name,
+                    match_type: PolicyCandidateMatchType::InheritedMapping,
+                    confidence: 95,
+                    match_reasons: vec![
+                        "Trusted mapping on an unchanged requirement in the prior release."
+                            .to_string(),
+                    ],
+                },
+            ),
+        );
+    }
 
     Ok(candidates)
 }
@@ -1223,6 +1286,115 @@ pub mod tests {
         tx2.commit().await.unwrap();
 
         assert_eq!(req_id1, req_id2, "same key must return same lineage id");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a database"]
+    async fn requirement_reconciliation_classifies_changed_and_removed_requirements() {
+        let pool = test_pool().await;
+        let framework_key = format!("test-fw-release-diff-{}", Uuid::new_v4());
+        let unchanged = RequirementVersionCanonical {
+            canonical_requirement_key: "V-unchanged".to_string(),
+            external_id: "V-unchanged".to_string(),
+            title: Some("Unchanged requirement".to_string()),
+            description: None,
+            kind: "rule".to_string(),
+            severity: Some("medium".to_string()),
+            check_text: Some("check".to_string()),
+            fix_text: Some("fix".to_string()),
+            metadata: serde_json::json!({}),
+        };
+        let changed_v1 = RequirementVersionCanonical {
+            canonical_requirement_key: "V-changed".to_string(),
+            external_id: "V-changed".to_string(),
+            title: Some("Original title".to_string()),
+            description: None,
+            kind: "rule".to_string(),
+            severity: Some("medium".to_string()),
+            check_text: Some("check".to_string()),
+            fix_text: Some("fix".to_string()),
+            metadata: serde_json::json!({}),
+        };
+        let removed = RequirementVersionCanonical {
+            canonical_requirement_key: "V-removed".to_string(),
+            external_id: "V-removed".to_string(),
+            title: None,
+            description: None,
+            kind: "rule".to_string(),
+            severity: None,
+            check_text: None,
+            fix_text: None,
+            metadata: serde_json::json!({}),
+        };
+
+        let mut tx = pool.begin().await.unwrap();
+        let framework_id = upsert_framework_lineage(
+            &mut tx,
+            "Release diff framework",
+            None,
+            &framework_key,
+            None,
+        )
+        .await
+        .unwrap();
+        let framework_version_id = insert_framework_version(
+            &mut tx,
+            framework_id,
+            &FrameworkVersionCanonical {
+                canonical_source_key: framework_key,
+                canonical_release_key: "V1R1".to_string(),
+                version: "V1R1".to_string(),
+                publisher: None,
+                title: None,
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        for canonical in [&unchanged, &changed_v1, &removed] {
+            let requirement_id = upsert_requirement_lineage(
+                &mut tx,
+                framework_id,
+                &canonical.canonical_requirement_key,
+            )
+            .await
+            .unwrap();
+            insert_requirement_version(
+                &mut tx,
+                requirement_id,
+                framework_version_id,
+                canonical,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let changed_v2 = RequirementVersionCanonical {
+            title: Some("Changed title".to_string()),
+            ..changed_v1.clone()
+        };
+        let preview =
+            preview_requirement_reconciliation(&pool, framework_id, None, &[unchanged, changed_v2])
+                .await
+                .unwrap();
+
+        assert_eq!(
+            preview.requirements[0].state,
+            RequirementReconciliationState::ExistingUnchanged
+        );
+        assert_eq!(
+            preview.requirements[1].state,
+            RequirementReconciliationState::ExistingChanged
+        );
+        assert_eq!(preview.removed_requirements.len(), 1);
+        assert_eq!(preview.removed_requirements[0].external_id, "V-removed");
+        assert_eq!(
+            preview.removed_requirements[0].state,
+            RequirementReconciliationState::RemovedFromRelease
+        );
     }
 
     // ── Mapping immutability ──────────────────────────────────────────────────

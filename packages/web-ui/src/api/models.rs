@@ -1543,6 +1543,15 @@ pub struct ForeignStigReconciliationPreview {
     pub framework: ForeignStigFrameworkReconciliation,
     #[serde(default)]
     pub requirements: Vec<ForeignStigRequirementReconciliation>,
+    /// Requirements present in the previous release but absent from the upload.
+    #[serde(default)]
+    pub removed_requirements: Vec<ForeignStigRemovedRequirement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignStigRemovedRequirement {
+    pub external_id: String,
+    pub state: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

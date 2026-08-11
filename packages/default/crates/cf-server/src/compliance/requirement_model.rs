@@ -104,6 +104,8 @@ pub enum RequirementReconciliationState {
     ExistingChanged,
     /// New canonical key not seen before in this framework.
     NewRequirement,
+    /// Present in the previous release but absent from this import.
+    RemovedFromRelease,
     /// A different lineage already owns this canonical key in the DB —
     /// requires explicit conflict resolution before commit is permitted.
     IdentityConflict,
@@ -123,6 +125,17 @@ pub struct RequirementReconciliation {
     pub existing_requirement_version_id: Option<Uuid>,
     /// Semantic digest of the existing version (for change detection).
     pub existing_digest: Option<String>,
+}
+
+/// Complete release-diff projection for an imported requirement set.
+#[derive(Debug, Clone)]
+pub struct RequirementReconciliationPreview {
+    /// Reconciliation entries for requirements present in the incoming artifact.
+    pub requirements: Vec<RequirementReconciliation>,
+    /// Requirement versions in the previous release which are absent from the
+    /// incoming artifact. Historical rows remain immutable; this is a preview
+    /// classification only.
+    pub removed_requirements: Vec<RequirementReconciliation>,
 }
 
 /// How an imported framework release reconciles with existing DB state.
