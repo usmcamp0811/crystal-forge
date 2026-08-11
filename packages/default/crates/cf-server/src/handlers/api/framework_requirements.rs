@@ -382,7 +382,11 @@ pub async fn update_policy_requirement_mapping(
     )
     .await
     {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "id": mapping_id }))).into_response(),
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "id": mapping_id })),
+        )
+            .into_response(),
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("POLICY_MAPPING_IMMUTABLE_OR_NOT_FOUND") {

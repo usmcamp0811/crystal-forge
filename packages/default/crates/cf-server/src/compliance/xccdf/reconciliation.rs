@@ -482,12 +482,20 @@ pub fn plan_bundle_reconciliation(
 mod bundle_tests {
     use super::*;
 
-    fn bundle(lineage: u128, version: u128, digest: &str, members: Vec<u128>) -> NativeBundleIdentity {
+    fn bundle(
+        lineage: u128,
+        version: u128,
+        digest: &str,
+        members: Vec<u128>,
+    ) -> NativeBundleIdentity {
         NativeBundleIdentity {
             lineage_id: Uuid::from_u128(lineage),
             version_id: Uuid::from_u128(version),
             semantic_digest: digest.into(),
-            members: members.into_iter().map(|m| (Uuid::from_u128(m), true)).collect(),
+            members: members
+                .into_iter()
+                .map(|m| (Uuid::from_u128(m), true))
+                .collect(),
         }
     }
 

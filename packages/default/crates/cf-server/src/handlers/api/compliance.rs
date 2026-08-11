@@ -3501,13 +3501,12 @@ pub(crate) async fn compute_cf_native_reconciliation(
     };
 
     // Load bundle name and framework from compliance_bundles (for display)
-    let bundle_info: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT name, framework, version FROM compliance_bundles WHERE id = $1",
-    )
-    .bind(bundle_meta.bundle_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("failed to load bundle info: {}", e))?;
+    let bundle_info: Option<(String, String, String)> =
+        sqlx::query_as("SELECT name, framework, version FROM compliance_bundles WHERE id = $1")
+            .bind(bundle_meta.bundle_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("failed to load bundle info: {}", e))?;
 
     let (bundle_name, bundle_framework, bundle_version) = match bundle_info {
         Some((n, f, v)) => (n, f, v),
@@ -3571,14 +3570,14 @@ pub(crate) async fn compute_cf_native_reconciliation(
     // Build existing policy identities
     let existing_identities: Vec<ExistingPolicyIdentity> = existing_policies
         .iter()
-        .map(|(lineage_id, version_id, policy_type, semantic_digest, _)| {
-            ExistingPolicyIdentity {
+        .map(
+            |(lineage_id, version_id, policy_type, semantic_digest, _)| ExistingPolicyIdentity {
                 lineage_id: *lineage_id,
                 version_id: *version_id,
                 policy_type: policy_type.clone(),
                 semantic_digest: semantic_digest.clone(),
-            }
-        })
+            },
+        )
         .collect();
 
     // Build imported policy identities from policy records
@@ -3604,25 +3603,25 @@ pub(crate) async fn compute_cf_native_reconciliation(
         .into_iter()
         .collect();
 
-    let policy_name_collisions: std::collections::HashSet<String> = sqlx::query_scalar(
-        "SELECT name FROM deployment_policies WHERE name = ANY($1)",
-    )
-    .bind(&policy_names)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("failed to check policy name collisions: {}", e))?
-    .into_iter()
-    .collect();
+    let policy_name_collisions: std::collections::HashSet<String> =
+        sqlx::query_scalar("SELECT name FROM deployment_policies WHERE name = ANY($1)")
+            .bind(&policy_names)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("failed to check policy name collisions: {}", e))?
+            .into_iter()
+            .collect();
 
     // Plan bundle reconciliation
-    let existing_bundle_identity = existing_bundle.as_ref().map(|(version_id, lineage_id, digest)| {
-        ExistingBundleIdentity {
-            lineage_id: *lineage_id,
-            version_id: *version_id,
-            semantic_digest: digest.clone(),
-            members: existing_bundle_members.clone(),
-        }
-    });
+    let existing_bundle_identity =
+        existing_bundle
+            .as_ref()
+            .map(|(version_id, lineage_id, digest)| ExistingBundleIdentity {
+                lineage_id: *lineage_id,
+                version_id: *version_id,
+                semantic_digest: digest.clone(),
+                members: existing_bundle_members.clone(),
+            });
 
     let bundle_digest = bundle_meta.digest.clone().unwrap_or_default();
     let mut imported_members: Vec<(Uuid, bool, i32)> = policy_records
@@ -3710,12 +3709,14 @@ pub(crate) async fn compute_cf_native_reconciliation(
 
     // Build reconciliation state for policies
     use crate::compliance::xccdf::reconciliation::ReconcileDecision;
-    let decisions_by_version: std::collections::HashMap<Uuid, (&NativePolicyIdentity, &ReconcileDecision)> =
-        policy_plan
-            .decisions
-            .iter()
-            .map(|(ident, decision)| (ident.version_id, (ident, decision)))
-            .collect();
+    let decisions_by_version: std::collections::HashMap<
+        Uuid,
+        (&NativePolicyIdentity, &ReconcileDecision),
+    > = policy_plan
+        .decisions
+        .iter()
+        .map(|(ident, decision)| (ident.version_id, (ident, decision)))
+        .collect();
 
     // Build policy reconciliation objects from policy_records
     let policies: Vec<CfNativePolicyReconciliation> = policy_records
@@ -3904,7 +3905,7 @@ pub async fn xccdf_preview(
             .into_response();
     }
 
-     // Compute CF-native reconciliation data for CfNativeExact documents
+    // Compute CF-native reconciliation data for CfNativeExact documents
     let cf_native_reconciliation = match compute_cf_native_reconciliation(&pool, &parsed).await {
         Ok(recon) => recon,
         Err(e) => {
@@ -4083,13 +4084,13 @@ pub async fn xccdf_preview(
             "code": w.code, "summary": w.summary,
         })).collect::<Vec<_>>(),
     });
-    
+
     // Add CF-native reconciliation if available
     if let Some(recon) = cf_native_reconciliation {
-        response["cf_native_reconciliation"] = serde_json::to_value(recon)
-            .unwrap_or(serde_json::Value::Null);
+        response["cf_native_reconciliation"] =
+            serde_json::to_value(recon).unwrap_or(serde_json::Value::Null);
     }
-    
+
     (StatusCode::OK, Json(response)).into_response()
 }
 
@@ -12791,7 +12792,8 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
         let mut policy = policy;
         policy["semantic_digest"] = serde_json::json!(canonical.compute_digest());
 
-        let normalized = normalize_policy_import(policy, None, None, 0).expect("canonical policy should normalize");
+        let normalized = normalize_policy_import(policy, None, None, 0)
+            .expect("canonical policy should normalize");
 
         assert_eq!(normalized.lineage_id, lineage_id);
         assert_eq!(normalized.version_id, version_id);
@@ -13446,10 +13448,7 @@ packages = ["git"]
 
     // Policy interchange test helpers for endpoint tests
     /// Build a policy JSON multipart body with plan
-    fn build_policy_interchange_body(
-        policies_json: &str,
-        filename: &str,
-    ) -> Vec<u8> {
+    fn build_policy_interchange_body(policies_json: &str, filename: &str) -> Vec<u8> {
         let mut body = Vec::new();
         push_file_field(&mut body, "file", filename, policies_json.as_bytes());
         finish_multipart(&mut body);
@@ -13588,15 +13587,23 @@ packages = ["git"]
     async fn spawn_interchange_test_server(pool: PgPool) -> String {
         use axum::routing::post;
         let app = Router::new()
-            .route("/api/v1/policies/interchange/preview", post(policy_interchange_preview))
-            .route("/api/v1/policies/interchange/import", post(policy_interchange_import))
+            .route(
+                "/api/v1/policies/interchange/preview",
+                post(policy_interchange_preview),
+            )
+            .route(
+                "/api/v1/policies/interchange/import",
+                post(policy_interchange_import),
+            )
             .with_state(pool);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
         tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve interchange app");
+            axum::serve(listener, app)
+                .await
+                .expect("serve interchange app");
         });
         format!("http://{addr}")
     }
@@ -13633,27 +13640,63 @@ packages = ["git"]
         };
 
         // Preview should show exact_match with no blocking conflicts
-        let preview_resp = post_preview_policy_interchange(&base, &token, &policies_json.to_string(), "policies.json").await;
+        let preview_resp = post_preview_policy_interchange(
+            &base,
+            &token,
+            &policies_json.to_string(),
+            "policies.json",
+        )
+        .await;
         assert_eq!(preview_resp.status().as_u16(), 200, "preview succeeds");
         let preview_body: serde_json::Value = preview_resp.json().await.expect("parse preview");
-        assert!(!preview_body["has_blocking_conflicts"].as_bool().unwrap_or(true), "exact match has no conflicts");
+        assert!(
+            !preview_body["has_blocking_conflicts"]
+                .as_bool()
+                .unwrap_or(true),
+            "exact match has no conflicts"
+        );
         let policies_preview = preview_body["policies"].as_array().expect("policies array");
         assert_eq!(policies_preview.len(), 1);
         assert_eq!(policies_preview[0]["reconciliation_state"], "exact_match");
 
         // Import should succeed with same source SHA
-        let import_resp = post_import_policy_interchange(&base, &token, &policies_json.to_string(), "policies.json", &source_sha).await;
-        assert_eq!(import_resp.status().as_u16(), 201, "import succeeds for exact match");
+        let import_resp = post_import_policy_interchange(
+            &base,
+            &token,
+            &policies_json.to_string(),
+            "policies.json",
+            &source_sha,
+        )
+        .await;
+        assert_eq!(
+            import_resp.status().as_u16(),
+            201,
+            "import succeeds for exact match"
+        );
         let import_body: serde_json::Value = import_resp.json().await.expect("parse import");
 
         // Verify response contains outcome information
-        let policies_resp = import_body["policies"].as_array().expect("policies array in response");
+        let policies_resp = import_body["policies"]
+            .as_array()
+            .expect("policies array in response");
         assert_eq!(policies_resp.len(), 1);
-        assert_eq!(policies_resp[0]["created"], false, "exact match: created flag false");
+        assert_eq!(
+            policies_resp[0]["created"], false,
+            "exact match: created flag false"
+        );
         assert_eq!(policies_resp[0]["reconciliation_action"], "exact_match");
-        assert_eq!(policies_resp[0]["publication_state"], "accepted", "exact match preserves publication state");
-        assert_eq!(policies_resp[0]["trust_state"], "trusted", "exact match preserves local trust state");
-        assert_eq!(policies_resp[0]["enabled"], true, "exact match preserves lineage enabled state");
+        assert_eq!(
+            policies_resp[0]["publication_state"], "accepted",
+            "exact match preserves publication state"
+        );
+        assert_eq!(
+            policies_resp[0]["trust_state"], "trusted",
+            "exact match preserves local trust state"
+        );
+        assert_eq!(
+            policies_resp[0]["enabled"], true,
+            "exact match preserves lineage enabled state"
+        );
 
         // Verify DB state unchanged for policy (publication, trust, enabled)
         let (db_pub_state, db_trust_state, db_enabled): (String, String, bool) = sqlx::query_as(
@@ -13695,41 +13738,77 @@ packages = ["git"]
         db_publish_policy_version(&pool, policy_id, version_id).await;
 
         // Get portable lineage ID
-        let (lineage_id,): (Uuid,) = sqlx::query_as("SELECT lineage_id FROM deployment_policy_versions WHERE id = $1")
-            .bind(version_id)
-            .fetch_one(&pool)
-            .await
-            .expect("fetch lineage");
+        let (lineage_id,): (Uuid,) =
+            sqlx::query_as("SELECT lineage_id FROM deployment_policy_versions WHERE id = $1")
+                .bind(version_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch lineage");
 
         // Import a NEW version with same lineage (omit semantic_digest; let endpoint compute it)
         let new_version_id = Uuid::new_v4();
-        let policies_json = build_valid_policy_import_doc(lineage_id, new_version_id, "0.2.0", &name);
+        let policies_json =
+            build_valid_policy_import_doc(lineage_id, new_version_id, "0.2.0", &name);
 
         let base = spawn_interchange_test_server(pool.clone()).await;
 
         // Preview first to get source_sha256
-        let preview_resp = post_preview_policy_interchange(&base, &token, &policies_json.to_string(), "policies.json").await;
+        let preview_resp = post_preview_policy_interchange(
+            &base,
+            &token,
+            &policies_json.to_string(),
+            "policies.json",
+        )
+        .await;
         assert_eq!(preview_resp.status().as_u16(), 200, "preview succeeds");
         let preview_body: serde_json::Value = preview_resp.json().await.expect("parse preview");
-        let source_sha = preview_body["source_sha256"].as_str().expect("source_sha256 in preview");
+        let source_sha = preview_body["source_sha256"]
+            .as_str()
+            .expect("source_sha256 in preview");
 
         // Verify preview shows new_version
-        let policies_preview = preview_body["policies"].as_array().expect("policies in preview");
+        let policies_preview = preview_body["policies"]
+            .as_array()
+            .expect("policies in preview");
         assert_eq!(policies_preview.len(), 1);
         assert_eq!(policies_preview[0]["reconciliation_state"], "new_version");
-        assert!(!preview_body["has_blocking_conflicts"].as_bool().unwrap_or(false), "new version has no blocking conflicts");
+        assert!(
+            !preview_body["has_blocking_conflicts"]
+                .as_bool()
+                .unwrap_or(false),
+            "new version has no blocking conflicts"
+        );
 
         // Import with same source SHA
-        let import_resp = post_import_policy_interchange(&base, &token, &policies_json.to_string(), "policies.json", source_sha).await;
-        assert_eq!(import_resp.status().as_u16(), 201, "new version import succeeds");
+        let import_resp = post_import_policy_interchange(
+            &base,
+            &token,
+            &policies_json.to_string(),
+            "policies.json",
+            source_sha,
+        )
+        .await;
+        assert_eq!(
+            import_resp.status().as_u16(),
+            201,
+            "new version import succeeds"
+        );
         let import_body: serde_json::Value = import_resp.json().await.expect("parse import");
 
         // Verify response indicates creation
-        let policies_resp = import_body["policies"].as_array().expect("policies in response");
+        let policies_resp = import_body["policies"]
+            .as_array()
+            .expect("policies in response");
         assert_eq!(policies_resp.len(), 1);
-        assert_eq!(policies_resp[0]["created"], true, "new version: created flag true");
+        assert_eq!(
+            policies_resp[0]["created"], true,
+            "new version: created flag true"
+        );
         assert_eq!(policies_resp[0]["reconciliation_action"], "new_version");
-        assert_eq!(policies_resp[0]["publication_state"], "draft", "new version starts as draft");
+        assert_eq!(
+            policies_resp[0]["publication_state"], "draft",
+            "new version starts as draft"
+        );
 
         // Verify new version exists in DB and is draft
         let (new_pub_state, new_ver_id, new_policy_id): (String, Uuid, Uuid) = sqlx::query_as(
@@ -13741,7 +13820,10 @@ packages = ["git"]
         .expect("fetch new version");
         assert_eq!(new_pub_state, "draft", "new version is draft in DB");
         assert_eq!(new_ver_id, new_version_id, "version ID matches portable ID");
-        assert_eq!(new_policy_id, policy_id, "version belongs to same policy lineage");
+        assert_eq!(
+            new_policy_id, policy_id,
+            "version belongs to same policy lineage"
+        );
     }
 
     #[tokio::test]
@@ -13762,7 +13844,8 @@ packages = ["git"]
                 "config": serde_json::json!({}),
                 "version": "1.0.0",
             }]
-        }).to_string();
+        })
+        .to_string();
 
         let base = spawn_interchange_test_server(pool.clone()).await;
 
@@ -13784,18 +13867,21 @@ packages = ["git"]
             .await
             .expect("send");
 
-        assert_eq!(resp.status().as_u16(), 409, "digest mismatch rejected as 409");
+        assert_eq!(
+            resp.status().as_u16(),
+            409,
+            "digest mismatch rejected as 409"
+        );
         let response_body: serde_json::Value = resp.json().await.expect("parse error");
         assert_eq!(response_body["error"], "POLICY_SOURCE_DIGEST_MISMATCH");
 
         // Verify no side effects: no version created
-        let version_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM deployment_policy_versions WHERE id = $1",
-        )
-        .bind(incoming_version_id)
-        .fetch_one(&pool)
-        .await
-        .expect("count versions");
+        let version_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policy_versions WHERE id = $1")
+                .bind(incoming_version_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count versions");
         assert_eq!(version_count, 0, "no version created on digest mismatch");
 
         // Verify no audit event created
@@ -13849,24 +13935,37 @@ packages = ["git"]
         };
 
         // Import directly without preview
-        let resp = post_import_policy_interchange(&base, &token, &policies_json, "policies.json", &source_sha).await;
-        assert_eq!(resp.status().as_u16(), 422, "duplicate version IDs rejected");
+        let resp = post_import_policy_interchange(
+            &base,
+            &token,
+            &policies_json,
+            "policies.json",
+            &source_sha,
+        )
+        .await;
+        assert_eq!(
+            resp.status().as_u16(),
+            422,
+            "duplicate version IDs rejected"
+        );
         let body: serde_json::Value = resp.json().await.expect("parse error");
         assert_eq!(body["error"], "POLICY_INTERCHANGE_INVALID");
 
         // Verify the error message explicitly names the duplicate validator
         let msg = body["message"].as_str().expect("message");
-        assert!(msg.contains("Duplicate version ID") || msg.contains(&dup_version.to_string()),
-            "error message mentions duplicate version ID: {}", msg);
+        assert!(
+            msg.contains("Duplicate version ID") || msg.contains(&dup_version.to_string()),
+            "error message mentions duplicate version ID: {}",
+            msg
+        );
 
         // Verify no versions were created for the duplicate ID
-        let version_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM deployment_policy_versions WHERE id = $1",
-        )
-        .bind(dup_version)
-        .fetch_one(&pool)
-        .await
-        .expect("count versions");
+        let version_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policy_versions WHERE id = $1")
+                .bind(dup_version)
+                .fetch_one(&pool)
+                .await
+                .expect("count versions");
         assert_eq!(version_count, 0, "duplicate version ID not created");
 
         // Verify no audit event for this version
@@ -13888,7 +13987,8 @@ packages = ["git"]
 
         // Create existing policy with a specific name
         let collision_name = format!("collision-{}", Uuid::new_v4().simple());
-        let (existing_policy_id, existing_version_id, _) = make_draft_policy(&pool, &collision_name).await;
+        let (existing_policy_id, existing_version_id, _) =
+            make_draft_policy(&pool, &collision_name).await;
         db_publish_policy_version(&pool, existing_policy_id, existing_version_id).await;
 
         // Try to import new lineage with SAME name (case-sensitive exact match)
@@ -13898,7 +13998,7 @@ packages = ["git"]
             new_lineage_id,
             imported_version_id,
             "1.0.0",
-            &collision_name,  // Same name as existing policy
+            &collision_name, // Same name as existing policy
         );
 
         let base = spawn_interchange_test_server(pool.clone()).await;
@@ -13908,35 +14008,68 @@ packages = ["git"]
         };
 
         // Preview should flag collision as blocking conflict
-        let preview_resp = post_preview_policy_interchange(&base, &token, &policies_json.to_string(), "policies.json").await;
+        let preview_resp = post_preview_policy_interchange(
+            &base,
+            &token,
+            &policies_json.to_string(),
+            "policies.json",
+        )
+        .await;
         assert_eq!(preview_resp.status().as_u16(), 200, "preview succeeds");
         let preview_body: serde_json::Value = preview_resp.json().await.expect("parse preview");
-        assert!(preview_body["has_blocking_conflicts"].as_bool().unwrap_or(false), "preview shows blocking conflict");
+        assert!(
+            preview_body["has_blocking_conflicts"]
+                .as_bool()
+                .unwrap_or(false),
+            "preview shows blocking conflict"
+        );
 
         // Verify conflict details in preview
-        let conflicts = preview_body["blocking_conflicts"].as_array().expect("conflicts array");
-        assert!(conflicts.iter().any(|c| c["code"] == "POLICY_INTERCHANGE_NAME_COLLISION"),
-            "conflicts contain name collision code");
+        let conflicts = preview_body["blocking_conflicts"]
+            .as_array()
+            .expect("conflicts array");
+        assert!(
+            conflicts
+                .iter()
+                .any(|c| c["code"] == "POLICY_INTERCHANGE_NAME_COLLISION"),
+            "conflicts contain name collision code"
+        );
 
         // Import should reject with conflict
-        let import_resp = post_import_policy_interchange(&base, &token, &policies_json.to_string(), "policies.json", &source_sha).await;
-        assert_eq!(import_resp.status().as_u16(), 409, "name collision rejected as 409");
+        let import_resp = post_import_policy_interchange(
+            &base,
+            &token,
+            &policies_json.to_string(),
+            "policies.json",
+            &source_sha,
+        )
+        .await;
+        assert_eq!(
+            import_resp.status().as_u16(),
+            409,
+            "name collision rejected as 409"
+        );
         let import_body: serde_json::Value = import_resp.json().await.expect("parse error");
         assert_eq!(import_body["error"], "POLICY_INTERCHANGE_CONFLICTS");
 
         // Verify conflict identifies the collision
-        let import_conflicts = import_body["conflicts"].as_array().expect("conflicts in error");
-        assert!(import_conflicts.iter().any(|c| c["code"] == "POLICY_INTERCHANGE_NAME_COLLISION"),
-            "import error contains name collision code");
+        let import_conflicts = import_body["conflicts"]
+            .as_array()
+            .expect("conflicts in error");
+        assert!(
+            import_conflicts
+                .iter()
+                .any(|c| c["code"] == "POLICY_INTERCHANGE_NAME_COLLISION"),
+            "import error contains name collision code"
+        );
 
         // Verify no side effects: imported lineage/version NOT created
-        let lineage_exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM deployment_policies WHERE id = $1",
-        )
-        .bind(new_lineage_id)
-        .fetch_one(&pool)
-        .await
-        .expect("count lineages");
+        let lineage_exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies WHERE id = $1")
+                .bind(new_lineage_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count lineages");
         assert_eq!(lineage_exists, 0, "new lineage not created on collision");
 
         // Verify no audit event for imported version
@@ -13970,19 +14103,34 @@ packages = ["git"]
             .fetch_one(&pool)
             .await
             .expect("count policies");
-        let versions_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policy_versions")
-            .fetch_one(&pool)
-            .await
-            .expect("count versions");
-        let audit_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_audit_events WHERE action = 'policy_interchange_imported'")
-            .fetch_one(&pool)
-            .await
-            .expect("count audit");
+        let versions_before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policy_versions")
+                .fetch_one(&pool)
+                .await
+                .expect("count versions");
+        let audit_before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM admin_audit_events WHERE action = 'policy_interchange_imported'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count audit");
 
         // Call preview twice
-        let resp1 = post_preview_policy_interchange(&base, &token, &policies_json.to_string(), "policies.json").await;
+        let resp1 = post_preview_policy_interchange(
+            &base,
+            &token,
+            &policies_json.to_string(),
+            "policies.json",
+        )
+        .await;
         assert_eq!(resp1.status().as_u16(), 200, "first preview succeeds");
-        let resp2 = post_preview_policy_interchange(&base, &token, &policies_json.to_string(), "policies.json").await;
+        let resp2 = post_preview_policy_interchange(
+            &base,
+            &token,
+            &policies_json.to_string(),
+            "policies.json",
+        )
+        .await;
         assert_eq!(resp2.status().as_u16(), 200, "second preview succeeds");
 
         // Verify all 3 counts unchanged
@@ -13990,18 +14138,30 @@ packages = ["git"]
             .fetch_one(&pool)
             .await
             .expect("count policies");
-        let versions_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policy_versions")
-            .fetch_one(&pool)
-            .await
-            .expect("count versions");
-        let audit_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_audit_events WHERE action = 'policy_interchange_imported'")
-            .fetch_one(&pool)
-            .await
-            .expect("count audit");
+        let versions_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policy_versions")
+                .fetch_one(&pool)
+                .await
+                .expect("count versions");
+        let audit_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM admin_audit_events WHERE action = 'policy_interchange_imported'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count audit");
 
-        assert_eq!(policies_before, policies_after, "preview must not create policies");
-        assert_eq!(versions_before, versions_after, "preview must not create policy versions");
-        assert_eq!(audit_before, audit_after, "preview must not create audit events");
+        assert_eq!(
+            policies_before, policies_after,
+            "preview must not create policies"
+        );
+        assert_eq!(
+            versions_before, versions_after,
+            "preview must not create policy versions"
+        );
+        assert_eq!(
+            audit_before, audit_after,
+            "preview must not create audit events"
+        );
     }
 
     #[tokio::test]
@@ -14028,34 +14188,48 @@ packages = ["git"]
         };
 
         // Preview should detect wrong-lineage conflict
-        let preview_resp = post_preview_policy_interchange(&base, &token, &doc.to_string(), "policies.json").await;
+        let preview_resp =
+            post_preview_policy_interchange(&base, &token, &doc.to_string(), "policies.json").await;
         assert_eq!(preview_resp.status().as_u16(), 200);
         let preview_body: serde_json::Value = preview_resp.json().await.expect("parse");
-        assert!(preview_body["has_blocking_conflicts"].as_bool().unwrap_or(false), "preview detects lineage conflict");
+        assert!(
+            preview_body["has_blocking_conflicts"]
+                .as_bool()
+                .unwrap_or(false),
+            "preview detects lineage conflict"
+        );
 
         // Import should reject
-        let import_resp = post_import_policy_interchange(&base, &token, &doc.to_string(), "policies.json", &source_sha).await;
+        let import_resp = post_import_policy_interchange(
+            &base,
+            &token,
+            &doc.to_string(),
+            "policies.json",
+            &source_sha,
+        )
+        .await;
         assert_eq!(import_resp.status().as_u16(), 409, "wrong-lineage rejected");
 
         // Verify lineage B not created
-        let lineage_b_exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM deployment_policies WHERE id = $1",
-        )
-        .bind(lineage_b_id)
-        .fetch_one(&pool)
-        .await
-        .expect("count");
+        let lineage_b_exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies WHERE id = $1")
+                .bind(lineage_b_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
         assert_eq!(lineage_b_exists, 0, "lineage B not created");
 
         // Verify version still belongs to lineage A
-        let (version_lineage,): (Uuid,) = sqlx::query_as(
-            "SELECT policy_id FROM deployment_policy_versions WHERE id = $1",
-        )
-        .bind(version_x_id)
-        .fetch_one(&pool)
-        .await
-        .expect("fetch version lineage");
-        assert_eq!(version_lineage, lineage_a_id, "version still belongs to lineage A");
+        let (version_lineage,): (Uuid,) =
+            sqlx::query_as("SELECT policy_id FROM deployment_policy_versions WHERE id = $1")
+                .bind(version_x_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch version lineage");
+        assert_eq!(
+            version_lineage, lineage_a_id,
+            "version still belongs to lineage A"
+        );
 
         // Verify no audit event for version X (rollback complete)
         let audit_count: i64 = sqlx::query_scalar(
@@ -14101,26 +14275,35 @@ packages = ["git"]
         };
 
         // Import with correct SHA to prove server rejects
-        let import_resp = post_import_policy_interchange(&base, &token, &doc.to_string(), "policies.json", &source_sha).await;
-        assert_eq!(import_resp.status().as_u16(), 409, "multi-policy import rejected on conflict");
+        let import_resp = post_import_policy_interchange(
+            &base,
+            &token,
+            &doc.to_string(),
+            "policies.json",
+            &source_sha,
+        )
+        .await;
+        assert_eq!(
+            import_resp.status().as_u16(),
+            409,
+            "multi-policy import rejected on conflict"
+        );
 
         // Verify rollback: neither policy lineage A nor B created
-        let a_exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM deployment_policies WHERE id = $1",
-        )
-        .bind(new_a_lineage)
-        .fetch_one(&pool)
-        .await
-        .expect("count");
+        let a_exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies WHERE id = $1")
+                .bind(new_a_lineage)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
         assert_eq!(a_exists, 0, "lineage A not created (rolled back)");
 
-        let b_exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM deployment_policies WHERE id = $1",
-        )
-        .bind(new_b_lineage)
-        .fetch_one(&pool)
-        .await
-        .expect("count");
+        let b_exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies WHERE id = $1")
+                .bind(new_b_lineage)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
         assert_eq!(b_exists, 0, "lineage B not created (rolled back)");
 
         // Verify no audit for either version
@@ -14159,35 +14342,72 @@ packages = ["git"]
         };
 
         // Preview #1
-        let p1_resp = post_preview_policy_interchange(&base, &token, &legacy_bytes, "policies.json").await;
+        let p1_resp =
+            post_preview_policy_interchange(&base, &token, &legacy_bytes, "policies.json").await;
         assert_eq!(p1_resp.status().as_u16(), 200);
         let p1_body: serde_json::Value = p1_resp.json().await.expect("parse");
-        let p1_lineage = p1_body["policies"][0]["lineage_id"].as_str().expect("lineage").to_string();
-        let p1_version = p1_body["policies"][0]["version_id"].as_str().expect("version").to_string();
+        let p1_lineage = p1_body["policies"][0]["lineage_id"]
+            .as_str()
+            .expect("lineage")
+            .to_string();
+        let p1_version = p1_body["policies"][0]["version_id"]
+            .as_str()
+            .expect("version")
+            .to_string();
 
         // Preview #2 with identical bytes
-        let p2_resp = post_preview_policy_interchange(&base, &token, &legacy_bytes, "policies.json").await;
+        let p2_resp =
+            post_preview_policy_interchange(&base, &token, &legacy_bytes, "policies.json").await;
         assert_eq!(p2_resp.status().as_u16(), 200);
         let p2_body: serde_json::Value = p2_resp.json().await.expect("parse");
-        let p2_lineage = p2_body["policies"][0]["lineage_id"].as_str().expect("lineage").to_string();
-        let p2_version = p2_body["policies"][0]["version_id"].as_str().expect("version").to_string();
+        let p2_lineage = p2_body["policies"][0]["lineage_id"]
+            .as_str()
+            .expect("lineage")
+            .to_string();
+        let p2_version = p2_body["policies"][0]["version_id"]
+            .as_str()
+            .expect("version")
+            .to_string();
 
         // IDs must be deterministic (identical)
         assert_eq!(p1_lineage, p2_lineage, "lineage ID deterministic");
         assert_eq!(p1_version, p2_version, "version ID deterministic");
 
         // Import first time
-        let i1_resp = post_import_policy_interchange(&base, &token, &legacy_bytes, "policies.json", &source_sha).await;
+        let i1_resp = post_import_policy_interchange(
+            &base,
+            &token,
+            &legacy_bytes,
+            "policies.json",
+            &source_sha,
+        )
+        .await;
         assert_eq!(i1_resp.status().as_u16(), 201, "first import succeeds");
         let i1_body: serde_json::Value = i1_resp.json().await.expect("parse");
-        assert_eq!(i1_body["policies"][0]["created"], true, "first import creates");
+        assert_eq!(
+            i1_body["policies"][0]["created"], true,
+            "first import creates"
+        );
 
         // Re-import identical bytes
-        let i2_resp = post_import_policy_interchange(&base, &token, &legacy_bytes, "policies.json", &source_sha).await;
+        let i2_resp = post_import_policy_interchange(
+            &base,
+            &token,
+            &legacy_bytes,
+            "policies.json",
+            &source_sha,
+        )
+        .await;
         assert_eq!(i2_resp.status().as_u16(), 201, "second import succeeds");
         let i2_body: serde_json::Value = i2_resp.json().await.expect("parse");
-        assert_eq!(i2_body["policies"][0]["created"], false, "second import reuses (exact_match)");
-        assert_eq!(i2_body["policies"][0]["reconciliation_action"], "exact_match");
+        assert_eq!(
+            i2_body["policies"][0]["created"], false,
+            "second import reuses (exact_match)"
+        );
+        assert_eq!(
+            i2_body["policies"][0]["reconciliation_action"],
+            "exact_match"
+        );
     }
 
     #[test]

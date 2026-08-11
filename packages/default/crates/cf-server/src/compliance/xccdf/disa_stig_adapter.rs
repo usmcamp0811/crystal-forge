@@ -456,8 +456,7 @@ mod tests {
 
     #[test]
     fn derive_source_key_strips_prefix() {
-        let key =
-            derive_canonical_source_key("xccdf_mil.disa.stig_benchmark_Anduril_NixOS_STIG");
+        let key = derive_canonical_source_key("xccdf_mil.disa.stig_benchmark_Anduril_NixOS_STIG");
         assert!(key.contains("anduril"), "expected anduril in key: {key}");
         assert!(!key.contains('_'), "expected no underscores in key: {key}");
     }

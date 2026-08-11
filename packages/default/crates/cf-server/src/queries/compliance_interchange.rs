@@ -2230,7 +2230,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!((pol_state.as_str(), pol_trust.as_str()), ("accepted", "trusted"));
+        assert_eq!(
+            (pol_state.as_str(), pol_trust.as_str()),
+            ("accepted", "trusted")
+        );
         let (bun_state, bun_trust): (String, String) = sqlx::query_as(
             "SELECT publication_state, trust_state FROM compliance_bundle_versions WHERE id = $1",
         )
@@ -2238,7 +2241,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!((bun_state.as_str(), bun_trust.as_str()), ("accepted", "trusted"));
+        assert_eq!(
+            (bun_state.as_str(), bun_trust.as_str()),
+            ("accepted", "trusted")
+        );
 
         // Exact re-import of the same bytes must reuse, not error.
         let second_pkg = make_package(bytes);
@@ -2269,7 +2275,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!((pol_state.as_str(), pol_trust.as_str()), ("accepted", "trusted"));
+        assert_eq!(
+            (pol_state.as_str(), pol_trust.as_str()),
+            ("accepted", "trusted")
+        );
         let (bun_state, bun_trust): (String, String) = sqlx::query_as(
             "SELECT publication_state, trust_state FROM compliance_bundle_versions WHERE id = $1",
         )
@@ -2277,7 +2286,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!((bun_state.as_str(), bun_trust.as_str()), ("accepted", "trusted"));
+        assert_eq!(
+            (bun_state.as_str(), bun_trust.as_str()),
+            ("accepted", "trusted")
+        );
 
         // Pointer invariants survive the re-import.
         let (pol_draft, pol_pub): (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
@@ -2447,7 +2459,10 @@ mod tests {
         assert!(second.bundle_version_created);
         assert_eq!(second.bundle_id, bundle_id);
         assert_eq!(second.bundle_version_id, new_bundle_version_id);
-        assert_eq!(second.created_policy_version_ids, vec![new_policy_version_id]);
+        assert_eq!(
+            second.created_policy_version_ids,
+            vec![new_policy_version_id]
+        );
 
         // Version A rows must be unchanged (still accepted + trusted).
         let (a_state, a_trust): (String, String) = sqlx::query_as(
@@ -2457,7 +2472,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!((a_state.as_str(), a_trust.as_str()), ("accepted", "trusted"));
+        assert_eq!(
+            (a_state.as_str(), a_trust.as_str()),
+            ("accepted", "trusted")
+        );
         let (ab_state, ab_trust): (String, String) = sqlx::query_as(
             "SELECT publication_state, trust_state FROM compliance_bundle_versions WHERE id = $1",
         )
@@ -2465,7 +2483,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!((ab_state.as_str(), ab_trust.as_str()), ("accepted", "trusted"));
+        assert_eq!(
+            (ab_state.as_str(), ab_trust.as_str()),
+            ("accepted", "trusted")
+        );
 
         // Version B rows exist in the same lineages as fresh drafts.
         let (b_state, b_trust): (String, String) = sqlx::query_as(
@@ -2483,26 +2504,27 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!((bb_state.as_str(), bb_trust.as_str()), ("draft", "untrusted"));
+        assert_eq!(
+            (bb_state.as_str(), bb_trust.as_str()),
+            ("draft", "untrusted")
+        );
 
         // The bundle version label must be lineage-unique: version B gets a
         // deterministic disambiguated label instead of colliding with A's.
-        let bb_label: String = sqlx::query_scalar(
-            "SELECT version FROM compliance_bundle_versions WHERE id = $1",
-        )
-        .bind(new_bundle_version_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let bb_label: String =
+            sqlx::query_scalar("SELECT version FROM compliance_bundle_versions WHERE id = $1")
+                .bind(new_bundle_version_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         let short_b = &new_bundle_version_id.simple().to_string()[..8];
         assert_eq!(bb_label, format!("0.1.0-{short_b}"));
-        let a_label: String = sqlx::query_scalar(
-            "SELECT version FROM compliance_bundle_versions WHERE id = $1",
-        )
-        .bind(bundle_version_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let a_label: String =
+            sqlx::query_scalar("SELECT version FROM compliance_bundle_versions WHERE id = $1")
+                .bind(bundle_version_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(a_label, "0.1.0");
 
         // Pointer invariants: draft now points at B, published still at A.

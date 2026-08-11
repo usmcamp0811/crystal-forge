@@ -22,7 +22,9 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::compliance::framework_model::{FrameworkVersionCanonical, write_framework_version_digest};
+use crate::compliance::framework_model::{
+    FrameworkVersionCanonical, write_framework_version_digest,
+};
 use crate::compliance::requirement_model::{
     FrameworkReconciliation, FrameworkReconciliationState, PolicyCandidate,
     PolicyCandidateMatchType, PolicyReconciliation, RequirementReconciliation,
@@ -354,7 +356,9 @@ pub async fn create_policy_mapping(
     .context("failed to check policy version state")?;
 
     match pub_state.as_deref() {
-        None => bail!("POLICY_VERSION_NOT_FOUND: policy version {policy_version_id} does not exist"),
+        None => {
+            bail!("POLICY_VERSION_NOT_FOUND: policy version {policy_version_id} does not exist")
+        }
         Some("accepted") | Some("deprecated") => bail!(
             "POLICY_MAPPING_IMMUTABLE: cannot modify mappings on policy version {} \
              because it is in an immutable state. Create a derived draft first.",
@@ -592,13 +596,12 @@ pub async fn preview_framework_reconciliation(
     source_sha256: &str,
 ) -> Result<FrameworkReconciliation> {
     // 1. Check for exact artifact reuse.
-    let artifact_exists: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM compliance_source_artifacts WHERE sha256 = $1",
-    )
-    .bind(source_sha256)
-    .fetch_optional(pool)
-    .await
-    .context("failed to check source artifact")?;
+    let artifact_exists: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM compliance_source_artifacts WHERE sha256 = $1")
+            .bind(source_sha256)
+            .fetch_optional(pool)
+            .await
+            .context("failed to check source artifact")?;
 
     if artifact_exists.is_some() {
         // Check if this exact artifact was already used for a framework version.
@@ -631,13 +634,12 @@ pub async fn preview_framework_reconciliation(
     }
 
     // 2. Look up the framework lineage.
-    let existing_framework_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM compliance_frameworks WHERE canonical_source_key = $1",
-    )
-    .bind(&identity.canonical_source_key)
-    .fetch_optional(pool)
-    .await
-    .context("failed to look up framework by canonical key")?;
+    let existing_framework_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM compliance_frameworks WHERE canonical_source_key = $1")
+            .bind(&identity.canonical_source_key)
+            .fetch_optional(pool)
+            .await
+            .context("failed to look up framework by canonical key")?;
 
     let Some(fw_id) = existing_framework_id else {
         return Ok(FrameworkReconciliation {
@@ -1104,8 +1106,7 @@ pub mod tests {
 
     async fn test_pool() -> PgPool {
         PgPool::connect(
-            &std::env::var("DATABASE_URL")
-                .expect("DATABASE_URL must be set for DB-gated tests"),
+            &std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB-gated tests"),
         )
         .await
         .expect("connect to test DB")
@@ -1158,14 +1159,10 @@ pub mod tests {
 
         // Second insert of same release key should fail.
         let mut tx2 = pool.begin().await.unwrap();
-        let err = insert_framework_version(&mut tx2, fw_id, &canonical, None, None)
-            .await;
+        let err = insert_framework_version(&mut tx2, fw_id, &canonical, None, None).await;
         tx2.rollback().await.unwrap();
 
-        assert!(
-            err.is_err(),
-            "duplicate release key must be rejected"
-        );
+        assert!(err.is_err(), "duplicate release key must be rejected");
         let msg = err.unwrap_err().to_string();
         assert!(
             msg.contains("FRAMEWORK_RELEASE_CONFLICT"),
@@ -1221,12 +1218,13 @@ pub mod tests {
         .await
         .unwrap();
 
-        let version_id: Uuid =
-            sqlx::query_scalar("SELECT current_draft_version_id FROM deployment_policies WHERE id = $1")
-                .bind(policy_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let version_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(policy_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         // Accept the policy version.
         let mut tx = pool.begin().await.unwrap();
@@ -1309,7 +1307,10 @@ pub mod tests {
         )
         .await;
 
-        assert!(result.is_err(), "mapping on accepted version must be rejected");
+        assert!(
+            result.is_err(),
+            "mapping on accepted version must be rejected"
+        );
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("POLICY_MAPPING_IMMUTABLE"),
@@ -1361,9 +1362,15 @@ pub mod tests {
         let (k2, c2, _) = make_req("V-002");
         let (k3, c3, _) = make_req("V-003");
 
-        let req_id1 = upsert_requirement_lineage(&mut tx, fw_id, &k1).await.unwrap();
-        let req_id2 = upsert_requirement_lineage(&mut tx, fw_id, &k2).await.unwrap();
-        let req_id3 = upsert_requirement_lineage(&mut tx, fw_id, &k3).await.unwrap();
+        let req_id1 = upsert_requirement_lineage(&mut tx, fw_id, &k1)
+            .await
+            .unwrap();
+        let req_id2 = upsert_requirement_lineage(&mut tx, fw_id, &k2)
+            .await
+            .unwrap();
+        let req_id3 = upsert_requirement_lineage(&mut tx, fw_id, &k3)
+            .await
+            .unwrap();
 
         let rv_id1 = insert_requirement_version(&mut tx, req_id1, fv, &c1, None)
             .await
@@ -1387,12 +1394,13 @@ pub mod tests {
         .await
         .unwrap();
 
-        let bv_id: Uuid =
-            sqlx::query_scalar("SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1")
-                .bind(bundle_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let bv_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1",
+        )
+        .bind(bundle_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         let mut tx = pool.begin().await.unwrap();
         insert_bundle_version_requirement(&mut tx, bv_id, rv_id1, 0)
@@ -1416,12 +1424,13 @@ pub mod tests {
         .await
         .unwrap();
 
-        let pv_id: Uuid =
-            sqlx::query_scalar("SELECT current_draft_version_id FROM deployment_policies WHERE id = $1")
-                .bind(pol_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let pv_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(pol_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         // Add the policy to the bundle.
         sqlx::query(
@@ -1445,7 +1454,14 @@ pub mod tests {
             .await
             .unwrap();
         create_policy_mapping(
-            &pool, pv_id, rv_id1, "implements", "full", None, "manual", actor,
+            &pool,
+            pv_id,
+            rv_id1,
+            "implements",
+            "full",
+            None,
+            "manual",
+            actor,
         )
         .await
         .unwrap();
