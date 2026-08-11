@@ -12239,18 +12239,148 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
         );
     }
 
-    // NOTE: These tests below have broken normalize_policy_import calls that need to be fixed
-    // separately. They are disabled to allow compilation of new endpoint tests.
-    // TODO: Fix the 4 broken policy_import_* tests with correct normalize_policy_import arguments
-    //
-    // #[test]
-    // fn policy_import_normalizes_legacy_single_expression_shape() { ... }
-    // #[test]
-    // fn policy_import_rejects_tampered_semantic_digest() { ... }
-    // #[test]
-    // fn policy_import_uses_the_authoritative_digest_for_all_semantic_fields() { ... }
-    // #[test]
-    // fn policy_import_rejects_digest_when_previously_omitted_field_changes() { ... }
+    #[test]
+    fn policy_import_normalizes_legacy_single_expression_shape() {
+        let policy = normalize_policy_import(
+            serde_json::json!({
+                "name": "legacy-firewall",
+                "description": "legacy shape",
+                "expression": "cfg.networking.firewall.enable",
+                "strict": false
+            }),
+            None,
+            None,
+            0,
+        )
+        .expect("legacy policy should normalize");
+
+        assert_eq!(policy.policy_type, "custom_check");
+        assert_eq!(
+            policy.config["expression"],
+            "cfg.networking.firewall.enable"
+        );
+        assert_eq!(policy.config["strict"], false);
+        assert_eq!(policy.version, "0.1.0");
+    }
+
+    #[test]
+    fn policy_import_rejects_tampered_semantic_digest() {
+        let canonical = crate::compliance::digest::PolicyVersionCanonical {
+            name: "tampered".to_string(),
+            description: None,
+            policy_type: "custom_check".to_string(),
+            implementation_state: "native".to_string(),
+            execution_phase: "deploy".to_string(),
+            config: serde_json::json!({"expression": "true"}),
+            compliance_metadata: serde_json::json!(null),
+            dependencies: serde_json::json!(null),
+            opaque_xml_digest: None,
+            enabled_by_default: None,
+        };
+
+        let error = normalize_policy_import(
+            serde_json::json!({
+                "lineage_id": Uuid::new_v4(),
+                "version_id": Uuid::new_v4(),
+                "name": "tampered",
+                "policy_type": "custom_check",
+                "config": {"expression": "true"},
+                "semantic_digest": "not-the-canonical-digest"
+            }),
+            None,
+            None,
+            0,
+        )
+        .expect_err("tampered digest must be rejected");
+
+        assert!(error.contains("semantic_digest"));
+    }
+
+    #[test]
+    fn policy_import_uses_the_authoritative_digest_for_all_semantic_fields() {
+        let lineage_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        let policy = serde_json::json!({
+            "lineage_id": lineage_id,
+            "version_id": version_id,
+            "version": "1.2.3",
+            "name": "opaque imported policy",
+            "description": "Preserves external check details",
+            "policy_type": "custom_check",
+            "implementation_state": "opaque",
+            "execution_phase": "post-build",
+            "config": {"mode": "all", "rules": []},
+            "compliance_metadata": {"srg_ids": ["SRG-OS-000001"]},
+            "dependencies": [{"module": "example-module"}],
+            "opaque_xml": "<check system=\"urn:example\">opaque</check>",
+            "enabled_by_default": true,
+        });
+        let canonical = crate::compliance::digest::PolicyVersionCanonical {
+            name: "opaque imported policy".to_string(),
+            description: Some("Preserves external check details".to_string()),
+            policy_type: "custom_check".to_string(),
+            implementation_state: "opaque".to_string(),
+            execution_phase: "post-build".to_string(),
+            config: serde_json::json!({"mode": "all", "rules": []}),
+            compliance_metadata: serde_json::json!({"srg_ids": ["SRG-OS-000001"]}),
+            dependencies: serde_json::json!([{"module": "example-module"}]),
+            opaque_xml_digest: crate::compliance::digest::PolicyVersionCanonical::digest_opaque_xml(
+                Some("<check system=\"urn:example\">opaque</check>"),
+            ),
+            enabled_by_default: Some(true),
+        };
+        let mut policy = policy;
+        policy["semantic_digest"] = serde_json::json!(canonical.compute_digest());
+
+        let normalized = normalize_policy_import(policy, None, None, 0).expect("canonical policy should normalize");
+
+        assert_eq!(normalized.lineage_id, lineage_id);
+        assert_eq!(normalized.version_id, version_id);
+        assert_eq!(
+            normalized.compliance_metadata["srg_ids"][0],
+            "SRG-OS-000001"
+        );
+        assert_eq!(normalized.dependencies[0]["module"], "example-module");
+        assert_eq!(
+            normalized.opaque_xml.as_deref(),
+            Some("<check system=\"urn:example\">opaque</check>")
+        );
+        assert_eq!(normalized.enabled_by_default, Some(true));
+        assert_eq!(normalized.semantic_digest, canonical.compute_digest());
+    }
+
+    #[test]
+    fn policy_import_rejects_digest_when_previously_omitted_field_changes() {
+        let canonical = crate::compliance::digest::PolicyVersionCanonical {
+            name: "metadata-sensitive".to_string(),
+            description: None,
+            policy_type: "custom_check".to_string(),
+            implementation_state: "native".to_string(),
+            execution_phase: "nix-evaluation".to_string(),
+            config: serde_json::json!({"expression": "true"}),
+            compliance_metadata: serde_json::json!({"cci_ids": ["CCI-000001"]}),
+            dependencies: serde_json::json!([]),
+            opaque_xml_digest: None,
+            enabled_by_default: Some(false),
+        };
+        let error = normalize_policy_import(
+            serde_json::json!({
+                "name": "metadata-sensitive",
+                "policy_type": "custom_check",
+                "config": {"expression": "true"},
+                "compliance_metadata": {"cci_ids": ["CCI-000002"]},
+                "dependencies": [],
+                "enabled_by_default": false,
+                "semantic_digest": canonical.compute_digest(),
+            }),
+            None,
+            None,
+            0,
+        )
+        .expect_err("changing compliance metadata must invalidate the digest");
+
+        assert!(error.contains("semantic_digest"));
+    }
 
     #[test]
     fn policy_interchange_parser_accepts_json_and_toml_policy_sets() {
@@ -12911,6 +13041,90 @@ packages = ["git"]
             .expect("import request completes")
     }
 
+    /// Build a valid canonical import document from explicit fields.
+    /// Omits semantic_digest; endpoint will compute it from canonical fields.
+    /// Use generated unique names to ensure test isolation.
+    fn build_valid_policy_import_doc(
+        lineage_id: Uuid,
+        version_id: Uuid,
+        version: &str,
+        name: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "policies": [{
+                "lineage_id": lineage_id,
+                "version_id": version_id,
+                "version": version,
+                "name": name,
+                "policy_type": "custom_check",
+                "implementation_state": "native",
+                "execution_phase": "deploy",
+                "config": serde_json::json!({"mode":"all","context":"nixos-configuration-v1","binding":"cfg","rules":[]}),
+            }]
+        })
+    }
+
+    /// Build an import document FROM an actual DB policy version row so all semantic fields match exactly.
+    /// Returns (lineage_id, version_id, import_doc).
+    async fn build_import_doc_from_version(
+        pool: &PgPool,
+        version_id: Uuid,
+    ) -> (Uuid, Uuid, serde_json::Value) {
+        #[derive(sqlx::FromRow)]
+        struct VersionRow {
+            policy_id: Uuid,
+            name: String,
+            policy_type: String,
+            implementation_state: String,
+            execution_phase: String,
+            config: serde_json::Value,
+            compliance_metadata: serde_json::Value,
+            dependencies: serde_json::Value,
+            opaque_xml: Option<String>,
+            enabled_by_default: Option<bool>,
+            version: String,
+            lineage_id: Uuid,
+        }
+
+        let row: VersionRow = sqlx::query_as(
+            r#"SELECT
+                dpv.policy_id, dpv.name, dpv.policy_type, dpv.implementation_state,
+                dpv.execution_phase, dpv.config, dpv.compliance_metadata, dpv.dependencies,
+                dpv.opaque_xml, dpv.enabled_by_default, dpv.version,
+                (SELECT lineage_id FROM deployment_policy_versions WHERE id = $1) as lineage_id
+               FROM deployment_policy_versions dpv
+               WHERE dpv.id = $1"#,
+        )
+        .bind(version_id)
+        .fetch_one(pool)
+        .await
+        .expect("fetch version row");
+
+        let mut doc = serde_json::json!({
+            "policies": [{
+                "lineage_id": row.lineage_id,
+                "version_id": version_id,
+                "version": row.version,
+                "name": row.name,
+                "policy_type": row.policy_type,
+                "implementation_state": row.implementation_state,
+                "execution_phase": row.execution_phase,
+                "config": row.config,
+                "compliance_metadata": row.compliance_metadata,
+                "dependencies": row.dependencies,
+            }]
+        });
+
+        if let Some(opaque_xml) = row.opaque_xml {
+            doc["policies"][0]["opaque_xml"] = serde_json::json!(opaque_xml);
+        }
+        if let Some(enabled) = row.enabled_by_default {
+            doc["policies"][0]["enabled_by_default"] = serde_json::json!(enabled);
+        }
+
+        (row.lineage_id, version_id, doc)
+    }
+
     /// Create a test server that includes policy interchange endpoints
     async fn spawn_interchange_test_server(pool: PgPool) -> String {
         use axum::routing::post;
@@ -12934,40 +13148,18 @@ packages = ["git"]
         let pool = test_pool_from_env().await;
         let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
 
-        // Create an existing published policy
-        let (policy_id, version_id, digest) = make_draft_policy(&pool, "test-exact-match").await;
+        // Create an existing PUBLISHED AND TRUSTED policy with enabled=true
+        let name = format!("exact-match-{}", Uuid::new_v4().simple());
+        let (policy_id, version_id, _) = make_draft_policy(&pool, &name).await;
         db_publish_policy_version(&pool, policy_id, version_id).await;
+        sqlx::query("UPDATE deployment_policies SET enabled = true WHERE id = $1")
+            .bind(policy_id)
+            .execute(&pool)
+            .await
+            .expect("enable policy");
 
-        // Export it to get portable IDs
-        let (portable_lineage_id, portable_version_id): (Uuid, Uuid) = sqlx::query_as(
-            "SELECT lineage_id, version_id FROM deployment_policy_versions WHERE id = $1",
-        )
-        .bind(version_id)
-        .fetch_one(&pool)
-        .await
-        .expect("fetch portable IDs");
-
-        // Build import document with exact same portable IDs and digest
-        let mut policies_doc = serde_json::json!({
-            "policies": [{
-                "lineage_id": portable_lineage_id,
-                "version_id": portable_version_id,
-                "name": "test-exact-match",
-                "policy_type": "custom_check",
-                "implementation_state": "native",
-                "execution_phase": "deploy",
-                "config": serde_json::json!({"mode":"all","context":"nixos-configuration-v1","binding":"cfg","rules":[]}),
-                "semantic_digest": digest,
-                "version": "0.1.0",
-            }]
-        });
-
-        // Ensure enabled_by_default is null (Option<bool>)
-        if let Some(policy) = policies_doc["policies"][0].as_object_mut() {
-            policy.remove("enabled_by_default");
-        }
-
-        let policies_json = policies_doc;
+        // Build import document FROM the actual DB version row (guarantees semantics match exactly)
+        let (lineage_id, _, policies_json) = build_import_doc_from_version(&pool, version_id).await;
 
         let base = spawn_interchange_test_server(pool.clone()).await;
         let source_sha = {
@@ -12975,33 +13167,64 @@ packages = ["git"]
             hex::encode(Sha256::digest(policies_json.to_string().as_bytes()))
         };
 
-        // Preview should show exact_match
+        // Preview should show exact_match with no blocking conflicts
         let preview_resp = post_preview_policy_interchange(&base, &token, &policies_json.to_string(), "policies.json").await;
         assert_eq!(preview_resp.status().as_u16(), 200, "preview succeeds");
         let preview_body: serde_json::Value = preview_resp.json().await.expect("parse preview");
         assert!(!preview_body["has_blocking_conflicts"].as_bool().unwrap_or(true), "exact match has no conflicts");
+        let policies_preview = preview_body["policies"].as_array().expect("policies array");
+        assert_eq!(policies_preview.len(), 1);
+        assert_eq!(policies_preview[0]["reconciliation_state"], "exact_match");
 
-        // Import should succeed and not mutate state
+        // Import should succeed with same source SHA
         let import_resp = post_import_policy_interchange(&base, &token, &policies_json.to_string(), "policies.json", &source_sha).await;
         assert_eq!(import_resp.status().as_u16(), 201, "import succeeds for exact match");
+        let import_body: serde_json::Value = import_resp.json().await.expect("parse import");
 
-        // Verify state unchanged
-        let (local_state,): (String,) = sqlx::query_as("SELECT publication_state FROM deployment_policy_versions WHERE id = $1")
-            .bind(version_id)
-            .fetch_one(&pool)
-            .await
-            .expect("fetch state");
-        assert_eq!(local_state, "accepted", "exact match preserves published state");
+        // Verify response contains outcome information
+        let policies_resp = import_body["policies"].as_array().expect("policies array in response");
+        assert_eq!(policies_resp.len(), 1);
+        assert_eq!(policies_resp[0]["created"], false, "exact match: created flag false");
+        assert_eq!(policies_resp[0]["reconciliation_action"], "exact_match");
+        assert_eq!(policies_resp[0]["publication_state"], "accepted", "exact match preserves publication state");
+        assert_eq!(policies_resp[0]["trust_state"], "untrusted", "exact match has local trust state");
+        assert_eq!(policies_resp[0]["enabled"], true, "exact match preserves lineage enabled state");
+
+        // Verify DB state unchanged for policy
+        let (db_pub_state, db_enabled): (String, bool) = sqlx::query_as(
+            "SELECT publication_state, enabled FROM deployment_policy_versions dpv JOIN deployment_policies dp ON dpv.policy_id = dp.id WHERE dpv.id = $1",
+        )
+        .bind(version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch DB state");
+        assert_eq!(db_pub_state, "accepted", "DB publication_state unchanged");
+        assert_eq!(db_enabled, true, "DB enabled unchanged");
+
+        // Verify audit event records correct outcome
+        let audit_event: (Option<serde_json::Value>,) = sqlx::query_as(
+            "SELECT details FROM admin_audit_events WHERE action = 'policy_interchange_imported' AND target = $1 LIMIT 1",
+        )
+        .bind(version_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("fetch audit");
+
+        let details = audit_event.0.expect("audit details present");
+        assert_eq!(details["reconciliation_action"], "exact_match");
+        assert_eq!(details["created"], false);
+        assert_eq!(details["final_publication_state"], "accepted");
     }
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn policy_interchange_new_version_creates_draft() {
         let pool = test_pool_from_env().await;
-        let (_admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
 
-        // Create existing policy
-        let (policy_id, version_id, _) = make_draft_policy(&pool, "test-new-version").await;
+        // Create existing published policy
+        let name = format!("new-version-{}", Uuid::new_v4().simple());
+        let (policy_id, version_id, _) = make_draft_policy(&pool, &name).await;
         db_publish_policy_version(&pool, policy_id, version_id).await;
 
         // Get portable lineage ID
@@ -13011,49 +13234,47 @@ packages = ["git"]
             .await
             .expect("fetch lineage");
 
-        // Import with same lineage, new version ID
+        // Import a NEW version with same lineage (omit semantic_digest; let endpoint compute it)
         let new_version_id = Uuid::new_v4();
-        let new_digest = "new-digest-v2";
-        let mut policies_doc = serde_json::json!({
-            "policies": [{
-                "lineage_id": lineage_id,
-                "version_id": new_version_id,
-                "name": "test-new-version",
-                "policy_type": "custom_check",
-                "implementation_state": "native",
-                "execution_phase": "deploy",
-                "config": serde_json::json!({"mode":"all","context":"nixos-configuration-v1","binding":"cfg","rules":[]}),
-                "semantic_digest": new_digest,
-                "version": "0.2.0",
-            }]
-        });
-
-        // Ensure enabled_by_default is null (Option<bool>)
-        if let Some(policy) = policies_doc["policies"][0].as_object_mut() {
-            policy.remove("enabled_by_default");
-        }
-
-        let policies_json = policies_doc;
+        let policies_json = build_valid_policy_import_doc(lineage_id, new_version_id, "0.2.0", &name);
 
         let base = spawn_interchange_test_server(pool.clone()).await;
-        let source_sha = {
-            use sha2::{Digest, Sha256};
-            hex::encode(Sha256::digest(policies_json.to_string().as_bytes()))
-        };
 
-        let import_resp = post_import_policy_interchange(&base, &token, &policies_json.to_string(), "policies.json", &source_sha).await;
-        assert_eq!(import_resp.status().as_u16(), 201, "new version creates successfully");
+        // Preview first to get source_sha256
+        let preview_resp = post_preview_policy_interchange(&base, &token, &policies_json.to_string(), "policies.json").await;
+        assert_eq!(preview_resp.status().as_u16(), 200, "preview succeeds");
+        let preview_body: serde_json::Value = preview_resp.json().await.expect("parse preview");
+        let source_sha = preview_body["source_sha256"].as_str().expect("source_sha256 in preview");
 
-        // Verify new version exists and is draft
-        let (new_pub_state, new_ver_id): (String, Uuid) = sqlx::query_as(
-            "SELECT publication_state, id FROM deployment_policy_versions WHERE policy_id = $1 AND version = '0.2.0'",
+        // Verify preview shows new_version
+        let policies_preview = preview_body["policies"].as_array().expect("policies in preview");
+        assert_eq!(policies_preview.len(), 1);
+        assert_eq!(policies_preview[0]["reconciliation_state"], "new_version");
+        assert!(!preview_body["has_blocking_conflicts"].as_bool().unwrap_or(false), "new version has no blocking conflicts");
+
+        // Import with same source SHA
+        let import_resp = post_import_policy_interchange(&base, &token, &policies_json.to_string(), "policies.json", source_sha).await;
+        assert_eq!(import_resp.status().as_u16(), 201, "new version import succeeds");
+        let import_body: serde_json::Value = import_resp.json().await.expect("parse import");
+
+        // Verify response indicates creation
+        let policies_resp = import_body["policies"].as_array().expect("policies in response");
+        assert_eq!(policies_resp.len(), 1);
+        assert_eq!(policies_resp[0]["created"], true, "new version: created flag true");
+        assert_eq!(policies_resp[0]["reconciliation_action"], "create_lineage_and_version");
+        assert_eq!(policies_resp[0]["publication_state"], "draft", "new version starts as draft");
+
+        // Verify new version exists in DB and is draft
+        let (new_pub_state, new_ver_id, new_policy_id): (String, Uuid, Uuid) = sqlx::query_as(
+            "SELECT publication_state, id, policy_id FROM deployment_policy_versions WHERE version = '0.2.0' AND policy_id = $1",
         )
         .bind(policy_id)
         .fetch_one(&pool)
         .await
         .expect("fetch new version");
-        assert_eq!(new_pub_state, "draft", "new version is draft");
+        assert_eq!(new_pub_state, "draft", "new version is draft in DB");
         assert_eq!(new_ver_id, new_version_id, "version ID matches portable ID");
+        assert_eq!(new_policy_id, policy_id, "version belongs to same policy lineage");
     }
 
     #[tokio::test]
@@ -13062,23 +13283,23 @@ packages = ["git"]
         let pool = test_pool_from_env().await;
         let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
 
+        let incoming_version_id = Uuid::new_v4();
         let policies_json = serde_json::json!({
             "policies": [{
                 "lineage_id": Uuid::new_v4(),
-                "version_id": Uuid::new_v4(),
-                "name": "test-mismatch",
+                "version_id": incoming_version_id,
+                "name": format!("mismatch-{}", Uuid::new_v4().simple()),
                 "policy_type": "custom_check",
                 "implementation_state": "native",
                 "execution_phase": "deploy",
                 "config": serde_json::json!({}),
-                "semantic_digest": "digest1",
                 "version": "1.0.0",
             }]
         }).to_string();
 
         let base = spawn_interchange_test_server(pool.clone()).await;
 
-        // Send wrong SHA header
+        // Send wrong SHA header intentionally
         let mut body = Vec::new();
         push_file_field(&mut body, "file", "policies.json", policies_json.as_bytes());
         finish_multipart(&mut body);
@@ -13097,8 +13318,28 @@ packages = ["git"]
             .expect("send");
 
         assert_eq!(resp.status().as_u16(), 409, "digest mismatch rejected as 409");
-        let body: serde_json::Value = resp.json().await.expect("parse error");
-        assert_eq!(body["error"], "POLICY_SOURCE_DIGEST_MISMATCH");
+        let response_body: serde_json::Value = resp.json().await.expect("parse error");
+        assert_eq!(response_body["error"], "POLICY_SOURCE_DIGEST_MISMATCH");
+
+        // Verify no side effects: no version created
+        let version_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(incoming_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count versions");
+        assert_eq!(version_count, 0, "no version created on digest mismatch");
+
+        // Verify no audit event created
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM admin_audit_events WHERE action = 'policy_interchange_imported' AND target = $1",
+        )
+        .bind(incoming_version_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("count audit");
+        assert_eq!(audit_count, 0, "no audit event on digest mismatch");
     }
 
     #[tokio::test]
@@ -13107,44 +13348,32 @@ packages = ["git"]
         let pool = test_pool_from_env().await;
         let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
 
+        // Build two semantically valid import documents but with SAME version_id
         let dup_version = Uuid::new_v4();
-        let mut policies_doc = serde_json::json!({
+        let policies_json = serde_json::json!({
             "policies": [
                 {
                     "lineage_id": Uuid::new_v4(),
                     "version_id": dup_version,
-                    "name": "policy1",
+                    "name": format!("policy-dup-1-{}", Uuid::new_v4().simple()),
                     "policy_type": "custom_check",
                     "implementation_state": "native",
                     "execution_phase": "deploy",
-                    "config": serde_json::json!({}),
-                    "semantic_digest": "digest1",
+                    "config": serde_json::json!({"mode":"all","context":"nixos-configuration-v1","binding":"cfg","rules":[]}),
                     "version": "1.0.0",
                 },
                 {
                     "lineage_id": Uuid::new_v4(),
-                    "version_id": dup_version,
-                    "name": "policy2",
+                    "version_id": dup_version,  // SAME version ID
+                    "name": format!("policy-dup-2-{}", Uuid::new_v4().simple()),
                     "policy_type": "custom_check",
                     "implementation_state": "native",
                     "execution_phase": "deploy",
-                    "config": serde_json::json!({}),
-                    "semantic_digest": "digest2",
+                    "config": serde_json::json!({"mode":"all","context":"nixos-configuration-v1","binding":"cfg","rules":[]}),
                     "version": "2.0.0",
                 }
             ]
-        });
-
-        // Ensure enabled_by_default is null
-        if let Some(policies) = policies_doc["policies"].as_array_mut() {
-            for policy in policies {
-                if let Some(obj) = policy.as_object_mut() {
-                    obj.remove("enabled_by_default");
-                }
-            }
-        }
-
-        let policies_json = policies_doc.to_string();
+        }).to_string();
 
         let base = spawn_interchange_test_server(pool.clone()).await;
         let source_sha = {
@@ -13152,10 +13381,36 @@ packages = ["git"]
             hex::encode(Sha256::digest(policies_json.as_bytes()))
         };
 
+        // Import directly without preview
         let resp = post_import_policy_interchange(&base, &token, &policies_json, "policies.json", &source_sha).await;
         assert_eq!(resp.status().as_u16(), 422, "duplicate version IDs rejected");
         let body: serde_json::Value = resp.json().await.expect("parse error");
         assert_eq!(body["error"], "POLICY_INTERCHANGE_INVALID");
+
+        // Verify the error message explicitly names the duplicate validator
+        let msg = body["message"].as_str().expect("message");
+        assert!(msg.contains("Duplicate version ID") || msg.contains(&dup_version.to_string()),
+            "error message mentions duplicate version ID: {}", msg);
+
+        // Verify no versions were created for the duplicate ID
+        let version_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(dup_version)
+        .fetch_one(&pool)
+        .await
+        .expect("count versions");
+        assert_eq!(version_count, 0, "duplicate version ID not created");
+
+        // Verify no audit event for this version
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM admin_audit_events WHERE action = 'policy_interchange_imported' AND target = $1",
+        )
+        .bind(dup_version.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("count audit");
+        assert_eq!(audit_count, 0, "no audit event for duplicate version");
     }
 
     #[tokio::test]
@@ -13164,50 +13419,68 @@ packages = ["git"]
         let pool = test_pool_from_env().await;
         let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
 
-        // Create existing policy with a name
-        let (existing_policy_id, existing_version_id, _) = make_draft_policy(&pool, "collision-name").await;
+        // Create existing policy with a specific name
+        let collision_name = format!("collision-{}", Uuid::new_v4().simple());
+        let (existing_policy_id, existing_version_id, _) = make_draft_policy(&pool, &collision_name).await;
         db_publish_policy_version(&pool, existing_policy_id, existing_version_id).await;
 
-        // Try to import new lineage with same name (case-sensitive exact match)
+        // Try to import new lineage with SAME name (case-sensitive exact match)
         let new_lineage_id = Uuid::new_v4();
-        let mut policies_doc = serde_json::json!({
-            "policies": [{
-                "lineage_id": new_lineage_id,
-                "version_id": Uuid::new_v4(),
-                "name": "collision-name",
-                "policy_type": "custom_check",
-                "implementation_state": "native",
-                "execution_phase": "deploy",
-                "config": serde_json::json!({}),
-                "semantic_digest": "digest1",
-                "version": "1.0.0",
-            }]
-        });
-
-        // Ensure enabled_by_default is null
-        if let Some(policy) = policies_doc["policies"][0].as_object_mut() {
-            policy.remove("enabled_by_default");
-        }
-
-        let policies_json = policies_doc.to_string();
+        let imported_version_id = Uuid::new_v4();
+        let policies_json = build_valid_policy_import_doc(
+            new_lineage_id,
+            imported_version_id,
+            "1.0.0",
+            &collision_name,  // Same name as existing policy
+        );
 
         let base = spawn_interchange_test_server(pool.clone()).await;
         let source_sha = {
             use sha2::{Digest, Sha256};
-            hex::encode(Sha256::digest(policies_json.as_bytes()))
+            hex::encode(Sha256::digest(policies_json.to_string().as_bytes()))
         };
 
-        // Preview should flag collision
-        let preview_resp = post_preview_policy_interchange(&base, &token, &policies_json, "policies.json").await;
-        assert_eq!(preview_resp.status().as_u16(), 200);
+        // Preview should flag collision as blocking conflict
+        let preview_resp = post_preview_policy_interchange(&base, &token, &policies_json.to_string(), "policies.json").await;
+        assert_eq!(preview_resp.status().as_u16(), 200, "preview succeeds");
         let preview_body: serde_json::Value = preview_resp.json().await.expect("parse preview");
-        assert!(preview_body["has_blocking_conflicts"].as_bool().unwrap_or(false), "preview shows collision");
+        assert!(preview_body["has_blocking_conflicts"].as_bool().unwrap_or(false), "preview shows blocking conflict");
+
+        // Verify conflict details in preview
+        let conflicts = preview_body["blocking_conflicts"].as_array().expect("conflicts array");
+        assert!(conflicts.iter().any(|c| c["code"] == "POLICY_INTERCHANGE_NAME_COLLISION"),
+            "conflicts contain name collision code");
 
         // Import should reject with conflict
-        let import_resp = post_import_policy_interchange(&base, &token, &policies_json, "policies.json", &source_sha).await;
+        let import_resp = post_import_policy_interchange(&base, &token, &policies_json.to_string(), "policies.json", &source_sha).await;
         assert_eq!(import_resp.status().as_u16(), 409, "name collision rejected as 409");
-        let body: serde_json::Value = import_resp.json().await.expect("parse error");
-        assert_eq!(body["error"], "POLICY_INTERCHANGE_CONFLICTS");
+        let import_body: serde_json::Value = import_resp.json().await.expect("parse error");
+        assert_eq!(import_body["error"], "POLICY_INTERCHANGE_CONFLICTS");
+
+        // Verify conflict identifies the collision
+        let import_conflicts = import_body["conflicts"].as_array().expect("conflicts in error");
+        assert!(import_conflicts.iter().any(|c| c["code"] == "POLICY_INTERCHANGE_NAME_COLLISION"),
+            "import error contains name collision code");
+
+        // Verify no side effects: imported lineage/version NOT created
+        let lineage_exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policies WHERE id = $1",
+        )
+        .bind(new_lineage_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count lineages");
+        assert_eq!(lineage_exists, 0, "new lineage not created on collision");
+
+        // Verify no audit event for imported version
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM admin_audit_events WHERE action = 'policy_interchange_imported' AND target = $1",
+        )
+        .bind(imported_version_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("count audit");
+        assert_eq!(audit_count, 0, "no audit event on name collision");
     }
 
     #[tokio::test]
@@ -13216,48 +13489,228 @@ packages = ["git"]
         let pool = test_pool_from_env().await;
         let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
 
-        let mut policies_doc = serde_json::json!({
-            "policies": [{
-                "lineage_id": Uuid::new_v4(),
-                "version_id": Uuid::new_v4(),
-                "name": "test-immutable",
-                "policy_type": "custom_check",
-                "implementation_state": "native",
-                "execution_phase": "deploy",
-                "config": serde_json::json!({}),
-                "semantic_digest": "digest1",
-                "version": "1.0.0",
-            }]
-        });
-
-        // Ensure enabled_by_default is null
-        if let Some(policy) = policies_doc["policies"][0].as_object_mut() {
-            policy.remove("enabled_by_default");
-        }
-
-        let policies_json = policies_doc.to_string();
+        let policies_json = build_valid_policy_import_doc(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "1.0.0",
+            &format!("immutable-{}", Uuid::new_v4().simple()),
+        );
 
         let base = spawn_interchange_test_server(pool.clone()).await;
 
-        // Count policies before preview
-        let count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies")
+        // Record baseline counts for 3 tables
+        let policies_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies")
             .fetch_one(&pool)
             .await
-            .expect("count");
+            .expect("count policies");
+        let versions_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policy_versions")
+            .fetch_one(&pool)
+            .await
+            .expect("count versions");
+        let audit_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_audit_events WHERE action = 'policy_interchange_imported'")
+            .fetch_one(&pool)
+            .await
+            .expect("count audit");
 
         // Call preview twice
-        let resp1 = post_preview_policy_interchange(&base, &token, &policies_json, "policies.json").await;
-        assert_eq!(resp1.status().as_u16(), 200);
-        let resp2 = post_preview_policy_interchange(&base, &token, &policies_json, "policies.json").await;
-        assert_eq!(resp2.status().as_u16(), 200);
+        let resp1 = post_preview_policy_interchange(&base, &token, &policies_json.to_string(), "policies.json").await;
+        assert_eq!(resp1.status().as_u16(), 200, "first preview succeeds");
+        let resp2 = post_preview_policy_interchange(&base, &token, &policies_json.to_string(), "policies.json").await;
+        assert_eq!(resp2.status().as_u16(), 200, "second preview succeeds");
 
-        // Count policies after preview
-        let count_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies")
+        // Verify all 3 counts unchanged
+        let policies_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies")
             .fetch_one(&pool)
             .await
-            .expect("count");
+            .expect("count policies");
+        let versions_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policy_versions")
+            .fetch_one(&pool)
+            .await
+            .expect("count versions");
+        let audit_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_audit_events WHERE action = 'policy_interchange_imported'")
+            .fetch_one(&pool)
+            .await
+            .expect("count audit");
 
-        assert_eq!(count_before, count_after, "preview must not create policies");
+        assert_eq!(policies_before, policies_after, "preview must not create policies");
+        assert_eq!(versions_before, versions_after, "preview must not create policy versions");
+        assert_eq!(audit_before, audit_after, "preview must not create audit events");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn policy_interchange_wrong_lineage_same_version_blocked() {
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+
+        // Create local version under lineage A
+        let name = format!("wrong-lineage-{}", Uuid::new_v4().simple());
+        let (lineage_a_id, version_x_id, _) = make_draft_policy(&pool, &name).await;
+        db_publish_policy_version(&pool, lineage_a_id, version_x_id).await;
+
+        // Build import doc with SAME version ID but DIFFERENT lineage ID (B)
+        let (_, _, original_doc) = build_import_doc_from_version(&pool, version_x_id).await;
+        let mut doc = original_doc;
+        let lineage_b_id = Uuid::new_v4();
+        doc["policies"][0]["lineage_id"] = serde_json::json!(lineage_b_id);
+
+        let base = spawn_interchange_test_server(pool.clone()).await;
+        let source_sha = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(doc.to_string().as_bytes()))
+        };
+
+        // Preview should detect wrong-lineage conflict
+        let preview_resp = post_preview_policy_interchange(&base, &token, &doc.to_string(), "policies.json").await;
+        assert_eq!(preview_resp.status().as_u16(), 200);
+        let preview_body: serde_json::Value = preview_resp.json().await.expect("parse");
+        assert!(preview_body["has_blocking_conflicts"].as_bool().unwrap_or(false), "preview detects lineage conflict");
+
+        // Import should reject
+        let import_resp = post_import_policy_interchange(&base, &token, &doc.to_string(), "policies.json", &source_sha).await;
+        assert_eq!(import_resp.status().as_u16(), 409, "wrong-lineage rejected");
+
+        // Verify lineage B not created
+        let lineage_b_exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policies WHERE id = $1",
+        )
+        .bind(lineage_b_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(lineage_b_exists, 0, "lineage B not created");
+
+        // Verify version still belongs to lineage A
+        let (version_lineage,): (Uuid,) = sqlx::query_as(
+            "SELECT policy_id FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(version_x_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch version lineage");
+        assert_eq!(version_lineage, lineage_a_id, "version still belongs to lineage A");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn policy_interchange_multi_policy_rollback_on_conflict() {
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+
+        // Create existing policy with specific name for collision
+        let collision_name = format!("collision-rollback-{}", Uuid::new_v4().simple());
+        let (existing_id, existing_version_id, _) = make_draft_policy(&pool, &collision_name).await;
+        db_publish_policy_version(&pool, existing_id, existing_version_id).await;
+
+        // Build document with 2 policies: A is new, B has collision
+        let new_a_lineage = Uuid::new_v4();
+        let new_a_version = Uuid::new_v4();
+        let new_b_lineage = Uuid::new_v4();
+        let new_b_version = Uuid::new_v4();
+
+        let doc = serde_json::json!({
+            "policies": [
+                build_valid_policy_import_doc(new_a_lineage, new_a_version, "1.0.0",
+                    &format!("new-a-{}", Uuid::new_v4().simple()))["policies"][0],
+                build_valid_policy_import_doc(new_b_lineage, new_b_version, "1.0.0",
+                    &collision_name)["policies"][0],
+            ]
+        });
+
+        let base = spawn_interchange_test_server(pool.clone()).await;
+        let source_sha = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(doc.to_string().as_bytes()))
+        };
+
+        // Import with correct SHA to prove server rejects
+        let import_resp = post_import_policy_interchange(&base, &token, &doc.to_string(), "policies.json", &source_sha).await;
+        assert_eq!(import_resp.status().as_u16(), 409, "multi-policy import rejected on conflict");
+
+        // Verify rollback: neither policy lineage A nor B created
+        let a_exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policies WHERE id = $1",
+        )
+        .bind(new_a_lineage)
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(a_exists, 0, "lineage A not created (rolled back)");
+
+        let b_exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policies WHERE id = $1",
+        )
+        .bind(new_b_lineage)
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(b_exists, 0, "lineage B not created (rolled back)");
+
+        // Verify no audit for either version
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM admin_audit_events WHERE action = 'policy_interchange_imported' AND target IN ($1, $2)",
+        )
+        .bind(new_a_version)
+        .bind(new_b_version)
+        .fetch_one(&pool)
+        .await
+        .expect("count audit");
+        assert_eq!(audit_count, 0, "no audit for rolled-back policies");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn policy_interchange_legacy_no_id_deterministic_round_trip() {
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+
+        // Simplified legacy policy (no portable IDs)
+        let legacy_doc = serde_json::json!({
+            "policies": [{
+                "policy_type": "custom_check",
+                "name": format!("legacy-{}", Uuid::new_v4().simple()),
+                "description": "Legacy policy without portable IDs",
+                "config": {"mode": "all", "context": "nixos-configuration-v1", "binding": "cfg", "rules": []}
+            }]
+        });
+        let legacy_bytes = legacy_doc.to_string();
+
+        let base = spawn_interchange_test_server(pool.clone()).await;
+        let source_sha = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(legacy_bytes.as_bytes()))
+        };
+
+        // Preview #1
+        let p1_resp = post_preview_policy_interchange(&base, &token, &legacy_bytes, "policies.json").await;
+        assert_eq!(p1_resp.status().as_u16(), 200);
+        let p1_body: serde_json::Value = p1_resp.json().await.expect("parse");
+        let p1_lineage = p1_body["policies"][0]["lineage_id"].as_str().expect("lineage").to_string();
+        let p1_version = p1_body["policies"][0]["version_id"].as_str().expect("version").to_string();
+
+        // Preview #2 with identical bytes
+        let p2_resp = post_preview_policy_interchange(&base, &token, &legacy_bytes, "policies.json").await;
+        assert_eq!(p2_resp.status().as_u16(), 200);
+        let p2_body: serde_json::Value = p2_resp.json().await.expect("parse");
+        let p2_lineage = p2_body["policies"][0]["lineage_id"].as_str().expect("lineage").to_string();
+        let p2_version = p2_body["policies"][0]["version_id"].as_str().expect("version").to_string();
+
+        // IDs must be deterministic (identical)
+        assert_eq!(p1_lineage, p2_lineage, "lineage ID deterministic");
+        assert_eq!(p1_version, p2_version, "version ID deterministic");
+
+        // Import first time
+        let i1_resp = post_import_policy_interchange(&base, &token, &legacy_bytes, "policies.json", &source_sha).await;
+        assert_eq!(i1_resp.status().as_u16(), 201, "first import succeeds");
+        let i1_body: serde_json::Value = i1_resp.json().await.expect("parse");
+        assert_eq!(i1_body["policies"][0]["created"], true, "first import creates");
+
+        // Re-import identical bytes
+        let i2_resp = post_import_policy_interchange(&base, &token, &legacy_bytes, "policies.json", &source_sha).await;
+        assert_eq!(i2_resp.status().as_u16(), 201, "second import succeeds");
+        let i2_body: serde_json::Value = i2_resp.json().await.expect("parse");
+        assert_eq!(i2_body["policies"][0]["created"], false, "second import reuses (exact_match)");
+        assert_eq!(i2_body["policies"][0]["reconciliation_action"], "exact_match");
     }
 
     #[test]
