@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-11 20:12'
+updated_date: '2026-08-11 20:21'
 labels: []
 milestone: m-22
 dependencies:
@@ -360,6 +360,8 @@ DATABASE_URL=... cargo test -p cf-server --lib -- --ignored queries::compliance_
 2026-08-11 reuse increment: at foreign-import commit, resolve each `MapExisting` source policy version to a mutable derived draft using the established `ensure_policy_draft(..., EnsureMutable)` workflow when the source version is immutable. Use the effective draft version consistently for bundle membership, normalized mapping, source-object mappings, and reuse counts. Validate that the selected source is an eligible trusted mapping for the relevant previous requirement version before deriving or persisting. Add DB-gated coverage for immutable selected-policy reuse.
 
 2026-08-11 confirmed follow-up scope: preserve the full trusted inherited mapping contract (relationship, coverage, rationale) on the derived draft; make commit eligibility exactly match preview (accepted and current published only); deduplicate effective policy versions for bundle membership while retaining per-requirement mappings; correct actual creation/reuse result counts; add the listed DB integration cases and execute both DB suites before proceeding to exact technical-match candidates.
+
+2026-08-11 validation correction: MapExisting is now explicitly restricted to a trusted mapping on the unchanged prior requirement where the submitted policy version is both accepted and the lineage's current published version. Every accepted source is then resolved through `ensure_policy_draft(..., EnsureMutable)`; client-submitted mutable versions are rejected. Add a complete DB integration fixture covering shared-policy reuse, preservation of mapping semantics, derived draft membership/mapping, deterministic membership order, accounting, and rejected superseded/deprecated/stale versions before starting technical matching.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
