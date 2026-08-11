@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-11 19:44'
+updated_date: '2026-08-11 19:50'
 labels: []
 milestone: m-22
 dependencies:
@@ -354,6 +354,8 @@ DATABASE_URL=... cargo test -p cf-server --lib -- --ignored queries::compliance_
 - UI mapping editor must handle the offline state gracefully (failed search, failed create) without optimistic mutation
 
 2026-08-11 continuation: wire the existing normalized framework/requirement query layer into foreign DISA STIG preview and atomic commit before further UI work. The preview will provide real reconciliation states/candidates; the commit will reparse as it already does, use the normalized upsert helpers in the same transaction, and make exact-artifact imports idempotent. Then connect the reconciliation modal and bundle selector to these APIs, followed by targeted server/web builds.
+
+2026-08-11 continuation plan: complete the mutation-free release-diff projection first. Pass adapter-derived requirement canonicals/digests into reconciliation, compare against the prior framework release even when previewing a new release, return changed and removed states, and offer inherited candidates only for unchanged requirements. Add focused query tests. Defer commit-time reuse of immutable accepted policy versions until its required derived-draft behavior is confirmed against existing workflow, because silently mutating accepted versions would violate the task's immutability criterion.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
