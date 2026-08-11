@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-11 20:04'
+updated_date: '2026-08-11 20:08'
 labels: []
 milestone: m-22
 dependencies:
@@ -418,4 +418,6 @@ Implemented an in-progress requirement-aware DISA STIG path: foreign preview now
 Committed and pushed `cbd8c72d feat(compliance): reconcile STIG imports and split bundle policies`. It includes the server-backed bulk framework mapping projection and design-aligned mapped/custom sections in both bundle add and edit flows. `cargo check` passed for server and web UI; warnings are pre-existing repository-wide warnings.
 
 Implemented release-diff preview work: adapter-derived requirement semantic digests now classify incoming requirements as unchanged, changed, or new against the preceding release; prior-only requirements are emitted as removed; candidate lookup differentiates exact-version authoritative mappings from inherited mappings. Added a DB-gated changed/removed classification test. Verified with the targeted ignored DB test and server/web `cargo check`; existing repository warnings remain.
+
+Implemented and pushed immutable STIG policy reuse: `MapExisting` is revalidated against a trusted mapping for the unchanged prior requirement, accepted selected policies are converted to the existing mutable derived-draft workflow, and the effective draft is used consistently for membership, mappings, and source-object provenance. Reuse candidates are now restricted to current accepted versions, preventing a deprecated/non-current implementation from being silently substituted. `SQLX_OFFLINE=true nix develop ../.. --command cargo check -p cf-server`, targeted rustfmt checks, and `git diff --check` passed; DB integration coverage for this commit-time path remains to be added. Commits: `6ebaf6ca`, `e22332d8`.
 <!-- SECTION:NOTES:END -->
