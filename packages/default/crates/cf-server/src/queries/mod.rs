@@ -11,6 +11,7 @@ pub mod commits;
 pub mod commits_artifacts;
 pub mod compliance;
 pub mod compliance_interchange;
+pub mod framework_requirements;
 pub mod config_health;
 pub mod cve_scans;
 pub mod cves;

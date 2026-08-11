@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE derivations\n        SET \n            status_id = 5,  -- dry-run-complete\n            store_path = NULL,\n            completed_at = NULL,\n            error_message = 'Store path was garbage collected, needs rebuild'\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5961e49d1c51c3784ff2806c54df51b0b1cef1e80a60342f0ca84411f6595589"
+}

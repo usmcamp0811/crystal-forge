@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE cache_push_jobs \n            SET \n                status = 'failed',\n                completed_at = NOW(),\n                error_message = $2,\n                retry_after = NOW() + ($3 || ' minutes')::INTERVAL\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5679afe11fe996ca766d399e4036e0b984a619236aa59127caa4ddb8f510f8f4"
+}

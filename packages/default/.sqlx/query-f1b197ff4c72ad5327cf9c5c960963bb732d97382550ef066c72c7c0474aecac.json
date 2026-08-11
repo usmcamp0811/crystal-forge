@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE cache_push_jobs \n            SET \n                status = 'permanently_failed',\n                completed_at = NOW(),\n                error_message = $2,\n                retry_after = NULL\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f1b197ff4c72ad5327cf9c5c960963bb732d97382550ef066c72c7c0474aecac"
+}

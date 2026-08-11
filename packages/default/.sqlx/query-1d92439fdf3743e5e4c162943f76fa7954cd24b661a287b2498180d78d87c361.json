@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) FROM derivations d \n         JOIN derivation_statuses ds ON d.status_id = ds.id \n         WHERE ds.is_terminal = false",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "1d92439fdf3743e5e4c162943f76fa7954cd24b661a287b2498180d78d87c361"
+}

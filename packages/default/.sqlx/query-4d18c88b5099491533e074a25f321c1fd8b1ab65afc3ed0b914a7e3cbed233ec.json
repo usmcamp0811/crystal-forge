@@ -1,0 +1,88 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT \n            cpj.id, cpj.derivation_id, cpj.status, cpj.store_path, cpj.scheduled_at, cpj.started_at, \n            cpj.completed_at, cpj.attempts, cpj.error_message, cpj.push_size_bytes, \n            cpj.push_duration_ms, cpj.cache_destination\n        FROM cache_push_jobs cpj\n        JOIN derivations d ON d.id = cpj.derivation_id\n        JOIN commits c ON c.id = d.commit_id\n        WHERE \n            (cpj.status = 'pending')\n            OR \n            (cpj.status = 'failed' AND cpj.retry_after IS NOT NULL AND cpj.retry_after <= NOW())\n        ORDER BY \n            CASE \n                WHEN cpj.status = 'pending' THEN 0\n                WHEN cpj.status = 'failed' THEN 1\n            END,\n            c.commit_timestamp DESC,\n            d.completed_at ASC NULLS LAST\n        LIMIT $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "derivation_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "store_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "scheduled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "completed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "error_message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "push_size_bytes",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "push_duration_ms",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 11,
+        "name": "cache_destination",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "4d18c88b5099491533e074a25f321c1fd8b1ab65afc3ed0b914a7e3cbed233ec"
+}
