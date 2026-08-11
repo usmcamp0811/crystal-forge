@@ -29,6 +29,10 @@ use crate::compliance::digest::{
     BundleVersionCanonical, PolicyVersionCanonical, load_bundle_membership,
     write_bundle_version_digest, write_policy_version_digest,
 };
+use crate::compliance::framework_model::FrameworkVersionCanonical;
+use crate::compliance::xccdf::disa_stig_adapter::{
+    canonical_for_rule, canonical_key_for_rule, identify_framework,
+};
 use crate::compliance::xccdf::import_models::ImportedPolicyRecord;
 use crate::compliance::xccdf::import_models::{ValidatedImportPlan, XccdfCommittedImportResult};
 use crate::compliance::xccdf::importer::build_policy_records;
@@ -36,6 +40,10 @@ use crate::compliance::xccdf::package::{ProcessedXccdfPackage, build_package_con
 use crate::compliance::xccdf::reconciliation::{
     ExistingPolicyIdentity, NativePolicyIdentity, NativeReconcileFailure, ReconcileConflict,
     ReconcileDecision, plan_policy_reconciliation,
+};
+use crate::queries::framework_requirements::{
+    insert_bundle_version_requirement, insert_framework_version, insert_policy_mapping_in_tx,
+    insert_requirement_version, upsert_framework_lineage, upsert_requirement_lineage,
 };
 
 // ── Parser version identifier ─────────────────────────────────────────────────
@@ -108,6 +116,56 @@ pub async fn commit_foreign_import(
             .await
             .context("failed to load source artifact")?;
 
+    // An artifact is its own immutable import identity.  Returning the original
+    // result before creating any bundle or policy rows makes an exact re-import
+    // idempotent across all imported objects, including normalized requirements
+    // and mappings added below.
+    if let Some(existing_bundle_version_id) = sqlx::query_scalar::<_, Uuid>(
+        "SELECT bundle_version_id FROM compliance_source_object_mappings \
+         WHERE source_artifact_id = $1 AND object_kind = 'benchmark' \
+         AND bundle_version_id IS NOT NULL LIMIT 1",
+    )
+    .bind(source_artifact_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("failed to check exact artifact import")?
+    {
+        let (existing_bundle_id, bundle_semantic_digest): (Uuid, String) = sqlx::query_as(
+            "SELECT bundle_id, semantic_digest FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(existing_bundle_version_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("failed to load exact artifact bundle version")?;
+        let reused_policy_versions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_bundle_version_policies WHERE bundle_version_id = $1",
+        )
+        .bind(existing_bundle_version_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("failed to count exact artifact policy membership")?;
+
+        tx.commit()
+            .await
+            .context("failed to commit exact artifact import")?;
+        return Ok(XccdfCommittedImportResult {
+            source_artifact_id,
+            bundle_id: existing_bundle_id,
+            bundle_version_id: existing_bundle_version_id,
+            created_policy_count: 0,
+            created_policy_lineages: 0,
+            created_policy_versions: 0,
+            reused_policy_versions: reused_policy_versions as u32,
+            bundle_lineage_created: false,
+            bundle_version_created: false,
+            excluded_rule_count: 0,
+            created_policy_version_ids: vec![],
+            source_sha256,
+            bundle_semantic_digest,
+            warnings: vec![],
+        });
+    }
+
     // ── 2. Bundle lineage ─────────────────────────────────────────────────────
     let bundle_name = validated.bundle.name.trim().to_owned();
     let bundle_framework = validated.bundle.framework.trim().to_owned();
@@ -172,6 +230,75 @@ pub async fn commit_foreign_import(
     .execute(&mut *tx)
     .await
     .context("failed to set source_artifact_id on bundle version")?;
+
+    // DISA STIGs have a stable framework/release identity and requirement
+    // lineages.  Persist those authoritative objects before choosing policy
+    // implementations; the legacy policy metadata remains source provenance.
+    let normalized_requirements = if let Some(identity) = identify_framework(&pkg.parsed) {
+        let framework_name = identity
+            .title
+            .as_deref()
+            .unwrap_or("DISA Security Technical Implementation Guide");
+        let framework_id = upsert_framework_lineage(
+            &mut tx,
+            framework_name,
+            Some(&identity.publisher),
+            &identity.canonical_source_key,
+            identity.title.as_deref(),
+        )
+        .await?;
+        let framework_version_id = insert_framework_version(
+            &mut tx,
+            framework_id,
+            &FrameworkVersionCanonical {
+                canonical_source_key: identity.canonical_source_key,
+                canonical_release_key: identity.canonical_release_key,
+                version: identity.version,
+                publisher: Some(identity.publisher),
+                title: identity.title,
+            },
+            Some(source_artifact_id),
+            None,
+        )
+        .await?;
+
+        let mut requirement_versions = std::collections::HashMap::new();
+        for (requirement_order, record) in policy_records.iter().enumerate() {
+            let rule = pkg
+                .parsed
+                .rules
+                .iter()
+                .find(|rule| rule.id == record.source_rule_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "IMPORT_RULE_NOT_FOUND: parsed rule {} disappeared before commit",
+                        record.source_rule_id
+                    )
+                })?;
+            let canonical_key = canonical_key_for_rule(rule);
+            let requirement_id =
+                upsert_requirement_lineage(&mut tx, framework_id, &canonical_key).await?;
+            let requirement_version_id = insert_requirement_version(
+                &mut tx,
+                requirement_id,
+                framework_version_id,
+                &canonical_for_rule(rule, &canonical_key),
+                None,
+            )
+            .await?;
+            insert_bundle_version_requirement(
+                &mut tx,
+                bundle_version_id,
+                requirement_version_id,
+                requirement_order as i32,
+            )
+            .await?;
+            requirement_versions.insert(record.source_rule_id.clone(), requirement_version_id);
+        }
+        Some(requirement_versions)
+    } else {
+        None
+    };
 
     // ── 3. Policy lineages and versions ───────────────────────────────────────
     let excluded_rule_count =
@@ -278,6 +405,30 @@ pub async fn commit_foreign_import(
         .execute(&mut *tx)
         .await
         .context("failed to insert bundle membership row")?;
+
+        if let Some(requirement_versions) = &normalized_requirements {
+            let requirement_version_id = requirement_versions
+                .get(&rec.source_rule_id)
+                .copied()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "IMPORT_REQUIREMENT_NOT_FOUND: missing normalized requirement for {}",
+                        rec.source_rule_id
+                    )
+                })?;
+            insert_policy_mapping_in_tx(
+                &mut tx,
+                policy_version_id,
+                requirement_version_id,
+                "implements",
+                "full",
+                None,
+                "imported",
+                Some(source_artifact_id),
+                importing_user_id,
+            )
+            .await?;
+        }
     }
 
     // ── 5. Source-object mappings ─────────────────────────────────────────────

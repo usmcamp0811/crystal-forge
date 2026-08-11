@@ -559,6 +559,10 @@ async fn main() -> anyhow::Result<()> {
             get(framework_requirements::list_compliance_framework_versions),
         )
         .route(
+            "/api/v1/compliance/frameworks/:id/mapped-policy-versions",
+            get(framework_requirements::list_framework_mapped_policies),
+        )
+        .route(
             "/api/v1/compliance/framework-versions/:fv_id/requirements",
             get(framework_requirements::search_framework_requirements),
         )

@@ -2472,6 +2472,19 @@ pub async fn fetch_compliance_framework_versions(
     fetch_json(&url).await
 }
 
+/// Fetch policy versions that have a normalized requirement mapping to a
+/// framework.  This is a bulk projection for the bundle policy picker.
+pub async fn fetch_framework_mapped_policy_versions(
+    framework_id: &Uuid,
+) -> Result<FrameworkMappedPolicyVersionsResponse, ApiClientError> {
+    let url = format!(
+        "{}/compliance/frameworks/{}/mapped-policy-versions",
+        base_url(),
+        framework_id
+    );
+    fetch_json(&url).await
+}
+
 /// Server-side requirement search within a framework version.
 ///
 /// `q` is matched against external_id, title, CCI IDs, and SRG IDs.

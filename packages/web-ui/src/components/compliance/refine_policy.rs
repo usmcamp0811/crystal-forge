@@ -313,6 +313,11 @@ pub fn action_to_import(rule: &RefinedStigRule) -> XccdfRuleImportAction {
 pub struct RefinePolicyStepProps {
     pub rules: Signal<Vec<RefinedStigRule>>,
     pub cursor: Signal<usize>,
+    /// When present, walk only these source rules while keeping all selected
+    /// rules in the eventual import plan.  This lets reconciliation surface
+    /// only controls requiring human attention without dropping auto-resolved
+    /// controls from the bundle.
+    pub review_rule_ids: Option<Vec<String>>,
     pub existing_policies: Vec<(uuid::Uuid, String)>,
     pub on_back: EventHandler<()>,
     pub on_review: EventHandler<()>,
@@ -326,7 +331,12 @@ pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
         .read()
         .iter()
         .enumerate()
-        .filter_map(|(i, r)| r.selected.then_some(i))
+        .filter_map(|(i, r)| {
+            let in_review_scope = props.review_rule_ids.as_ref().map_or(true, |ids| {
+                ids.iter().any(|id| id == &r.source.rule_id)
+            });
+            (r.selected && in_review_scope).then_some(i)
+        })
         .collect();
     let position = (*props.cursor.read()).min(selected.len().saturating_sub(1));
     let Some(index) = selected.get(position).copied() else {

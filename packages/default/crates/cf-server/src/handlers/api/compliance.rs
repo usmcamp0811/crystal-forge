@@ -23,6 +23,7 @@ use crate::api::models::{
 };
 use crate::compliance::interchange::{InterchangeLimits, MAX_XCCDF_UPLOAD_BYTES};
 use crate::compliance::resolver::ResolutionOutcome;
+use crate::compliance::xccdf::disa_stig_adapter::{canonical_key_for_rule, identify_framework};
 use crate::compliance::xccdf::export_models::{
     GroupProjectionError, ImportedCheckError, ImportedFixError, XccdfBundleExport,
     XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
@@ -46,6 +47,9 @@ use crate::queries::compliance::{
     update_grouping_scheme,
 };
 use crate::queries::compliance_interchange;
+use crate::queries::framework_requirements::{
+    find_policy_candidates, preview_framework_reconciliation, preview_requirement_reconciliation,
+};
 
 const MAX_GROUPING_SCHEME_NAME_BYTES: usize = 255;
 const MAX_GROUPING_GROUP_ID_BYTES: usize = 128;
@@ -3849,6 +3853,107 @@ pub(crate) async fn compute_cf_native_reconciliation(
     }))
 }
 
+/// Compute the mutation-free reconciliation projection for a foreign DISA STIG.
+/// This deliberately uses the parsed rules and authoritative mapping tables, not
+/// legacy policy metadata, so the client can ask for review only where a human
+/// decision is genuinely needed.
+async fn compute_foreign_stig_reconciliation(
+    pool: &PgPool,
+    parsed: &crate::compliance::xccdf::models::ParsedXccdf,
+    source_sha256: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(identity) = identify_framework(parsed) else {
+        return Ok(None);
+    };
+    let framework = preview_framework_reconciliation(pool, &identity, source_sha256)
+        .await
+        .map_err(|error| format!("failed to reconcile framework release: {error}"))?;
+    let canonical_keys: Vec<String> = parsed.rules.iter().map(canonical_key_for_rule).collect();
+    let requirements = match framework.existing_framework_id {
+        Some(framework_id) => preview_requirement_reconciliation(
+            pool,
+            framework_id,
+            framework.existing_framework_version_id,
+            &canonical_keys,
+        )
+        .await
+        .map_err(|error| format!("failed to reconcile requirements: {error}"))?,
+        None => canonical_keys
+            .iter()
+            .map(|key| crate::compliance::requirement_model::RequirementReconciliation {
+                canonical_requirement_key: key.clone(),
+                external_id: key.clone(),
+                state: crate::compliance::requirement_model::RequirementReconciliationState::NewRequirement,
+                existing_requirement_id: None,
+                existing_requirement_version_id: None,
+                existing_digest: None,
+            })
+            .collect(),
+    };
+
+    let mut rows = Vec::with_capacity(parsed.rules.len());
+    for (rule, requirement) in parsed.rules.iter().zip(requirements.iter()) {
+        let candidates = match requirement.existing_requirement_id {
+            Some(requirement_id) => find_policy_candidates(pool, requirement_id)
+                .await
+                .map_err(|error| format!("failed to find policy candidates: {error}"))?,
+            None => vec![],
+        };
+        let inferred_enforcement = rule
+            .fix
+            .as_ref()
+            .map(|fix| {
+                !crate::compliance::xccdf::inference::infer_nixos_assertions(&fix.content)
+                    .is_empty()
+            })
+            .unwrap_or(false);
+        let auto_resolvable = !candidates.is_empty() || inferred_enforcement;
+        let state = match requirement.state {
+            crate::compliance::requirement_model::RequirementReconciliationState::ExistingUnchanged => "existing_unchanged",
+            crate::compliance::requirement_model::RequirementReconciliationState::ExistingChanged => "existing_changed",
+            crate::compliance::requirement_model::RequirementReconciliationState::NewRequirement => "new_requirement",
+            crate::compliance::requirement_model::RequirementReconciliationState::IdentityConflict => "identity_conflict",
+        };
+        rows.push(serde_json::json!({
+            "rule_id": rule.id,
+            "external_id": requirement.external_id,
+            "title": rule.title,
+            "state": state,
+            "auto_resolvable": auto_resolvable,
+            "inferred_enforcement": inferred_enforcement,
+            "candidates": candidates.into_iter().map(|candidate| serde_json::json!({
+                "policy_id": candidate.policy_id,
+                "policy_version_id": candidate.policy_version_id,
+                "policy_name": candidate.policy_name,
+                "match_type": match candidate.match_type {
+                    crate::compliance::requirement_model::PolicyCandidateMatchType::AuthoritativeMapping => "authoritative_mapping",
+                    crate::compliance::requirement_model::PolicyCandidateMatchType::InheritedMapping => "inherited_mapping",
+                    crate::compliance::requirement_model::PolicyCandidateMatchType::ExactTechnicalMatch => "exact_technical_match",
+                    crate::compliance::requirement_model::PolicyCandidateMatchType::RelatedMapping => "related_mapping",
+                    crate::compliance::requirement_model::PolicyCandidateMatchType::FuzzySimilarity => "fuzzy_similarity",
+                },
+                "confidence": candidate.confidence,
+                "match_reasons": candidate.match_reasons,
+            })).collect::<Vec<_>>(),
+        }));
+    }
+
+    Ok(Some(serde_json::json!({
+        "framework": {
+            "canonical_source_key": framework.canonical_source_key,
+            "canonical_release_key": framework.canonical_release_key,
+            "state": match framework.state {
+                crate::compliance::requirement_model::FrameworkReconciliationState::ExactArtifact => "exact_artifact",
+                crate::compliance::requirement_model::FrameworkReconciliationState::ExistingRelease => "existing_release",
+                crate::compliance::requirement_model::FrameworkReconciliationState::NewRelease => "new_release",
+                crate::compliance::requirement_model::FrameworkReconciliationState::ReleaseConflict => "release_conflict",
+                crate::compliance::requirement_model::FrameworkReconciliationState::NewFramework => "new_framework",
+            },
+        },
+        "requirements": rows,
+    })))
+}
+
 /// `POST /api/v1/compliance/xccdf/preview`
 ///
 /// Accepts multipart XML upload, parses XCCDF 1.2 and CF-XCCDF content,
@@ -3919,6 +4024,20 @@ pub async fn xccdf_preview(
                 .into_response();
         }
     };
+    let foreign_stig_reconciliation =
+        match compute_foreign_stig_reconciliation(&pool, &parsed, &original_sha256).await {
+            Ok(reconciliation) => reconciliation,
+            Err(message) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "STIG reconciliation failed",
+                        "message": message,
+                    })),
+                )
+                    .into_response();
+            }
+        };
 
     let rule_summaries: Vec<serde_json::Value> = parsed
         .rules
@@ -4089,6 +4208,9 @@ pub async fn xccdf_preview(
     if let Some(recon) = cf_native_reconciliation {
         response["cf_native_reconciliation"] =
             serde_json::to_value(recon).unwrap_or(serde_json::Value::Null);
+    }
+    if let Some(recon) = foreign_stig_reconciliation {
+        response["foreign_stig_reconciliation"] = recon;
     }
 
     (StatusCode::OK, Json(response)).into_response()

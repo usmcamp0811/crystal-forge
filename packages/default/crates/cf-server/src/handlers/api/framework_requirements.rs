@@ -36,7 +36,8 @@ use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::framework_requirements::{
     BundleCoverageReport, FrameworkSummary, FrameworkVersionSummary, PolicyMappingRow,
     RequirementVersionSummary, compute_bundle_requirement_coverage, create_policy_mapping,
-    delete_policy_mapping, list_framework_versions, list_frameworks, list_policy_mappings,
+    delete_policy_mapping, list_framework_mapped_policy_versions, list_framework_versions,
+    list_frameworks, list_policy_mappings,
     list_requirement_children, search_requirements, update_policy_mapping,
 };
 
@@ -174,6 +175,30 @@ pub async fn list_compliance_framework_versions(
                 "failed to list framework versions"
             );
             internal_error("Failed to list framework versions")
+        }
+    }
+}
+
+/// `GET /api/v1/compliance/frameworks/:id/mapped-policy-versions`
+///
+/// Compact policy projection used by bundle editors to divide the picker into
+/// normalized framework mappings and explicit custom additions.
+pub async fn list_framework_mapped_policies(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(framework_id): Path<Uuid>,
+) -> impl IntoResponse {
+    if authenticated_user_roles(&pool, &headers).await.is_none() {
+        return forbidden();
+    }
+    match list_framework_mapped_policy_versions(&pool, framework_id).await {
+        Ok(policy_version_ids) => {
+            (StatusCode::OK, Json(serde_json::json!({ "policy_version_ids": policy_version_ids })))
+                .into_response()
+        }
+        Err(error) => {
+            tracing::error!(error = %error, framework_id = %framework_id, "failed to list mapped policy versions");
+            internal_error("Failed to list mapped policy versions")
         }
     }
 }

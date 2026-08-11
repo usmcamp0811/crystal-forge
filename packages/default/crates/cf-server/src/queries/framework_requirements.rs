@@ -174,6 +174,30 @@ pub async fn list_framework_versions(
     .context("failed to list framework versions")
 }
 
+/// Return the exact policy-version IDs with at least one normalized mapping to
+/// any release of `framework_id`.  Bundle editors use this compact projection
+/// to split a policy picker into framework-mapped and custom additions without
+/// issuing one mapping request per policy.
+pub async fn list_framework_mapped_policy_versions(
+    pool: &PgPool,
+    framework_id: Uuid,
+) -> Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT m.policy_version_id
+        FROM policy_requirement_mappings m
+        JOIN compliance_requirement_versions rv ON rv.id = m.requirement_version_id
+        JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id
+        WHERE fv.framework_id = $1
+        ORDER BY m.policy_version_id
+        "#,
+    )
+    .bind(framework_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to list mapped policy versions for framework")
+}
+
 // ── Requirement search ────────────────────────────────────────────────────────
 
 /// Server-side paginated requirement search within a framework version.

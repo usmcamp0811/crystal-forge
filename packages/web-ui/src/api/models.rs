@@ -1532,6 +1532,47 @@ pub struct XccdfPreviewResponse {
     /// CF-native reconciliation data (present only for CfNativeExact documents)
     #[serde(default)]
     pub cf_native_reconciliation: Option<CfNativeReconciliationPreview>,
+    /// Requirement-aware reconciliation for a foreign DISA STIG.  This is
+    /// server-computed from normalized framework/requirement/mapping data.
+    #[serde(default)]
+    pub foreign_stig_reconciliation: Option<ForeignStigReconciliationPreview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignStigReconciliationPreview {
+    pub framework: ForeignStigFrameworkReconciliation,
+    #[serde(default)]
+    pub requirements: Vec<ForeignStigRequirementReconciliation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignStigFrameworkReconciliation {
+    pub canonical_source_key: String,
+    pub canonical_release_key: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignStigRequirementReconciliation {
+    pub rule_id: String,
+    pub external_id: String,
+    pub title: Option<String>,
+    pub state: String,
+    pub auto_resolvable: bool,
+    pub inferred_enforcement: bool,
+    #[serde(default)]
+    pub candidates: Vec<ForeignStigPolicyCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignStigPolicyCandidate {
+    pub policy_id: Uuid,
+    pub policy_version_id: Uuid,
+    pub policy_name: String,
+    pub match_type: String,
+    pub confidence: u8,
+    #[serde(default)]
+    pub match_reasons: Vec<String>,
 }
 
 /// CF-native reconciliation preview for import
@@ -3690,6 +3731,14 @@ pub struct ComplianceFrameworkVersionSummary {
     pub published_at: Option<String>,
     pub semantic_digest: String,
     pub requirement_count: i64,
+}
+
+/// Compact projection used to split a bundle picker into mapped policies and
+/// explicit custom additions for a selected normalized framework.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FrameworkMappedPolicyVersionsResponse {
+    #[serde(default)]
+    pub policy_version_ids: Vec<Uuid>,
 }
 
 /// A single requirement version row from a search or list.

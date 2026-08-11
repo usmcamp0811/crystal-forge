@@ -5,8 +5,9 @@ use crate::api::client::{
     delete_compliance_bundle, fetch_bundle_requirement_coverage,
     fetch_bundle_version_policy_membership,
     fetch_compliance_bundle_systems, fetch_compliance_bundles, fetch_compliance_system_evidence,
-    fetch_environments, fetch_policies, fetch_systems, import_xccdf, preview_compliance_assignment,
-    preview_xccdf, publish_bundle_version, trust_bundle_version, update_compliance_bundle,
+    fetch_compliance_frameworks, fetch_environments, fetch_framework_mapped_policy_versions,
+    fetch_policies, fetch_systems, import_xccdf, preview_compliance_assignment, preview_xccdf,
+    publish_bundle_version, trust_bundle_version, update_compliance_bundle,
 };
 use crate::api::models::{
     BundleCoverageReport, BundleCoverageRow, ComplianceBundleSummary, ComplianceBundleSystemsResponse,
@@ -1906,6 +1907,9 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
     let mut bench_ver = use_signal(String::new);
     let mut selected_envs = use_signal(|| Vec::<String>::new());
     let mut cursor = use_signal(|| 0usize);
+    // Source rule IDs shown in the refine walkthrough.  All selected controls
+    // remain in the import plan; this only narrows the human-review path.
+    let mut refine_rule_ids = use_signal(Vec::<String>::new);
     let mut parse_error = use_signal(|| Option::<String>::None);
     // done-step summary
     let mut done_total = use_signal(|| 0usize);
@@ -1949,6 +1953,43 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
     let can_advance = sel_count > 0
         && !bundle_name.read().trim().is_empty()
         && (props.environments.is_empty() || !selected_envs.read().is_empty());
+    let reconciliation_rows = preview_response
+        .read()
+        .as_ref()
+        .and_then(|preview| preview.foreign_stig_reconciliation.as_ref())
+        .map(|reconciliation| reconciliation.requirements.clone())
+        .unwrap_or_default();
+    let selected_rule_ids: std::collections::HashSet<String> = selected_rules
+        .iter()
+        .map(|rule| rule.rule_id.clone())
+        .collect();
+    let reconciliation_rows: Vec<_> = reconciliation_rows
+        .into_iter()
+        .filter(|row| selected_rule_ids.contains(&row.rule_id))
+        .collect();
+    let attention_rule_ids: Vec<String> = reconciliation_rows
+        .iter()
+        .filter(|row| !row.auto_resolvable || row.state == "identity_conflict")
+        .map(|row| row.rule_id.clone())
+        .collect();
+    let reused_count = reconciliation_rows
+        .iter()
+        .filter(|row| !row.candidates.is_empty())
+        .count();
+    let ready_count = reconciliation_rows
+        .iter()
+        .filter(|row| row.candidates.is_empty() && row.auto_resolvable)
+        .count();
+    let review_count = if attention_rule_ids.is_empty() {
+        sel_count
+    } else {
+        attention_rule_ids.len()
+    };
+    let refine_all_rule_ids: Vec<String> = selected_rules
+        .iter()
+        .map(|rule| rule.rule_id.clone())
+        .collect();
+    let fallback_review_rule_ids = refine_all_rule_ids.clone();
 
     rsx! {
         div {
@@ -2395,17 +2436,15 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         div { style: "display:flex;gap:8px;",
                             button {
                                 class: "btn btn-primary focus-ring",
-                                "data-testid": "xccdf-review-refine-button",
+                                "data-testid": "xccdf-review-reconcile-button",
                                 disabled: !can_advance || *committing.read(),
                                 style: if !can_advance || *committing.read() { "opacity:0.5;cursor:not-allowed;" } else { "" },
                                 onclick: move |_| {
                                     if can_advance && !*committing.read() {
-                                        cursor.set(0);
-                                        step.set("refine".to_string());
+                                        step.set("reconcile".to_string());
                                     }
                                 },
-                                "Refine {sel_count} "
-                                if sel_count == 1 { "policy" } else { "policies" }
+                                "Continue "
                                 Icon { name: IconName::ChevronRight, size: 13 }
                             }
                             button {
@@ -2481,6 +2520,106 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                 }
 
                 // ══════════════════════════════════════════════════════
+                // STEP: reconcile (DISA STIG requirement reconciliation)
+                // ══════════════════════════════════════════════════════
+                if *step.read() == "reconcile" {
+                    div { class: "modal-head",
+                        h2 { style: "display:flex;align-items:center;gap:8px;",
+                            Icon { name: IconName::Link, size: 14 }
+                            "Reconciling {sel_count} controls"
+                        }
+                        p { "Checked each control against normalized requirements and policy mappings already on file before asking you to do anything." }
+                    }
+                    div { class: "modal-body", style: "overflow-y:auto;",
+                        div { style: "display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px;",
+                            for (count, label, color) in [
+                                (reused_count, "existing implementations reused", "#34d399"),
+                                (ready_count, "ready to create — enforcement inferred", "#60a5fa"),
+                                (attention_rule_ids.len(), "need review — no automatic resolution", if attention_rule_ids.is_empty() { "var(--cf-text-muted)" } else { "#fbbf24" }),
+                            ] {
+                                div { class: "card", style: "padding:14px 12px;text-align:center;",
+                                    div { style: "font-size:24px;font-weight:700;color:{color};", "{count}" }
+                                    div { style: "font-size:11px;color:var(--cf-text-muted);line-height:1.4;margin-top:2px;", "{label}" }
+                                }
+                            }
+                        }
+                        if reconciliation_rows.is_empty() {
+                            div { class: "sd-callout sd-callout-warn",
+                                Icon { name: IconName::Warn, size: 13 }
+                                div { style: "font-size:12px;", "This XCCDF source does not expose a stable DISA STIG identity. Review all selected controls before importing." }
+                            }
+                        }
+                        if !attention_rule_ids.is_empty() {
+                            div { class: "field",
+                                label { "Requiring attention · {attention_rule_ids.len()}" }
+                                div { style: "display:flex;flex-direction:column;gap:5px;max-height:220px;overflow-y:auto;",
+                                    for row in reconciliation_rows.iter().filter(|row| !row.auto_resolvable || row.state == "identity_conflict") {
+                                        div { key: "attention-{row.rule_id}", style: "display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-radius:8px;border:1px solid var(--cf-divider);",
+                                            span { style: "color:#fbbf24;margin-top:2px;flex-shrink:0;display:inline-flex;", Icon { name: IconName::Warn, size: 13 } }
+                                            div { style: "min-width:0;",
+                                                div { style: "font-size:12.5px;font-weight:600;line-height:1.4;", "{row.title.clone().unwrap_or_else(|| row.external_id.clone())}" }
+                                                div { class: "mono", style: "font-size:10.5px;color:var(--cf-text-muted);", "{row.external_id}" }
+                                                div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;",
+                                                    if row.state == "identity_conflict" { "Requirement identity conflict needs a human decision." } else { "No trusted mapped implementation or inferred enforcement is available." }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if reused_count + ready_count > 0 {
+                            details { style: "margin-top:4px;",
+                                summary { style: "cursor:pointer;font-size:11.5px;font-weight:600;color:var(--cf-text-muted);", "Show {reused_count + ready_count} auto-resolved controls" }
+                                div { style: "display:flex;flex-direction:column;gap:5px;margin-top:8px;max-height:220px;overflow-y:auto;",
+                                    for row in reconciliation_rows.iter().filter(|row| row.auto_resolvable && row.state != "identity_conflict") {
+                                        div { key: "resolved-{row.rule_id}", style: "display:flex;gap:10px;align-items:flex-start;padding:7px 10px;border-radius:8px;background:var(--cf-subtle-bg);",
+                                            span { style: if !row.candidates.is_empty() { "color:#34d399;margin-top:2px;display:inline-flex;" } else { "color:#60a5fa;margin-top:2px;display:inline-flex;" }, Icon { name: if !row.candidates.is_empty() { IconName::Check } else { IconName::Shield }, size: 12 } }
+                                            div { style: "min-width:0;",
+                                                div { style: "font-size:12px;font-weight:600;line-height:1.4;", "{row.title.clone().unwrap_or_else(|| row.external_id.clone())}" }
+                                                div { style: "font-size:10.5px;color:var(--cf-text-muted);margin-top:1px;",
+                                                    if let Some(candidate) = row.candidates.first() { "Reuses {candidate.policy_name}" } else { "Enforcement inferred from the STIG fix text" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "modal-foot", style: "justify-content:space-between;",
+                        button { class: "btn btn-ghost focus-ring", onclick: move |_| step.set("review".to_string()), Icon { name: IconName::ArrowLeft, size: 13 } " Back" }
+                        div { style: "display:flex;gap:8px;align-items:center;",
+                            button {
+                                class: "btn btn-ghost focus-ring",
+                                title: "Walk through every control, not just the ones needing attention",
+                                onclick: move |_| {
+                                    refine_rule_ids.set(refine_all_rule_ids.clone());
+                                    cursor.set(0);
+                                    step.set("refine".to_string());
+                                },
+                                "Refine all instead"
+                            }
+                            if attention_rule_ids.is_empty() && !reconciliation_rows.is_empty() {
+                                button { class: "btn btn-primary focus-ring", onclick: move |_| step.set("final-review".to_string()), Icon { name: IconName::Check, size: 13 } " Create bundle + {sel_count} policies" }
+                            } else {
+                                button {
+                                    class: "btn btn-primary focus-ring",
+                                    onclick: move |_| {
+                                        let scope = if attention_rule_ids.is_empty() { fallback_review_rule_ids.clone() } else { attention_rule_ids.clone() };
+                                        refine_rule_ids.set(scope);
+                                        cursor.set(0);
+                                        step.set("refine".to_string());
+                                    },
+                                    "Review {review_count} controls "
+                                    Icon { name: IconName::ChevronRight, size: 13 }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ══════════════════════════════════════════════════════
                 // STEP: refine (structured per-control walkthrough)
                 // ══════════════════════════════════════════════════════
                 if *step.read() == "refine" {
@@ -2491,8 +2630,9 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         RefinePolicyStep {
                             rules: refined_rules_signal,
                             cursor: cursor_signal,
+                            review_rule_ids: Some(refine_rule_ids.read().clone()),
                             existing_policies: props.existing_policies.clone(),
-                            on_back: move |_| step.set("review".to_string()),
+                            on_back: move |_| step.set("reconcile".to_string()),
                             on_review: move |_| step.set("final-review".to_string()),
                         }
                     }
@@ -3429,6 +3569,162 @@ fn BundleFrameworkField(props: BundleFrameworkFieldProps) -> Element {
 }
 
 #[derive(Props, Clone, PartialEq)]
+struct BundlePolicyPickerProps {
+    framework: Signal<String>,
+    policies: Vec<DeploymentPolicySummary>,
+    selected_policy_ids: Signal<Vec<uuid::Uuid>>,
+}
+
+/// Framework-aware bundle policy selector.  The split is driven by the
+/// authoritative mapping projection, not legacy policy framework metadata.
+#[component]
+fn BundlePolicyPicker(props: BundlePolicyPickerProps) -> Element {
+    let mut query = use_signal(String::new);
+    let mut mapped_policy_version_ids = use_signal(Vec::<uuid::Uuid>::new);
+    let mut loaded_framework_name = use_signal(|| None::<String>);
+    let mut loading = use_signal(|| false);
+    let framework_name = props.framework.read().trim().to_string();
+
+    if *loaded_framework_name.read() != Some(framework_name.clone()) && !*loading.read() {
+        loaded_framework_name.set(Some(framework_name.clone()));
+        mapped_policy_version_ids.set(vec![]);
+        loading.set(true);
+        let framework_name_for_request = framework_name.clone();
+        spawn(async move {
+            let mapped = match fetch_compliance_frameworks().await {
+                Ok(frameworks) => match frameworks
+                    .iter()
+                    .find(|framework| {
+                        framework.name.eq_ignore_ascii_case(&framework_name_for_request)
+                            || (framework_name_for_request.eq_ignore_ascii_case("DISA STIG")
+                                && framework
+                                    .canonical_source_key
+                                    .to_ascii_lowercase()
+                                    .starts_with("disa-"))
+                    })
+                {
+                    Some(framework) => fetch_framework_mapped_policy_versions(&framework.id)
+                        .await
+                        .map(|response| response.policy_version_ids)
+                        .unwrap_or_default(),
+                    None => vec![],
+                },
+                Err(_) => vec![],
+            };
+            mapped_policy_version_ids.set(mapped);
+            loading.set(false);
+        });
+    }
+
+    let filter = query.read().to_ascii_lowercase();
+    let matches_query = |policy: &&DeploymentPolicySummary| {
+        filter.is_empty()
+            || policy.name.to_ascii_lowercase().contains(&filter)
+            || policy
+                .description
+                .as_deref()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .contains(&filter)
+    };
+    let mapped_versions = mapped_policy_version_ids.read().clone();
+    let mapped: Vec<_> = props
+        .policies
+        .iter()
+        .filter(|policy| {
+            policy
+                .version_id
+                .is_some_and(|version_id| mapped_versions.contains(&version_id))
+                && matches_query(policy)
+        })
+        .cloned()
+        .collect();
+    let custom: Vec<_> = props
+        .policies
+        .iter()
+        .filter(|policy| {
+            !policy
+                .version_id
+                .is_some_and(|version_id| mapped_versions.contains(&version_id))
+                && matches_query(policy)
+        })
+        .cloned()
+        .collect();
+    let selected_count = props.selected_policy_ids.read().len();
+
+    rsx! {
+        div { style: "padding:14px;border:1px solid var(--cf-divider);border-radius:10px;background:color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg));",
+            div { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;",
+                div { style: "font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px;",
+                    Icon { name: IconName::File, size: 13 }
+                    "Controls in this bundle"
+                    span { class: "chip chip-info", style: "font-size:10px;", "{selected_count} selected" }
+                }
+                div { class: "filter-search", style: "max-width:200px;margin:0;",
+                    Icon { name: IconName::Search, size: 14 }
+                    input { class: "input focus-ring", placeholder: "Filter policies…", value: "{query}", oninput: move |event| query.set(event.value()) }
+                }
+            }
+            if *loading.read() {
+                div { style: "font-size:11px;color:var(--cf-text-muted);padding:4px 0 8px;", "Loading normalized mappings…" }
+            }
+            BundlePolicyPickerSection {
+                title: format!("Mapped to {framework_name}"),
+                subtitle: "Policies with an authoritative requirement mapping to this framework.",
+                policies: mapped,
+                selected_policy_ids: props.selected_policy_ids,
+            }
+            BundlePolicyPickerSection {
+                title: format!("Custom addition / No mapping to {framework_name}"),
+                subtitle: "Explicit additions. These policies are included without claiming framework ownership.",
+                policies: custom,
+                selected_policy_ids: props.selected_policy_ids,
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct BundlePolicyPickerSectionProps {
+    title: String,
+    subtitle: &'static str,
+    policies: Vec<DeploymentPolicySummary>,
+    selected_policy_ids: Signal<Vec<uuid::Uuid>>,
+}
+
+#[component]
+fn BundlePolicyPickerSection(mut props: BundlePolicyPickerSectionProps) -> Element {
+    rsx! {
+        div { style: "display:flex;flex-direction:column;gap:4px;margin-top:12px;",
+            div { style: "font-size:11px;font-weight:700;color:var(--cf-text-secondary);", "{props.title}" }
+            div { style: "font-size:10.5px;color:var(--cf-text-muted);margin-bottom:3px;", "{props.subtitle}" }
+            if props.policies.is_empty() {
+                div { style: "font-size:11px;color:var(--cf-text-muted);padding:7px 0;", "No policies in this section." }
+            }
+            for policy in props.policies {
+                {
+                    let policy_id = policy.id;
+                    let selected = props.selected_policy_ids.read().contains(&policy_id);
+                    let description = policy.description.clone().unwrap_or_default();
+                    rsx! {
+                        button {
+                            key: "{policy_id}", class: "focus-ring",
+                            style: if selected { "all:unset;cursor:pointer;display:flex;gap:10px;align-items:flex-start;padding:9px 11px;border-radius:8px;border:1px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 9%,var(--cf-card-bg));" } else { "all:unset;cursor:pointer;display:flex;gap:10px;align-items:flex-start;padding:9px 11px;border-radius:8px;border:1px solid var(--cf-divider);background:var(--cf-card-bg);" },
+                            onclick: move |_| toggle_uuid(&mut props.selected_policy_ids, policy_id),
+                            div { style: if selected { "width:16px;height:16px;border-radius:5px;flex-shrink:0;margin-top:1px;border:1.5px solid var(--cf-brand-purple);background:var(--cf-brand-purple);display:grid;place-items:center;" } else { "width:16px;height:16px;border-radius:5px;flex-shrink:0;margin-top:1px;border:1.5px solid var(--cf-card-border);background:transparent;display:grid;place-items:center;" }, if selected { span { style: "color:#fff;display:inline-flex;", Icon { name: IconName::Check, size: 11 } } } }
+                            div { style: "min-width:0;flex:1;",
+                                div { style: "display:flex;align-items:center;gap:8px;", span { class: "mono", style: "font-size:12px;font-weight:600;", "{policy.name}" } span { class: "chip chip-unknown", style: "font-size:9px;", "{policy.policy_type}" } }
+                                div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{description}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
 struct NewBundleModalProps {
     policies: Vec<DeploymentPolicySummary>,
     bundles: Vec<ComplianceBundleSummary>,
@@ -3557,74 +3853,7 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
                         }
                     }
 
-                    // Policy picker
-                    div {
-                        style: "padding:14px;border:1px solid var(--cf-divider);border-radius:10px;background:color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg));",
-                        div {
-                            style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;",
-                            div {
-                                style: "font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px;",
-                                Icon { name: IconName::File, size: 13 }
-                                "Controls in this bundle"
-                                span { class: "chip chip-info", style: "font-size:10px;", "{selected_policy_ids.read().len()} selected" }
-                            }
-                            div { class: "filter-search", style: "max-width:200px;margin:0;",
-                                Icon { name: IconName::Search, size: 14 }
-                                input {
-                                    class: "input focus-ring",
-                                    placeholder: "Filter policies…",
-                                    value: "{query}",
-                                    oninput: move |e| query.set(e.value()),
-                                }
-                            }
-                        }
-                        div { style: "display:flex;flex-direction:column;gap:4px;max-height:260px;overflow-y:auto;",
-                            if filtered_policies.is_empty() {
-                                div {
-                                    style: "font-size:12px;color:var(--cf-text-muted);padding:16px 0;text-align:center;",
-                                    "No policies match. Define new policies in the Policies view."
-                                }
-                            }
-                            for policy in filtered_policies.iter() {
-                                {
-                                    let pid = policy.id;
-                                    let pname = policy.name.clone();
-                                    let pdesc = policy.description.clone().unwrap_or_default();
-                                    let ptype = policy.policy_type.clone();
-                                    let on = selected_policy_ids.read().contains(&pid);
-                                    rsx! {
-                                        button {
-                                            class: "focus-ring",
-                                            style: if on {
-                                                "all:unset;cursor:pointer;display:flex;gap:10px;align-items:flex-start;padding:9px 11px;border-radius:8px;border:1px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 9%,var(--cf-card-bg));"
-                                            } else {
-                                                "all:unset;cursor:pointer;display:flex;gap:10px;align-items:flex-start;padding:9px 11px;border-radius:8px;border:1px solid var(--cf-divider);background:var(--cf-card-bg);"
-                                            },
-                                            onclick: move |_| toggle_uuid(&mut selected_policy_ids, pid),
-                                            // Checkbox
-                                            div {
-                                                style: if on {
-                                                    "width:16px;height:16px;border-radius:5px;flex-shrink:0;margin-top:1px;border:1.5px solid var(--cf-brand-purple);background:var(--cf-brand-purple);display:grid;place-items:center;"
-                                                } else {
-                                                    "width:16px;height:16px;border-radius:5px;flex-shrink:0;margin-top:1px;border:1.5px solid var(--cf-card-border);background:transparent;display:grid;place-items:center;"
-                                                },
-                                                if on {
-                                                    span { style: "color:#fff;display:inline-flex;", Icon { name: IconName::Check, size: 11 } }
-                                                }
-                                            }
-                                            div { style: "min-width:0;flex:1;",
-                                                div { style: "display:flex;align-items:center;gap:8px;",
-                                                    span { class: "mono", style: "font-size:12px;font-weight:600;", "{pname}" }
-                                                    span { class: "chip chip-unknown", style: "font-size:9px;", "{ptype}" }
-                                                }
-                                                div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{pdesc}" }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    BundlePolicyPicker { framework, policies: props.policies.clone(), selected_policy_ids }
 
                     if !can_save && !name.read().trim().is_empty() {
                         div { class: "help", style: "color:#fbbf24;margin-top:8px;",
@@ -3866,72 +4095,7 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                         }
                     }
 
-                    div {
-                        style: "padding:14px;border:1px solid var(--cf-divider);border-radius:10px;background:color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg));",
-                        div {
-                            style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;",
-                            div {
-                                style: "font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px;",
-                                Icon { name: IconName::File, size: 13 }
-                                "Controls in this bundle"
-                                span { class: "chip chip-info", style: "font-size:10px;", "{selected_policy_ids.read().len()} selected" }
-                            }
-                            div { class: "filter-search", style: "max-width:200px;margin:0;",
-                                Icon { name: IconName::Search, size: 14 }
-                                input {
-                                    class: "input focus-ring",
-                                    placeholder: "Filter policies…",
-                                    value: "{query}",
-                                    oninput: move |e| query.set(e.value()),
-                                }
-                            }
-                        }
-                        div { style: "display:flex;flex-direction:column;gap:4px;max-height:260px;overflow-y:auto;",
-                            if filtered_policies.is_empty() {
-                                div {
-                                    style: "font-size:12px;color:var(--cf-text-muted);padding:16px 0;text-align:center;",
-                                    "No policies match. Define new policies in the Policies view."
-                                }
-                            }
-                            for policy in filtered_policies.iter() {
-                                {
-                                    let pid = policy.id;
-                                    let pname = policy.name.clone();
-                                    let pdesc = policy.description.clone().unwrap_or_default();
-                                    let ptype = policy.policy_type.clone();
-                                    let on = selected_policy_ids.read().contains(&pid);
-                                    rsx! {
-                                        button {
-                                            class: "focus-ring",
-                                            style: if on {
-                                                "all:unset;cursor:pointer;display:flex;gap:10px;align-items:flex-start;padding:9px 11px;border-radius:8px;border:1px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 9%,var(--cf-card-bg));"
-                                            } else {
-                                                "all:unset;cursor:pointer;display:flex;gap:10px;align-items:flex-start;padding:9px 11px;border-radius:8px;border:1px solid var(--cf-divider);background:var(--cf-card-bg);"
-                                            },
-                                            onclick: move |_| toggle_uuid(&mut selected_policy_ids, pid),
-                                            div {
-                                                style: if on {
-                                                    "width:16px;height:16px;border-radius:5px;flex-shrink:0;margin-top:1px;border:1.5px solid var(--cf-brand-purple);background:var(--cf-brand-purple);display:grid;place-items:center;"
-                                                } else {
-                                                    "width:16px;height:16px;border-radius:5px;flex-shrink:0;margin-top:1px;border:1.5px solid var(--cf-card-border);background:transparent;display:grid;place-items:center;"
-                                                },
-                                                if on {
-                                                    span { style: "color:#fff;display:inline-flex;", Icon { name: IconName::Check, size: 11 } }
-                                                }
-                                            }
-                                            div { style: "min-width:0;flex:1;",
-                                                div { style: "display:flex;align-items:center;gap:8px;",
-                                                    span { class: "mono", style: "font-size:12px;font-weight:600;", "{pname}" }
-                                                    span { class: if ptype == "builtin" { "chip chip-unknown" } else { "chip chip-info" }, style: "font-size:9px;", "{ptype}" }
-                                                }
-                                                div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{pdesc}" }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    BundlePolicyPicker { framework, policies: props.policies.clone(), selected_policy_ids }
 
                     if selected_policy_ids.read().is_empty() {
                         div { class: "help", style: "color:#fbbf24;margin-top:8px;",
@@ -4280,6 +4444,7 @@ mod tests {
             errors: vec![],
             warnings: vec![],
             cf_native_reconciliation: None,
+            foreign_stig_reconciliation: None,
         };
 
         let rules = rules_from_preview(&preview);
