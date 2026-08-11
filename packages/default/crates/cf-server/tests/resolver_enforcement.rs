@@ -187,6 +187,7 @@ fn assert_unresolved_conflict(outcome: &ResolutionOutcome) {
 // ── Tests A–G: single-assignment preview ──────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "requires a disposable PostgreSQL database"]
 async fn enforce_baseline_unbound_rejected() {
     let pool = pool().await;
     let (policy_id, version_id) = policy_with_implementation_state(&pool, "unbound").await;
@@ -207,6 +208,7 @@ async fn enforce_baseline_unbound_rejected() {
 }
 
 #[tokio::test]
+#[ignore = "requires a disposable PostgreSQL database"]
 async fn enforce_baseline_opaque_rejected() {
     let pool = pool().await;
     let (policy_id, version_id) = policy_with_implementation_state(&pool, "opaque").await;
@@ -227,6 +229,7 @@ async fn enforce_baseline_opaque_rejected() {
 }
 
 #[tokio::test]
+#[ignore = "requires a disposable PostgreSQL database"]
 async fn enforce_baseline_unbound_excluded_succeeds() {
     let pool = pool().await;
     let (policy_id, version_id) = policy_with_implementation_state(&pool, "unbound").await;
@@ -259,6 +262,7 @@ async fn enforce_baseline_unbound_excluded_succeeds() {
 }
 
 #[tokio::test]
+#[ignore = "requires a disposable PostgreSQL database"]
 async fn enforce_unbound_addition_rejected() {
     let pool = pool().await;
     let (policy_id, version_id) = policy_with_implementation_state(&pool, "unbound").await;
@@ -278,6 +282,7 @@ async fn enforce_unbound_addition_rejected() {
 }
 
 #[tokio::test]
+#[ignore = "requires a disposable PostgreSQL database"]
 async fn enforce_opaque_addition_rejected() {
     let pool = pool().await;
     let (policy_id, version_id) = policy_with_implementation_state(&pool, "opaque").await;
@@ -297,6 +302,7 @@ async fn enforce_opaque_addition_rejected() {
 }
 
 #[tokio::test]
+#[ignore = "requires a disposable PostgreSQL database"]
 async fn report_only_unbound_succeeds() {
     let pool = pool().await;
     let (policy_id, version_id) = policy_with_implementation_state(&pool, "unbound").await;
@@ -324,6 +330,7 @@ async fn report_only_unbound_succeeds() {
 }
 
 #[tokio::test]
+#[ignore = "requires a disposable PostgreSQL database"]
 async fn report_only_opaque_succeeds() {
     let pool = pool().await;
     let (policy_id, version_id) = policy_with_implementation_state(&pool, "opaque").await;
@@ -353,6 +360,7 @@ async fn report_only_opaque_succeeds() {
 // ── Test H: combined environment/system resolution ────────────────────────────
 
 #[tokio::test]
+#[ignore = "requires a disposable PostgreSQL database"]
 async fn combined_resolution_does_not_bypass_enforce_validation() {
     let pool = pool().await;
 

@@ -2436,7 +2436,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                     spawn(async move {
                                         match import_xccdf(&bytes, &fname, &plan).await {
                                             Ok(result) => {
-                                                let total = result.created_policy_count + result.reused_policy_count;
+                                                let total = result.created_policy_count + result.reused_policy_versions;
                                                 done_total.set(total as usize);
                                                 import_result.set(Some(result));
                                                 committing.set(false);
@@ -2503,7 +2503,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 spawn(async move {
                                     match import_xccdf(&bytes, &filename, &plan).await {
                                         Ok(result) => {
-                                            done_total.set((result.created_policy_count + result.reused_policy_count) as usize);
+                                            done_total.set((result.created_policy_count + result.reused_policy_versions) as usize);
                                             import_result.set(Some(result));
                                             committing.set(false);
                                             step.set("done".into());
@@ -2537,7 +2537,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         // Stats grid — created / reused / total
                         {
                             let created = import_result.read().as_ref().map(|r| r.created_policy_count).unwrap_or(0);
-                            let reused = import_result.read().as_ref().map(|r| r.reused_policy_count).unwrap_or(0);
+                            let reused = import_result.read().as_ref().map(|r| r.reused_policy_versions).unwrap_or(0);
                             let total = created + reused;
                             rsx! {
                                 div { style: "display:grid;grid-template-columns:repeat(3,1fr);gap:10px;",
@@ -4257,6 +4257,7 @@ mod tests {
             profile_count: 0,
             errors: vec![],
             warnings: vec![],
+            cf_native_reconciliation: None,
         };
 
         let rules = rules_from_preview(&preview);

@@ -783,18 +783,26 @@ pub async fn commit_cf_native_import(
 
     for record in &policy_records {
         let policy_version_id = resolved_by_version[&record.policy_version_id];
-        sqlx::query(
-            "INSERT INTO compliance_bundle_version_policies \
-             (bundle_version_id, policy_version_id, policy_order, selected) VALUES ($1, $2, $3, $4) \
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(bundle_version_id)
-        .bind(policy_version_id)
-        .bind(record.policy_order)
-        .bind(record.selected)
-        .execute(&mut *tx)
-        .await
-        .context("failed to persist CF-native bundle membership")?;
+        // Only write membership when this commit created the bundle version.
+        // On ReuseExact the planner already verified that the existing version
+        // has identical digest and membership, so the rows are present and
+        // rewriting them is redundant. A re-insert would also fire the
+        // membership immutability BEFORE trigger on published bundles and
+        // break the documented "an identical version is reused" contract.
+        if bundle_version_created {
+            sqlx::query(
+                "INSERT INTO compliance_bundle_version_policies \
+                 (bundle_version_id, policy_version_id, policy_order, selected) VALUES ($1, $2, $3, $4) \
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(bundle_version_id)
+            .bind(policy_version_id)
+            .bind(record.policy_order)
+            .bind(record.selected)
+            .execute(&mut *tx)
+            .await
+            .context("failed to persist CF-native bundle membership")?;
+        }
         upsert_native_mapping(
             &mut tx,
             source_artifact_id,
@@ -1048,13 +1056,39 @@ async fn insert_native_bundle_version(
     bundle_version_id: Uuid,
     digest: &str,
 ) -> Result<()> {
+    // The CF-native document carries no bundle version string; the stored
+    // value is display metadata and is not part of the portable identity or
+    // the semantic digest. Keep the placeholder label for the first version
+    // of a lineage and deterministically disambiguate with a short form of
+    // the portable version UUID when the label is already taken, so a new
+    // version in an existing lineage satisfies the UNIQUE (bundle_id, version)
+    // constraint instead of failing with a raw constraint error.
+    let version_label = {
+        let base = "0.1.0";
+        let taken: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM compliance_bundle_versions \
+             WHERE bundle_id = $1 AND version = $2 LIMIT 1",
+        )
+        .bind(bundle_id)
+        .bind(base)
+        .fetch_optional(&mut **tx)
+        .await
+        .context("failed to check CF-native bundle version label")?;
+        match taken {
+            Some(existing) if existing != bundle_version_id => {
+                format!("{}-{}", base, &bundle_version_id.simple().to_string()[..8])
+            }
+            _ => base.to_string(),
+        }
+    };
     sqlx::query(
         "INSERT INTO compliance_bundle_versions \
          (id,bundle_id,version,publication_state,name,framework,framework_version,description,layer,owner,semantic_digest,source_artifact_id,created_by) \
-         VALUES ($1,$2,'0.1.0','draft',$3,$4,$5,$6,$7,$8,$9,NULL,$10)",
+         VALUES ($1,$2,$3,'draft',$4,$5,$6,$7,$8,$9,$10,NULL,$11)",
     )
     .bind(bundle_version_id)
     .bind(bundle_id)
+    .bind(&version_label)
     .bind(&validated.bundle.name)
     .bind(&validated.bundle.framework)
     .bind(&validated.bundle.version)
@@ -1240,6 +1274,29 @@ mod tests {
         policy_version_id: Uuid,
         strict: bool,
     ) -> Vec<u8> {
+        native_fixture_bytes_with_policy_version(
+            bundle_id,
+            bundle_version_id,
+            policy_id,
+            policy_version_id,
+            strict,
+            "1.0",
+        )
+    }
+
+    /// Variant that also controls the portable `<cf:policy-version>` label.
+    ///
+    /// Policy lineages enforce `UNIQUE (policy_id, version)`, so a document
+    /// that creates a second version in an existing lineage must carry a
+    /// distinct version label.
+    fn native_fixture_bytes_with_policy_version(
+        bundle_id: Uuid,
+        bundle_version_id: Uuid,
+        policy_id: Uuid,
+        policy_version_id: Uuid,
+        strict: bool,
+        policy_version_label: &str,
+    ) -> Vec<u8> {
         use crate::compliance::digest::{BundleVersionCanonical, PolicyVersionCanonical};
         let bundle_name = format!("Native Fixture Bundle {bundle_id}");
         let policy_name = format!("Native Agent Requirement {policy_id}");
@@ -1292,9 +1349,9 @@ mod tests {
   </cf:bundle>
   <Profile id="xccdf_test_profile"><select idref="xccdf_test_rule_{policy_version_id}" selected="true"/></Profile>
   <Rule id="xccdf_test_rule_{policy_version_id}"><title>{policy_name}</title><description>Requires the Crystal Forge agent</description>
-    <cf:policy-identity policy-id="urn:uuid:{policy_id}" policy-version-id="urn:uuid:{policy_version_id}" publication-state="draft" enabled-default="true" implementation-state="native" selected="true" policy-order="0">
-      <cf:policy-version>1.0</cf:policy-version><cf:content-digest algorithm="sha-256" canonical-model="cf-model-json-1">{policy_digest}</cf:content-digest>
-    </cf:policy-identity>
+      <cf:policy-identity policy-id="urn:uuid:{policy_id}" policy-version-id="urn:uuid:{policy_version_id}" publication-state="draft" enabled-default="true" implementation-state="native" selected="true" policy-order="0">
+        <cf:policy-version>{policy_version_label}</cf:policy-version><cf:content-digest algorithm="sha-256" canonical-model="cf-model-json-1">{policy_digest}</cf:content-digest>
+      </cf:policy-identity>
     <check system="urn:crystal-forge:check-system:policy:1"><check-content><cf:policy schema-version="1" policy-type="custom_check"><cf:execution phase="nix-evaluation" strict="true"/><cf:implementation state="native"><cf:custom-check mode="all" context="nixos-configuration-v1" binding="cfg"><cf:rule field-name="agentEnabled" strict="true"><cf:description>The agent is enabled</cf:description><cf:expression language="nix">cfg.config.services.crystal-forge-agent.enable</cf:expression></cf:rule></cf:custom-check></cf:implementation><cf:config-json>{config}</cf:config-json><cf:compliance-metadata-json>{metadata}</cf:compliance-metadata-json><cf:dependencies-json>{dependencies}</cf:dependencies-json></cf:policy></check-content></check>
   </Rule>
 </Benchmark>"#
@@ -2028,5 +2085,491 @@ mod tests {
             policy_count_before, policy_count_after,
             "preview must not insert policies"
         );
+    }
+
+    /// Publish a CF-native fixture lineage through the full trigger-safe
+    /// lifecycle, mirroring the handler order:
+    ///
+    /// 1. Trust the policy version while it is still draft.
+    /// 2. Publish the policy version: clear draft pointer, accept (DEFERRED
+    ///    trigger queued), then set the published pointer.
+    /// 3. Trust the bundle version while it is still draft.
+    /// 4. Publish the bundle version with the same trigger-safe order.
+    ///
+    /// Accepted versions cannot be deleted (immutability triggers), so tests
+    /// that publish intentionally leave their fixture rows behind, matching
+    /// the compliance.rs suite pattern of unique UUIDs per run.
+    async fn publish_native_lifecycle(
+        pool: &PgPool,
+        actor_id: Uuid,
+        policy_id: Uuid,
+        policy_version_id: Uuid,
+        bundle_id: Uuid,
+        bundle_version_id: Uuid,
+    ) {
+        let mut tx = pool.begin().await.expect("begin publish tx");
+
+        sqlx::query(
+            "UPDATE deployment_policy_versions \
+             SET trust_state = 'trusted', trusted_by = $2, trusted_at = CURRENT_TIMESTAMP \
+             WHERE id = $1",
+        )
+        .bind(policy_version_id)
+        .bind(actor_id)
+        .execute(&mut *tx)
+        .await
+        .expect("trust policy version");
+
+        sqlx::query(
+            "UPDATE deployment_policies SET current_draft_version_id = NULL \
+             WHERE id = $1 AND current_draft_version_id = $2",
+        )
+        .bind(policy_id)
+        .bind(policy_version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("clear policy draft pointer");
+        sqlx::query(
+            "UPDATE deployment_policy_versions \
+             SET publication_state = 'accepted', published_at = CURRENT_TIMESTAMP \
+             WHERE id = $1",
+        )
+        .bind(policy_version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("accept policy version");
+        sqlx::query(
+            "UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(policy_version_id)
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .expect("set policy published pointer");
+
+        sqlx::query(
+            "UPDATE compliance_bundle_versions \
+             SET trust_state = 'trusted', trusted_by = $2, trusted_at = CURRENT_TIMESTAMP \
+             WHERE id = $1",
+        )
+        .bind(bundle_version_id)
+        .bind(actor_id)
+        .execute(&mut *tx)
+        .await
+        .expect("trust bundle version");
+
+        sqlx::query(
+            "UPDATE compliance_bundles SET current_draft_version_id = NULL \
+             WHERE id = $1 AND current_draft_version_id = $2",
+        )
+        .bind(bundle_id)
+        .bind(bundle_version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("clear bundle draft pointer");
+        sqlx::query(
+            "UPDATE compliance_bundle_versions \
+             SET publication_state = 'accepted', published_at = CURRENT_TIMESTAMP \
+             WHERE id = $1",
+        )
+        .bind(bundle_version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("accept bundle version");
+        sqlx::query(
+            "UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(bundle_version_id)
+        .bind(bundle_id)
+        .execute(&mut *tx)
+        .await
+        .expect("set bundle published pointer");
+
+        tx.commit().await.expect("commit publish lifecycle");
+    }
+
+    /// Proof A: after a full publish lifecycle (trust while draft, then
+    /// publish policy before bundle in trigger-safe order), an exact re-import
+    /// of the same bytes must reuse the exact published identities. It must
+    /// not trip the bundle-membership immutability trigger, must not create or
+    /// rewrite rows, must leave publication/trust state and pointers
+    /// untouched, and must keep source mappings on the same exact versions.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn cf_native_reimport_exact_after_publish_lifecycle() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let (bytes, bundle_id, bundle_version_id, policy_id, policy_version_id) =
+            native_fixture_bytes();
+
+        let pkg = make_package(bytes.clone());
+        let (validated, records) =
+            crate::compliance::xccdf::importer::validate_cf_native_document(&pkg.parsed)
+                .expect("native fixture should validate");
+        let first = commit_cf_native_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("first native import");
+        assert_eq!(first.created_policy_versions, 1);
+        assert!(first.bundle_version_created);
+
+        publish_native_lifecycle(
+            &pool,
+            user_id,
+            policy_id,
+            policy_version_id,
+            bundle_id,
+            bundle_version_id,
+        )
+        .await;
+
+        // Confirm the published/trusted state before re-import.
+        let (pol_state, pol_trust): (String, String) = sqlx::query_as(
+            "SELECT publication_state, trust_state FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(policy_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((pol_state.as_str(), pol_trust.as_str()), ("accepted", "trusted"));
+        let (bun_state, bun_trust): (String, String) = sqlx::query_as(
+            "SELECT publication_state, trust_state FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((bun_state.as_str(), bun_trust.as_str()), ("accepted", "trusted"));
+
+        // Exact re-import of the same bytes must reuse, not error.
+        let second_pkg = make_package(bytes);
+        let (second_validated, second_records) =
+            crate::compliance::xccdf::importer::validate_cf_native_document(&second_pkg.parsed)
+                .expect("native fixture should validate on repeat");
+        let second =
+            commit_cf_native_import(&pool, user_id, second_pkg, second_validated, second_records)
+                .await
+                .expect("exact re-import after publish must reuse, not fail");
+        assert_eq!(second.created_policy_lineages, 0);
+        assert_eq!(second.created_policy_versions, 0);
+        assert_eq!(second.reused_policy_versions, 1);
+        assert!(!second.bundle_lineage_created);
+        assert!(!second.bundle_version_created);
+        assert_eq!(second.bundle_id, bundle_id);
+        assert_eq!(second.bundle_version_id, bundle_version_id);
+        assert_eq!(
+            second.source_artifact_id, first.source_artifact_id,
+            "sha256 dedupe must reuse the original artifact row"
+        );
+
+        // Lifecycle state must be unchanged by the re-import.
+        let (pol_state, pol_trust): (String, String) = sqlx::query_as(
+            "SELECT publication_state, trust_state FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(policy_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((pol_state.as_str(), pol_trust.as_str()), ("accepted", "trusted"));
+        let (bun_state, bun_trust): (String, String) = sqlx::query_as(
+            "SELECT publication_state, trust_state FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((bun_state.as_str(), bun_trust.as_str()), ("accepted", "trusted"));
+
+        // Pointer invariants survive the re-import.
+        let (pol_draft, pol_pub): (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            "SELECT current_draft_version_id, current_published_version_id \
+             FROM deployment_policies WHERE id = $1",
+        )
+        .bind(policy_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pol_draft, None);
+        assert_eq!(pol_pub, Some(policy_version_id));
+        let (bun_draft, bun_pub): (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            "SELECT current_draft_version_id, current_published_version_id \
+             FROM compliance_bundles WHERE id = $1",
+        )
+        .bind(bundle_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(bun_draft, None);
+        assert_eq!(bun_pub, Some(bundle_version_id));
+
+        // Membership must be unchanged: exactly one ordered row.
+        let members: Vec<(Uuid, bool, i32)> = sqlx::query_as(
+            "SELECT policy_version_id, selected, policy_order \
+             FROM compliance_bundle_version_policies WHERE bundle_version_id = $1 \
+             ORDER BY policy_order ASC",
+        )
+        .bind(bundle_version_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].0, policy_version_id);
+        assert!(members[0].1);
+        assert_eq!(members[0].2, 0);
+
+        // No duplicate rows anywhere.
+        let policy_versions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policy_versions WHERE policy_id = $1",
+        )
+        .bind(policy_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(policy_versions, 1);
+        let bundle_versions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_bundle_versions WHERE bundle_id = $1",
+        )
+        .bind(bundle_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(bundle_versions, 1);
+
+        // Source mappings must still point at the exact reused versions.
+        let (mapped_policy, mapped_bundle): (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            "SELECT policy_version_id, bundle_version_id FROM compliance_source_object_mappings \
+             WHERE source_artifact_id = $1 AND object_kind = 'rule' AND source_identity = $2",
+        )
+        .bind(second.source_artifact_id)
+        .bind(format!("xccdf_test_rule_{policy_version_id}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(mapped_policy, Some(policy_version_id));
+        assert_eq!(mapped_bundle, None);
+        let benchmark_mapped: Option<Uuid> = sqlx::query_scalar(
+            "SELECT bundle_version_id FROM compliance_source_object_mappings \
+             WHERE source_artifact_id = $1 AND object_kind = 'benchmark'",
+        )
+        .bind(second.source_artifact_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(benchmark_mapped, Some(bundle_version_id));
+    }
+
+    /// Proof B: committing a new version into an existing PUBLISHED lineage
+    /// must plan as `new_version` in the preview, create draft version B rows
+    /// in the same lineages, leave the accepted version A rows untouched, and
+    /// keep the draft/published pointers satisfying the deferred-trigger
+    /// invariants (draft points at B, published points at A).
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn cf_native_commit_new_version_in_existing_lineage() {
+        use crate::handlers::api::compliance::compute_cf_native_reconciliation;
+
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let (bytes_a, bundle_id, bundle_version_id, policy_id, policy_version_id) =
+            native_fixture_bytes();
+
+        // Import and publish version A, leaving no mutable draft behind.
+        let pkg = make_package(bytes_a.clone());
+        let (validated, records) =
+            crate::compliance::xccdf::importer::validate_cf_native_document(&pkg.parsed)
+                .expect("native fixture should validate");
+        let first = commit_cf_native_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("first native import");
+        assert_eq!(first.created_policy_versions, 1);
+        publish_native_lifecycle(
+            &pool,
+            user_id,
+            policy_id,
+            policy_version_id,
+            bundle_id,
+            bundle_version_id,
+        )
+        .await;
+
+        // Build version B: same lineages, fresh version UUIDs, same content.
+        // A distinct <cf:policy-version> label is required because policy
+        // lineages enforce UNIQUE (policy_id, version).
+        let new_bundle_version_id = Uuid::new_v4();
+        let new_policy_version_id = Uuid::new_v4();
+        let bytes_b = native_fixture_bytes_with_policy_version(
+            bundle_id,
+            new_bundle_version_id,
+            policy_id,
+            new_policy_version_id,
+            true,
+            "1.1",
+        );
+
+        // Preview B: new_version for both, lineage witnesses, no blocking.
+        let preview_pkg = make_package(bytes_b.clone());
+        let preview = compute_cf_native_reconciliation(&pool, &preview_pkg.parsed)
+            .await
+            .expect("reconciliation should succeed")
+            .expect("cf-native document should produce a preview");
+        assert_eq!(preview.bundle.reconciliation_state, "new_version");
+        assert_eq!(
+            preview.bundle.local_lineage_id.as_deref(),
+            Some(bundle_id.to_string().as_str())
+        );
+        assert_eq!(
+            preview.bundle.local_version_id.as_deref(),
+            Some(bundle_version_id.to_string().as_str())
+        );
+        assert_eq!(preview.policies[0].reconciliation_state, "new_version");
+        assert_eq!(
+            preview.policies[0].local_lineage_id.as_deref(),
+            Some(policy_id.to_string().as_str())
+        );
+        assert_eq!(preview.policies[0].local_version_id.as_deref(), None);
+        assert!(
+            !preview.has_blocking_conflicts,
+            "new version of a published lineage must not block"
+        );
+
+        // Commit B.
+        let commit_pkg = make_package(bytes_b);
+        let (commit_validated, commit_records) =
+            crate::compliance::xccdf::importer::validate_cf_native_document(&commit_pkg.parsed)
+                .expect("version B should validate");
+        let second =
+            commit_cf_native_import(&pool, user_id, commit_pkg, commit_validated, commit_records)
+                .await
+                .expect("commit version B into existing published lineage");
+        assert_eq!(second.created_policy_lineages, 0);
+        assert_eq!(second.created_policy_versions, 1);
+        assert_eq!(second.reused_policy_versions, 0);
+        assert!(!second.bundle_lineage_created);
+        assert!(second.bundle_version_created);
+        assert_eq!(second.bundle_id, bundle_id);
+        assert_eq!(second.bundle_version_id, new_bundle_version_id);
+        assert_eq!(second.created_policy_version_ids, vec![new_policy_version_id]);
+
+        // Version A rows must be unchanged (still accepted + trusted).
+        let (a_state, a_trust): (String, String) = sqlx::query_as(
+            "SELECT publication_state, trust_state FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(policy_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((a_state.as_str(), a_trust.as_str()), ("accepted", "trusted"));
+        let (ab_state, ab_trust): (String, String) = sqlx::query_as(
+            "SELECT publication_state, trust_state FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((ab_state.as_str(), ab_trust.as_str()), ("accepted", "trusted"));
+
+        // Version B rows exist in the same lineages as fresh drafts.
+        let (b_state, b_trust): (String, String) = sqlx::query_as(
+            "SELECT publication_state, trust_state FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(new_policy_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((b_state.as_str(), b_trust.as_str()), ("draft", "untrusted"));
+        let (bb_state, bb_trust): (String, String) = sqlx::query_as(
+            "SELECT publication_state, trust_state FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(new_bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((bb_state.as_str(), bb_trust.as_str()), ("draft", "untrusted"));
+
+        // The bundle version label must be lineage-unique: version B gets a
+        // deterministic disambiguated label instead of colliding with A's.
+        let bb_label: String = sqlx::query_scalar(
+            "SELECT version FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(new_bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let short_b = &new_bundle_version_id.simple().to_string()[..8];
+        assert_eq!(bb_label, format!("0.1.0-{short_b}"));
+        let a_label: String = sqlx::query_scalar(
+            "SELECT version FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(a_label, "0.1.0");
+
+        // Pointer invariants: draft now points at B, published still at A.
+        let (pol_draft, pol_pub): (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            "SELECT current_draft_version_id, current_published_version_id \
+             FROM deployment_policies WHERE id = $1",
+        )
+        .bind(policy_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pol_draft, Some(new_policy_version_id));
+        assert_eq!(pol_pub, Some(policy_version_id));
+        let (bun_draft, bun_pub): (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            "SELECT current_draft_version_id, current_published_version_id \
+             FROM compliance_bundles WHERE id = $1",
+        )
+        .bind(bundle_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(bun_draft, Some(new_bundle_version_id));
+        assert_eq!(bun_pub, Some(bundle_version_id));
+
+        // Membership for B is exactly (B policy version, selected) ordered.
+        let members_b: Vec<(Uuid, bool, i32)> = sqlx::query_as(
+            "SELECT policy_version_id, selected, policy_order \
+             FROM compliance_bundle_version_policies WHERE bundle_version_id = $1 \
+             ORDER BY policy_order ASC",
+        )
+        .bind(new_bundle_version_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(members_b.len(), 1);
+        assert_eq!(members_b[0].0, new_policy_version_id);
+        assert!(members_b[0].1);
+        assert_eq!(members_b[0].2, 0);
+
+        // Membership of A is untouched.
+        let members_a: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_bundle_version_policies WHERE bundle_version_id = $1",
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(members_a, 1);
+
+        // Source mappings point at the exact versions created by this commit.
+        let mapped_policy: Option<Uuid> = sqlx::query_scalar(
+            "SELECT policy_version_id FROM compliance_source_object_mappings \
+             WHERE source_artifact_id = $1 AND object_kind = 'rule'",
+        )
+        .bind(second.source_artifact_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(mapped_policy, Some(new_policy_version_id));
+        let mapped_bundle: Option<Uuid> = sqlx::query_scalar(
+            "SELECT bundle_version_id FROM compliance_source_object_mappings \
+             WHERE source_artifact_id = $1 AND object_kind = 'benchmark'",
+        )
+        .bind(second.source_artifact_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(mapped_bundle, Some(new_bundle_version_id));
     }
 }

@@ -1733,7 +1733,10 @@ pub struct XccdfImportResponse {
     #[serde(default)]
     pub bundle_version_id: Option<Uuid>,
     pub created_policy_count: u32,
-    pub reused_policy_count: u32,
+    /// Server field name for reused exact versions
+    /// (`XccdfCommittedImportResult.reused_policy_versions`).
+    #[serde(default)]
+    pub reused_policy_versions: u32,
     #[serde(default)]
     pub errors: Vec<String>,
 }
