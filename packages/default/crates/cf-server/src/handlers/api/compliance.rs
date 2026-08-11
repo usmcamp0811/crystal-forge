@@ -13157,6 +13157,12 @@ packages = ["git"]
             .execute(&pool)
             .await
             .expect("enable policy");
+        // Set trust state to trusted for this exact-match fixture
+        sqlx::query("UPDATE deployment_policy_versions SET trust_state = 'trusted' WHERE id = $1")
+            .bind(version_id)
+            .execute(&pool)
+            .await
+            .expect("set trusted state");
 
         // Build import document FROM the actual DB version row (guarantees semantics match exactly)
         let (lineage_id, _, policies_json) = build_import_doc_from_version(&pool, version_id).await;
@@ -13187,33 +13193,35 @@ packages = ["git"]
         assert_eq!(policies_resp[0]["created"], false, "exact match: created flag false");
         assert_eq!(policies_resp[0]["reconciliation_action"], "exact_match");
         assert_eq!(policies_resp[0]["publication_state"], "accepted", "exact match preserves publication state");
-        assert_eq!(policies_resp[0]["trust_state"], "untrusted", "exact match has local trust state");
+        assert_eq!(policies_resp[0]["trust_state"], "trusted", "exact match preserves local trust state");
         assert_eq!(policies_resp[0]["enabled"], true, "exact match preserves lineage enabled state");
 
-        // Verify DB state unchanged for policy
-        let (db_pub_state, db_enabled): (String, bool) = sqlx::query_as(
-            "SELECT publication_state, enabled FROM deployment_policy_versions dpv JOIN deployment_policies dp ON dpv.policy_id = dp.id WHERE dpv.id = $1",
+        // Verify DB state unchanged for policy (publication, trust, enabled)
+        let (db_pub_state, db_trust_state, db_enabled): (String, String, bool) = sqlx::query_as(
+            "SELECT publication_state, COALESCE(trust_state, 'untrusted'), enabled FROM deployment_policy_versions dpv JOIN deployment_policies dp ON dpv.policy_id = dp.id WHERE dpv.id = $1",
         )
         .bind(version_id)
         .fetch_one(&pool)
         .await
         .expect("fetch DB state");
         assert_eq!(db_pub_state, "accepted", "DB publication_state unchanged");
+        assert_eq!(db_trust_state, "trusted", "DB trust_state unchanged");
         assert_eq!(db_enabled, true, "DB enabled unchanged");
 
         // Verify audit event records correct outcome
-        let audit_event: (Option<serde_json::Value>,) = sqlx::query_as(
-            "SELECT details FROM admin_audit_events WHERE action = 'policy_interchange_imported' AND target = $1 LIMIT 1",
+        let audit_metadata: serde_json::Value = sqlx::query_scalar(
+            "SELECT metadata FROM admin_audit_events WHERE action = 'policy_interchange_imported' AND target = $1 LIMIT 1",
         )
         .bind(version_id.to_string())
         .fetch_one(&pool)
         .await
         .expect("fetch audit");
 
-        let details = audit_event.0.expect("audit details present");
-        assert_eq!(details["reconciliation_action"], "exact_match");
-        assert_eq!(details["created"], false);
-        assert_eq!(details["final_publication_state"], "accepted");
+        assert_eq!(audit_metadata["reconciliation_action"], "exact_match");
+        assert_eq!(audit_metadata["created"], false);
+        assert_eq!(audit_metadata["final_publication_state"], "accepted");
+        assert_eq!(audit_metadata["final_trust_state"], "trusted");
+        assert_eq!(audit_metadata["final_enabled"], true);
     }
 
     #[tokio::test]
@@ -13261,7 +13269,7 @@ packages = ["git"]
         let policies_resp = import_body["policies"].as_array().expect("policies in response");
         assert_eq!(policies_resp.len(), 1);
         assert_eq!(policies_resp[0]["created"], true, "new version: created flag true");
-        assert_eq!(policies_resp[0]["reconciliation_action"], "create_lineage_and_version");
+        assert_eq!(policies_resp[0]["reconciliation_action"], "new_version");
         assert_eq!(policies_resp[0]["publication_state"], "draft", "new version starts as draft");
 
         // Verify new version exists in DB and is draft
@@ -13589,6 +13597,16 @@ packages = ["git"]
         .await
         .expect("fetch version lineage");
         assert_eq!(version_lineage, lineage_a_id, "version still belongs to lineage A");
+
+        // Verify no audit event for version X (rollback complete)
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM admin_audit_events WHERE action = 'policy_interchange_imported' AND target = $1",
+        )
+        .bind(version_x_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("count audit");
+        assert_eq!(audit_count, 0, "no audit event on wrong-lineage conflict");
     }
 
     #[tokio::test]
@@ -13650,8 +13668,8 @@ packages = ["git"]
         let audit_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM admin_audit_events WHERE action = 'policy_interchange_imported' AND target IN ($1, $2)",
         )
-        .bind(new_a_version)
-        .bind(new_b_version)
+        .bind(new_a_version.to_string())
+        .bind(new_b_version.to_string())
         .fetch_one(&pool)
         .await
         .expect("count audit");
