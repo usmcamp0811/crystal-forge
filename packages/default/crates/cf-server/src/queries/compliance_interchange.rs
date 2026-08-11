@@ -1657,6 +1657,495 @@ mod tests {
         user.id
     }
 
+    fn disa_stig_bytes(benchmark_id: &str, release: &str, rules: &[(&str, &str)]) -> Vec<u8> {
+        let rules = rules
+            .iter()
+            .enumerate()
+            .map(|(index, (vuln_id, title))| {
+                format!(
+                    r#"  <Rule id="xccdf_test_stig_rule_{index}"><title>{title}</title><description>Stable requirement {vuln_id}</description><ident system="http://cyber.mil/stigs/stig">{vuln_id}</ident><check system="urn:test"><check-content>Verify {vuln_id}.</check-content></check></Rule>"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="{benchmark_id}">
+  <status>draft</status><title>MapExisting Test STIG</title><version>{release}</version>
+{rules}
+</Benchmark>"#
+        )
+        .into_bytes()
+    }
+
+    fn map_existing_plan(
+        pkg: &ProcessedXccdfPackage,
+        policy_version_id: Uuid,
+    ) -> (ValidatedImportPlan, Vec<ImportedPolicyRecord>) {
+        use crate::compliance::xccdf::import_models::{
+            ImportedBundlePlan, XccdfImportPlan, XccdfRuleImportAction,
+        };
+        use crate::compliance::xccdf::importer::validate_import_plan;
+
+        let rule_ids: Vec<String> = pkg
+            .parsed
+            .rules
+            .iter()
+            .map(|rule| rule.id.clone())
+            .collect();
+        let plan = XccdfImportPlan {
+            expected_sha256: pkg.provenance.sha256.clone(),
+            selected_profile_id: None,
+            selected_rule_ids: rule_ids.clone(),
+            rule_actions: rule_ids
+                .iter()
+                .map(|rule_id| XccdfRuleImportAction::MapExisting {
+                    rule_id: rule_id.clone(),
+                    policy_version_id,
+                })
+                .collect(),
+            bundle: ImportedBundlePlan {
+                name: format!("MapExisting STIG bundle {}", Uuid::new_v4()),
+                framework: "DISA STIG".into(),
+                version: "test".into(),
+                layer: Some("os".into()),
+                owner: Some("Security Team".into()),
+                description: None,
+            },
+        };
+        let validated = validate_import_plan(plan, &pkg.parsed).expect("valid MapExisting plan");
+        let records = build_policy_records(&validated);
+        (validated, records)
+    }
+
+    async fn publish_policy_version(
+        pool: &PgPool,
+        actor_id: Uuid,
+        policy_id: Uuid,
+        policy_version_id: Uuid,
+    ) {
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("begin policy publish transaction");
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET trust_state = 'trusted', trusted_by = $2, trusted_at = CURRENT_TIMESTAMP WHERE id = $1",
+        )
+        .bind(policy_version_id)
+        .bind(actor_id)
+        .execute(&mut *tx)
+        .await
+        .expect("trust policy version");
+        sqlx::query(
+            "UPDATE deployment_policies SET current_draft_version_id = NULL WHERE id = $1 AND current_draft_version_id = $2",
+        )
+        .bind(policy_id)
+        .bind(policy_version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("clear policy draft pointer");
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET publication_state = 'accepted', published_at = CURRENT_TIMESTAMP WHERE id = $1",
+        )
+        .bind(policy_version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("accept policy version");
+        sqlx::query(
+            "UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(policy_version_id)
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .expect("set published policy pointer");
+        tx.commit()
+            .await
+            .expect("commit policy publish transaction");
+    }
+
+    struct MapExistingSource {
+        policy_id: Uuid,
+        policy_version_id: Uuid,
+        requirement_version_ids: Vec<Uuid>,
+        benchmark_id: String,
+    }
+
+    async fn prepare_map_existing_source(
+        pool: &PgPool,
+        user_id: Uuid,
+        mapping_trust_state: &str,
+        publish: bool,
+    ) -> MapExistingSource {
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_MapExisting_Test_STIG_{}",
+            Uuid::new_v4().simple()
+        );
+        let pkg = make_package(disa_stig_bytes(
+            &benchmark_id,
+            "V1R1",
+            &[
+                ("V-418-001", "First stable requirement"),
+                ("V-418-002", "Second stable requirement"),
+            ],
+        ));
+        let (validated, records) =
+            make_plan(&pkg, &["xccdf_test_stig_rule_0", "xccdf_test_stig_rule_1"]);
+        let result = commit_foreign_import(pool, user_id, pkg, validated, records)
+            .await
+            .expect("import prior STIG release");
+        let policy_version_id = result.created_policy_version_ids[0];
+        let policy_id: Uuid =
+            sqlx::query_scalar("SELECT policy_id FROM deployment_policy_versions WHERE id = $1")
+                .bind(policy_version_id)
+                .fetch_one(pool)
+                .await
+                .expect("load source policy lineage");
+        let requirement_version_ids: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT requirement_version_id FROM compliance_bundle_version_requirements WHERE bundle_version_id = $1 ORDER BY requirement_order",
+        )
+        .bind(result.bundle_version_id)
+        .fetch_all(pool)
+        .await
+        .expect("load prior requirement versions");
+
+        // Both prior requirements deliberately share the one source policy and
+        // carry non-default mapping semantics that the inherited reuse must copy.
+        sqlx::query(
+            "UPDATE policy_requirement_mappings SET relationship = 'supports', coverage = 'partial', rationale = 'shared inherited rationale', trust_state = $2 WHERE policy_version_id = $1",
+        )
+        .bind(policy_version_id)
+        .bind(mapping_trust_state)
+        .execute(pool)
+        .await
+        .expect("update first source mapping semantics");
+        sqlx::query(
+            "INSERT INTO policy_requirement_mappings (policy_version_id, requirement_version_id, relationship, coverage, rationale, provenance, trust_state, created_by) VALUES ($1, $2, 'supports', 'partial', 'shared inherited rationale', 'manual', $3, $4)",
+        )
+        .bind(policy_version_id)
+        .bind(requirement_version_ids[1])
+        .bind(mapping_trust_state)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("map shared source policy to second requirement");
+
+        if publish {
+            publish_policy_version(pool, user_id, policy_id, policy_version_id).await;
+        }
+        MapExistingSource {
+            policy_id,
+            policy_version_id,
+            requirement_version_ids,
+            benchmark_id,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn map_existing_stig_reuses_current_policy_draft_and_preserves_inherited_mappings() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let source = prepare_map_existing_source(&pool, user_id, "trusted", true).await;
+        let source_version_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policy_versions WHERE policy_id = $1",
+        )
+        .bind(source.policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count source policy versions before reuse");
+        let pkg = make_package(disa_stig_bytes(
+            &source.benchmark_id,
+            "V1R2",
+            &[
+                ("V-418-001", "First stable requirement"),
+                ("V-418-002", "Second stable requirement"),
+            ],
+        ));
+        let (validated, records) = map_existing_plan(&pkg, source.policy_version_id);
+        let result = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("current accepted STIG mapping should be reused");
+
+        assert_eq!(result.created_policy_count, 0);
+        assert_eq!(result.created_policy_versions, 0);
+        assert_eq!(result.reused_policy_versions, 1);
+        assert!(result.created_policy_version_ids.is_empty());
+
+        let draft_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(source.policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load derived policy draft");
+        assert_ne!(draft_id, source.policy_version_id);
+        let derived_from: Option<Uuid> = sqlx::query_scalar(
+            "SELECT derived_from_version_id FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(draft_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load derived draft provenance");
+        assert_eq!(derived_from, Some(source.policy_version_id));
+
+        let members: Vec<(Uuid, i32)> = sqlx::query_as(
+            "SELECT policy_version_id, policy_order FROM compliance_bundle_version_policies WHERE bundle_version_id = $1 ORDER BY policy_order",
+        )
+        .bind(result.bundle_version_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load bundle membership");
+        assert_eq!(members, vec![(draft_id, 0)]);
+
+        let mappings: Vec<(Uuid, String, String, Option<String>, String)> = sqlx::query_as(
+            "SELECT requirement_version_id, relationship, coverage, rationale, provenance FROM policy_requirement_mappings WHERE policy_version_id = $1 ORDER BY requirement_version_id",
+        )
+        .bind(draft_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load inherited mappings");
+        assert_eq!(mappings.len(), 2);
+        assert_eq!(
+            mappings
+                .iter()
+                .map(|(_, relationship, coverage, rationale, provenance)| (
+                    relationship.as_str(),
+                    coverage.as_str(),
+                    rationale.as_deref(),
+                    provenance.as_str(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "supports",
+                    "partial",
+                    Some("shared inherited rationale"),
+                    "inherited"
+                ),
+                (
+                    "supports",
+                    "partial",
+                    Some("shared inherited rationale"),
+                    "inherited"
+                ),
+            ]
+        );
+        assert_ne!(mappings[0].0, source.requirement_version_ids[0]);
+        assert_ne!(mappings[1].0, source.requirement_version_ids[1]);
+
+        let version_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policy_versions WHERE policy_id = $1",
+        )
+        .bind(source.policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count source policy versions");
+        assert_eq!(
+            version_count,
+            source_version_count + 1,
+            "both rules must reuse one existing mutable draft"
+        );
+
+        let audit_counts: (i64, i64) = sqlx::query_as(
+            "SELECT (metadata->>'created_policy_count')::bigint, (metadata->>'reused_policy_versions')::bigint FROM admin_audit_events WHERE (metadata->>'bundle_id')::uuid = $1",
+        )
+        .bind(result.bundle_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load import accounting audit event");
+        assert_eq!(audit_counts, (0, 1));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn map_existing_stig_rejects_non_current_nonaccepted_untrusted_and_changed_sources() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+
+        let mutable = prepare_map_existing_source(&pool, user_id, "trusted", false).await;
+        let pkg = make_package(disa_stig_bytes(
+            &mutable.benchmark_id,
+            "V1R2",
+            &[
+                ("V-418-001", "First stable requirement"),
+                ("V-418-002", "Second stable requirement"),
+            ],
+        ));
+        let (validated, records) = map_existing_plan(&pkg, mutable.policy_version_id);
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("mutable selected version must be rejected");
+        assert!(error.to_string().contains("IMPORT_REUSE_INELIGIBLE"));
+
+        let untrusted = prepare_map_existing_source(&pool, user_id, "suggested", true).await;
+        let pkg = make_package(disa_stig_bytes(
+            &untrusted.benchmark_id,
+            "V1R2",
+            &[
+                ("V-418-001", "First stable requirement"),
+                ("V-418-002", "Second stable requirement"),
+            ],
+        ));
+        let (validated, records) = map_existing_plan(&pkg, untrusted.policy_version_id);
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("untrusted source mapping must be rejected");
+        assert!(error.to_string().contains("IMPORT_REUSE_INELIGIBLE"));
+
+        let superseded = prepare_map_existing_source(&pool, user_id, "trusted", true).await;
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("begin superseding draft transaction");
+        let replacement = ensure_policy_draft(
+            &mut tx,
+            superseded.policy_id,
+            Some(user_id),
+            None,
+            PolicyDraftIntent::EnsureMutable,
+        )
+        .await
+        .expect("derive replacement draft");
+        sqlx::query(
+            "INSERT INTO policy_requirement_mappings (policy_version_id, requirement_version_id, relationship, coverage, provenance, trust_state, created_by) VALUES ($1, $2, 'implements', 'full', 'manual', 'trusted', $3)",
+        )
+        .bind(replacement)
+        .bind(superseded.requirement_version_ids[0])
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .expect("map replacement draft");
+        tx.commit().await.expect("commit replacement draft");
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET publication_state = 'deprecated' WHERE id = $1",
+        )
+        .bind(superseded.policy_version_id)
+        .execute(&pool)
+        .await
+        .expect("retire superseded source policy version");
+        publish_policy_version(&pool, user_id, superseded.policy_id, replacement).await;
+        let pkg = make_package(disa_stig_bytes(
+            &superseded.benchmark_id,
+            "V1R2",
+            &[
+                ("V-418-001", "First stable requirement"),
+                ("V-418-002", "Second stable requirement"),
+            ],
+        ));
+        let (validated, records) = map_existing_plan(&pkg, superseded.policy_version_id);
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("superseded selected version must be rejected");
+        assert!(error.to_string().contains("IMPORT_REUSE_INELIGIBLE"));
+
+        let deprecated = prepare_map_existing_source(&pool, user_id, "trusted", true).await;
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET publication_state = 'deprecated' WHERE id = $1",
+        )
+        .bind(deprecated.policy_version_id)
+        .execute(&pool)
+        .await
+        .expect("deprecate selected policy version");
+        let pkg = make_package(disa_stig_bytes(
+            &deprecated.benchmark_id,
+            "V1R2",
+            &[
+                ("V-418-001", "First stable requirement"),
+                ("V-418-002", "Second stable requirement"),
+            ],
+        ));
+        let (validated, records) = map_existing_plan(&pkg, deprecated.policy_version_id);
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("deprecated selected version must be rejected");
+        assert!(error.to_string().contains("IMPORT_REUSE_INELIGIBLE"));
+
+        let changed = prepare_map_existing_source(&pool, user_id, "trusted", true).await;
+        let pkg = make_package(disa_stig_bytes(
+            &changed.benchmark_id,
+            "V1R2",
+            &[
+                ("V-418-001", "Changed requirement"),
+                ("V-418-002", "Second stable requirement"),
+            ],
+        ));
+        let (validated, records) = map_existing_plan(&pkg, changed.policy_version_id);
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("changed requirement must not inherit a prior mapping");
+        assert!(error.to_string().contains("IMPORT_REUSE_INELIGIBLE"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn map_existing_stig_rolls_back_derived_draft_and_import_rows_on_late_failure() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let source = prepare_map_existing_source(&pool, user_id, "trusted", true).await;
+        let source_version_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policy_versions WHERE policy_id = $1",
+        )
+        .bind(source.policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count source policy versions before failed reuse");
+        let pkg = make_package(disa_stig_bytes(
+            &source.benchmark_id,
+            "V1R2",
+            &[
+                ("V-418-001", "First stable requirement"),
+                ("V-418-002", "Second stable requirement"),
+            ],
+        ));
+        let failed_sha256 = pkg.provenance.sha256.clone();
+        let artifact_count_before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1",
+        )
+        .bind(&failed_sha256)
+        .fetch_one(&pool)
+        .await
+        .expect("count future artifact rows");
+        let (validated, mut records) = map_existing_plan(&pkg, source.policy_version_id);
+        let bundle_name = validated.bundle.name.clone();
+        records[1].mapped_policy_version_id = Some(Uuid::new_v4());
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("second invalid mapping must fail after the first draft derivation");
+        assert!(
+            error
+                .to_string()
+                .contains("IMPORT_POLICY_VERSION_NOT_FOUND")
+        );
+
+        let artifact_count_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1",
+        )
+        .bind(&failed_sha256)
+        .fetch_one(&pool)
+        .await
+        .expect("count failed import artifact rows");
+        let bundle_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundles WHERE name = $1")
+                .bind(bundle_name)
+                .fetch_one(&pool)
+                .await
+                .expect("count failed import bundle rows");
+        assert_eq!(bundle_count, 0);
+        assert_eq!(artifact_count_after, artifact_count_before);
+        let draft_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policy_versions WHERE policy_id = $1",
+        )
+        .bind(source.policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count derived drafts after rollback");
+        assert_eq!(
+            draft_count, source_version_count,
+            "failed import must not retain its derived draft"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn successful_import_creates_all_expected_rows() {
