@@ -16,21 +16,37 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+use crate::api::models::{DeletionEligibility, DeploymentPolicyVersionSummary};
 use crate::auth::extractors::{RequireAdmin, RequireAuth, RequireOperator};
+use crate::compliance::mappings::{
+    extract_cci_ids, extract_classification, extract_srg_ids, infer_legacy_category,
+    normalise_cci_ids, normalise_srg_ids,
+};
 use crate::handlers::agent_request::CFState;
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
     is_reserved_policy_result_field,
 };
 use crate::queries::deployment_policies;
+use crate::queries::deployment_policies::PolicyDeleteOutcome;
 
 // =============================================================================
 // Response Models
 // =============================================================================
 
 #[derive(Debug, Serialize)]
+pub struct DeploymentPolicyListItem {
+    #[serde(flatten)]
+    pub policy: DeploymentPolicyRecord,
+    /// Exact mutable version represented by the policy-management view.
+    pub current_version_id: Option<Uuid>,
+    #[serde(default)]
+    pub versions: Vec<DeploymentPolicyVersionSummary>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DeploymentPoliciesListResponse {
-    pub policies: Vec<DeploymentPolicyRecord>,
+    pub policies: Vec<DeploymentPolicyListItem>,
     pub total: usize,
     pub limit: i64,
     pub offset: i64,
@@ -54,6 +70,32 @@ pub struct PaginationParams {
 
 fn default_limit() -> i64 {
     100
+}
+
+fn normalize_required_packages(packages: &[Value]) -> Result<Vec<String>, (StatusCode, String)> {
+    let mut normalized = packages
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or((
+                    StatusCode::BAD_REQUEST,
+                    "config.packages must contain only non-empty strings".to_string(),
+                ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    normalized.sort();
+    normalized.dedup();
+    if normalized.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "require_packages policy requires at least one package".to_string(),
+        ));
+    }
+    Ok(normalized)
 }
 
 /// Validate and normalize a Nix expression for custom policy checks.
@@ -162,17 +204,12 @@ fn validate_policy_config(
                 ));
             }
 
-            let all_valid = packages.iter().all(|entry| {
-                entry
-                    .as_str()
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false)
-            });
-            if !all_valid {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "config.packages must contain only non-empty strings".to_string(),
-                ));
+            let normalized_packages = normalize_required_packages(packages)?;
+            if let Some(config_obj) = validated_config.as_object_mut() {
+                config_obj.insert(
+                    "packages".to_string(),
+                    Value::Array(normalized_packages.into_iter().map(Value::String).collect()),
+                );
             }
         }
         "custom_check" => {
@@ -513,8 +550,101 @@ pub async fn list_deployment_policies(
         .map(|pc| (pc.policy_id, pc.system_count))
         .collect();
 
+    let policy_ids: Vec<Uuid> = policies.iter().map(|policy| policy.id).collect();
+    let versions: HashMap<Uuid, Uuid> = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT id, COALESCE(current_draft_version_id, current_published_version_id) FROM deployment_policies WHERE id = ANY($1) AND COALESCE(current_draft_version_id, current_published_version_id) IS NOT NULL",
+    )
+    .bind(&policy_ids)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to load current policy versions: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to retrieve deployment policy versions".to_string(),
+        )
+    })?
+    .into_iter()
+    .collect();
+
+    let pointer_rows: HashMap<Uuid, (Option<Uuid>, Option<Uuid>)> = sqlx::query_as::<_, (Uuid, Option<Uuid>, Option<Uuid>)>(
+        "SELECT id, current_published_version_id, current_draft_version_id FROM deployment_policies WHERE id = ANY($1)",
+    )
+    .bind(&policy_ids)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to load policy version pointers: {}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to retrieve policy version pointers".to_string())
+    })?
+    .into_iter()
+    .map(|(id, published, draft)| (id, (published, draft)))
+    .collect();
+
+    // Fetch all version rows in one query, including compliance_metadata for
+    // SRG/CCI extraction. No N+1: one query covers all policies in the page.
+    let version_rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, String, String, chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>, Option<Uuid>, String, Option<String>, String, Value, bool, Value)>(
+        "SELECT id, policy_id, version, publication_state, trust_state, semantic_digest, created_at, published_at, derived_from_version_id, name, description, policy_type, config, COALESCE(enabled_by_default, true), compliance_metadata FROM deployment_policy_versions WHERE policy_id = ANY($1) ORDER BY policy_id, created_at DESC, id DESC",
+    )
+    .bind(&policy_ids)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to load policy version history: {}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to retrieve policy version history".to_string())
+    })?;
+
     Ok(Json(DeploymentPoliciesListResponse {
-        policies,
+        policies: policies
+            .into_iter()
+            .map(|policy| DeploymentPolicyListItem {
+                current_version_id: versions.get(&policy.id).copied(),
+                versions: version_rows
+                    .iter()
+                    .filter(|row| row.1 == policy.id)
+                    .map(|row| {
+                        let pointers = pointer_rows
+                            .get(&policy.id)
+                            .copied()
+                            .unwrap_or((None, None));
+                        let compliance_meta = &row.14;
+                        let (cat, fw, sev, cf, cmmc, cis, rat) =
+                            extract_classification(compliance_meta);
+                        let inferred_category = cat.clone().unwrap_or_else(|| {
+                            infer_legacy_category(&row.11, compliance_meta).to_string()
+                        });
+                        DeploymentPolicyVersionSummary {
+                            id: row.0,
+                            policy_id: row.1,
+                            version: row.2.clone(),
+                            publication_state: row.3.clone(),
+                            trust_state: row.4.clone(),
+                            semantic_digest: row.5.clone(),
+                            created_at: row.6,
+                            published_at: row.7,
+                            derived_from_version_id: row.8,
+                            is_current_published: pointers.0 == Some(row.0),
+                            is_current_draft: pointers.1 == Some(row.0),
+                            name: row.9.clone(),
+                            description: row.10.clone(),
+                            policy_type: row.11.clone(),
+                            config: row.12.clone(),
+                            enabled: row.13,
+                            srg_ids: extract_srg_ids(compliance_meta),
+                            cci_ids: extract_cci_ids(compliance_meta),
+                            category: Some(inferred_category),
+                            framework: fw,
+                            severity: sev,
+                            control_family: cf,
+                            cmmc_level: cmmc,
+                            cis_section: cis,
+                            rationale: rat,
+                        }
+                    })
+                    .collect(),
+                policy,
+            })
+            .collect(),
         total: total as usize,
         limit: params.limit,
         offset: params.offset,
@@ -663,7 +793,20 @@ pub async fn create_deployment_policy(
         ));
     }
 
-    // Check for duplicate policy semantics (same type + same config)
+    // Validate and normalise SRG/CCI mappings before persistence.
+    if !request.srg_ids.is_empty() {
+        normalise_srg_ids(&request.srg_ids)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid srg_ids: {e}")))?;
+    }
+    if !request.cci_ids.is_empty() {
+        normalise_cci_ids(&request.cci_ids)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid cci_ids: {e}")))?;
+    }
+
+    // Check for duplicate policy semantics (same type + same config).
+    // Note: two policies with the same config but different SRG/CCI mappings
+    // are NOT considered duplicates because compliance_metadata is included in
+    // the canonical digest, making them semantically distinct policy versions.
     let content_exists = deployment_policies::check_policy_content_exists(
         &state.pool,
         &request.policy_type,
@@ -679,7 +822,10 @@ pub async fn create_deployment_policy(
         )
     })?;
 
-    if content_exists {
+    // Only reject exact content duplicates when the caller supplies no mappings
+    // (an exact config duplicate with a different SRG/CCI set is a new semantic
+    // version, not a true duplicate).
+    if content_exists && request.srg_ids.is_empty() && request.cci_ids.is_empty() {
         return Err((
             StatusCode::CONFLICT,
             "A policy with the same type and configuration already exists".to_string(),
@@ -719,7 +865,7 @@ pub async fn create_deployment_policy(
 /// Returns 404 if the policy does not exist.
 /// Returns 409 if the new name conflicts with an existing policy.
 pub async fn update_deployment_policy(
-    RequireOperator(_user): RequireOperator,
+    RequireOperator(user): RequireOperator,
     State(state): State<CFState>,
     Path(policy_id): Path<Uuid>,
     Json(request): Json<UpdateDeploymentPolicyRequest>,
@@ -837,43 +983,66 @@ pub async fn update_deployment_policy(
         request.config = Some(candidate_config.clone());
     }
 
-    // Check for duplicate policy semantics (same type + same config)
-    let content_exists = deployment_policies::check_policy_content_exists(
-        &state.pool,
-        &candidate_policy_type,
-        &candidate_config,
-        Some(&policy_id),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to check duplicate policy content: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to validate policy content".to_string(),
-        )
-    })?;
+    // Validate SRG/CCI mappings when the caller is changing them.
+    if let Some(ref srgs) = request.srg_ids {
+        normalise_srg_ids(srgs)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid srg_ids: {e}")))?;
+    }
+    if let Some(ref ccis) = request.cci_ids {
+        normalise_cci_ids(ccis)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid cci_ids: {e}")))?;
+    }
 
-    if content_exists {
-        return Err((
-            StatusCode::CONFLICT,
-            "A policy with the same type and configuration already exists".to_string(),
-        ));
+    // Skip the config-only duplicate check when the caller is changing mappings —
+    // two versions with the same enforcement config but different SRG/CCI sets
+    // are semantically distinct (the canonical digest covers compliance_metadata).
+    let mappings_changing = request.srg_ids.is_some() || request.cci_ids.is_some();
+    let config_changing = request.policy_type.is_some() || request.config.is_some();
+
+    if config_changing && !mappings_changing {
+        // Check for duplicate policy semantics (same type + same config)
+        let content_exists = deployment_policies::check_policy_content_exists(
+            &state.pool,
+            &candidate_policy_type,
+            &candidate_config,
+            Some(&policy_id),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to check duplicate policy content: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to validate policy content".to_string(),
+            )
+        })?;
+
+        if content_exists {
+            return Err((
+                StatusCode::CONFLICT,
+                "A policy with the same type and configuration already exists".to_string(),
+            ));
+        }
     }
 
     // Update policy
-    let policy = deployment_policies::update_deployment_policy(&state.pool, &policy_id, &request)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to update deployment policy {}: {}", policy_id, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to update deployment policy".to_string(),
-            )
-        })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            "Deployment policy not found".to_string(),
-        ))?;
+    let policy = deployment_policies::update_deployment_policy(
+        &state.pool,
+        &policy_id,
+        &request,
+        Some(user.user_id),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to update deployment policy {}: {}", policy_id, e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to update deployment policy".to_string(),
+        )
+    })?
+    .ok_or((
+        StatusCode::NOT_FOUND,
+        "Deployment policy not found".to_string(),
+    ))?;
 
     Ok(Json(policy))
 }
@@ -883,71 +1052,82 @@ pub async fn update_deployment_policy(
 /// Available to Admin role only.
 ///
 /// Returns 404 if the policy does not exist.
-/// Returns 409 if the policy is currently assigned to any environments or systems.
+/// Returns a typed 409 body containing the authoritative, transactionally checked
+/// deletion eligibility and every retained blocker.
+pub async fn get_deployment_policy_deletion_eligibility(
+    RequireAdmin(_user): RequireAdmin,
+    State(state): State<CFState>,
+    Path(policy_id): Path<Uuid>,
+) -> Result<Json<DeletionEligibility>, axum::response::Response> {
+    match deployment_policies::policy_deletion_eligibility(&state.pool, &policy_id).await {
+        Ok(Some(eligibility)) => Ok(Json(eligibility)),
+        Ok(None) => Err(policy_delete_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Deployment policy not found",
+            None,
+        )),
+        Err(error) => {
+            tracing::error!(%policy_id, %error, "failed to load policy deletion eligibility");
+            Err(policy_delete_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to load deployment policy deletion eligibility",
+                None,
+            ))
+        }
+    }
+}
+
 pub async fn delete_deployment_policy(
     RequireAdmin(_user): RequireAdmin,
     State(state): State<CFState>,
     Path(policy_id): Path<Uuid>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let existing = deployment_policies::get_deployment_policy_by_id(&state.pool, &policy_id)
+) -> Result<StatusCode, axum::response::Response> {
+    let outcome = deployment_policies::delete_deployment_policy(&state.pool, &policy_id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to fetch deployment policy {}: {}", policy_id, e);
-            (
+            tracing::error!(%policy_id, error = %e, "failed to delete deployment policy");
+            policy_delete_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to retrieve deployment policy".to_string(),
-            )
-        })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            "Deployment policy not found".to_string(),
-        ))?;
-
-    if existing.policy_type == "require_cf_agent" {
-        return Err((
-            StatusCode::CONFLICT,
-            "Core require_cf_agent policy cannot be deleted".to_string(),
-        ));
-    }
-
-    // Check if policy is in use
-    let in_use = deployment_policies::check_policy_in_use(&state.pool, &policy_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to check if policy {} is in use: {}", policy_id, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to validate policy deletion".to_string(),
+                "internal_error",
+                "Failed to validate or delete deployment policy",
+                None,
             )
         })?;
 
-    if in_use {
-        return Err((
-            StatusCode::CONFLICT,
-            "Cannot delete policy: it is currently assigned to one or more environments or systems"
-                .to_string(),
-        ));
-    }
-
-    // Delete policy
-    let deleted = deployment_policies::delete_deployment_policy(&state.pool, &policy_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete deployment policy {}: {}", policy_id, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to delete deployment policy".to_string(),
-            )
-        })?;
-
-    if !deleted {
-        return Err((
+    match outcome {
+        PolicyDeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        PolicyDeleteOutcome::NotFound => Err(policy_delete_error(
             StatusCode::NOT_FOUND,
-            "Deployment policy not found".to_string(),
-        ));
+            "not_found",
+            "Deployment policy not found",
+            None,
+        )),
+        PolicyDeleteOutcome::Blocked(eligibility) => Err(policy_delete_error(
+            StatusCode::CONFLICT,
+            "deletion_blocked",
+            "This deployment policy cannot be permanently deleted.",
+            Some(serde_json::json!({ "policy_id": policy_id, "eligibility": eligibility })),
+        )),
     }
+}
 
-    Ok(StatusCode::NO_CONTENT)
+fn policy_delete_error(
+    status: StatusCode,
+    error: &str,
+    message: &str,
+    details: Option<serde_json::Value>,
+) -> axum::response::Response {
+    (
+        status,
+        Json(crate::api::models::ApiError {
+            error: error.to_string(),
+            message: message.to_string(),
+            details,
+        }),
+    )
+        .into_response()
 }
 
 // =============================================================================
@@ -1165,6 +1345,7 @@ mod tests {
             policy_type: "custom_check".to_string(),
             config: serde_json::json!({"expression": "true"}),
             enabled: Some(true),
+            ..Default::default()
         };
 
         deployment_policies::create_deployment_policy(pool, &request)
@@ -1197,6 +1378,7 @@ mod tests {
             policy_type: "custom_check".to_string(),
             config: serde_json::json!({"expression": "true"}),
             enabled: Some(true),
+            ..Default::default()
         };
         deployment_policies::create_deployment_policy(&pool, &enabled_request)
             .await
@@ -1209,6 +1391,7 @@ mod tests {
             policy_type: "custom_check".to_string(),
             config: serde_json::json!({"expression": "false"}),
             enabled: Some(false),
+            ..Default::default()
         };
         deployment_policies::create_deployment_policy(&pool, &disabled_request)
             .await
@@ -1241,6 +1424,7 @@ mod tests {
             policy_type: "custom_check".to_string(),
             config: serde_json::json!({"expression": "config.services.ssh.enable"}),
             enabled: Some(true),
+            ..Default::default()
         };
 
         let policy = deployment_policies::create_deployment_policy(&pool, &request)
@@ -1279,10 +1463,11 @@ mod tests {
             policy_type: None,
             config: None,
             enabled: Some(false),
+            ..Default::default()
         };
 
         let updated =
-            deployment_policies::update_deployment_policy(&pool, &policy_id, &update_request)
+            deployment_policies::update_deployment_policy(&pool, &policy_id, &update_request, None)
                 .await
                 .unwrap()
                 .expect("Policy should exist after update");
@@ -1302,7 +1487,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(deleted);
+        assert_eq!(deleted, PolicyDeleteOutcome::Deleted);
 
         // Verify it's actually deleted
         let policy = deployment_policies::get_deployment_policy_by_id(&pool, &policy_id)
@@ -1324,6 +1509,7 @@ mod tests {
             policy_type: "custom_check".to_string(),
             config: serde_json::json!({"expression": "true"}),
             enabled: Some(true),
+            ..Default::default()
         };
 
         let result = deployment_policies::create_deployment_policy(&pool, &request).await;

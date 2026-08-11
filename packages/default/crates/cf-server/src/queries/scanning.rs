@@ -27,10 +27,12 @@ pub struct ScanStatsRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanQueueRow {
-    pub scan_id: Uuid,
+    /// `None` when the system has been deployed but never scanned.
+    pub scan_id: Option<Uuid>,
     pub hostname: String,
     pub flake_name: Option<String>,
     pub commit_hash: Option<String>,
+    /// Normalized scan status; `"never_scanned"` when no scan row exists.
     pub status: String,
     pub completed_at: Option<DateTime<Utc>>,
     pub scheduled_at: Option<DateTime<Utc>>,
@@ -42,6 +44,8 @@ pub struct ScanQueueRow {
     pub freshness: String,
     /// True when this is the latest scan row for its derivation.
     pub is_current: bool,
+    /// True when this derivation's commit is the latest known commit for its flake.
+    pub is_latest_per_flake: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,12 +189,19 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
 pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRow>> {
     let rows = sqlx::query(
         r#"
-        WITH latest_per_derivation AS (
+        WITH latest_commit_per_flake AS (
+            SELECT DISTINCT ON (flake_id) id AS commit_id, flake_id
+            FROM commits
+            ORDER BY flake_id, commit_timestamp DESC NULLS LAST, id DESC
+        ),
+        latest_per_derivation AS (
             SELECT DISTINCT ON (d.id)
                 cs.id AS scan_id,
                 d.derivation_name AS hostname,
                 f.name AS flake_name,
                 c.git_commit_hash AS commit_hash,
+                c.flake_id,
+                c.id AS commit_db_id,
                 cs.status,
                 cs.completed_at,
                 cs.scheduled_at,
@@ -222,8 +233,10 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
                 WHEN completed_at >= NOW() - INTERVAL '30 days' THEN 'recent'
                 ELSE 'archived'
             END AS freshness,
-            TRUE AS is_current
-        FROM latest_per_derivation
+            TRUE AS is_current,
+            (lc.commit_id IS NOT NULL AND lpd.commit_db_id = lc.commit_id) AS is_latest_per_flake
+        FROM latest_per_derivation lpd
+        LEFT JOIN latest_commit_per_flake lc ON lc.flake_id = lpd.flake_id
         ORDER BY
             CASE WHEN status = 'in_progress' THEN 0 WHEN status = 'pending' THEN 1 ELSE 2 END,
             lifecycle_at DESC NULLS LAST
@@ -249,8 +262,235 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
             medium_count: row.get("medium_count"),
             freshness: row.get("freshness"),
             is_current: row.get("is_current"),
+            is_latest_per_flake: row.get("is_latest_per_flake"),
         })
         .collect())
+}
+
+/// Result type for `get_scan_deployed` including pagination metadata.
+pub struct ScanDeployedResult {
+    pub rows: Vec<ScanQueueRow>,
+    /// Total deployed configurations known to the server (without limit/cursor).
+    pub total: i64,
+    /// True when the result was capped.
+    pub has_more: bool,
+    /// Opaque composite cursor: `{hostname}:{derivation_id}` of the last row.
+    pub next_cursor: Option<String>,
+}
+
+/// Returns all derivations currently deployed on at least one active system,
+/// with complete flake history used to derive `is_latest_per_flake`.
+///
+/// Uses the same normalized configuration-name expression as the evaluation
+/// path (`COALESCE(NULLIF(BTRIM(system_configuration_name), ''), hostname)`)
+/// so systems whose NixOS config name differs from their hostname are included.
+///
+/// Nullable scan columns are COALESCE'd to safe defaults so systems that have
+/// never been scanned are included without NULL-decode panics.
+/// Marker for a malformed deployed-scan cursor.
+#[derive(Debug)]
+pub struct InvalidCursorError;
+impl std::fmt::Display for InvalidCursorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid deployed scan cursor")
+    }
+}
+impl std::error::Error for InvalidCursorError {}
+
+/// Decode an opaque base64url cursor into (hostname, derivation_id).
+pub fn decode_deployed_cursor(cursor: &str) -> Result<(String, i32), InvalidCursorError> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| InvalidCursorError)?;
+    let s = std::str::from_utf8(&bytes).map_err(|_| InvalidCursorError)?;
+    let mut parts = s.splitn(2, '\x00');
+    let host = parts.next().ok_or(InvalidCursorError)?.to_string();
+    let id: i32 = parts
+        .next()
+        .ok_or(InvalidCursorError)?
+        .parse()
+        .map_err(|_| InvalidCursorError)?;
+    Ok((host, id))
+}
+
+/// Encode (hostname, derivation_id) into an opaque base64url cursor.
+pub fn encode_deployed_cursor(hostname: &str, derivation_id: i32) -> String {
+    use base64::Engine;
+    // NUL-separated; hostname cannot contain NUL in practice.
+    let raw = format!("{}\x00{}", hostname, derivation_id);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes())
+}
+
+/// Cursor-based pagination for the deployed scan list.
+///
+/// The cursor is a base64url-encoded `{hostname}\x00{derivation_id}` payload so
+/// that the cursor is opaque, unambiguous, and handles config names with `:`.
+pub async fn get_scan_deployed(
+    pool: &PgPool,
+    limit: i64,
+    after_cursor: Option<&str>,
+) -> Result<ScanDeployedResult> {
+    // Decode the composite cursor.
+    let (cursor_hostname, cursor_derivation_id): (String, i32) = match after_cursor {
+        None => (String::new(), 0),
+        Some(c) => decode_deployed_cursor(c).map_err(anyhow::Error::new)?,
+    };
+    let rows = sqlx::query(
+        r#"
+        WITH latest_system_state AS (
+            SELECT DISTINCT ON (s.id)
+                s.id AS system_id,
+                ss.store_path AS current_store_path
+            FROM systems s
+            LEFT JOIN system_states ss ON ss.hostname = s.hostname
+            ORDER BY s.id, ss.timestamp DESC NULLS LAST, ss.id DESC
+        ),
+        latest_commit_per_flake AS (
+            -- Order by commit_timestamp DESC first (newest git commit wins),
+            -- then by id DESC as a tiebreaker for identical timestamps.
+            SELECT DISTINCT ON (flake_id) id AS commit_id, flake_id
+            FROM commits
+            ORDER BY flake_id, commit_timestamp DESC NULLS LAST, id DESC
+        ),
+        deployed_derivations AS (
+            SELECT DISTINCT ON (d.id)
+                cs.id                      AS scan_id,
+                d.id                       AS derivation_id,
+                COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) AS hostname,
+                f.name                     AS flake_name,
+                c.git_commit_hash          AS commit_hash,
+                c.flake_id,
+                c.id                       AS commit_db_id,
+                COALESCE(cs.status, 'never_scanned')  AS status,
+                cs.completed_at,
+                cs.scheduled_at,
+                COALESCE(cs.critical_count, 0)::int   AS critical_count,
+                COALESCE(cs.high_count, 0)::int        AS high_count,
+                COALESCE(cs.medium_count, 0)::int      AS medium_count,
+                COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) AS lifecycle_at
+            FROM systems s
+            LEFT JOIN latest_system_state lss ON lss.system_id = s.id
+            JOIN derivations d
+              ON d.derivation_name =
+                     COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
+              AND d.store_path IS NOT NULL
+              AND d.store_path = lss.current_store_path
+            LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
+            LEFT JOIN commits c ON c.id = d.commit_id
+            LEFT JOIN flakes f ON f.id = c.flake_id
+            WHERE s.is_active = TRUE
+              AND d.derivation_type = 'nixos'
+            ORDER BY d.id,
+                     COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
+        )
+        SELECT
+            scan_id,
+            derivation_id,
+            hostname,
+            flake_name,
+            commit_hash,
+            status,
+            completed_at,
+            scheduled_at,
+            critical_count,
+            high_count,
+            medium_count,
+            CASE
+                WHEN completed_at IS NULL THEN 'never_scanned'
+                WHEN completed_at >= NOW() - INTERVAL '24 hours' THEN 'deployed'
+                WHEN completed_at >= NOW() - INTERVAL '30 days' THEN 'recent'
+                ELSE 'archived'
+            END AS freshness,
+            TRUE AS is_current,
+            (lc.commit_id IS NOT NULL
+             AND dd.commit_db_id = lc.commit_id) AS is_latest_per_flake
+        FROM deployed_derivations dd
+        LEFT JOIN latest_commit_per_flake lc ON lc.flake_id = dd.flake_id
+        -- Composite keyset cursor: (hostname, derivation_id).
+        WHERE (dd.hostname, dd.derivation_id) > ($2, $3)
+        ORDER BY dd.hostname ASC, dd.derivation_id ASC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit + 1) // Fetch one extra to detect has_more (P2 #7).
+    .bind(&cursor_hostname)
+    .bind(cursor_derivation_id)
+    .fetch_all(pool)
+    .await?;
+
+    // Build items from the raw rows, collecting (row, derivation_id) pairs so
+    // we can construct the composite cursor from the last item.
+    let mut raw_items: Vec<(ScanQueueRow, i32)> = rows
+        .into_iter()
+        .map(|row| {
+            (
+                ScanQueueRow {
+                    scan_id: row.get("scan_id"),
+                    hostname: row.get("hostname"),
+                    flake_name: row.get("flake_name"),
+                    commit_hash: row.get("commit_hash"),
+                    status: row.get("status"),
+                    completed_at: row.get("completed_at"),
+                    scheduled_at: row.get("scheduled_at"),
+                    critical_count: row.get("critical_count"),
+                    high_count: row.get("high_count"),
+                    medium_count: row.get("medium_count"),
+                    freshness: row.get("freshness"),
+                    is_current: row.get("is_current"),
+                    is_latest_per_flake: row.get("is_latest_per_flake"),
+                },
+                row.get::<i32, _>("derivation_id"),
+            )
+        })
+        .collect();
+
+    // limit+1 pattern: has_more iff we got the extra row; trim it off (P2 #7).
+    let has_more = raw_items.len() as i64 > limit;
+    if has_more {
+        raw_items.truncate(limit as usize);
+    }
+
+    let next_cursor = if has_more {
+        raw_items
+            .last()
+            .map(|(row, did)| encode_deployed_cursor(&row.hostname, *did))
+    } else {
+        None
+    };
+
+    // Total count query for informational display (not used for has_more).
+    let total: i64 = sqlx::query_scalar(
+        r#"
+        WITH latest_system_state AS (
+            SELECT DISTINCT ON (s.id)
+                s.id AS system_id,
+                ss.store_path AS current_store_path
+            FROM systems s
+            LEFT JOIN system_states ss ON ss.hostname = s.hostname
+            ORDER BY s.id, ss.timestamp DESC NULLS LAST, ss.id DESC
+        )
+        SELECT COUNT(DISTINCT d.id)
+        FROM systems s
+        LEFT JOIN latest_system_state lss ON lss.system_id = s.id
+        JOIN derivations d
+          ON d.derivation_name =
+                 COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
+          AND d.store_path IS NOT NULL
+          AND d.store_path = lss.current_store_path
+        WHERE s.is_active = TRUE
+          AND d.derivation_type = 'nixos'
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(ScanDeployedResult {
+        has_more,
+        total,
+        next_cursor,
+        rows: raw_items.into_iter().map(|(r, _)| r).collect(),
+    })
 }
 
 pub async fn get_scan_queue_for_system(
@@ -260,12 +500,19 @@ pub async fn get_scan_queue_for_system(
 ) -> Result<Vec<ScanQueueRow>> {
     let rows = sqlx::query(
         r#"
-        WITH latest_per_derivation AS (
+        WITH latest_commit_per_flake AS (
+            SELECT DISTINCT ON (flake_id) id AS commit_id, flake_id
+            FROM commits
+            ORDER BY flake_id, commit_timestamp DESC NULLS LAST, id DESC
+        ),
+        latest_per_derivation AS (
             SELECT DISTINCT ON (d.id)
                 cs.id AS scan_id,
                 d.derivation_name AS hostname,
                 f.name AS flake_name,
                 c.git_commit_hash AS commit_hash,
+                c.flake_id,
+                c.id AS commit_db_id,
                 cs.status,
                 cs.completed_at,
                 cs.scheduled_at,
@@ -274,7 +521,9 @@ pub async fn get_scan_queue_for_system(
                 cs.medium_count,
                 COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) AS lifecycle_at
             FROM derivations d
-            JOIN systems s ON s.hostname = d.derivation_name
+            JOIN systems s
+              ON d.derivation_name =
+                     COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
             LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
             LEFT JOIN commits c ON c.id = d.commit_id
             LEFT JOIN flakes f ON f.id = c.flake_id
@@ -302,8 +551,10 @@ pub async fn get_scan_queue_for_system(
             END AS freshness,
             (ROW_NUMBER() OVER (
                 ORDER BY lifecycle_at DESC NULLS LAST
-            ) = 1) AS is_current
-        FROM latest_per_derivation
+            ) = 1) AS is_current,
+            (lc.commit_id IS NOT NULL AND lpd.commit_db_id = lc.commit_id) AS is_latest_per_flake
+        FROM latest_per_derivation lpd
+        LEFT JOIN latest_commit_per_flake lc ON lc.flake_id = lpd.flake_id
         ORDER BY
             CASE WHEN status = 'in_progress' THEN 0 WHEN status = 'pending' THEN 1 ELSE 2 END,
             lifecycle_at DESC NULLS LAST
@@ -330,6 +581,7 @@ pub async fn get_scan_queue_for_system(
             medium_count: row.get("medium_count"),
             freshness: row.get("freshness"),
             is_current: row.get("is_current"),
+            is_latest_per_flake: row.get("is_latest_per_flake"),
         })
         .collect())
 }

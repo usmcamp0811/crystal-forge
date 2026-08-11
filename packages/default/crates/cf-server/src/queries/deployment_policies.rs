@@ -2,11 +2,19 @@
 
 use anyhow::{Context, Result};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use uuid::Uuid;
 
+use crate::api::models::DeletionEligibility;
+use crate::compliance::digest::{PolicyVersionCanonical, write_policy_version_digest};
+use crate::compliance::mappings::{
+    initial_policy_metadata, merge_classification_into_metadata, merge_policy_mappings,
+};
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
 };
+use crate::queries::compliance::ensure_policy_draft;
+use crate::queries::deletion::{blocker, eligibility};
 
 /// List deployment policies with pagination
 pub async fn list_deployment_policies(
@@ -267,11 +275,114 @@ pub async fn get_deployment_policy_by_id(
     Ok(policy)
 }
 
-/// Create a new deployment policy
+/// Fetch a deployment policy record resolved to an exact version.
+pub async fn get_deployment_policy_by_version(
+    pool: &PgPool,
+    policy_version_id: &Uuid,
+) -> Result<Option<DeploymentPolicyRecord>> {
+    let row = sqlx::query_as::<_, DeploymentPolicyRecord>(
+        r#"
+        SELECT dp.id, dp.name, dp.description, dp.policy_type,
+               COALESCE(pv.config, dp.config) AS config,
+               dp.enabled, dp.created_at, dp.updated_at
+          FROM deployment_policy_versions pv
+          JOIN deployment_policies dp ON dp.id = pv.policy_id
+         WHERE pv.id = $1
+        "#,
+    )
+    .bind(policy_version_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to fetch deployment policy by version ID")?;
+
+    Ok(row)
+}
+
+/// Fetch deployment policy records for exact version IDs in one query.
+///
+/// Evaluation and deployment resolve policies per system, but many systems
+/// share the same policy versions. Loading those versions as a batch avoids a
+/// policy-version query for every system/policy pair.
+pub async fn get_deployment_policies_by_versions(
+    pool: &PgPool,
+    policy_version_ids: &[Uuid],
+) -> Result<HashMap<Uuid, DeploymentPolicyRecord>> {
+    if policy_version_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            String,
+            Option<String>,
+            String,
+            serde_json::Value,
+            bool,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        ),
+    >(
+        r#"
+        SELECT pv.id, dp.id, dp.name, dp.description, dp.policy_type,
+               COALESCE(pv.config, dp.config) AS config,
+               dp.enabled, dp.created_at, dp.updated_at
+          FROM deployment_policy_versions pv
+          JOIN deployment_policies dp ON dp.id = pv.policy_id
+         WHERE pv.id = ANY($1)
+        "#,
+    )
+    .bind(policy_version_ids)
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch deployment policies by version IDs")?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                version_id,
+                id,
+                name,
+                description,
+                policy_type,
+                config,
+                enabled,
+                created_at,
+                updated_at,
+            )| {
+                (
+                    version_id,
+                    DeploymentPolicyRecord {
+                        id,
+                        name,
+                        description,
+                        policy_type,
+                        config,
+                        enabled,
+                        created_at,
+                        updated_at,
+                    },
+                )
+            },
+        )
+        .collect())
+}
+
+/// Create a new deployment policy.
+///
+/// Runs entirely within a transaction. The SQL trigger creates the draft
+/// version row with `semantic_digest = 'pending'`; within the same transaction
+/// we compute the real Rust-canonical digest and persist it. A digest failure
+/// rolls back the entire insert.
 pub async fn create_deployment_policy(
     pool: &PgPool,
     request: &CreateDeploymentPolicyRequest,
 ) -> Result<DeploymentPolicyRecord> {
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+
     let policy = sqlx::query_as::<_, DeploymentPolicyRecord>(
         r#"
         INSERT INTO deployment_policies (name, description, policy_type, config, enabled)
@@ -284,28 +395,122 @@ pub async fn create_deployment_policy(
     .bind(&request.policy_type)
     .bind(&request.config)
     .bind(request.enabled.unwrap_or(true))
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .context("Failed to create deployment policy")?;
 
+    // Compute and persist the canonical digest before committing.
+    // New policies created via the legacy API have no opaque XML.
+    // Build compliance_metadata containing any supplied SRG/CCI mappings.
+    let srg_ids_opt: Option<&[String]> = if request.srg_ids.is_empty() {
+        None
+    } else {
+        Some(&request.srg_ids)
+    };
+    let cci_ids_opt: Option<&[String]> = if request.cci_ids.is_empty() {
+        None
+    } else {
+        Some(&request.cci_ids)
+    };
+    let base_metadata = initial_policy_metadata(srg_ids_opt, cci_ids_opt)
+        .context("Failed to build compliance metadata for new policy")?;
+    // Merge classification fields into the initial metadata.
+    let compliance_metadata = merge_classification_into_metadata(
+        &base_metadata,
+        request.category.as_deref(),
+        request.framework.as_deref(),
+        request.severity.as_deref(),
+        request.control_family.as_deref(),
+        request.cmmc_level,
+        request.cis_section.as_deref(),
+        request.rationale.as_deref(),
+    );
+
+    let canonical = PolicyVersionCanonical {
+        name: policy.name.clone(),
+        description: policy.description.clone(),
+        policy_type: policy.policy_type.clone(),
+        implementation_state: "native".to_string(),
+        execution_phase: "nix-evaluation".to_string(),
+        config: policy.config.clone(),
+        compliance_metadata,
+        dependencies: serde_json::json!([]),
+        opaque_xml_digest: None,
+        enabled_by_default: Some(policy.enabled),
+    };
+    write_policy_version_digest(&mut tx, policy.id, &canonical)
+        .await
+        .context("Failed to write policy version digest")?;
+
+    tx.commit()
+        .await
+        .context("Failed to commit policy creation")?;
     Ok(policy)
 }
 
-/// Update an existing deployment policy
+/// Update an existing deployment policy.
+///
+/// Loads the current draft version's rich semantic fields (implementation_state,
+/// execution_phase, compliance_metadata, dependencies) before updating, so that
+/// a plain name/config/enabled edit does not overwrite imported metadata (P1 #4).
+///
+/// Runs entirely within a transaction; a digest failure rolls back the update.
 pub async fn update_deployment_policy(
     pool: &PgPool,
     policy_id: &Uuid,
     request: &UpdateDeploymentPolicyRequest,
+    actor_id: Option<Uuid>,
 ) -> Result<Option<DeploymentPolicyRecord>> {
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+
+    // Load the current draft version's rich fields before the lineage update,
+    // so that updating the lineage cannot erase imported semantics (P1 #4).
+    // Ensure a mutable draft exists (creates a derived draft from the published
+    // version when needed). (P1 #2)
+    let _draft_version_id = ensure_policy_draft(
+        &mut tx,
+        *policy_id,
+        actor_id,
+        None,
+        crate::queries::compliance::PolicyDraftIntent::EnsureMutable,
+    )
+    .await
+    .context("Failed to ensure policy draft version exists")?;
+
+    // Load rich semantic fields from the current draft version row.
+    // This is done AFTER ensure_policy_draft so the pointer is guaranteed valid.
+    #[derive(sqlx::FromRow)]
+    struct DraftVersionFields {
+        implementation_state: String,
+        execution_phase: String,
+        compliance_metadata: serde_json::Value,
+        dependencies: serde_json::Value,
+        opaque_xml: Option<String>,
+    }
+    let draft_fields: Option<DraftVersionFields> = sqlx::query_as(
+        r#"
+        SELECT dpv.implementation_state, dpv.execution_phase,
+               dpv.compliance_metadata, dpv.dependencies, dpv.opaque_xml
+        FROM deployment_policies dp
+        JOIN deployment_policy_versions dpv ON dpv.id = dp.current_draft_version_id
+        WHERE dp.id = $1
+          AND dpv.publication_state IN ('incomplete', 'draft', 'interim')
+        "#,
+    )
+    .bind(policy_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to load policy draft version fields")?;
+
     let policy = sqlx::query_as::<_, DeploymentPolicyRecord>(
         r#"
         UPDATE deployment_policies
         SET
-            name = COALESCE($2, name),
+            name        = COALESCE($2, name),
             description = COALESCE($3, description),
             policy_type = COALESCE($4, policy_type),
-            config = COALESCE($5, config),
-            enabled = COALESCE($6, enabled)
+            config      = COALESCE($5, config),
+            enabled     = COALESCE($6, enabled)
         WHERE id = $1
         RETURNING id, name, description, policy_type, config, enabled, created_at, updated_at
         "#,
@@ -316,23 +521,319 @@ pub async fn update_deployment_policy(
     .bind(&request.policy_type)
     .bind(&request.config)
     .bind(request.enabled)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .context("Failed to update deployment policy")?;
 
+    if let Some(ref p) = policy {
+        // Merge: preserve existing rich fields; update only what the legacy
+        // request supports. Callers using the full version-aware API can update
+        // implementation_state, execution_phase, etc. separately.
+        let (impl_state, exec_phase, existing_meta, deps, opaque_xml) =
+            if let Some(df) = draft_fields {
+                (
+                    df.implementation_state,
+                    df.execution_phase,
+                    df.compliance_metadata,
+                    df.dependencies,
+                    df.opaque_xml,
+                )
+            } else {
+                // No prior draft version — new policy path, use defaults.
+                (
+                    "native".to_string(),
+                    "nix-evaluation".to_string(),
+                    serde_json::json!({}),
+                    serde_json::json!([]),
+                    None,
+                )
+            };
+
+        // Merge SRG/CCI mappings into existing compliance_metadata, preserving
+        // all other metadata keys (source fidelity, rationale, checks, etc.).
+        let srg_opt = request.srg_ids.as_deref();
+        let cci_opt = request.cci_ids.as_deref();
+        let srg_cci_merged = merge_policy_mappings(&existing_meta, srg_opt, cci_opt)
+            .context("Failed to merge SRG/CCI mappings")?;
+        // Merge classification fields into the already-merged metadata.
+        let merged_meta = merge_classification_into_metadata(
+            &srg_cci_merged,
+            request.category.as_deref(),
+            request.framework.as_deref(),
+            request.severity.as_deref(),
+            request.control_family.as_deref(),
+            request.cmmc_level,
+            request.cis_section.as_deref(),
+            request.rationale.as_deref(),
+        );
+
+        let canonical = PolicyVersionCanonical {
+            name: p.name.clone(),
+            description: p.description.clone(),
+            policy_type: p.policy_type.clone(),
+            implementation_state: impl_state,
+            execution_phase: exec_phase,
+            config: p.config.clone(),
+            compliance_metadata: merged_meta,
+            dependencies: deps,
+            opaque_xml_digest: PolicyVersionCanonical::digest_opaque_xml(opaque_xml.as_deref()),
+            enabled_by_default: Some(p.enabled),
+        };
+        write_policy_version_digest(&mut tx, p.id, &canonical)
+            .await
+            .context("Failed to write policy version digest")?;
+    }
+
+    tx.commit()
+        .await
+        .context("Failed to commit policy update")?;
     Ok(policy)
 }
 
-/// Delete a deployment policy
-/// Returns true if deleted, false if not found
-pub async fn delete_deployment_policy(pool: &PgPool, policy_id: &Uuid) -> Result<bool> {
-    let result = sqlx::query("DELETE FROM deployment_policies WHERE id = $1")
-        .bind(policy_id)
-        .execute(pool)
-        .await
-        .context("Failed to delete deployment policy")?;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyDeleteOutcome {
+    Deleted,
+    NotFound,
+    Blocked(DeletionEligibility),
+}
 
-    Ok(result.rows_affected() > 0)
+/// Return every retained record that prevents deleting this policy lineage.
+///
+/// The caller owns the transaction so DELETE can hold the lineage lock from
+/// preflight through removal; the public status endpoint uses the same helper
+/// in a short-lived transaction.
+async fn policy_deletion_eligibility_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    policy_id: &Uuid,
+) -> Result<Option<DeletionEligibility>> {
+    let policy: Option<(Uuid, String)> =
+        sqlx::query_as("SELECT id, policy_type FROM deployment_policies WHERE id = $1 FOR UPDATE")
+            .bind(policy_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .context("Failed to lock deployment policy")?;
+    let Some((_id, policy_type)) = policy else {
+        return Ok(None);
+    };
+
+    let immutable_versions: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM deployment_policy_versions WHERE policy_id = $1 AND publication_state IN ('accepted', 'deprecated') ORDER BY created_at, id",
+    )
+    .bind(policy_id)
+    .fetch_all(&mut **tx)
+    .await
+    .context("Failed to check policy immutable history")?;
+
+    let immutable_assignment_history: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*) FROM (
+            SELECT e.assignment_version_id FROM compliance_assignment_exclusions e JOIN deployment_policy_versions pv ON pv.id = e.policy_version_id WHERE pv.policy_id = $1
+            UNION SELECT a.assignment_version_id FROM compliance_assignment_additions a JOIN deployment_policy_versions pv ON pv.id = a.policy_version_id WHERE pv.policy_id = $1
+            UNION SELECT o.assignment_version_id FROM compliance_assignment_value_overrides o JOIN deployment_policy_versions pv ON pv.id = o.policy_version_id WHERE pv.policy_id = $1
+        ) AS assignment_history
+        "#,
+    )
+    .bind(policy_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("Failed to check immutable policy assignment history")?;
+    let immutable_memberships: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT bvp.bundle_version_id FROM compliance_bundle_version_policies bvp JOIN deployment_policy_versions pv ON pv.id = bvp.policy_version_id JOIN compliance_bundle_versions bv ON bv.id = bvp.bundle_version_id WHERE pv.policy_id = $1 AND bv.publication_state IN ('accepted', 'deprecated') ORDER BY bvp.bundle_version_id",
+    )
+    .bind(policy_id)
+    .fetch_all(&mut **tx)
+    .await
+    .context("Failed to check immutable bundle memberships")?;
+    let mutable_membership_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM compliance_bundle_version_policies bvp JOIN deployment_policy_versions pv ON pv.id = bvp.policy_version_id JOIN compliance_bundle_versions bv ON bv.id = bvp.bundle_version_id WHERE pv.policy_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim')",
+    )
+    .bind(policy_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("Failed to check mutable draft memberships")?;
+    let environment_assignment_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM environment_policies WHERE policy_id = $1")
+            .bind(policy_id)
+            .fetch_one(&mut **tx)
+            .await
+            .context("Failed to check environment policy assignments")?;
+    let system_assignment_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM system_policies WHERE policy_id = $1")
+            .bind(policy_id)
+            .fetch_one(&mut **tx)
+            .await
+            .context("Failed to check system policy assignments")?;
+
+    let immutable_source_mapping_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM compliance_source_object_mappings m JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id LEFT JOIN compliance_bundle_versions bv ON bv.id = m.bundle_version_id WHERE pv.policy_id = $1 AND (pv.publication_state IN ('accepted', 'deprecated') OR bv.publication_state IN ('accepted', 'deprecated'))",
+    )
+    .bind(policy_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("Failed to check immutable policy source mappings")?;
+    let disposable_source_mapping_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM compliance_source_object_mappings m JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id LEFT JOIN compliance_bundle_versions bv ON bv.id = m.bundle_version_id WHERE pv.policy_id = $1 AND pv.publication_state IN ('incomplete', 'draft', 'interim') AND (bv.id IS NULL OR bv.publication_state IN ('incomplete', 'draft', 'interim'))",
+    )
+    .bind(policy_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("Failed to check disposable policy source mappings")?;
+
+    let mut blockers = Vec::new();
+    if policy_type == "require_cf_agent" {
+        blockers.push(blocker(
+            "policy_core",
+            "The core require_cf_agent policy cannot be permanently deleted.",
+            false,
+            None,
+            Vec::new(),
+        ));
+    }
+    if !immutable_versions.is_empty() {
+        blockers.push(blocker(
+            "policy_immutable_history",
+            "This policy has accepted or deprecated history and cannot be permanently deleted.",
+            false,
+            None,
+            immutable_versions,
+        ));
+    }
+    if immutable_assignment_history > 0 {
+        blockers.push(blocker("immutable_assignment_history", "This policy is referenced by immutable assignment history and cannot be permanently deleted.", false, Some(immutable_assignment_history), Vec::new()));
+    }
+    if !immutable_memberships.is_empty() {
+        blockers.push(blocker(
+            "immutable_bundle_membership",
+            "This policy belongs to immutable bundle membership and cannot be permanently deleted.",
+            false,
+            None,
+            immutable_memberships,
+        ));
+    }
+    if mutable_membership_count > 0 {
+        blockers.push(blocker(
+            "mutable_draft_membership",
+            "Draft bundle membership will be removed with this policy.",
+            true,
+            Some(mutable_membership_count),
+            Vec::new(),
+        ));
+    }
+    let assignment_count = environment_assignment_count + system_assignment_count;
+    if assignment_count > 0 {
+        blockers.push(blocker(
+            "mutable_direct_assignment",
+            "Direct environment or system assignments will be removed with this policy.",
+            true,
+            Some(assignment_count),
+            Vec::new(),
+        ));
+    }
+    if disposable_source_mapping_count > 0 {
+        blockers.push(blocker(
+            "disposable_source_mapping",
+            "Draft-only source mappings will be removed with this policy.",
+            true,
+            Some(disposable_source_mapping_count),
+            Vec::new(),
+        ));
+    }
+    if immutable_source_mapping_count > 0 {
+        blockers.push(blocker(
+            "immutable_source_mapping",
+            "This policy has retained source mappings and cannot be permanently deleted.",
+            false,
+            Some(immutable_source_mapping_count),
+            Vec::new(),
+        ));
+    }
+    Ok(Some(eligibility(blockers)))
+}
+
+pub async fn policy_deletion_eligibility(
+    pool: &PgPool,
+    policy_id: &Uuid,
+) -> Result<Option<DeletionEligibility>> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin policy deletion preflight")?;
+    let result = policy_deletion_eligibility_in_transaction(&mut tx, policy_id).await;
+    tx.rollback().await.ok();
+    result
+}
+
+/// Delete a policy lineage only when no immutable history or reference would
+/// be destroyed. The lineage row is locked for the full eligibility check and
+/// delete; the FK guards remain defense in depth.
+pub async fn delete_deployment_policy(
+    pool: &PgPool,
+    policy_id: &Uuid,
+) -> Result<PolicyDeleteOutcome> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin policy deletion")?;
+
+    let Some(eligibility) = policy_deletion_eligibility_in_transaction(&mut tx, policy_id).await?
+    else {
+        tx.rollback().await.ok();
+        return Ok(PolicyDeleteOutcome::NotFound);
+    };
+    if !eligibility.eligible {
+        tx.rollback().await.ok();
+        return Ok(PolicyDeleteOutcome::Blocked(eligibility));
+    }
+
+    sqlx::query(
+        "DELETE FROM compliance_source_object_mappings m \
+         WHERE m.policy_version_id IN ( \
+             SELECT pv.id FROM deployment_policy_versions pv \
+             WHERE pv.policy_id = $1 \
+               AND pv.publication_state IN ('incomplete', 'draft', 'interim') \
+         ) \
+         AND ( \
+             m.bundle_version_id IS NULL \
+             OR NOT EXISTS ( \
+                 SELECT 1 FROM compliance_bundle_versions bv \
+                 WHERE bv.id = m.bundle_version_id \
+                   AND bv.publication_state IN ('accepted', 'deprecated') \
+             ) \
+         )",
+    )
+    .bind(policy_id)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to remove disposable policy source mappings")?;
+    sqlx::query("DELETE FROM compliance_bundle_version_policies bvp USING deployment_policy_versions pv, compliance_bundle_versions bv WHERE bvp.policy_version_id = pv.id AND bvp.bundle_version_id = bv.id AND pv.policy_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim')")
+        .bind(policy_id).execute(&mut *tx).await.context("Failed to remove mutable draft bundle memberships")?;
+    sqlx::query("DELETE FROM environment_policies WHERE policy_id = $1")
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to remove mutable environment policy assignments")?;
+    sqlx::query("DELETE FROM system_policies WHERE policy_id = $1")
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to remove mutable system policy assignments")?;
+
+    let deleted = sqlx::query("DELETE FROM deployment_policies WHERE id = $1")
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to delete deployment policy")?
+        .rows_affected();
+
+    if deleted != 1 {
+        tx.rollback().await.ok();
+        return Ok(PolicyDeleteOutcome::NotFound);
+    }
+
+    tx.commit()
+        .await
+        .context("Failed to commit deployment policy deletion")?;
+    Ok(PolicyDeleteOutcome::Deleted)
 }
 
 /// Check if a policy name already exists (case-insensitive)
@@ -654,6 +1155,75 @@ mod tests {
         }
 
         (flake_id, sys_id, env_id, pol_id)
+    }
+
+    /// Publish a policy version in the trigger-safe order: clear the draft
+    /// pointer, flip the version state, then set the published pointer, all in
+    /// one transaction so the deferred lineage-pointer trigger passes at COMMIT.
+    async fn publish_policy_version_row(
+        pool: &sqlx::PgPool,
+        version_id: &Uuid,
+        state: &str,
+    ) -> sqlx::Result<()> {
+        let mut tx = pool.begin().await?;
+        sqlx::query(
+            "UPDATE deployment_policies SET current_draft_version_id = NULL \
+             WHERE current_draft_version_id = $1",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE deployment_policy_versions \
+             SET publication_state = $1, published_at = CURRENT_TIMESTAMP \
+             WHERE id = $2",
+        )
+        .bind(state)
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE deployment_policies SET current_published_version_id = $1 \
+             WHERE id = (SELECT policy_id FROM deployment_policy_versions WHERE id = $1)",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await
+    }
+
+    /// Publish a bundle version in the trigger-safe order, mirroring
+    /// `publish_policy_version_row` for compliance_bundle_versions.
+    async fn publish_bundle_version_row(
+        pool: &sqlx::PgPool,
+        version_id: &Uuid,
+        state: &str,
+    ) -> sqlx::Result<()> {
+        let mut tx = pool.begin().await?;
+        sqlx::query(
+            "UPDATE compliance_bundles SET current_draft_version_id = NULL \
+             WHERE current_draft_version_id = $1",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE compliance_bundle_versions \
+             SET publication_state = $1, published_at = CURRENT_TIMESTAMP \
+             WHERE id = $2",
+        )
+        .bind(state)
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE compliance_bundles SET current_published_version_id = $1 \
+             WHERE id = (SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1)",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await
     }
 
     #[tokio::test]
@@ -1210,7 +1780,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires a test database role with CREATE DATABASE privileges"]
-    async fn full_migration_chain_applies_cleanly_on_fresh_database_including_0187() {
+    async fn full_migration_chain_applies_cleanly_on_fresh_database_including_0210() {
         let (admin_pool, pool, db_name) = create_temp_db().await;
 
         MIGRATOR
@@ -1218,19 +1788,286 @@ mod tests {
             .await
             .expect("full migration chain should apply successfully on a fresh database");
 
-        // 0187 must be recorded as successfully applied.
-        let success_187: Option<bool> =
-            sqlx::query_scalar("SELECT success FROM _sqlx_migrations WHERE version = 187")
+        // The deletion mapping guard migration must be recorded as applied.
+        let success_210: Option<bool> =
+            sqlx::query_scalar("SELECT success FROM _sqlx_migrations WHERE version = 210")
                 .fetch_optional(&pool)
                 .await
-                .expect("query _sqlx_migrations for version 187");
+                .expect("query _sqlx_migrations for version 210");
         assert_eq!(
-            success_187,
+            success_210,
             Some(true),
-            "migration 0187 must be recorded as successful after a fresh-chain apply"
+            "migration 0210 must be recorded as successful after a fresh-chain apply"
         );
 
         drop(pool);
         drop_temp_db(&admin_pool, &db_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a test database role with CREATE DATABASE privileges"]
+    async fn source_mapping_guard_uses_all_referenced_version_states() {
+        let (admin_pool, pool, db_name) = create_temp_db().await;
+        MIGRATOR
+            .run(&pool)
+            .await
+            .expect("apply migrations to isolated database");
+
+        let artifact_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_source_artifacts (content, filename, media_type, sha256, parser_version) VALUES ($1, 'fixture.xml', 'application/xml', encode(digest($1, 'sha256'), 'hex'), 'test') RETURNING id",
+        )
+        .bind(b"<Benchmark/>".as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("insert source artifact");
+
+        // A-G: draft or immutable single references, then every two-reference
+        // combination. A mapping is disposable only in A, C, and E.
+        let cases = [
+            ("A", Some("draft"), None, true),
+            ("B", Some("accepted"), None, false),
+            ("C", None, Some("draft"), true),
+            ("D", None, Some("accepted"), false),
+            ("E", Some("draft"), Some("draft"), true),
+            ("F", Some("accepted"), Some("draft"), false),
+            ("G", Some("draft"), Some("accepted"), false),
+        ];
+
+        for (case, policy_state, bundle_state, disposable) in cases {
+            let policy_version_id = if let Some(policy_state) = policy_state {
+                let policy_id: Uuid = sqlx::query_scalar(
+                    "INSERT INTO deployment_policies (name, policy_type, config, enabled) VALUES ($1, 'custom_check', '{\"expression\": \"true\"}', false) RETURNING id",
+                )
+                .bind(format!("source-mapping-{case}-policy"))
+                .fetch_one(&pool)
+                .await
+                .expect("insert policy");
+                let version_id: Uuid = sqlx::query_scalar(
+                    "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+                )
+                .bind(policy_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load policy version");
+                if policy_state != "draft" {
+                    publish_policy_version_row(&pool, &version_id, policy_state)
+                        .await
+                        .expect("publish policy version");
+                }
+                Some(version_id)
+            } else {
+                None
+            };
+
+            let bundle_version_id = if let Some(bundle_state) = bundle_state {
+                let bundle_id: Uuid = sqlx::query_scalar(
+                    "INSERT INTO compliance_bundles (name, framework, layer, owner) VALUES ($1, 'test', 'fleet', 'test') RETURNING id",
+                )
+                .bind(format!("source-mapping-{case}-bundle"))
+                .fetch_one(&pool)
+                .await
+                .expect("insert bundle");
+                let version_id: Uuid = sqlx::query_scalar(
+                    "SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1",
+                )
+                .bind(bundle_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load bundle version");
+                if bundle_state != "draft" {
+                    publish_bundle_version_row(&pool, &version_id, bundle_state)
+                        .await
+                        .expect("publish bundle version");
+                }
+                Some(version_id)
+            } else {
+                None
+            };
+
+            let mapping_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO compliance_source_object_mappings (source_artifact_id, object_kind, source_identity, policy_version_id, bundle_version_id, fidelity) VALUES ($1, 'rule', $2, $3, $4, 'native_exact') RETURNING id",
+            )
+            .bind(artifact_id)
+            .bind(format!("source-mapping-{case}"))
+            .bind(policy_version_id)
+            .bind(bundle_version_id)
+            .fetch_one(&pool)
+            .await
+            .expect("insert source mapping");
+            let result = sqlx::query("DELETE FROM compliance_source_object_mappings WHERE id = $1")
+                .bind(mapping_id)
+                .execute(&pool)
+                .await;
+            assert_eq!(
+                result.is_ok(),
+                disposable,
+                "case {case} must classify mappings from version state, not a non-null UUID"
+            );
+        }
+
+        drop(pool);
+        drop_temp_db(&admin_pool, &db_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires CRYSTAL_FORGE_TEST_DATABASE_URL with migration 0210 applied"]
+    async fn hard_delete_removes_disposable_draft_source_mapping() {
+        let pool = get_test_pool().await;
+        let suffix = uuid::Uuid::new_v4();
+        let policy_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config, enabled) VALUES ($1, 'custom_check', '{\"expression\": \"true\"}', false) RETURNING id",
+        )
+        .bind(format!("deletion-disposable-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .expect("insert draft policy");
+        let policy_version_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM deployment_policy_versions WHERE policy_id = $1 AND publication_state = 'draft'",
+        )
+        .bind(policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("find draft policy version");
+        let bundle_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_bundles (name, framework, layer, owner) VALUES ($1, 'test', 'fleet', 'test') RETURNING id",
+        )
+        .bind(format!("deletion-disposable-bundle-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .expect("insert draft bundle");
+        let bundle_version_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM compliance_bundle_versions WHERE bundle_id = $1 AND publication_state = 'draft'",
+        )
+        .bind(bundle_id)
+        .fetch_one(&pool)
+        .await
+        .expect("find draft bundle version");
+        let source_artifact_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_source_artifacts (content, filename, media_type, sha256, parser_version) VALUES ($1, 'fixture.xml', 'application/xml', encode(digest($1, 'sha256'), 'hex'), 'test') RETURNING id",
+        )
+        .bind(format!("<Benchmark><!-- {suffix} --></Benchmark>").into_bytes())
+        .fetch_one(&pool)
+        .await
+        .expect("insert source artifact");
+        let mapping_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_source_object_mappings (source_artifact_id, object_kind, source_identity, policy_version_id, bundle_version_id, fidelity) VALUES ($1, 'rule', $2, $3, $4, 'native_exact') RETURNING id",
+        )
+        .bind(source_artifact_id)
+        .bind(format!("rule-{suffix}"))
+        .bind(policy_version_id)
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert disposable mapping");
+
+        let eligibility = policy_deletion_eligibility(&pool, &policy_id)
+            .await
+            .expect("load eligibility")
+            .expect("policy exists");
+        assert!(eligibility.eligible);
+        assert!(
+            eligibility
+                .blockers
+                .iter()
+                .any(|blocker| blocker.kind == "disposable_source_mapping" && blocker.removable)
+        );
+        assert_eq!(
+            delete_deployment_policy(&pool, &policy_id)
+                .await
+                .expect("delete policy"),
+            PolicyDeleteOutcome::Deleted
+        );
+        let mapping_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM compliance_source_object_mappings WHERE id = $1)",
+        )
+        .bind(mapping_id)
+        .fetch_one(&pool)
+        .await
+        .expect("check mapping cleanup");
+        assert!(!mapping_exists);
+
+        assert_eq!(
+            crate::queries::compliance::delete_bundle(&pool, bundle_id)
+                .await
+                .expect("delete draft bundle"),
+            crate::queries::compliance::BundleDeleteOutcome::Deleted
+        );
+
+        let bundle_policy_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config, enabled) VALUES ($1, 'custom_check', '{\"expression\": \"true\"}', false) RETURNING id",
+        )
+        .bind(format!("deletion-disposable-bundle-policy-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .expect("insert second draft policy");
+        let bundle_policy_version_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(bundle_policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("find second draft policy version");
+        let bundle_only_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_bundles (name, framework, layer, owner) VALUES ($1, 'test', 'fleet', 'test') RETURNING id",
+        )
+        .bind(format!("deletion-disposable-bundle-only-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .expect("insert second draft bundle");
+        let bundle_only_version_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1",
+        )
+        .bind(bundle_only_id)
+        .fetch_one(&pool)
+        .await
+        .expect("find second draft bundle version");
+        let bundle_mapping_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_source_object_mappings (source_artifact_id, object_kind, source_identity, policy_version_id, bundle_version_id, fidelity) VALUES ($1, 'rule', $2, $3, $4, 'native_exact') RETURNING id",
+        )
+        .bind(source_artifact_id)
+        .bind(format!("bundle-rule-{suffix}"))
+        .bind(bundle_policy_version_id)
+        .bind(bundle_only_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert disposable bundle mapping");
+
+        let bundle_eligibility =
+            crate::queries::compliance::bundle_deletion_eligibility(&pool, bundle_only_id)
+                .await
+                .expect("load bundle eligibility")
+                .expect("bundle exists");
+        assert!(bundle_eligibility.eligible);
+        assert!(
+            bundle_eligibility.blockers.iter().any(|blocker| {
+                blocker.kind == "disposable_source_mapping" && blocker.removable
+            })
+        );
+        assert_eq!(
+            crate::queries::compliance::delete_bundle(&pool, bundle_only_id)
+                .await
+                .expect("delete second draft bundle"),
+            crate::queries::compliance::BundleDeleteOutcome::Deleted
+        );
+        let bundle_mapping_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM compliance_source_object_mappings WHERE id = $1)",
+        )
+        .bind(bundle_mapping_id)
+        .fetch_one(&pool)
+        .await
+        .expect("check bundle mapping cleanup");
+        assert!(!bundle_mapping_exists);
+        assert_eq!(
+            delete_deployment_policy(&pool, &bundle_policy_id)
+                .await
+                .expect("delete second draft policy"),
+            PolicyDeleteOutcome::Deleted
+        );
+
+        sqlx::query("DELETE FROM compliance_source_artifacts WHERE id = $1")
+            .bind(source_artifact_id)
+            .execute(&pool)
+            .await
+            .expect("clean up source artifact");
     }
 }

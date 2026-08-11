@@ -4,8 +4,8 @@
 //! `DATABASE_URL=... cargo test -p crystal-forge --lib scanning_tests -- --ignored`
 
 use crate::queries::scanning::{
-    ScanSchedulePolicyRow, get_scan_activity, get_scan_queue, get_scan_schedule_policy,
-    get_scan_stats, get_scan_systems, update_scan_schedule_policy,
+    ScanSchedulePolicyRow, get_scan_activity, get_scan_deployed, get_scan_queue,
+    get_scan_schedule_policy, get_scan_stats, get_scan_systems, update_scan_schedule_policy,
 };
 use sqlx::PgPool;
 
@@ -93,4 +93,17 @@ async fn list_queries_respect_limit_and_run() {
         .await
         .expect("activity query should run");
     assert!(activity.len() <= 5);
+}
+
+#[tokio::test]
+#[ignore = "requires live database connection"]
+async fn deployed_query_runs_against_current_schema() {
+    let pool = test_pool_from_env().await;
+
+    let result = get_scan_deployed(&pool, 5, None)
+        .await
+        .expect("deployed query should run");
+
+    assert!(result.rows.len() <= 5);
+    assert!(result.total >= result.rows.len() as i64);
 }

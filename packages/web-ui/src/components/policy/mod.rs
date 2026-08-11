@@ -5,12 +5,16 @@
 
 mod policy_card;
 mod policy_editor_modal;
+mod grouping_schemes_modal;
+mod policy_interchange_modal;
 mod types;
 
 pub use policy_card::PolicyCard;
 pub use policy_editor_modal::PolicyEditorModal;
+pub use grouping_schemes_modal::GroupingSchemesModal;
+pub use policy_interchange_modal::PolicyInterchangeModal;
 pub use types::{
     POLICY_CATEGORIES, POLICY_TOML_SAMPLE, PolicyCategory, PolicyDefinition, PolicyFormat,
-    PolicyRuleSummary, is_core_policy, is_policy_enabled, normalized_policy_type, policy_category,
-    policy_rule_summaries,
+    PolicyRevisionSummary, PolicyRuleSummary, is_core_policy, is_policy_enabled,
+    is_policy_version_editable, normalized_policy_type, policy_category, policy_rule_summaries,
 };

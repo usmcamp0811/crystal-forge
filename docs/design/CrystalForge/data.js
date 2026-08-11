@@ -82,6 +82,27 @@ const HOSTS = [
   ["lab-rig-02", "lab", "lab-nodes", "healthy", 5],
 ];
 
+// Explicit compliance-assignment overrides — systems intentionally pinned to a non-current
+// STIG revision, with the defensible reason/approval/deadline that makes the exception auditable.
+// Everyone else in production/staging tracks whichever revision is published as "current".
+const COMPLIANCE_ASSIGNMENT_OVERRIDES = {
+  "orion-db-02": [{
+    lineageId: "disa-nixos-stig", bundleId: "disa-rhel9-stig-r1", targetBundleId: "disa-rhel9-stig",
+    status: "exception", reason: "Legacy Oracle-compatible kernel module is incompatible with the v1r2 FIPS crypto requirement.",
+    approvedBy: "AO — J. Alvarez", deadline: "2026-10-01", poam: "POAM-2026-014",
+  }],
+  "hydra-03": [{
+    lineageId: "disa-nixos-stig", bundleId: "disa-rhel9-stig-r4", targetBundleId: "disa-rhel9-stig",
+    status: "transitioning", reason: "Phased rollout — build farm is migrating to v1r2 in wave 2.",
+    approvedBy: "ISSM — R. Chen", deadline: "2026-08-25", poam: null,
+  }],
+  "stg-atlas-02": [{
+    lineageId: "disa-nixos-stig", bundleId: "disa-rhel9-stig-r1", targetBundleId: "disa-rhel9-stig",
+    status: "grandfathered", reason: "Disconnected staging node — offline, pending manual baseline refresh on next maintenance window.",
+    approvedBy: "ISSM — R. Chen", deadline: null, poam: null,
+  }],
+};
+
 function buildSystem([hostname, env, flake, health, criticalCves], idx) {
   const statusMap = {
     healthy:  { label: "Healthy",   color: "#34d399", chip: "chip-healthy" },
@@ -166,6 +187,7 @@ function buildSystem([hostname, env, flake, health, criticalCves], idx) {
       hostname.includes("db") ? "persistent-data" : null,
     ].filter(Boolean),
     stig: env === "production" ? int(28, 30) : env === "staging" ? int(22, 28) : int(14, 22),
+    compliance: COMPLIANCE_ASSIGNMENT_OVERRIDES[hostname] ? { assignments: COMPLIANCE_ASSIGNMENT_OVERRIDES[hostname] } : undefined,
     events: [
       { at: rel(hbMin + 2),   title: `Heartbeat received`, color: "#34d399" },
       { at: rel(int(30, 120)), title: `Deploy ${deploy === "up-to-date" ? "succeeded" : deploy === "failed" ? "failed" : "completed"}`, color: deploy === "failed" ? "#f87171" : "#34d399" },

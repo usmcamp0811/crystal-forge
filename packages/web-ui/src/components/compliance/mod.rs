@@ -6,6 +6,13 @@ use crate::api::models::{
 };
 use crate::components::icon::{Icon, IconName};
 
+pub mod refine_policy;
+pub use refine_policy::{
+    EvidenceRequirementDraft, ImportReview, PolicyAssertionDraft, RefinePolicyStep,
+    RefinedPolicyDraft, RefinedRuleAction, RefinedStigRule, SourceCheck, SourceCheckBodyPart,
+    SourceStigRule, action_to_import,
+};
+
 // ─── Bundle catalog left rail ────────────────────────────────────────────────
 
 #[derive(Props, Clone, PartialEq)]
@@ -13,6 +20,10 @@ pub struct BundleCatalogProps {
     pub bundles: Vec<ComplianceBundleSummary>,
     pub selected_id: Option<uuid::Uuid>,
     pub on_select: EventHandler<uuid::Uuid>,
+    #[props(default)]
+    pub selected_version_id: Option<uuid::Uuid>,
+    #[props(default)]
+    pub on_select_version: EventHandler<uuid::Uuid>,
 }
 
 #[component]
@@ -35,6 +46,7 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                     let framework = bundle.framework.clone();
                     let version = bundle.version.clone();
                     let name = bundle.name.clone();
+                    let revisions = bundle.versions.clone();
                     rsx! {
                         button {
                             class: "focus-ring",
@@ -56,6 +68,29 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                             div {
                                 style: "font-size:11px;color:var(--cf-text-muted);margin-top:4px;",
                                 "{control_count} controls · {env_count} env{env_count_suffix(env_count)}"
+                                if revisions.len() > 1 { " · {revisions.len()} revisions" }
+                            }
+                            if revisions.len() > 1 && selected {
+                                div { style: "display:flex;flex-direction:column;gap:4px;margin-top:8px;padding-top:8px;border-top:1px solid var(--cf-divider);",
+                                    for revision in revisions.iter() {
+                                        {
+                                            let revision_id = revision.id;
+                                            let version = revision.version.clone();
+                                            let state = revision.publication_state.clone();
+                                            let is_selected = props.selected_version_id == Some(revision_id);
+                                            rsx! {
+                                                button {
+                                                    class: "focus-ring",
+                                                    onclick: move |event| { event.stop_propagation(); props.on_select_version.call(revision_id); },
+                                                    style: if is_selected { "all:unset;cursor:pointer;padding:5px 7px;border-radius:6px;background:color-mix(in oklab,var(--cf-brand-purple) 14%,transparent);border:1px solid var(--cf-brand-purple);font-size:10px;text-align:left;" } else { "all:unset;cursor:pointer;padding:5px 7px;border-radius:6px;background:var(--cf-subtle-bg);font-size:10px;text-align:left;" },
+                                                    "{version} · {state}"
+                                                    if revision.is_current_published { " · Current" }
+                                                    if revision.is_current_draft { " · Draft" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -179,10 +214,19 @@ pub fn ScoreStrip(props: ScoreStripProps) -> Element {
                     "{props.totals.fully_compliant_count} of {props.totals.system_count} hosts fully compliant"
                 }
             }
-            ScoreStat { label: "Pass",   value: props.totals.pass,   color: "#34d399" }
-            ScoreStat { label: "Warn",   value: props.totals.warn,   color: "#fbbf24" }
-            ScoreStat { label: "Fail",   value: props.totals.fail,   color: "#f87171" }
-            ScoreStat { label: "Waiver", value: props.totals.waiver, color: "#a78bfa" }
+            ScoreStat { label: "Pass",          value: props.totals.pass,          color: "#34d399" }
+            ScoreStat { label: "Warn",          value: props.totals.warn,          color: "#fbbf24" }
+            ScoreStat { label: "Fail",          value: props.totals.fail,          color: "#f87171" }
+            ScoreStat { label: "Waiver",        value: props.totals.waiver,        color: "#a78bfa" }
+            if props.totals.not_checked > 0 {
+                ScoreStat { label: "Not checked",   value: props.totals.not_checked,   color: "#94a3b8" }
+            }
+            if props.totals.not_applicable > 0 {
+                ScoreStat { label: "N/A",           value: props.totals.not_applicable, color: "#64748b" }
+            }
+            if props.totals.error > 0 {
+                ScoreStat { label: "Error",         value: props.totals.error,          color: "#f43f5e" }
+            }
         }
     }
 }
@@ -361,20 +405,206 @@ pub struct EvidenceDrawerProps {
     pub on_close: EventHandler<()>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EvidenceGrouping {
+    Severity,
+    ControlFamily,
+    CmmcLevel,
+    CisSection,
+    Flat,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EvidenceNavigatorGroup {
+    key: String,
+    label: String,
+    controls: Vec<usize>,
+}
+
+fn evidence_grouping(framework: Option<&str>) -> EvidenceGrouping {
+    let framework = framework.unwrap_or_default().to_ascii_lowercase();
+    if framework.contains("stig") {
+        EvidenceGrouping::Severity
+    } else if framework.contains("800-53") || framework.contains("nist") {
+        EvidenceGrouping::ControlFamily
+    } else if framework.contains("cmmc") {
+        EvidenceGrouping::CmmcLevel
+    } else if framework.contains("cis") {
+        EvidenceGrouping::CisSection
+    } else {
+        EvidenceGrouping::Flat
+    }
+}
+
+fn control_matches(control: &ComplianceControlEvidence, query: &str) -> bool {
+    query.is_empty()
+        || control.policy_name.to_ascii_lowercase().contains(query)
+        || format!("{:?}", control.status)
+            .to_ascii_lowercase()
+            .contains(query)
+}
+
+fn cis_sort_key(section: &str) -> Vec<u32> {
+    section
+        .split('.')
+        .map(|part| part.trim().parse().unwrap_or(u32::MAX))
+        .collect()
+}
+
+fn navigator_groups(
+    controls: &[ComplianceControlEvidence],
+    framework: Option<&str>,
+    query: &str,
+) -> Vec<EvidenceNavigatorGroup> {
+    let mut groups = std::collections::BTreeMap::<String, (String, Vec<usize>)>::new();
+    let grouping = evidence_grouping(framework);
+    for (index, control) in controls
+        .iter()
+        .enumerate()
+        .filter(|(_, control)| control_matches(control, query))
+    {
+        let (key, label) = match grouping {
+            EvidenceGrouping::Severity => match control.severity.to_ascii_lowercase().as_str() {
+                "high" | "cat i" | "cat 1" => ("01-cat-i".to_string(), "CAT I".to_string()),
+                "medium" | "cat ii" | "cat 2" => ("02-cat-ii".to_string(), "CAT II".to_string()),
+                "low" | "cat iii" | "cat 3" => ("03-cat-iii".to_string(), "CAT III".to_string()),
+                _ => ("04-unrated".to_string(), "Unrated".to_string()),
+            },
+            EvidenceGrouping::ControlFamily => {
+                let family = control
+                    .control_family
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_uppercase();
+                let position = ["AC", "AU", "CM", "IA", "SC", "SI", "MP"]
+                    .iter()
+                    .position(|known| *known == family)
+                    .map(|position| format!("{:02}-{family}", position + 1));
+                match position {
+                    Some(key) => (key, family),
+                    None => ("99-ungrouped".to_string(), "Ungrouped".to_string()),
+                }
+            }
+            EvidenceGrouping::CmmcLevel => match control.cmmc_level {
+                Some(3) => ("01-l3".to_string(), "Level 3".to_string()),
+                Some(2) => ("02-l2".to_string(), "Level 2".to_string()),
+                Some(1) => ("03-l1".to_string(), "Level 1".to_string()),
+                _ => ("04-unrated".to_string(), "Unrated".to_string()),
+            },
+            EvidenceGrouping::CisSection => match control.cis_section.as_deref().map(str::trim) {
+                Some(section) if !section.is_empty() => {
+                    (section.to_string(), format!("Section {section}"))
+                }
+                _ => ("~unmapped".to_string(), "Unmapped".to_string()),
+            },
+            EvidenceGrouping::Flat => ("unmapped".to_string(), "Unmapped".to_string()),
+        };
+        groups
+            .entry(key)
+            .or_insert_with(|| (label, Vec::new()))
+            .1
+            .push(index);
+    }
+
+    let mut groups: Vec<_> = groups
+        .into_iter()
+        .map(|(key, (label, controls))| EvidenceNavigatorGroup {
+            key,
+            label,
+            controls,
+        })
+        .collect();
+    if grouping == EvidenceGrouping::CisSection {
+        groups.sort_by(
+            |left, right| match (left.key.as_str(), right.key.as_str()) {
+                ("~unmapped", "~unmapped") => std::cmp::Ordering::Equal,
+                ("~unmapped", _) => std::cmp::Ordering::Greater,
+                (_, "~unmapped") => std::cmp::Ordering::Less,
+                _ => cis_sort_key(&left.key).cmp(&cis_sort_key(&right.key)),
+            },
+        );
+    }
+    groups
+}
+
+fn visible_control_order(groups: &[EvidenceNavigatorGroup], collapsed: &[String]) -> Vec<usize> {
+    groups
+        .iter()
+        .filter(|group| !collapsed.iter().any(|key| key == &group.key))
+        .flat_map(|group| group.controls.iter().copied())
+        .collect()
+}
+
+fn reconciled_active(active: usize, visible: &[usize]) -> Option<usize> {
+    visible
+        .contains(&active)
+        .then_some(active)
+        .or_else(|| visible.first().copied())
+}
+
 #[component]
 pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
     let mut active_idx = use_signal(|| 0usize);
+    let mut filter = use_signal(String::new);
+    let mut collapsed = use_signal(Vec::<String>::new);
     let total = props.evidence.controls.len();
     let hostname = props.evidence.hostname.clone();
     let bundle_name = props.bundle_name.clone();
 
-    let active_control = props.evidence.controls.get(*active_idx.read()).cloned();
+    let query = filter.read().trim().to_ascii_lowercase();
+    let groups = navigator_groups(
+        &props.evidence.controls,
+        props.evidence.framework.as_deref(),
+        &query,
+    );
+    let visible = visible_control_order(&groups, &collapsed.read());
+    let active_control = reconciled_active(*active_idx.read(), &visible)
+        .and_then(|index| props.evidence.controls.get(index).cloned());
+    let visible_for_reconciliation = visible.clone();
+    use_effect(move || {
+        let active = *active_idx.read();
+        if let Some(index) = reconciled_active(active, &visible_for_reconciliation) {
+            if index != active {
+                active_idx.set(index);
+            }
+        }
+    });
+    let groups_for_keyboard = groups.clone();
 
     rsx! {
         div { class: "fl-tray-backdrop", onclick: move |_| props.on_close.call(()) }
         aside {
             class: "fl-tray",
             style: "width:min(960px,96vw);",
+            onkeydown: move |event| {
+                let visible = visible_control_order(&groups_for_keyboard, &collapsed.read());
+                let key = event.key().to_string();
+                match key.as_str() {
+                    "Escape" => props.on_close.call(()),
+                    "ArrowDown" | "j" | "J" => {
+                        let active = *active_idx.read();
+                        if let Some(current) = reconciled_active(active, &visible) {
+                            let position = visible.iter().position(|index| *index == current).unwrap_or(0);
+                            if let Some(next) = visible.get((position + 1).min(visible.len().saturating_sub(1))) {
+                                event.prevent_default();
+                                active_idx.set(*next);
+                            }
+                        }
+                    }
+                    "ArrowUp" | "k" | "K" => {
+                        let active = *active_idx.read();
+                        if let Some(current) = reconciled_active(active, &visible) {
+                            let position = visible.iter().position(|index| *index == current).unwrap_or(0);
+                            if let Some(previous) = visible.get(position.saturating_sub(1)) {
+                                event.prevent_default();
+                                active_idx.set(*previous);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            },
             header {
                 class: "fl-tray-head",
                 div {
@@ -409,36 +639,73 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
             }
 
             div {
-                style: "display:grid;grid-template-columns:260px 1fr;flex:1;min-height:0;overflow:hidden;",
+                style: "display:grid;grid-template-columns:minmax(0,260px) minmax(0,1fr);flex:1;min-height:0;overflow:hidden;",
                 // Left: control nav
                 nav {
-                    style: "border-right:1px solid var(--cf-divider);overflow-y:auto;background:color-mix(in oklab,var(--cf-page-bg) 30%,var(--cf-card-bg));",
-                    for (i, control) in props.evidence.controls.iter().enumerate() {
+                    style: "border-right:1px solid var(--cf-divider);overflow-y:auto;overflow-x:hidden;background:color-mix(in oklab,var(--cf-page-bg) 30%,var(--cf-card-bg));",
+                    div { style: "position:sticky;top:0;z-index:1;padding:8px;background:color-mix(in oklab,var(--cf-page-bg) 55%,var(--cf-card-bg));border-bottom:1px solid var(--cf-divider);",
+                        input {
+                            class: "input focus-ring",
+                            placeholder: "Filter controls…",
+                            value: "{filter}",
+                            style: "width:100%;box-sizing:border-box;font-size:11.5px;padding:6px 8px;",
+                            onkeydown: move |event| event.stop_propagation(),
+                            oninput: move |event| filter.set(event.value()),
+                        }
+                    }
+                    if groups.is_empty() {
+                        div { style: "padding:20px 14px;font-size:12px;color:var(--cf-text-muted);text-align:center;", "No controls match." }
+                    }
+                    for group in groups.iter() {
                         {
-                            let is_sel = i == *active_idx.read();
-                            let dot_color = control_status_color(&control.status);
-                            let policy_name = control.policy_name.clone();
+                            let key = group.key.clone();
+                            let label = group.label.clone();
+                            let controls = group.controls.clone();
+                            let groups_for_collapse = groups.clone();
+                            let is_collapsed = collapsed.read().iter().any(|collapsed_key| collapsed_key == &key);
                             rsx! {
-                                button {
-                                    class: "focus-ring",
-                                    style: if is_sel {
-                                        "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 8%,transparent);border-bottom:1px solid var(--cf-divider);"
-                                    } else {
-                                        "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid transparent;background:transparent;border-bottom:1px solid var(--cf-divider);"
-                                    },
-                                    onclick: move |_| active_idx.set(i),
-                                    div {
-                                        style: "display:flex;justify-content:space-between;align-items:center;gap:8px;",
-                                        span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{i+1:02}" }
-                                        span { style: "width:8px;height:8px;border-radius:50%;background:{dot_color};" }
-                                    }
-                                    div {
-                                        style: if is_sel {
-                                            "font-size:12px;color:var(--cf-text-primary);margin-top:4px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
-                                        } else {
-                                            "font-size:12px;color:var(--cf-text-primary);margin-top:4px;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+                                div {
+                                    button {
+                                        class: "focus-ring",
+                                        style: "all:unset;cursor:pointer;display:flex;align-items:center;gap:6px;width:100%;box-sizing:border-box;padding:9px 14px 5px;font-size:9.5px;text-transform:uppercase;letter-spacing:0.06em;font-weight:700;color:var(--cf-text-muted);",
+                                        onclick: move |_| {
+                                            let mut next = collapsed.read().clone();
+                                            if let Some(position) = next.iter().position(|collapsed_key| collapsed_key == &key) {
+                                                next.remove(position);
+                                            } else {
+                                                next.push(key.clone());
+                                            }
+                                            let visible = visible_control_order(&groups_for_collapse, &next);
+                                            collapsed.set(next);
+                                            let active = *active_idx.read();
+                                            if let Some(index) = reconciled_active(active, &visible) {
+                                                active_idx.set(index);
+                                            }
                                         },
-                                        "{policy_name}"
+                                        Icon { name: if is_collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, size: 10 }
+                                        span { style: "flex:1;text-align:left;", "{label} · {controls.len()}" }
+                                    }
+                                    if !is_collapsed {
+                                        for index in controls {
+                                            {
+                                                let control = props.evidence.controls[index].clone();
+                                                let is_sel = index == *active_idx.read();
+                                                let dot_color = control_status_color(&control.status);
+                                                let policy_name = control.policy_name.clone();
+                                                rsx! {
+                                                    button {
+                                                        class: "focus-ring",
+                                                        style: if is_sel { "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 8%,transparent);border-bottom:1px solid var(--cf-divider);" } else { "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid transparent;background:transparent;border-bottom:1px solid var(--cf-divider);" },
+                                                        onclick: move |_| active_idx.set(index),
+                                                        div { style: "display:flex;justify-content:space-between;align-items:center;gap:8px;",
+                                                            span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{index+1:02}" }
+                                                            span { style: "width:8px;height:8px;border-radius:50%;background:{dot_color};" }
+                                                        }
+                                                        div { style: if is_sel { "font-size:12px;color:var(--cf-text-primary);margin-top:4px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" } else { "font-size:12px;color:var(--cf-text-primary);margin-top:4px;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" }, "{policy_name}" }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -452,7 +719,7 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                     if let Some(ctrl) = active_control {
                         ControlEvidenceCard {
                             control: ctrl,
-                            control_idx: *active_idx.read(),
+                            control_idx: reconciled_active(*active_idx.read(), &visible).unwrap_or(0),
                             total,
                         }
                     }
@@ -468,6 +735,9 @@ fn control_status_color(status: &ComplianceControlStatus) -> &'static str {
         ComplianceControlStatus::Warn => "#fbbf24",
         ComplianceControlStatus::Fail => "#f87171",
         ComplianceControlStatus::Waiver => "#a78bfa",
+        ComplianceControlStatus::NotChecked => "#94a3b8",
+        ComplianceControlStatus::NotApplicable => "#64748b",
+        ComplianceControlStatus::Error => "#f43f5e",
     }
 }
 
@@ -491,6 +761,9 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
         ComplianceControlStatus::Warn => "warn",
         ComplianceControlStatus::Fail => "fail",
         ComplianceControlStatus::Waiver => "waiver",
+        ComplianceControlStatus::NotChecked => "not checked",
+        ComplianceControlStatus::NotApplicable => "not applicable",
+        ComplianceControlStatus::Error => "error",
     };
     let policy_name = props.control.policy_name.clone();
     let summary = props.control.summary.clone();
@@ -551,6 +824,32 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
                 }
             },
             ComplianceControlStatus::Pass => rsx! {},
+            ComplianceControlStatus::NotChecked => rsx! {
+                div { class: "sd-callout",
+                    style: "background:rgba(148,163,184,0.08);border-color:rgba(148,163,184,0.25);",
+                    div { style: "font-size:12px;color:var(--cf-text-muted);",
+                        strong { "Not checked. " }
+                        "No applicable evaluation or evidence exists for this control."
+                    }
+                }
+            },
+            ComplianceControlStatus::NotApplicable => rsx! {
+                div { class: "sd-callout",
+                    style: "background:rgba(100,116,139,0.08);border-color:rgba(100,116,139,0.25);",
+                    div { style: "font-size:12px;color:var(--cf-text-muted);",
+                        strong { "Not applicable. " }
+                        "This control does not apply to the current system configuration."
+                    }
+                }
+            },
+            ComplianceControlStatus::Error => rsx! {
+                div { class: "sd-callout sd-callout-danger",
+                    div { style: "font-size:12px;",
+                        strong { "Evaluator error. " }
+                        "The control could not be evaluated. Check system logs for details."
+                    }
+                }
+            },
         }
 
         // Evidence items
@@ -608,5 +907,87 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
             span { style: "margin-left:8px;", "—" }
             span { class: "mono", style: "margin-left:8px;", "{framework_mapping}" }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn control(
+        name: &str,
+        cmmc_level: Option<i32>,
+        cis_section: Option<&str>,
+    ) -> ComplianceControlEvidence {
+        ComplianceControlEvidence {
+            policy_id: Uuid::nil(),
+            policy_name: name.to_string(),
+            status: ComplianceControlStatus::Pass,
+            severity: "medium".to_string(),
+            summary: String::new(),
+            evidence_items: Vec::new(),
+            framework_mapping: String::new(),
+            control_family: Some("AC".to_string()),
+            cmmc_level,
+            cis_section: cis_section.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn grouping_uses_bundle_framework_not_control_severity() {
+        assert_eq!(
+            evidence_grouping(Some("DISA STIG")),
+            EvidenceGrouping::Severity
+        );
+        assert_eq!(
+            evidence_grouping(Some("NIST SP 800-53")),
+            EvidenceGrouping::ControlFamily
+        );
+        assert_eq!(
+            evidence_grouping(Some("CMMC 2.0")),
+            EvidenceGrouping::CmmcLevel
+        );
+        assert_eq!(
+            evidence_grouping(Some("CIS Benchmark")),
+            EvidenceGrouping::CisSection
+        );
+        assert_eq!(
+            evidence_grouping(Some("Internal baseline")),
+            EvidenceGrouping::Flat
+        );
+    }
+
+    #[test]
+    fn visible_order_reconciles_filter_and_collapsed_groups() {
+        let controls = vec![
+            control("Account management", None, None),
+            control("Audit", None, None),
+        ];
+        let groups = navigator_groups(&controls, Some("NIST 800-53"), "audit");
+        assert_eq!(visible_control_order(&groups, &[]), vec![1]);
+        assert_eq!(reconciled_active(0, &[1]), Some(1));
+        assert_eq!(reconciled_active(1, &[]), None);
+
+        let collapsed = vec![groups[0].key.clone()];
+        assert!(visible_control_order(&groups, &collapsed).is_empty());
+    }
+
+    #[test]
+    fn cis_sections_sort_naturally_and_unmapped_last() {
+        let controls = vec![
+            control("ten", None, Some("1.10")),
+            control("two", None, Some("1.2")),
+            control("one", None, Some("1.1")),
+            control("unmapped", None, None),
+        ];
+        let labels: Vec<_> = navigator_groups(&controls, Some("CIS Benchmark"), "")
+            .into_iter()
+            .map(|group| group.label)
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["Section 1.1", "Section 1.2", "Section 1.10", "Unmapped"]
+        );
     }
 }

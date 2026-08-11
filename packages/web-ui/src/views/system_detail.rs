@@ -1716,7 +1716,7 @@ fn ComplianceTab(system: SystemDetail) -> Element {
                                                 let bid = bundle_id;
                                                 let sid = system_id;
                                                 async move {
-                                                    match fetch_compliance_system_evidence(&bid, &sid).await {
+                                                    match fetch_compliance_system_evidence(&bid, &sid, None).await {
                                                         Ok(resp) => evidence_data.set(Some(Ok(resp))),
                                                         Err(e) => evidence_data.set(Some(Err(e.to_string()))),
                                                     }

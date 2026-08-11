@@ -57,6 +57,7 @@ pub fn EnvironmentsListView() -> Element {
     let default_required_policy = required_agent_policy_id(&policy_library_state.read());
 
     let mut environments = use_signal(Vec::<EnvironmentItem>::new);
+    let mut bundle_catalog = use_signal(Vec::<crate::api::models::ComplianceBundleSummary>::new);
     let mut api_notice = use_signal(|| None::<String>);
     let mut loading = use_signal(|| true);
     let mut redirect_to_login = use_signal(|| false);
@@ -67,6 +68,10 @@ pub fn EnvironmentsListView() -> Element {
             let policies_result = load_policies_with_fallback().await;
             let effective_default_policy = required_agent_policy_id(&policies_result.policies);
             let result = load_environments_with_fallback(effective_default_policy).await;
+            // Load bundle catalog for the assignment picker (best-effort).
+            if let Ok(bundles) = crate::api::client::fetch_compliance_bundles().await {
+                bundle_catalog.set(bundles);
+            }
 
             if result.redirect_to_login || policies_result.redirect_to_login {
                 redirect_to_login.set(true);
@@ -122,6 +127,9 @@ pub fn EnvironmentsListView() -> Element {
     let mut view_mode = use_signal(|| ViewMode::Cards);
     let mut form_draft = use_signal(|| None::<EnvironmentFormDraft>);
     let mut form_error = use_signal(|| None::<String>);
+    // Snapshot of bundle assignments at modal open — used to diff on Save.
+    let mut original_assignments = use_signal(|| Vec::<crate::components::environments::EnvBundleAssignment>::new());
+    let mut assignment_load_state = use_signal(|| crate::components::environments::AssignmentLoadState::Ready);
     let mut pending_remove = use_signal(|| None::<EnvironmentItem>);
     let mut view_env = use_signal(|| None::<EnvironmentItem>);
 
@@ -294,7 +302,7 @@ pub fn EnvironmentsListView() -> Element {
                                     occurrence_id_for_subject("environments", &env.id.to_string()).as_deref(),
                                 );
                                 form_error.set(None);
-                                form_draft.set(Some(form_draft_from_environment(&env)));
+                                open_edit_modal(&env, form_draft.clone(), original_assignments.clone(), assignment_load_state.clone());
                             }
                         }
                     }
@@ -321,7 +329,7 @@ pub fn EnvironmentsListView() -> Element {
                             occurrence_id_for_subject("environments", &env.id.to_string()).as_deref(),
                         );
                         form_error.set(None);
-                        form_draft.set(Some(form_draft_from_environment(&env)));
+                        open_edit_modal(&env, form_draft.clone(), original_assignments.clone(), assignment_load_state.clone());
                     }
                 }
             }
@@ -340,7 +348,7 @@ pub fn EnvironmentsListView() -> Element {
                         );
                         view_env.set(None);
                         form_error.set(None);
-                        form_draft.set(Some(form_draft_from_environment(&env)));
+                        open_edit_modal(&env, form_draft.clone(), original_assignments.clone(), assignment_load_state.clone());
                     },
                 }
             }
@@ -349,6 +357,14 @@ pub fn EnvironmentsListView() -> Element {
                 draft: form_draft,
                 existing: items.clone(),
                 policy_library: policy_library_state.read().clone(),
+                bundle_catalog: bundle_catalog.read().clone(),
+                assignment_load_state,
+                on_retry_assignments: move |_| {
+                    let current_id = form_draft.read().as_ref().and_then(|draft| draft.id);
+                    if let Some(env) = current_id.and_then(|id| environments.read().iter().find(|env| env.id == id).cloned()) {
+                        open_edit_modal(&env, form_draft.clone(), original_assignments.clone(), assignment_load_state.clone());
+                    }
+                },
                 error: form_error,
                 on_close: move |_| {
                     form_draft.set(None);
@@ -362,8 +378,10 @@ pub fn EnvironmentsListView() -> Element {
                         form_error.set(Some(err));
                         return;
                     }
+                    let orig = original_assignments.read().clone();
                     save_environment_form(
                         next,
+                        orig,
                         environments.clone(),
                         form_draft.clone(),
                         form_error.clone(),
@@ -503,7 +521,46 @@ fn new_environment_form_draft(default_required_policy: Uuid) -> EnvironmentFormD
         auto_sync: Some(true),
         requires_approval: Some(true),
         is_production: Some(false),
+        // Bundle assignments are loaded from the server when the modal opens.
+        bundle_assignments: Vec::new(),
     }
+}
+
+/// Open the edit modal for an environment. The draft starts with empty
+/// `bundle_assignments` (shown as loading); a background fetch then
+/// populates them and snaps the `original_assignments` snapshot.
+fn open_edit_modal(
+    env: &EnvironmentItem,
+    mut form_draft: Signal<Option<EnvironmentFormDraft>>,
+    mut original_assignments: Signal<Vec<crate::components::environments::EnvBundleAssignment>>,
+    mut assignment_load_state: Signal<crate::components::environments::AssignmentLoadState>,
+) {
+    let draft = form_draft_from_environment(env);
+    let env_id = env.id;
+    original_assignments.set(env.bundle_assignments.clone());
+    form_draft.set(Some(draft.clone()));
+    assignment_load_state.set(crate::components::environments::AssignmentLoadState::Loading);
+    // Load authoritative assignments in the background.
+    spawn(async move {
+        let assignments_result = crate::environments::adapter::load_environment_bundle_assignments(&env_id).await;
+        match assignments_result {
+            Ok(loaded) => {
+                original_assignments.set(loaded.clone());
+                let cur = form_draft.read().clone();
+                if let Some(mut current) = cur {
+                    if current.id == Some(env_id) {
+                        current.bundle_assignments = loaded;
+                        form_draft.set(Some(current));
+                        assignment_load_state.set(crate::components::environments::AssignmentLoadState::Ready);
+                    }
+                }
+            }
+            Err(err) => {
+                assignment_load_state.set(crate::components::environments::AssignmentLoadState::Failed(err.clone()));
+                web_sys::console::warn_1(&format!("Failed to load environment assignments: {err}").into());
+            }
+        }
+    });
 }
 
 fn form_draft_from_environment(env: &EnvironmentItem) -> EnvironmentFormDraft {
@@ -517,11 +574,15 @@ fn form_draft_from_environment(env: &EnvironmentItem) -> EnvironmentFormDraft {
         auto_sync: env.auto_sync,
         requires_approval: env.requires_approval,
         is_production: env.is_production,
+        // bundle_assignments is populated from the server when the modal opens,
+        // not from EnvironmentItem which only has a legacy single-bundle summary.
+        bundle_assignments: env.bundle_assignments.clone(),
     }
 }
 
 fn save_environment_form(
     next: EnvironmentFormDraft,
+    original_assignments: Vec<crate::components::environments::EnvBundleAssignment>,
     mut environments: Signal<Vec<EnvironmentItem>>,
     mut form_draft: Signal<Option<EnvironmentFormDraft>>,
     mut form_error: Signal<Option<String>>,
@@ -570,13 +631,36 @@ fn save_environment_form(
 
         match result {
             Ok(mut saved) => {
+                // Update gate policies.
                 if let Err(message) =
                     update_environment_policies_via_api(saved.id, next.required_policy_ids.clone())
                         .await
                 {
+                    // Keep the modal open; report the failure without closing.
+                    form_error.set(Some(format!(
+                        "Environment saved but gate policies could not be updated: {message}"
+                    )));
                     api_notice.set(Some(message));
+                    return;
                 }
+
+                // Reconcile bundle assignments. On failure keep modal open.
+                if let Err(message) =
+                    crate::environments::adapter::reconcile_environment_assignments(
+                        saved.id,
+                        &original_assignments,
+                        &next.bundle_assignments,
+                    )
+                    .await
+                {
+                    form_error.set(Some(format!(
+                        "Environment saved but bundle assignment update failed: {message}"
+                    )));
+                    return;
+                }
+
                 saved.required_policy_ids = next.required_policy_ids.clone();
+                saved.bundle_assignments = next.bundle_assignments.clone();
 
                 let mut values = environments.read().clone();
                 if let Some(target) = values.iter_mut().find(|env| env.id == saved.id) {
@@ -629,10 +713,7 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
     } else {
         Some(env.required_policy_ids.len())
     };
-    let display_compliance_label = env
-        .compliance_bundle
-        .as_ref()
-        .map(|bundle| bundle.framework.clone());
+    let display_bundle_assignments = env.bundle_assignments.clone();
     let is_production = env.is_production.unwrap_or(false);
     let total = env.health.total().max(env.system_count).max(1) as f64;
     let no_health = env.health.total() == 0;
@@ -789,15 +870,24 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
 
                         dt { "Enforcement" }
                         dd {
-                            div { style: "display:flex; gap:6px; flex-wrap:wrap; align-items:center;",
-                                if let Some(compliance_label) = display_compliance_label.clone() {
-                                    button {
-                                        class: "chip chip-info sd-commit-sha-link",
-                                        style: "background:unset;",
-                                        title: "Open Compliance",
-                                        onclick: move |_| { nav.push(Route::ComplianceView {}); },
-                                        Icon { name: IconName::Shield, size: 9 }
-                                        " {compliance_label}"
+                            div { style: "display:flex; flex-direction:column; gap:6px;",
+                                // Authoritative versioned bundle assignments.
+                                if !display_bundle_assignments.is_empty() {
+                                    for a in display_bundle_assignments.iter().cloned().collect::<Vec<_>>() {
+                                        div { style: "display:flex; align-items:center; gap:6px;",
+                                            button {
+                                                class: "chip chip-info sd-commit-sha-link",
+                                                style: "background:unset;",
+                                                title: "{a.bundle_name} · {a.bundle_version} — open Compliance",
+                                                onclick: move |_| { nav.push(Route::ComplianceView {}); },
+                                                Icon { name: IconName::Shield, size: 9 }
+                                                " {a.framework}"
+                                            }
+                                            span { class: "mono", style: "font-size:10px; color:var(--cf-text-muted);", "{a.bundle_version}" }
+                                            if a.enforcement_mode == "report_only" {
+                                                span { class: "chip chip-unknown", style: "font-size:10px;", "report only" }
+                                            }
+                                        }
                                     }
                                 }
                                 if let Some(gate_count) = display_gate_count {
@@ -805,7 +895,7 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
                                         "{gate_count} gate{plural_s(gate_count)}"
                                     }
                                 }
-                                if display_compliance_label.is_none() && display_gate_count.is_none() {
+                                if display_bundle_assignments.is_empty() && display_gate_count.is_none() {
                                     span { style: "font-size:11px; color:var(--cf-text-muted);", "none" }
                                 }
                             }
@@ -972,7 +1062,7 @@ mod tests {
             requires_approval: None,
             is_production: None,
             role_assignment_count: None,
-            compliance_bundle: None,
+            bundle_assignments: Vec::new(),
         }
     }
 
@@ -999,6 +1089,7 @@ mod tests {
             auto_sync: Some(false),
             requires_approval: Some(true),
             is_production: Some(true),
+            bundle_assignments: Vec::new(),
         };
 
         saved.required_policy_ids = draft.required_policy_ids.clone();

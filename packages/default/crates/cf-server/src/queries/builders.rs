@@ -1669,21 +1669,22 @@ pub async fn mark_job_failed_with_retry(
     .await
     .context("Failed to mark build attempt failed")?;
 
-    let retry_job =
-        if automatic_retry_budget_remaining(job.retry_count, i32::from(policy.max_build_retries))
-            && automatic_retry_eligible(policy.transient_only, failure_class)
-        {
-            lock_build_queue_order(&mut tx).await?;
+    let retry_job = if automatic_retry_budget_remaining(
+        job.retry_count,
+        i32::from(policy.max_build_retries),
+    ) && automatic_retry_eligible(policy.transient_only, failure_class)
+    {
+        lock_build_queue_order(&mut tx).await?;
 
-            let next_pos: i64 = sqlx::query_scalar(
+        let next_pos: i64 = sqlx::query_scalar(
                 "SELECT COALESCE(MAX(queue_position), 0) + 1 FROM build_jobs WHERE status = 'queued' OR status = 'building'",
             )
             .fetch_one(&mut *tx)
             .await
             .context("Failed to read max queue_position for retry")?;
 
-            sqlx::query_as::<_, BuildJobRow>(
-                r#"
+        sqlx::query_as::<_, BuildJobRow>(
+            r#"
             INSERT INTO build_jobs (
                 derivation_id, environment_id, status, retry_count, max_retries,
                 priority_weight, queue_position, parent_job_id, root_job_id,
@@ -1697,23 +1698,23 @@ pub async fn mark_job_failed_with_retry(
                 WHERE automatic_retry_source_id IS NOT NULL DO NOTHING
             RETURNING *
             "#,
-            )
-            .bind(job.derivation_id)
-            .bind(job.environment_id)
-            .bind(job.retry_count + 1)
-            .bind(i32::from(policy.max_build_retries))
-            .bind(job.priority_weight * 0.95)
-            .bind(next_pos)
-            .bind(job.id)
-            .bind(job.root_job_id.unwrap_or(job.id))
-            .bind(job.attempt_number + 1)
-            .bind(policy.backoff_seconds)
-            .fetch_optional(&mut *tx)
-            .await
-            .context("Failed to schedule automatic build retry")?
-        } else {
-            None
-        };
+        )
+        .bind(job.derivation_id)
+        .bind(job.environment_id)
+        .bind(job.retry_count + 1)
+        .bind(i32::from(policy.max_build_retries))
+        .bind(job.priority_weight * 0.95)
+        .bind(next_pos)
+        .bind(job.id)
+        .bind(job.root_job_id.unwrap_or(job.id))
+        .bind(job.attempt_number + 1)
+        .bind(policy.backoff_seconds)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("Failed to schedule automatic build retry")?
+    } else {
+        None
+    };
 
     tx.commit()
         .await

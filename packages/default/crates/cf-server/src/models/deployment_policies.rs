@@ -357,18 +357,22 @@ impl DeploymentPolicy {
                     .to_string(),
             ),
             DeploymentPolicy::RequirePackages { packages, .. } => {
+                if packages.is_empty() {
+                    return (format!("hasRequiredPackages_{index}"), "false".to_string());
+                }
                 let package_list = packages
                     .iter()
-                    .map(|p| format!("\"{}\"", p.replace('"', "\\\"")))
+                    .map(|p| nix_string(p))
                     .collect::<Vec<_>>()
                     .join(" ");
                 (
                     format!("hasRequiredPackages_{index}"),
                     format!(
-                        "let pkgNames = builtins.map (p: p.pname or p.name or \"\") \
-                         cfg.config.environment.systemPackages; \
-                         required = [ {} ]; \
-                         in builtins.all (pkg: builtins.elem pkg pkgNames) required",
+                        "builtins.all \
+                         (required: builtins.any \
+                           (pkg: (pkg.pname or (pkg.name or \"\")) == required) \
+                           cfg.config.environment.systemPackages) \
+                         [ {} ]",
                         package_list
                     ),
                 )
@@ -1339,23 +1343,81 @@ pub struct DeploymentPolicyRecord {
 }
 
 /// Request to create a new deployment policy
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CreateDeploymentPolicyRequest {
     pub name: String,
     pub description: Option<String>,
     pub policy_type: String,
     pub config: serde_json::Value,
     pub enabled: Option<bool>,
+    /// Security Requirements Guide IDs this control satisfies.
+    /// Normalised and validated server-side; stored in compliance_metadata.
+    #[serde(default)]
+    pub srg_ids: Vec<String>,
+    /// Control Correlation Identifier mappings.
+    /// Normalised and validated server-side; stored in compliance_metadata.
+    #[serde(default)]
+    pub cci_ids: Vec<String>,
+    /// Policy category: "deployment", "pipeline", "rollout", "security"
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Framework string, e.g. "DISA STIG", "NIST 800-53", "CMMC 2.0", "CIS Benchmark", or custom
+    #[serde(default)]
+    pub framework: Option<String>,
+    /// Severity: "high", "medium", "low"
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// NIST 800-53 control family, e.g. "AC", "AU", "CM", "IA", "SC", "SI", "MP"
+    #[serde(default)]
+    pub control_family: Option<String>,
+    /// CMMC 2.0 maturity level: 1, 2, or 3
+    #[serde(default)]
+    pub cmmc_level: Option<i32>,
+    /// CIS Benchmark section, e.g. "5.2.3"
+    #[serde(default)]
+    pub cis_section: Option<String>,
+    /// Human-readable rationale for this control
+    #[serde(default)]
+    pub rationale: Option<String>,
 }
 
 /// Request to update an existing deployment policy
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateDeploymentPolicyRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub policy_type: Option<String>,
     pub config: Option<serde_json::Value>,
     pub enabled: Option<bool>,
+    /// When `Some`, replace the curated SRG mapping; `Some([])` clears it.
+    /// When `None`, the existing value is preserved.
+    #[serde(default)]
+    pub srg_ids: Option<Vec<String>>,
+    /// When `Some`, replace the curated CCI mapping; `Some([])` clears it.
+    /// When `None`, the existing value is preserved.
+    #[serde(default)]
+    pub cci_ids: Option<Vec<String>>,
+    /// When `Some`, replace the category; `None` preserves existing.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// When `Some`, replace the framework; `None` preserves existing.
+    #[serde(default)]
+    pub framework: Option<String>,
+    /// When `Some`, replace the severity; `None` preserves existing.
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// When `Some`, replace the control_family; `None` preserves existing.
+    #[serde(default)]
+    pub control_family: Option<String>,
+    /// When `Some`, replace the cmmc_level; `None` preserves existing.
+    #[serde(default)]
+    pub cmmc_level: Option<i32>,
+    /// When `Some`, replace the cis_section; `None` preserves existing.
+    #[serde(default)]
+    pub cis_section: Option<String>,
+    /// When `Some`, replace the rationale; `None` preserves existing.
+    #[serde(default)]
+    pub rationale: Option<String>,
 }
 
 // ============================================================================
@@ -1974,6 +2036,43 @@ in {{
             Some(true),
             "custom firewall check must evaluate to true; got {parsed}"
         );
+    }
+
+    #[test]
+    #[ignore = "requires Nix evaluator in PATH"]
+    fn required_packages_expression_evaluates_each_requested_package() {
+        let (_, expression) = DeploymentPolicy::RequirePackages {
+            packages: vec!["openssh".into(), "auditd".into(), "aide".into()],
+            strict: true,
+        }
+        .to_nix_expression_with_index(0);
+
+        for (installed, expected) in [
+            (vec!["openssh", "auditd", "aide"], true),
+            (vec!["openssh", "auditd"], false),
+            (Vec::new(), false),
+        ] {
+            let packages = installed
+                .iter()
+                .map(|name| format!("{{ pname = \"{name}\"; name = \"{name}\"; }}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let nix_expression = format!(
+                "let cfg = {{ config.environment.systemPackages = [ {packages} ]; }}; in {expression}"
+            );
+            let output = std::process::Command::new("nix")
+                .args(["eval", "--json", "--expr", &nix_expression])
+                .output()
+                .expect("failed to spawn nix eval");
+            assert!(
+                output.status.success(),
+                "nix eval failed:\n{}\nExpression:\n{}",
+                String::from_utf8_lossy(&output.stderr),
+                nix_expression
+            );
+            let actual: bool = serde_json::from_slice(&output.stdout).expect("boolean JSON result");
+            assert_eq!(actual, expected, "installed packages: {installed:?}");
+        }
     }
 
     #[test]

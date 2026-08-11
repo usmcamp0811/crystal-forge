@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CF-XCCDF v0.1 extension schema.
+  Namespace: urn:crystal-forge:xccdf:1
+  See docs/design/CrystalForge/docs/crystal-forge-xccdf-interchange-profile-v0.1.md.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    targetNamespace="urn:crystal-forge:xccdf:1"
+    xmlns:cf="urn:crystal-forge:xccdf:1"
+    elementFormDefault="qualified"
+    attributeFormDefault="unqualified"
+    version="1.0">
+
+  <xs:simpleType name="uuidUrn"><xs:restriction base="xs:string"><xs:pattern value="urn:uuid:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="publicationState"><xs:restriction base="xs:string"><xs:enumeration value="incomplete"/><xs:enumeration value="draft"/><xs:enumeration value="interim"/><xs:enumeration value="accepted"/><xs:enumeration value="deprecated"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="executionPhase"><xs:restriction base="xs:string"><xs:enumeration value="nix-evaluation"/><xs:enumeration value="post-build"/><xs:enumeration value="pre-deployment"/><xs:enumeration value="deployment-orchestration"/><xs:enumeration value="continuous-assessment"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="customCheckMode"><xs:restriction base="xs:string"><xs:enumeration value="all"/><xs:enumeration value="any"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="weekday"><xs:restriction base="xs:string"><xs:enumeration value="mon"/><xs:enumeration value="tue"/><xs:enumeration value="wed"/><xs:enumeration value="thu"/><xs:enumeration value="fri"/><xs:enumeration value="sat"/><xs:enumeration value="sun"/></xs:restriction></xs:simpleType>
+
+  <xs:element name="bundle" type="cf:bundleType"/>
+  <xs:complexType name="bundleType"><xs:sequence><xs:element name="framework" type="cf:frameworkType" minOccurs="0"/><xs:element name="layer" type="xs:string" minOccurs="0"/><xs:element name="owner" type="xs:string" minOccurs="0"/><xs:element name="content-digest" type="cf:digestType"/></xs:sequence><xs:attribute name="schema-version" type="xs:positiveInteger" use="required" fixed="1"/><xs:attribute name="bundle-id" type="cf:uuidUrn" use="required"/><xs:attribute name="bundle-version-id" type="cf:uuidUrn" use="required"/><xs:attribute name="publication-state" type="cf:publicationState" use="required"/></xs:complexType>
+  <xs:complexType name="frameworkType"><xs:attribute name="name" type="xs:string" use="required"/><xs:attribute name="version" type="xs:string"/></xs:complexType>
+  <xs:complexType name="digestType"><xs:simpleContent><xs:extension base="xs:string"><xs:attribute name="algorithm" type="xs:string" use="required" fixed="sha-256"/><xs:attribute name="canonical-model" type="xs:string" use="required" fixed="cf-model-json-1"/></xs:extension></xs:simpleContent></xs:complexType>
+
+  <xs:element name="profile-role" type="xs:string"/>
+  <xs:element name="policy-identity" type="cf:policyIdentityType"/>
+  <xs:complexType name="policyIdentityType"><xs:sequence><xs:element name="policy-version" type="xs:string"/><xs:element name="content-digest" type="cf:digestType"/></xs:sequence><xs:attribute name="policy-id" type="cf:uuidUrn" use="required"/><xs:attribute name="policy-version-id" type="cf:uuidUrn" use="required"/><xs:attribute name="publication-state" type="cf:publicationState" use="required"/><xs:attribute name="enabled-default" type="xs:boolean" use="required"/><xs:attribute name="implementation-state" type="xs:string" use="required"/><xs:attribute name="selected" type="xs:boolean" use="required"/><xs:attribute name="policy-order" type="xs:integer" use="required"/></xs:complexType>
+
+  <xs:element name="policy" type="cf:policyType"/>
+  <xs:element name="source-mappings" type="cf:sourceMappingsType"/>
+  <xs:element name="opaque-xml" type="xs:string"/>
+  <xs:element name="source-group-id" type="xs:string"/>
+  <xs:complexType name="sourceMappingsType"><xs:sequence><xs:element name="source" type="cf:sourceMappingType" minOccurs="1" maxOccurs="unbounded"/></xs:sequence></xs:complexType>
+  <xs:complexType name="sourceMappingType"><xs:sequence><xs:element name="object-kind" type="xs:string"/><xs:element name="source-identity" type="xs:string"/><xs:element name="fidelity" type="xs:string"/></xs:sequence></xs:complexType>
+   <xs:complexType name="policyType"><xs:sequence><xs:element name="execution" type="cf:executionType"/><xs:element name="implementation" type="cf:implementationType"/><xs:element name="dependencies" type="cf:dependenciesType" minOccurs="0"/><xs:element name="config-json" type="xs:string"/><xs:element name="compliance-metadata-json" type="xs:string"/><xs:element name="dependencies-json" type="xs:string"/></xs:sequence><xs:attribute name="schema-version" type="xs:positiveInteger" use="required" fixed="1"/><xs:attribute name="policy-type" type="xs:string" use="optional"/></xs:complexType>
+  <xs:complexType name="executionType"><xs:attribute name="phase" type="cf:executionPhase" use="required"/><xs:attribute name="strict" type="xs:boolean" use="required"/></xs:complexType>
+  <xs:complexType name="implementationType"><xs:choice><xs:element name="require-crystal-forge-agent"/><xs:element name="require-packages" type="cf:requirePackagesType"/><xs:element name="custom-check" type="cf:customCheckType"/><xs:element name="require-cve-check" type="cf:requireCveCheckType"/><xs:element name="time-window" type="cf:timeWindowType"/><xs:element name="require-approvals" type="cf:requireApprovalsType"/><xs:element name="canary-rollout" type="cf:canaryRolloutType"/><xs:element name="cve-threshold" type="cf:cveThresholdType"/><xs:element name="unsupported"/><xs:any namespace="##other" processContents="lax"/></xs:choice><xs:attribute name="state" type="xs:string" use="required"/></xs:complexType>
+  <xs:complexType name="requirePackagesType"><xs:sequence><xs:element name="package" type="xs:string" minOccurs="1" maxOccurs="unbounded"/></xs:sequence></xs:complexType>
+  <xs:complexType name="customCheckType"><xs:sequence><xs:element name="rule" type="cf:customCheckRuleType" minOccurs="1" maxOccurs="unbounded"/></xs:sequence><xs:attribute name="mode" type="cf:customCheckMode" use="required"/><xs:attribute name="context" type="xs:string" use="required"/><xs:attribute name="binding" type="xs:string" use="required"/></xs:complexType>
+  <xs:complexType name="customCheckRuleType"><xs:sequence><xs:element name="description" type="xs:string" minOccurs="0"/><xs:element name="expression" type="cf:expressionType"/></xs:sequence><xs:attribute name="field-name" type="xs:string" use="required"/><xs:attribute name="strict" type="xs:boolean" use="required"/></xs:complexType>
+  <xs:complexType name="expressionType"><xs:simpleContent><xs:extension base="xs:string"><xs:attribute name="language" type="xs:string" use="required" fixed="nix"/></xs:extension></xs:simpleContent></xs:complexType>
+  <xs:complexType name="requireCveCheckType"><xs:sequence><xs:element name="max-high" type="xs:nonNegativeInteger" minOccurs="0"/></xs:sequence><xs:attribute name="max-critical" type="xs:nonNegativeInteger" use="required"/><xs:attribute name="require-high-justification" type="xs:boolean" use="required"/><xs:attribute name="when-no-scan" type="xs:string" use="required"/></xs:complexType>
+  <xs:complexType name="timeWindowType"><xs:sequence><xs:element name="description" type="xs:string" minOccurs="0"/><xs:element name="day" type="cf:weekday" minOccurs="1" maxOccurs="7"/></xs:sequence><xs:attribute name="start-time" type="xs:string" use="required"/><xs:attribute name="end-time" type="xs:string" use="required"/><xs:attribute name="timezone" type="xs:string" use="required"/><xs:attribute name="action" type="xs:string" use="required"/></xs:complexType>
+  <xs:complexType name="requireApprovalsType"><xs:sequence><xs:element name="description" type="xs:string" minOccurs="0"/><xs:element name="expires-after-hours" type="xs:positiveInteger" minOccurs="0"/></xs:sequence><xs:attribute name="count" type="xs:positiveInteger" use="required"/><xs:attribute name="role" type="xs:string" use="required"/><xs:attribute name="distinct" type="xs:boolean" use="required"/></xs:complexType>
+  <xs:complexType name="canaryRolloutType"><xs:sequence><xs:element name="description" type="xs:string" minOccurs="0"/><xs:element name="health-check" type="cf:healthCheckType"/></xs:sequence><xs:attribute name="percentage" type="xs:positiveInteger" use="required"/><xs:attribute name="observe-duration-minutes" type="xs:nonNegativeInteger" use="required"/><xs:attribute name="selection-strategy" type="xs:string" use="required"/></xs:complexType>
+  <xs:complexType name="healthCheckType"><xs:attribute name="type" type="xs:string" use="required"/><xs:attribute name="fail-threshold" type="xs:nonNegativeInteger" use="required"/></xs:complexType>
+  <xs:complexType name="cveThresholdType"><xs:sequence><xs:element name="description" type="xs:string" minOccurs="0"/><xs:element name="threshold" type="cf:thresholdType" minOccurs="1" maxOccurs="unbounded"/></xs:sequence><xs:attribute name="no-scan-behavior" type="xs:string" use="required"/><xs:attribute name="allow-justifications" type="xs:boolean" use="required"/><xs:attribute name="require-acknowledgment" type="xs:boolean" use="required"/></xs:complexType>
+  <xs:complexType name="thresholdType"><xs:attribute name="severity" type="xs:string" use="required"/><xs:attribute name="max" type="xs:nonNegativeInteger" use="required"/><xs:attribute name="action" type="xs:string" use="required"/></xs:complexType>
+  <xs:complexType name="dependenciesType"><xs:sequence><xs:choice minOccurs="0" maxOccurs="unbounded"><xs:element name="nix-option" type="cf:nixOptionType"/><xs:element name="module-ref" type="cf:moduleRefType"/></xs:choice></xs:sequence></xs:complexType>
+  <xs:complexType name="nixOptionType"><xs:attribute name="path" type="xs:string" use="required"/></xs:complexType>
+  <xs:complexType name="moduleRefType"><xs:attribute name="uri" type="xs:anyURI" use="required"/><xs:attribute name="optional" type="xs:boolean" use="required"/></xs:complexType>
+</xs:schema>

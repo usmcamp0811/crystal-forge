@@ -2,11 +2,15 @@
 
 function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
   const [query, setQuery] = React.useState("");
+  const [domain, setDomain] = React.useState("platform"); // platform | security
   const [catFilter, setCatFilter] = React.useState("all");
-  const [typeFilter, setTypeFilter] = React.useState("all");
+  const [groupingScheme, setGroupingScheme] = React.useState("control-family");
+  const [customSchemes, setCustomSchemes] = React.useState(() => loadCustomGroupingSchemes());
+  const [adminOpen, setAdminOpen] = React.useState(false);
   const [editPolicy, setEditPolicy] = React.useState(null);
   const [addOpen, setAddOpen] = React.useState(false);
   const [drawerPolicy, setDrawerPolicy] = React.useState(null);
+  const [drawerTab, setDrawerTab] = React.useState(null);
   const [importOpen, setImportOpen] = React.useState(false);
   const [selectMode, setSelectMode] = React.useState(false);
   const [selectedIds, setSelectedIds] = React.useState(() => new Set());
@@ -18,32 +22,103 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
     onClearFocus?.();
   }, [focus]);
 
-  const list = POLICIES.filter(p => {
-    if (catFilter !== "all" && (p.category || "deployment") !== catFilter) return false;
-    if (typeFilter !== "all" && p.type !== typeFilter) return false;
-    if (query) {
-      const q = query.toLowerCase();
-      if (!p.name.toLowerCase().includes(q) && !p.description.toLowerCase().includes(q)) return false;
-    }
-    return true;
-  });
+  const searchMatch = (p) => {
+    if (!query) return true;
+    const q = query.toLowerCase();
+    return p.name.toLowerCase().includes(q) || p.description.toLowerCase().includes(q)
+      || (p.srgIds||[]).some(s => s.toLowerCase().includes(q)) || (p.cciIds||[]).some(s => s.toLowerCase().includes(q));
+  };
 
-  // Group the filtered list by category, preserving POLICY_CATEGORIES order.
-  const groups = POLICY_CATEGORIES
-    .map(cat => ({ cat, items: list.filter(p => (p.category || "deployment") === cat.id) }))
-    .filter(g => g.items.length > 0);
+  const lineages = (typeof groupPoliciesByLineage === "function" ? groupPoliciesByLineage(POLICIES) : POLICIES.map(p => ({ lineageId:p.id, current:p, revisions:[p] })));
+  const groupListAll = lineages.filter(g => g.revisions.some(searchMatch));
+  const groupListDomain = groupListAll.filter(g => (typeof policyDomain === "function" ? policyDomain(g.current) : "platform") === domain);
+  const [frameworkFilter, setFrameworkFilter] = React.useState("all");
+  const availableFrameworks = domain === "security" ? [...new Set(groupListDomain.map(g => g.current.framework).filter(Boolean))] : [];
+  const groupListFramework = domain === "security" && frameworkFilter !== "all"
+    ? groupListDomain.filter(g => g.current.framework === frameworkFilter)
+    : groupListDomain;
+  const groupList = domain === "platform" ? groupListFramework.filter(g => catFilter === "all" || (g.current.category || "deployment") === catFilter) : groupListFramework;
 
-  const catCount = (id) => POLICIES.filter(p => (p.category || "deployment") === id).length;
+  const platformCats = POLICY_CATEGORIES.filter(c => c.domain === "platform");
+  const allSchemes = [...GROUPING_SCHEMES, ...customSchemes];
+  const activeScheme = allSchemes.find(s => s.id === groupingScheme) || GROUPING_SCHEMES[0];
+  const matchesGroupRule = (p, grp) => {
+    if ((grp.pinIds || []).includes(p.id)) return !(grp.excludeIds || []).includes(p.id);
+    const q = (grp.query || "").trim().toLowerCase();
+    if (!q) return false;
+    const hay = [p.name, p.description, p.controlFamily, (p.srgIds||[]).join(" "), (p.cciIds||[]).join(" "), p.severity].filter(Boolean).join(" ").toLowerCase();
+    return hay.includes(q) && !(grp.excludeIds || []).includes(p.id);
+  };
+
+  let groups = [];
+  if (domain === "platform") {
+    groups = platformCats
+      .map(cat => ({ key:cat.id, label:cat.label, icon:cat.icon, color:cat.color, blurb:cat.blurb, items: groupList.filter(g => (g.current.category || "deployment") === cat.id) }))
+      .filter(g => g.items.length > 0);
+  } else if (activeScheme.id === "flat") {
+    groups = groupListFramework.length ? [{ key:"all", label:"All security controls", icon:"shield", color:"#f87171", blurb:"Every control in this domain, ungrouped.", items: groupListFramework }] : [];
+  } else if (activeScheme.id === "control-family") {
+    const order = [...Object.keys(CONTROL_FAMILIES), "ungrouped"];
+    groups = order.map(fid => {
+      const fam = CONTROL_FAMILIES[fid];
+      return { key:fid, label: fam ? `${fam.id} — ${fam.label}` : "Ungrouped", icon:"shield", color:"#f87171",
+        blurb: fam ? fam.blurb : "Controls with no NIST family tag set yet.",
+        items: groupListFramework.filter(g => (g.current.controlFamily || "ungrouped") === fid) };
+    }).filter(g => g.items.length > 0);
+  } else if (activeScheme.id === "severity") {
+    const order = [["high","CAT I — High","#f87171","Findings that could result in loss of confidentiality, availability, or integrity — highest priority to remediate."],
+      ["medium","CAT II — Medium","#fbbf24","Findings that could result in degraded protection but not immediate compromise."],
+      ["low","CAT III — Low","#60a5fa","Findings that reduce the ability to detect or recover, but don't directly weaken protection."],
+      ["unrated","Unrated","#6b7280","No STIG severity assigned."]];
+    groups = order.map(([sid,label,color,blurb]) => ({ key:sid, label, icon:"shield", color, blurb, items: groupListFramework.filter(g => (g.current.severity || "unrated") === sid) })).filter(g => g.items.length > 0);
+  } else if (activeScheme.id === "cci" || activeScheme.id === "srg-category" || activeScheme.id === "cmmc-level" || activeScheme.id === "remediation") {
+    // Generic path: every one of these schemes is a pure pivot over a groupKeyOf/groupOf
+    // pair on GROUPING_SCHEMES — no bespoke per-scheme code needed beyond an order + blurb.
+    const blurbs = {
+      cci: {}, // labels are the CCI ids themselves, self-explanatory
+      "srg-category": {}, // labels are the SRG categories themselves
+      "cmmc-level": {
+        l3: "Findings backing Level 3 (Expert) practices.", l2: "Findings backing Level 2 (Advanced) practices.",
+        l1: "Findings backing Level 1 (Foundational) practices.", unrated: "No severity to derive a level from.",
+      },
+      remediation: {
+        auto: "Declarative NixOS options — corrected automatically by the next build/deploy.",
+        semi: "Needs a custom eval assertion — flagged, but not self-healing.",
+        manual: "No automatable rule yet — verified by attestation or manual check.",
+      },
+    };
+    const byKey = new Map();
+    groupListFramework.forEach(g => {
+      const key = activeScheme.groupKeyOf(g.current);
+      const label = activeScheme.groupOf(g.current);
+      if (!byKey.has(key)) byKey.set(key, { key, label, items: [] });
+      byKey.get(key).items.push(g);
+    });
+    groups = Array.from(byKey.values()).map(grp => ({
+      ...grp, icon:"shield", color:"#f87171", blurb: blurbs[activeScheme.id]?.[grp.key] || "",
+    })).sort((a,b) => b.items.length - a.items.length);
+  } else {
+    // Custom admin-defined scheme — each group is a match rule (+ pins/excludes), so
+    // adding a new policy later joins matching groups automatically. No manual re-triage.
+    const assigned = new Set();
+    groups = (activeScheme.groups || []).map(grp => {
+      const items = groupListFramework.filter(g => matchesGroupRule(g.current, grp));
+      items.forEach(it => assigned.add(it.current.id));
+      return { key:grp.id, label:grp.name, icon:"shield", color:"#f87171", blurb: grp.desc || "", items };
+    }).filter(g => g.items.length > 0);
+    const ungrouped = groupListFramework.filter(g => !assigned.has(g.current.id));
+    if (ungrouped.length) groups.push({ key:"ungrouped", label:"Ungrouped", icon:"shield", color:"#6b7280", blurb:"Controls that don't match any group's rule in this scheme.", items: ungrouped });
+  }
+
+  const catCount = (id) => lineages.filter(g => (g.current.category || "deployment") === id).length;
+  const domainCount = (id) => lineages.filter(g => (typeof policyDomain === "function" ? policyDomain(g.current) : "platform") === id).length;
+  const currentPolicies = lineages.map(g => g.current);
+  const refreshCustomSchemes = () => setCustomSchemes(loadCustomGroupingSchemes());
 
   return (
-    <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-      <div className="page-head">
-        <div>
-          <h1 className="page-title">Policies</h1>
-          <p className="page-subtitle">
-            Criteria a system must satisfy to deploy · {POLICY_BUILTIN.length} built-in · {POLICY_CUSTOM.length} custom · governing {SYSTEMS.length} systems
-          </p>
-        </div>
+    <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+      <div className="page-head" style={{ marginBottom:0 }}>
+        <h1 className="page-title" style={{ marginBottom:0 }}>Policies</h1>
         <div style={{ display:"flex", gap:8 }}>
           {selectMode ? (
             <>
@@ -69,82 +144,100 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
         </div>
       </div>
 
-      {/* Category stat strip — doubles as a filter. Click to scope, click again to clear. */}
-      <div className="stat-strip pol-cat-strip">
-        {POLICY_CATEGORIES.map(cat => {
-          const active = catFilter === cat.id;
+      {/* Domain split — Platform (pipeline mechanics) vs Security controls (framework-owned).
+          Sits as the page's sub-header, directly under the title. Real tabs: underline
+          indicator + hover state — no stat-card look-alike, no extra copy line. */}
+      <div className="pol-domain-tabs" role="tablist" style={{ marginTop:-4 }}>
+        {POLICY_DOMAINS.map(d => {
+          const active = domain === d.id;
           return (
-            <button key={cat.id}
-              className="stat pol-cat-stat"
-              onClick={() => setCatFilter(active ? "all" : cat.id)}
-              title={cat.blurb}
-              style={active ? {
-                background:`color-mix(in oklab, ${cat.color} 14%, transparent)`,
-                boxShadow:`inset 0 0 0 1px color-mix(in oklab, ${cat.color} 45%, transparent)`,
-              } : undefined}>
-              <span className="stat-accent" style={{ "--stat-color": cat.color }}/>
-              <div className="stat-label" style={{ display:"flex", alignItems:"center", gap:6 }}>
-                <Icon name={cat.icon} size={12} style={{ color:cat.color }}/> {cat.label}
-              </div>
-              <div className="stat-value" style={{ color: cat.color }}>{catCount(cat.id)}</div>
+            <button key={d.id} role="tab" aria-selected={active} className={`pol-domain-tab${active?" active":""}`}
+              onClick={()=>setDomain(d.id)} title={d.blurb}
+              style={active ? { "--dc": d.color } : undefined}>
+              <Icon name={d.icon} size={14}/>
+              <span>{d.label}</span>
+              <span className="pol-domain-tab-count">{domainCount(d.id)}</span>
             </button>
           );
         })}
       </div>
 
+      {/* Grouping toolbar — identical row/position/height in both domains so nothing
+          shifts when switching tabs; only the control inside changes. */}
+      <div className="pol-group-toolbar">
+        <span className="pol-group-toolbar-label">{domain === "platform" ? "Category" : "Framework"}</span>
+        {domain === "platform" ? (
+          <div className="seg">
+            <button className={catFilter==="all"?"active":""} onClick={()=>setCatFilter("all")}>all</button>
+            {platformCats.map(c => (
+              <button key={c.id} className={catFilter===c.id?"active":""} onClick={()=>setCatFilter(c.id)} title={c.blurb}>
+                <span style={{ display:"inline-flex", alignItems:"center", gap:5 }}>
+                  <span style={{ width:6, height:6, borderRadius:"50%", background:c.color, flexShrink:0 }}/>
+                  {c.short} <span className="mono" style={{ opacity:0.6, fontSize:10.5 }}>{catCount(c.id)}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <>
+            <select className="input focus-ring" value={groupingScheme} onChange={e=>setGroupingScheme(e.target.value)} style={{ width:"auto", fontSize:12, padding:"6px 10px" }}>
+              <optgroup label="Predefined">
+                {GROUPING_SCHEMES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+              </optgroup>
+              {customSchemes.length > 0 && (
+                <optgroup label="Custom">
+                  {customSchemes.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+                </optgroup>
+              )}
+            </select>
+          </>
+        )}
+        <button className="btn btn-ghost focus-ring xs" style={{ marginLeft:"auto", visibility: domain === "security" ? "visible" : "hidden" }} onClick={()=>setAdminOpen(true)}>
+          <Icon name="gear" size={12}/> Manage groupings
+        </button>
+      </div>
+
+      {/* Filterbar — fixed position/contents across both domains. */}
       <div className="filterbar">
         <div className="filter-search" style={{ maxWidth:280 }}>
           <Icon name="search"/>
           <input className="input focus-ring" placeholder="Search policies…" value={query} onChange={e=>setQuery(e.target.value)}/>
         </div>
-        <div className="seg">
-          <button className={catFilter==="all"?"active":""} onClick={()=>setCatFilter("all")}>all</button>
-          {POLICY_CATEGORIES.map(c => (
-            <button key={c.id} className={catFilter===c.id?"active":""} onClick={()=>setCatFilter(c.id)} title={c.blurb}>
-              <span style={{ display:"inline-flex", alignItems:"center", gap:5 }}>
-                <span style={{ width:6, height:6, borderRadius:"50%", background:c.color, flexShrink:0 }}/>
-                {c.short}
-              </span>
-            </button>
-          ))}
-        </div>
-        <select className="input focus-ring" value={typeFilter} onChange={e=>setTypeFilter(e.target.value)}
-          style={{ width:"auto", fontSize:12, padding:"6px 10px" }} title="Filter by policy type">
-          <option value="all">All types</option>
-          <option value="builtin">Built-in</option>
-          <option value="custom">Custom</option>
-        </select>
-        {(catFilter !== "all" || typeFilter !== "all" || query) && (
-          <button className="btn btn-ghost focus-ring xs" onClick={()=>{ setCatFilter("all"); setTypeFilter("all"); setQuery(""); }}>
+        {(catFilter !== "all" || query) && (
+          <button className="btn btn-ghost focus-ring xs" onClick={()=>{ setCatFilter("all"); setQuery(""); }}>
             <Icon name="x" size={11}/> Clear
           </button>
         )}
-        <span className="filter-count">{list.length} {list.length === 1 ? "policy" : "policies"}</span>
-      </div>
+        <span className="filter-count">{(() => {
+          const shown = groups.reduce((a,g) => a + g.items.length, 0);
+          return shown < groupList.length
+            ? `Showing ${shown} of ${groupList.length} ${groupList.length === 1 ? "policy" : "policies"}`
+            : `${groupList.length} ${groupList.length === 1 ? "policy" : "policies"}`;
+        })()}</span>      </div>
 
       {groups.length === 0 ? (
         <div className="card" style={{ padding:"40px 20px", textAlign:"center", color:"var(--cf-text-muted)" }}>
           <Icon name="search" size={20} style={{ opacity:0.5 }}/>
           <div style={{ marginTop:8, fontSize:13 }}>No policies match these filters.</div>
         </div>
-      ) : groups.map(({ cat, items }) => (
-        <section key={cat.id} className="pol-group">
+      ) : groups.map((g) => (
+        <section key={g.key} className="pol-group">
           <div className="pol-group-head">
-            <span className="pol-group-icon" style={{ background:`color-mix(in oklab, ${cat.color} 16%, transparent)`, color:cat.color }}>
-              <Icon name={cat.icon} size={13}/>
+            <span className="pol-group-icon" style={{ background:`color-mix(in oklab, ${g.color} 16%, transparent)`, color:g.color }}>
+              <Icon name={g.icon} size={13}/>
             </span>
             <div style={{ minWidth:0 }}>
-              <h2 className="pol-group-title">{cat.label} <span className="pol-group-count">{items.length}</span></h2>
-              <div className="pol-group-blurb">{cat.blurb}</div>
+              <h2 className="pol-group-title">{g.label} <span className="pol-group-count">{g.items.length}</span></h2>
+              {g.blurb && <div className="pol-group-blurb">{g.blurb}</div>}
             </div>
           </div>
           <div className="cards-grid">
-            {items.map(p => (
-              <PolicyCard key={p.id} policy={p}
-                onOpen={() => selectMode ? toggleSelected(p.id) : setDrawerPolicy(p)}
-                onEdit={!selectMode && p.type === "custom" ? () => setEditPolicy(p) : null}
+            {g.items.map(grp => (
+              <PolicyCard key={grp.lineageId} group={grp}
+                onOpen={(p, tab) => selectMode ? toggleSelected(p.id) : (setDrawerPolicy(p), setDrawerTab(tab || null))}
+                onEdit={!selectMode ? (p) => setEditPolicy(p) : null}
                 selectMode={selectMode}
-                selected={selectedIds.has(p.id)}
+                selected={selectedIds}
               />
             ))}
           </div>
@@ -154,9 +247,11 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
       {drawerPolicy && (
         <PolicyDrawer
           policy={drawerPolicy}
+          initialTab={drawerTab}
           onClose={() => setDrawerPolicy(null)}
           onEdit={drawerPolicy.type === "custom" ? () => { setEditPolicy(drawerPolicy); setDrawerPolicy(null); } : null}
           onOpenSystem={onOpenSystem}
+          onSwitchPolicy={setDrawerPolicy}
         />
       )}
       {(editPolicy || addOpen) && (
@@ -167,6 +262,14 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
         />
       )}
       {importOpen && <ImportPoliciesModal onClose={() => setImportOpen(false)}/>}
+      {adminOpen && (
+        <AdminGroupingsModal
+          schemes={customSchemes}
+          onClose={() => setAdminOpen(false)}
+          onChange={(next) => { saveCustomGroupingSchemes(next); refreshCustomSchemes(); }}
+          onSelectScheme={(id) => setGroupingScheme(id)}
+        />
+      )}
     </div>
   );
 }
@@ -391,18 +494,236 @@ function ImportPoliciesModal({ onClose }) {
   );
 }
 
-function PolicyCard({ policy, onOpen, onEdit, selectMode, selected }) {
+// ── Admin: manage custom grouping schemes for the Security controls domain ──
+// A scheme is a named set of groups; each group holds an explicit list of security
+// policy ids. Lets security teams mirror their own control catalog (an internal
+// baseline, a customer's ATO package, etc.) without touching the underlying policies.
+function AdminGroupingsModal({ schemes, onClose, onChange, onSelectScheme }) {
+  const [local, setLocal] = React.useState(() => schemes.map(s => ({ ...s, groups: s.groups.map(g => ({ ...g, pinIds: [...(g.pinIds||g.policyIds||[])], excludeIds: [...(g.excludeIds||[])] })) })));
+  const [activeId, setActiveId] = React.useState(local[0]?.id || null);
+  const active = local.find(s => s.id === activeId);
+  const securityLineages = React.useMemo(() => {
+    const lineages = groupPoliciesByLineage(POLICIES);
+    return lineages.filter(g => (typeof policyDomain === "function" ? policyDomain(g.current) : "platform") === "security").map(g => g.current);
+  }, []);
+  const matchesRule = (p, grp) => {
+    if ((grp.pinIds || []).includes(p.id)) return !(grp.excludeIds || []).includes(p.id);
+    const q = (grp.query || "").trim().toLowerCase();
+    if (!q) return false;
+    const hay = [p.name, p.description, p.controlFamily, (p.srgIds||[]).join(" "), (p.cciIds||[]).join(" "), p.severity].filter(Boolean).join(" ").toLowerCase();
+    return hay.includes(q) && !(grp.excludeIds || []).includes(p.id);
+  };
+
+  const commit = (next) => { setLocal(next); onChange(next); };
+
+  const addScheme = () => {
+    const id = `custom-${Date.now()}`;
+    const next = [...local, { id, label: "New grouping", groups: [] }];
+    commit(next);
+    setActiveId(id);
+  };
+  const renameScheme = (id, label) => commit(local.map(s => s.id===id ? { ...s, label } : s));
+  const removeScheme = (id) => { commit(local.filter(s => s.id !== id)); if (activeId === id) setActiveId(local.find(s=>s.id!==id)?.id || null); };
+
+  const addGroup = () => {
+    if (!active) return;
+    const g = { id: `grp-${Date.now()}`, name: "New group", desc: "", query: "", pinIds: [], excludeIds: [] };
+    commit(local.map(s => s.id===active.id ? { ...s, groups: [...s.groups, g] } : s));
+  };
+  const patchGroup = (gid, patch) => commit(local.map(s => s.id===active.id ? { ...s, groups: s.groups.map(g => g.id===gid ? { ...g, ...patch } : g) } : s));
+  const removeGroup = (gid) => commit(local.map(s => s.id===active.id ? { ...s, groups: s.groups.filter(g => g.id!==gid) } : s));
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(860px,96vw)", maxHeight:"90vh", display:"flex", flexDirection:"column" }}>
+        <div className="modal-head">
+          <h2><Icon name="gear" size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/> Manage security groupings</h2>
+          <p>Each group is a match rule — controls whose name, description, SRG/CCI id, control family, or severity contain the text join it automatically. New controls that match join without you revisiting this screen; pin or exclude individual controls only for exceptions.</p>
+        </div>
+        <div className="modal-body" style={{ overflow:"hidden", display:"flex", flexDirection:"row", gap:0, padding:0, flex:1 }}>
+          <div style={{ width:220, flexShrink:0, boxSizing:"border-box", borderRight:"1px solid var(--cf-divider)", overflowY:"auto", padding:12, display:"flex", flexDirection:"column", gap:6, minWidth:0 }}>
+            {local.map(s => (
+              <button key={s.id} className="focus-ring" onClick={()=>setActiveId(s.id)}
+                style={{ all:"unset", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"space-between", gap:6,
+                  padding:"8px 10px", borderRadius:8, fontSize:12.5,
+                  background: activeId===s.id ? "color-mix(in oklab,var(--cf-brand-purple) 12%, transparent)" : "transparent",
+                  border: `1px solid ${activeId===s.id ? "var(--cf-brand-purple)" : "transparent"}` }}>
+                <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", minWidth:0, flex:1 }}>{s.label}</span>
+                <span className="mono" style={{ fontSize:10, color:"var(--cf-text-muted)", flexShrink:0 }}>{s.groups.length}</span>
+              </button>
+            ))}
+            <button className="btn btn-ghost focus-ring" onClick={addScheme} style={{ marginTop:4, fontSize:12, width:"100%", minWidth:0 }}>
+              <Icon name="plus" size={12}/> New scheme
+            </button>
+          </div>
+          <div style={{ flex:1, overflowY:"auto", padding:18 }}>
+            {!active ? (
+              <div style={{ fontSize:12, color:"var(--cf-text-muted)", textAlign:"center", padding:"40px 0" }}>Create a scheme to define custom groups.</div>
+            ) : (
+              <>
+                <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:16 }}>
+                  <input className="input focus-ring" value={active.label} onChange={e=>renameScheme(active.id, e.target.value)} style={{ fontSize:14, fontWeight:600, flex:1 }}/>
+                  <button className="btn btn-ghost focus-ring xs" onClick={()=>{ onSelectScheme(active.id); onClose(); }}><Icon name="check" size={11}/> Use this scheme</button>
+                  <button className="btn-icon focus-ring" onClick={()=>removeScheme(active.id)} title="Delete scheme"><Icon name="x" size={13}/></button>
+                </div>
+                <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+                  {active.groups.map(g => {
+                    const matched = securityLineages.filter(p => matchesRule(p, g));
+                    return (
+                    <div key={g.id} style={{ border:"1px solid var(--cf-divider)", borderRadius:10, padding:12 }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
+                        <input className="input focus-ring" value={g.name} onChange={e=>patchGroup(g.id, { name:e.target.value })} style={{ fontSize:13, fontWeight:600, flex:1 }}/>
+                        <button className="btn-icon focus-ring" onClick={()=>removeGroup(g.id)} title="Delete group"><Icon name="x" size={13}/></button>
+                      </div>
+                      <input className="input focus-ring" value={g.desc||""} onChange={e=>patchGroup(g.id, { desc:e.target.value })}
+                        placeholder="One-line description shown as this section's subtitle in the list…" style={{ fontSize:11.5, marginBottom:8 }}/>
+                      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                        <Icon name="search" size={12} style={{ color:"var(--cf-text-muted)", flexShrink:0 }}/>
+                        <input className="input focus-ring mono" value={g.query} onChange={e=>patchGroup(g.id, { query:e.target.value })}
+                          placeholder="e.g. ssh, AC, CAT I, password…" style={{ fontSize:12, flex:1 }}/>
+                        <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)", flexShrink:0, whiteSpace:"nowrap" }}>{matched.length} match{matched.length===1?"":"es"}</span>
+                      </div>
+                      <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginTop:8 }}>
+                        {matched.slice(0, 10).map(p => {
+                          const isPinned = (g.pinIds||[]).includes(p.id);
+                          return (
+                            <span key={p.id} className="chip chip-unknown mono" style={{ fontSize:10, display:"inline-flex", alignItems:"center", gap:4 }}>
+                              {isPinned && <Icon name="key" size={8} title="Pinned"/>}
+                              {p.name}
+                              <button className="focus-ring" title="Exclude from this group" onClick={()=>patchGroup(g.id, { excludeIds:[...(g.excludeIds||[]), p.id], pinIds:(g.pinIds||[]).filter(x=>x!==p.id) })}
+                                style={{ all:"unset", cursor:"pointer", display:"inline-flex", opacity:0.6 }}>
+                                <Icon name="x" size={9}/>
+                              </button>
+                            </span>
+                          );
+                        })}
+                        {matched.length > 10 && <span style={{ fontSize:10.5, color:"var(--cf-text-muted)", alignSelf:"center" }}>+{matched.length - 10} more</span>}
+                        {matched.length === 0 && <span style={{ fontSize:11, color:"var(--cf-text-muted)", fontStyle:"italic" }}>No controls match yet.</span>}
+                      </div>
+                      {(g.excludeIds||[]).length > 0 && (
+                        <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginTop:6 }}>
+                          <span style={{ fontSize:10, color:"var(--cf-text-muted)" }}>Excluded:</span>
+                          {g.excludeIds.map(id => {
+                            const p = securityLineages.find(x=>x.id===id);
+                            return (
+                              <button key={id} className="chip focus-ring" style={{ fontSize:10, cursor:"pointer", opacity:0.7 }}
+                                title="Un-exclude" onClick={()=>patchGroup(g.id, { excludeIds:g.excludeIds.filter(x=>x!==id) })}>
+                                {p?.name || id} <Icon name="x" size={8}/>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                      <PinPolicyPicker options={securityLineages.filter(p=>!matchesRule(p,g))} onPick={(id)=>patchGroup(g.id, { pinIds:[...(g.pinIds||[]), id], excludeIds:(g.excludeIds||[]).filter(x=>x!==id) })}/>
+                    </div>
+                    );
+                  })}
+                  <button className="btn btn-ghost focus-ring" onClick={addGroup} style={{ width:"fit-content" }}>
+                    <Icon name="plus" size={12}/> New group
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+        <div className="modal-foot">
+          <button className="btn btn-primary focus-ring" onClick={onClose}>Done</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Small typeahead for pinning the rare exception that a text rule won't catch —
+// not a full checkbox wall, so it stays usable at any policy-catalog size.
+function PinPolicyPicker({ options, onPick }) {
+  const [q, setQ] = React.useState("");
+  const [open, setOpen] = React.useState(false);
+  const matches = q.trim() ? options.filter(p => p.name.toLowerCase().includes(q.trim().toLowerCase())).slice(0, 6) : [];
+  return (
+    <div style={{ position:"relative", marginTop:8 }}>
+      <input className="input focus-ring mono" value={q} onChange={e=>{ setQ(e.target.value); setOpen(true); }} onFocus={()=>setOpen(true)}
+        placeholder="+ pin a specific control not caught by the rule…" style={{ fontSize:11.5 }}/>
+      {open && matches.length > 0 && (
+        <div style={{ position:"absolute", top:"100%", left:0, right:0, marginTop:2, background:"var(--cf-card-bg)", border:"1px solid var(--cf-divider)", borderRadius:8, zIndex:5, boxShadow:"0 8px 20px rgba(0,0,0,0.25)", overflow:"hidden" }}>
+          {matches.map(p => (
+            <button key={p.id} className="focus-ring" onClick={()=>{ onPick(p.id); setQ(""); setOpen(false); }}
+              style={{ all:"unset", cursor:"pointer", display:"block", width:"100%", boxSizing:"border-box", padding:"7px 10px", fontSize:11.5, fontFamily:"var(--font-mono)" }}
+              onMouseDown={e=>e.preventDefault()}>
+              {p.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Chip-based id picker for SRG/CCI — these aren't small closed sets like control family or
+// CMMC level (DISA publishes hundreds of SRGs and thousands of CCIs), so we can't offer a
+// full dropdown. Instead: type-ahead suggestions from ids already used elsewhere in this
+// registry, rendered as removable chips, with free entry for ids not yet known here.
+// Shared "comma-separated string -> trimmed id array" parser, used by both the SRG/CCI
+// save logic and the chip picker's own add/remove.
+function parseIdList(v) { return (v || "").split(",").map(s => s.trim()).filter(Boolean); }
+function IdChipPicker({ value, onChange, allKnownIds, placeholder }) {
+  const ids = parseIdList(value);
+  const [draft, setDraft] = React.useState("");
+  const [open, setOpen] = React.useState(false);
+  const suggestions = draft.trim()
+    ? allKnownIds.filter(id => id.toLowerCase().includes(draft.trim().toLowerCase()) && !ids.includes(id)).slice(0, 6)
+    : [];
+  const commit = (id) => {
+    const clean = id.trim();
+    if (!clean || ids.includes(clean)) { setDraft(""); setOpen(false); return; }
+    onChange([...ids, clean].join(", "));
+    setDraft(""); setOpen(false);
+  };
+  const remove = (id) => onChange(ids.filter(x => x !== id).join(", "));
+  return (
+    <div style={{ position:"relative" }}>
+      <div className="input focus-ring" style={{ height:"auto", minHeight:36, display:"flex", flexWrap:"wrap", gap:6, alignItems:"center", padding:"6px 8px" }}>
+        {ids.map(id => (
+          <span key={id} className="chip chip-unknown mono" style={{ fontSize:10.5, display:"inline-flex", alignItems:"center", gap:4 }}>
+            {id}
+            <button className="focus-ring" onClick={()=>remove(id)} style={{ all:"unset", cursor:"pointer", display:"inline-flex", opacity:0.6 }}><Icon name="x" size={9}/></button>
+          </span>
+        ))}
+        <input value={draft} onChange={e=>{ setDraft(e.target.value); setOpen(true); }} onFocus={()=>setOpen(true)}
+          onKeyDown={e=>{ if (e.key==="Enter"||e.key===",") { e.preventDefault(); commit(draft); } if (e.key==="Backspace" && !draft && ids.length) remove(ids[ids.length-1]); }}
+          placeholder={ids.length ? "Add another…" : placeholder}
+          style={{ all:"unset", flex:1, minWidth:120, fontFamily:"var(--font-mono)", fontSize:11.5 }}/>
+      </div>
+      {open && suggestions.length > 0 && (
+        <div style={{ position:"absolute", top:"100%", left:0, right:0, marginTop:2, background:"var(--cf-card-bg)", border:"1px solid var(--cf-divider)", borderRadius:8, zIndex:5, boxShadow:"0 8px 20px rgba(0,0,0,0.25)", overflow:"hidden" }}>
+          {suggestions.map(id => (
+            <button key={id} className="focus-ring" onMouseDown={e=>e.preventDefault()} onClick={()=>commit(id)}
+              style={{ all:"unset", cursor:"pointer", display:"block", width:"100%", boxSizing:"border-box", padding:"7px 10px", fontSize:11, fontFamily:"var(--font-mono)" }}>
+              {id}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PolicyCard({ group, onOpen, onEdit, selectMode, selected }) {
+  const [shownId, setShownId] = React.useState(group.current.id);
+  const policy = group.revisions.find(r => r.id === shownId) || group.current;
+  const multi = group.revisions.length > 1;
+  const isSelected = selectMode && selected.has(policy.id);
   const usage = policyUsage(policy.id);
   const cat = policyCategoryMeta(policy.category || "deployment");
   const disabled = policy.type === "custom" && policy.enabled === false;
   const railColor = disabled ? "#6b7280" : cat.color;
 
   return (
-    <div className="sys-card" onClick={onOpen} style={{ cursor:"pointer", opacity: disabled ? 0.72 : 1, outline: selectMode && selected ? "2px solid var(--cf-brand-purple)" : "none", outlineOffset: -1 }}>
+    <div className="sys-card" onClick={() => onOpen(policy)} style={{ cursor:"pointer", opacity: disabled ? 0.72 : 1, outline: isSelected ? "2px solid var(--cf-brand-purple)" : "none", outlineOffset: -1 }}>
       <div className="status-rail" style={{ "--status-color": railColor }}/>
       {selectMode && (
-        <span className={`pol-select-box${selected?" checked":""}`}>
-          {selected && <Icon name="check" size={11} style={{ color:"#fff" }}/>}
+        <span className={`pol-select-box${isSelected?" checked":""}`}>
+          {isSelected && <Icon name="check" size={11} style={{ color:"#fff" }}/>}
         </span>
       )}
       <div className="sys-card-head">
@@ -414,6 +735,7 @@ function PolicyCard({ policy, onOpen, onEdit, selectMode, selected }) {
           {policy.type === "builtin"
             ? <span className="chip chip-info">built-in</span>
             : <span className="chip chip-healthy">custom</span>}
+          {multi && <PubStateChip state={policy.publicationState}/>}
           {disabled && <span className="chip chip-unknown" style={{ fontSize:9 }}>disabled</span>}
           {policy.severity && (
             <span className="chip" style={{ fontSize:9,
@@ -440,20 +762,91 @@ function PolicyCard({ policy, onOpen, onEdit, selectMode, selected }) {
         </div>
       </div>
 
+      {(policy.srgIds?.length || policy.cciIds?.length) ? (
+        <div style={{ display:"flex", flexWrap:"wrap", gap:4 }}>
+          {(policy.srgIds||[]).map(s => <span key={s} className="chip chip-unknown mono" style={{ fontSize:9 }}>{s}</span>)}
+          {(policy.cciIds||[]).map(s => <span key={s} className="chip chip-unknown mono" style={{ fontSize:9 }}>{s}</span>)}
+        </div>
+      ) : null}
+
       <div style={{ paddingTop:10, borderTop:"1px solid var(--cf-divider)", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
         <div style={{ display:"flex", alignItems:"center", gap:8 }}>
           <Icon name="server" size={11} style={{ color:"var(--cf-text-muted)" }}/>
           <span className="mono" style={{ fontSize:12, fontWeight:600 }}>{usage.count}</span>
           <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>systems use this</span>
         </div>
-        {onEdit && (
-          <button className="btn btn-subtle focus-ring" style={{ padding:"4px 10px", fontSize:12 }} onClick={e=>{ e.stopPropagation(); onEdit(); }}>
+        {onEdit && policy.type === "custom" && (
+          <button className="btn btn-subtle focus-ring" style={{ padding:"4px 10px", fontSize:12 }} onClick={e=>{ e.stopPropagation(); onEdit(policy); }}>
             <Icon name="gear" size={12}/> Edit
           </button>
         )}
       </div>
+
+      {multi && (
+        <div style={{ margin:"2px -16px -16px", borderTop:"1px solid var(--cf-divider)", background:"var(--cf-subtle-bg)", borderRadius:"0 0 var(--radius-xl) var(--radius-xl)" }}>
+          <button className="focus-ring" onClick={e => { e.stopPropagation(); onOpen(policy, "revisions"); }}
+            style={{ all:"unset", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"space-between", width:"100%", boxSizing:"border-box", padding:"9px 14px", fontSize:11.5, color:"var(--cf-text-secondary)" }}>
+            <span>{group.revisions.length} revisions</span>
+            <Icon name="chevron-right" size={12}/>
+          </button>
+        </div>
+      )}
     </div>
   );
+}
+
+/* Drawer/modal for browsing many revisions at once — used when a lineage has more than a few. */
+function RevisionPickerModal({ title, revisions, currentId, selectedId, onSelect, onClose }) {
+  const [query, setQuery] = React.useState("");
+  const q = query.toLowerCase();
+  const filtered = revisions.filter(r => !q
+    || String(r.revision).includes(q) || (r.version||"").toLowerCase().includes(q)
+    || (r.publicationState||"").toLowerCase().includes(q) || (r.publishedDate||"").includes(q)
+    || (r.digest||"").toLowerCase().includes(q));
+  return ReactDOM.createPortal((
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(520px,94vw)", maxHeight:"84vh", display:"flex", flexDirection:"column" }}>
+        <div className="modal-head">
+          <h2><Icon name="sync" size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/>{title} — {revisions.length} revisions</h2>
+          <p>Pick an exact revision. The selection is preserved as-is — it won't silently move to “latest” later.</p>
+        </div>
+        <div className="modal-body" style={{ overflowY:"auto", flex:1 }}>
+          <div className="filter-search" style={{ marginBottom:10 }}>
+            <Icon name="search"/>
+            <input className="input focus-ring" placeholder="Search revision, state, date, digest…" value={query} onChange={e=>setQuery(e.target.value)} autoFocus/>
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
+            {filtered.map(r => {
+              const isSel = r.id === selectedId;
+              return (
+                <button key={r.id} onClick={() => onSelect(r.id)} className="focus-ring"
+                  style={{ all:"unset", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"space-between", gap:8,
+                    padding:"9px 12px", borderRadius:8, background: isSel ? "color-mix(in oklab,var(--cf-brand-purple) 12%, transparent)" : "var(--cf-subtle-bg)",
+                    border: `1px solid ${isSel ? "var(--cf-brand-purple)" : "var(--cf-divider)"}` }}>
+                  <span style={{ display:"flex", alignItems:"center", gap:8, minWidth:0 }}>
+                    <span className="mono" style={{ fontSize:12, fontWeight:600, flexShrink:0 }}>Rev {r.revision}</span>
+                    {r.version && <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{r.version}</span>}
+                    {r.digest && <span className="mono" style={{ fontSize:10, color:"var(--cf-text-muted)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.digest}</span>}
+                  </span>
+                  <span style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
+                    <span style={{ fontSize:10.5, color:"var(--cf-text-muted)" }}>{r.publishedDate}</span>
+                    <PubStateChip state={r.publicationState}/>
+                    {r.id === currentId && <span className="chip" style={{ fontSize:8.5, color:"#34d399", background:"color-mix(in oklab, #34d399 16%, transparent)" }}>Current</span>}
+                  </span>
+                </button>
+              );
+            })}
+            {filtered.length === 0 && (
+              <div style={{ fontSize:12, color:"var(--cf-text-muted)", padding:"16px 0", textAlign:"center" }}>No revisions match “{query}”.</div>
+            )}
+          </div>
+        </div>
+        <div className="modal-foot">
+          <button className="btn btn-ghost focus-ring" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  ), document.body);
 }
 
 function ruleDescription(r) {
@@ -484,7 +877,9 @@ function evidenceSummary(ev) {
   }
 }
 
-function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem }) {
+function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem, onSwitchPolicy, initialTab }) {
+  const [tab, setTab] = React.useState(initialTab || "details");
+  React.useEffect(() => { setTab(initialTab || "details"); }, [policy.lineageId || policy.id]);
   React.useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -492,6 +887,11 @@ function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem }) {
   }, [onClose]);
 
   const usage = policyUsage(policy.id);
+  const group = React.useMemo(() => {
+    const groups = (typeof groupPoliciesByLineage === "function") ? groupPoliciesByLineage(POLICIES) : [];
+    return groups.find(g => g.lineageId === (policy.lineageId || policy.id));
+  }, [policy]);
+  const multi = group && group.revisions.length > 1;
 
   return (
     <>
@@ -531,6 +931,37 @@ function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem }) {
           {policy.createdBy && <div className="ed-stat"><div className="ed-stat-label">Owner</div><div className="ed-stat-val mono" style={{ fontSize:13 }}>{policy.createdBy}</div></div>}
         </div>
 
+        {multi && (
+          <div className="seg" style={{ margin:"12px 22px 0", width:"fit-content" }}>
+            <button className={tab==="details"?"active":""} onClick={()=>setTab("details")}>Details</button>
+            <button className={tab==="revisions"?"active":""} onClick={()=>setTab("revisions")}>Revisions · {group.revisions.length}</button>
+          </div>
+        )}
+
+        {tab === "revisions" && multi ? (
+          <div className="ed-body" style={{ padding:"18px 22px", overflow:"auto", display:"flex", flexDirection:"column", gap:8 }}>
+            <div style={{ fontSize:12, color:"var(--cf-text-muted)", marginBottom:2 }}>Revision history for this policy lineage — selecting a revision does not change which policy other bundles reference.</div>
+            {group.revisions.map(r => {
+              const isSel = r.id === policy.id;
+              return (
+                <button key={r.id} onClick={() => onSwitchPolicy?.(r)} className="focus-ring"
+                  style={{ all:"unset", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"space-between", gap:10,
+                    padding:"10px 12px", borderRadius:9, background: isSel ? "color-mix(in oklab,var(--cf-brand-purple) 10%, transparent)" : "var(--cf-subtle-bg)",
+                    border: `1px solid ${isSel ? "var(--cf-brand-purple)" : "var(--cf-divider)"}` }}>
+                  <span style={{ display:"flex", alignItems:"center", gap:10, minWidth:0 }}>
+                    <span className="mono" style={{ fontSize:12.5, fontWeight:600, flexShrink:0 }}>Revision {r.revision}</span>
+                    <span style={{ fontSize:11.5, color:"var(--cf-text-secondary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.description}</span>
+                  </span>
+                  <span style={{ display:"flex", alignItems:"center", gap:8, flexShrink:0 }}>
+                    <span style={{ fontSize:10.5, color:"var(--cf-text-muted)" }}>{r.publishedDate}</span>
+                    <PubStateChip state={r.publicationState}/>
+                    {r.id === group.current.id && <span className="chip" style={{ fontSize:8.5, color:"#34d399", background:"color-mix(in oklab, #34d399 16%, transparent)" }}>Current</span>}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
         <div className="ed-body" style={{ padding:"18px 22px", overflow:"auto", display:"flex", flexDirection:"column", gap:18 }}>
           {policy.rationale && (
             <section>
@@ -538,6 +969,15 @@ function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem }) {
               <div style={{ fontSize:13, color:"var(--cf-text-primary)", lineHeight:1.5 }}>{policy.rationale}</div>
             </section>
           )}
+          {(policy.srgIds?.length || policy.cciIds?.length) ? (
+            <section>
+              <h3 style={{ fontSize:11, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", margin:"0 0 8px", fontWeight:600 }}>SRG / CCI mapping</h3>
+              <div style={{ display:"flex", flexWrap:"wrap", gap:5 }}>
+                {(policy.srgIds||[]).map(s => <span key={s} className="chip chip-unknown mono" style={{ fontSize:10 }}>{s}</span>)}
+                {(policy.cciIds||[]).map(s => <span key={s} className="chip chip-unknown mono" style={{ fontSize:10 }}>{s}</span>)}
+              </div>
+            </section>
+          ) : null}
           <section>
             <h3 style={{ fontSize:11, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", margin:"0 0 8px", fontWeight:600 }}>Rules</h3>
             {policy.rules.length === 0 ? (
@@ -615,6 +1055,7 @@ function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem }) {
             )}
           </section>
         </div>
+        )}
       </aside>
     </>
   );
@@ -622,12 +1063,20 @@ function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem }) {
 
 function PolicyFormModal({ mode, policy, onClose }) {
   const isEdit = mode === "edit";
+  const knownSrgIds = React.useMemo(()=>[...new Set(POLICIES.flatMap(p=>p.srgIds||[]))].sort(), []);
+  const knownCciIds = React.useMemo(()=>[...new Set(POLICIES.flatMap(p=>p.cciIds||[]))].sort(), []);
   const [form, setForm] = React.useState(() => isEdit && policy ? {
     name: policy.name,
     description: policy.description,
     category: policy.category || "deployment",
+    controlFamily: policy.controlFamily || "",
+    cmmcLevel: policy.cmmcLevel || "",
+    framework: policy.framework || "",
+    cisSection: policy.cisSection || "",
     rationale: policy.rationale || "",
     severity: policy.severity || "medium",
+    srgIds: (policy.srgIds || []).join(", "),
+    cciIds: (policy.cciIds || []).join(", "),
     enabled: policy.enabled !== false,
     rules: [...policy.rules],
     evidence: policy.evidence ? policy.evidence.map(e => ({ ...e })) : [],
@@ -635,13 +1084,20 @@ function PolicyFormModal({ mode, policy, onClose }) {
     name: "",
     description: "",
     category: "deployment",
+    controlFamily: "",
+    cmmcLevel: "",
+    framework: "",
+    cisSection: "",
     rationale: "",
     severity: "medium",
+    srgIds: "",
+    cciIds: "",
     enabled: true,
     rules: [{ kind:"eval_passed" }, { kind:"build_succeeded" }],
     evidence: [],
   });
   const [confirmDelete, setConfirmDelete] = React.useState(false);
+  const [tab, setTab] = React.useState("details");
   const set = (k,v) => setForm(p => ({ ...p, [k]: v }));
 
   const addRule = (kind) => {
@@ -675,11 +1131,48 @@ function PolicyFormModal({ mode, policy, onClose }) {
   const removeEvidence = (idx) => set("evidence", form.evidence.filter((_, i) => i !== idx));
   const updateEvidence = (idx, patch) => set("evidence", form.evidence.map((e, i) => i === idx ? { ...e, ...patch } : e));
 
+  const parseIdList = (s) => s.split(",").map(x => x.trim()).filter(Boolean);
+
+  const doSave = () => {
+    const srgIds = parseIdList(form.srgIds);
+    const cciIds = parseIdList(form.cciIds);
+    if (isEdit) {
+      Object.assign(policy, {
+        name: form.name, description: form.description, category: form.category,
+        controlFamily: form.category === "security" ? (form.controlFamily || null) : undefined,
+        cmmcLevel: form.category === "security" ? (form.cmmcLevel || null) : undefined,
+        framework: form.category === "security" ? (form.framework || null) : undefined,
+        cisSection: form.category === "security" ? (form.cisSection || null) : undefined,
+        rationale: form.rationale, severity: form.severity, srgIds, cciIds,
+        enabled: form.enabled, rules: form.rules, evidence: form.evidence,
+        lastModified: "just now",
+      });
+    } else {
+      const id = `custom-${slugify(form.name) || Date.now()}`;
+      POLICIES.push({
+        id, lineageId: id, revision: 1, publicationState: "current", publishedDate: new Date().toISOString().slice(0,10),
+        name: form.name, description: form.description, category: form.category,
+        controlFamily: form.category === "security" ? (form.controlFamily || null) : null,
+        cmmcLevel: form.category === "security" ? (form.cmmcLevel || null) : null,
+        framework: form.category === "security" ? (form.framework || null) : null,
+        cisSection: form.category === "security" ? (form.cisSection || null) : null,
+        rationale: form.rationale, severity: form.severity, srgIds, cciIds,
+        type: "custom", enabled: form.enabled, rules: form.rules, evidence: form.evidence,
+        createdBy: "you", createdAt: "just now", lastModified: "just now",
+      });
+    }
+  };
+  const doDelete = () => {
+    const idx = POLICIES.findIndex(p => p.id === policy.id);
+    if (idx >= 0) POLICIES.splice(idx, 1);
+    onClose();
+  };
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(680px,96vw)", maxHeight:"92vh" }}>
         {confirmDelete ? (
-          <DeletePolicyConfirm policy={policy} onCancel={()=>setConfirmDelete(false)} onConfirm={onClose}/>
+          <DeletePolicyConfirm policy={policy} onCancel={()=>setConfirmDelete(false)} onConfirm={doDelete}/>
         ) : (
           <>
             <div className="modal-head">
@@ -688,7 +1181,28 @@ function PolicyFormModal({ mode, policy, onClose }) {
               </h2>
               <p>{isEdit ? "Update the rules and rationale." : "Compose a policy from gate rules. Systems can be assigned this policy from their edit dialog."}</p>
             </div>
-            <div className="modal-body" style={{ overflowY:"auto" }}>
+            <div className="modal-body" style={{ overflowY:"auto", display:"flex", flexDirection:"column" }}>
+              <div style={{ border:"1px solid var(--cf-divider)", borderRadius:10, overflow:"hidden", flexShrink:0 }}>
+                <div style={{ display:"flex", borderBottom:"1px solid var(--cf-divider)", background:"var(--cf-subtle-bg)" }}>
+                  {[
+                    { id:"details",    label:"Details", color:"var(--cf-text-primary)" },
+                    { id:"rule",       label:`Enforcement · ${form.rules.length}`, color:"var(--cf-brand-purple)" },
+                    { id:"evidence",   label:`Evidence · ${form.evidence.length}`, color:"#60a5fa" },
+                  ].map(t => (
+                    <button key={t.id} type="button" onClick={()=>setTab(t.id)} className="focus-ring"
+                      style={{ all:"unset", cursor:"pointer", flex:1, textAlign:"center", padding:"10px 8px", fontSize:12, fontWeight:600,
+                        color: tab===t.id ? t.color : "var(--cf-text-muted)",
+                        background: tab===t.id ? "var(--cf-card-bg)" : "transparent",
+                        borderBottom: tab===t.id ? `2px solid ${t.color}` : "2px solid transparent",
+                        marginBottom:-1 }}>
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ padding:16 }}>
+
+              {tab === "details" && (
+              <>
               <div style={{ display:"grid", gridTemplateColumns:"1fr", gap:14 }}>
                 <div className="field">
                   <label>Name</label>
@@ -700,32 +1214,116 @@ function PolicyFormModal({ mode, policy, onClose }) {
                 <input className="input focus-ring" value={form.description} onChange={e=>set("description",e.target.value)} placeholder="One-line summary shown in the registry"/>
               </div>
               <div className="field">
-                <label>Category</label>
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(150px, 1fr))", gap:8 }}>
-                  {POLICY_CATEGORIES.map(c => {
-                    const active = form.category === c.id;
+                <label>Domain</label>
+                <div className="seg" style={{ width:"fit-content" }}>
+                  {POLICY_DOMAINS.map(dom => {
+                    const active = (policyCategoryMeta(form.category).domain || "platform") === dom.id;
                     return (
-                      <button key={c.id} type="button" onClick={()=>set("category", c.id)}
-                        className="focus-ring"
-                        style={{
-                          display:"flex", alignItems:"flex-start", gap:9, textAlign:"left",
-                          padding:"9px 11px", borderRadius:9, cursor:"pointer",
-                          background: active ? `color-mix(in oklab, ${c.color} 12%, transparent)` : "var(--cf-subtle-bg)",
-                          border: `1px solid ${active ? `color-mix(in oklab, ${c.color} 55%, transparent)` : "var(--cf-divider)"}`,
-                        }}>
-                        <span style={{ flexShrink:0, width:24, height:24, borderRadius:6, display:"grid", placeItems:"center",
-                          background:`color-mix(in oklab, ${c.color} 16%, transparent)`, color:c.color }}>
-                          <Icon name={c.icon} size={13}/>
-                        </span>
-                        <span style={{ minWidth:0 }}>
-                          <span style={{ display:"block", fontSize:12, fontWeight:600, color: active ? c.color : "var(--cf-text-primary)" }}>{c.label}</span>
-                          <span style={{ display:"block", fontSize:10.5, color:"var(--cf-text-muted)", lineHeight:1.35, marginTop:2 }}>{c.blurb}</span>
+                      <button key={dom.id} type="button" className={active ? "active" : ""}
+                        onClick={()=>{ if (dom.id === "security") set("category", "security"); else if (form.category === "security") set("category", "deployment"); }}
+                        style={active ? { color: dom.color } : undefined}>
+                        <span style={{ display:"inline-flex", alignItems:"center", gap:6 }}>
+                          <Icon name={dom.icon} size={12}/> {dom.label}
                         </span>
                       </button>
                     );
                   })}
                 </div>
+                <div className="help">{POLICY_DOMAINS.find(d=>d.id===(policyCategoryMeta(form.category).domain||"platform"))?.blurb}</div>
               </div>
+              {policyCategoryMeta(form.category).domain !== "security" && (
+                <div className="field">
+                  <label>Category</label>
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(150px, 1fr))", gap:8 }}>
+                    {POLICY_CATEGORIES.filter(c => c.domain === "platform").map(c => {
+                      const active = form.category === c.id;
+                      return (
+                        <button key={c.id} type="button" onClick={()=>set("category", c.id)}
+                          className="focus-ring"
+                          style={{
+                            display:"flex", alignItems:"flex-start", gap:9, textAlign:"left",
+                            padding:"9px 11px", borderRadius:9, cursor:"pointer",
+                            background: active ? `color-mix(in oklab, ${c.color} 12%, transparent)` : "var(--cf-subtle-bg)",
+                            border: `1px solid ${active ? `color-mix(in oklab, ${c.color} 55%, transparent)` : "var(--cf-divider)"}`,
+                          }}>
+                          <span style={{ flexShrink:0, width:24, height:24, borderRadius:6, display:"grid", placeItems:"center",
+                            background:`color-mix(in oklab, ${c.color} 16%, transparent)`, color:c.color }}>
+                            <Icon name={c.icon} size={13}/>
+                          </span>
+                          <span style={{ minWidth:0 }}>
+                            <span style={{ display:"block", fontSize:12, fontWeight:600, color: active ? c.color : "var(--cf-text-primary)" }}>{c.label}</span>
+                            <span style={{ display:"block", fontSize:10.5, color:"var(--cf-text-muted)", lineHeight:1.35, marginTop:2 }}>{c.blurb}</span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              {form.category === "security" && (
+                <div className="field">
+                  <label>Framework</label>
+                  <select className="input focus-ring" value={form.framework||""} onChange={e=>set("framework", e.target.value)}>
+                    <option value="">Choose a framework…</option>
+                    <optgroup label="Standard">
+                      {BUILTIN_FRAMEWORKS.map(f => <option key={f}>{f}</option>)}
+                    </optgroup>
+                    {loadCustomFrameworks().length > 0 && (
+                      <optgroup label="Custom">
+                        {loadCustomFrameworks().map(f => <option key={f.name}>{f.name}</option>)}
+                      </optgroup>
+                    )}
+                  </select>
+                  <div className="help">Determines which grouping field applies below — e.g. NIST 800-53 asks for a control family, CMMC asks for a level.</div>
+                </div>
+              )}
+              {form.category === "security" && form.framework === "NIST 800-53" && (
+                <div className="field">
+                  <label>NIST 800-53 control family <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· drives the "Group by → NIST family" view</span></label>
+                  <select className="input focus-ring" value={form.controlFamily} onChange={e=>set("controlFamily", e.target.value)}>
+                    <option value="">Unassigned (shows as "Ungrouped")</option>
+                    {Object.values(CONTROL_FAMILIES).map(f => <option key={f.id} value={f.id}>{f.id} — {f.label}</option>)}
+                  </select>
+                  <div className="help">At scale, most bulk-imported controls won't have this set — an admin can also route them into a group with a text-match rule from Security controls → Manage groupings, without editing each one.</div>
+                </div>
+              )}
+              {form.category === "security" && form.framework === "CMMC 2.0" && (
+                <div className="field">
+                  <label>CMMC 2.0 level <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· drives the "Group by → CMMC level" view</span></label>
+                  <select className="input focus-ring" value={form.cmmcLevel||""} onChange={e=>set("cmmcLevel", e.target.value ? parseInt(e.target.value,10) : "")}>
+                    <option value="">Derive from severity (default)</option>
+                    <option value={1}>Level 1 — Foundational</option>
+                    <option value={2}>Level 2 — Advanced</option>
+                    <option value={3}>Level 3 — Expert</option>
+                  </select>
+                  <div className="help">Left unset, the level is inferred from STIG severity. Set it explicitly if this control maps to a different CMMC practice than its severity implies.</div>
+                </div>
+              )}
+              {form.category === "security" && form.framework === "CIS Benchmark" && (
+                <div className="field">
+                  <label>CIS section <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· drives the "Group by → CIS Benchmark section" view</span></label>
+                  <input className="input focus-ring mono" value={form.cisSection||""} onChange={e=>set("cisSection", e.target.value)} placeholder="e.g. 5.2.3"/>
+                  <div className="help">CIS Benchmark section number this control maps to. SRG/CCI don't apply to CIS — those are DISA-specific identifiers.</div>
+                </div>
+              )}
+              {form.category === "security" && form.framework === "DISA STIG" && (
+              <>
+              <div className="field">
+                <label>SRG IDs</label>
+                <IdChipPicker value={form.srgIds} onChange={v=>set("srgIds",v)}
+                  allKnownIds={knownSrgIds}
+                  placeholder="Type to search or add an SRG id…"/>
+                <div className="help">Security Requirements Guide IDs this control satisfies — searchable from the policy list.</div>
+              </div>
+              <div className="field">
+                <label>CCI IDs</label>
+                <IdChipPicker value={form.cciIds} onChange={v=>set("cciIds",v)}
+                  allKnownIds={knownCciIds}
+                  placeholder="Type to search or add a CCI id…"/>
+                <div className="help">CCI mappings, if applicable.</div>
+              </div>
+              </>
+              )}
               <div className="field">
                 <label>Severity</label>
                 <div className="seg seg-sev" style={{ width:"fit-content" }}>
@@ -756,9 +1354,13 @@ function PolicyFormModal({ mode, policy, onClose }) {
                 <textarea className="input focus-ring" rows={2} value={form.rationale} onChange={e=>set("rationale",e.target.value)}
                   placeholder="Why this policy exists — shown in detail view" style={{ resize:"vertical" }}/>
               </div>
+              </>
+              )}
 
+              {tab === "rule" && (
+              <>
               {/* Rules */}
-              <div style={{ marginTop:6 }}>
+              <div>
                 <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:8 }}>
                   <label style={{ fontSize:12, fontWeight:600 }}>Assertions &amp; gate rules ({form.rules.length})</label>
                   <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>All must hold — each compiles to a nix-eval-job check.</span>
@@ -796,9 +1398,13 @@ function PolicyFormModal({ mode, policy, onClose }) {
                   </select>
                 </div>
               </div>
+              </>
+              )}
 
+              {tab === "evidence" && (
+              <>
               {/* Evidence */}
-              <div style={{ marginTop:6 }}>
+              <div>
                 <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:8 }}>
                   <label style={{ fontSize:12, fontWeight:600 }}>Evidence for ATO ({form.evidence.length})</label>
                   <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>Artifacts collected to prove compliance to an assessor.</span>
@@ -833,6 +1439,11 @@ function PolicyFormModal({ mode, policy, onClose }) {
                   </select>
                 </div>
               </div>
+              </>
+              )}
+
+                </div>
+              </div>
 
               {isEdit && (
                 <div style={{ marginTop:10, paddingTop:14, borderTop:"1px solid var(--cf-divider)" }}>
@@ -845,7 +1456,7 @@ function PolicyFormModal({ mode, policy, onClose }) {
             </div>
             <div className="modal-foot">
               <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
-              <button className="btn btn-primary focus-ring" onClick={onClose} disabled={!form.name}>
+              <button className="btn btn-primary focus-ring" onClick={()=>{ doSave(); onClose(); }} disabled={!form.name}>
                 <Icon name="check" size={13}/> {isEdit ? "Save changes" : "Create policy"}
               </button>
             </div>
@@ -1018,8 +1629,8 @@ function RuleEditor({ rule, onChange }) {
             <Icon name="terminal" size={11} style={{ color:"var(--cf-brand-purple)", verticalAlign:"text-bottom" }}/>
             Custom nix expression (must evaluate to <span className="mono">true</span>)
           </span>
-          <textarea className="input focus-ring mono" rows={2} value={rule.expr} onChange={e=>onChange({ expr:e.target.value })}
-            placeholder="config.networking.firewall.enable == true" style={{ fontSize:11, padding:"6px 8px", resize:"vertical" }}/>
+          <textarea className="input focus-ring mono code-editor" rows={3} value={rule.expr} onChange={e=>onChange({ expr:e.target.value })}
+            placeholder="config.networking.firewall.enable == true" style={{ fontSize:12, resize:"vertical" }}/>
           <input className="input focus-ring" value={rule.message} onChange={e=>onChange({ message:e.target.value })}
             placeholder="Failure message shown when assertion fails" style={{ fontSize:11, padding:"5px 8px" }}/>
         </div>
@@ -1068,4 +1679,4 @@ function DeletePolicyConfirm({ policy, onCancel, onConfirm }) {
   );
 }
 
-Object.assign(window, { PoliciesView, RuleEditor, policyToExternal, externalToPolicy, slugify, downloadFile, exportPolicies, parsePolicyFile, ruleDescription, ImportPoliciesModal });
+Object.assign(window, { PoliciesView, RuleEditor, policyToExternal, externalToPolicy, slugify, downloadFile, exportPolicies, parsePolicyFile, ruleDescription, ImportPoliciesModal, RevisionPickerModal, AdminGroupingsModal });

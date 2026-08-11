@@ -1,6 +1,10 @@
 pub mod jobs;
 
 use crate::builder::run_cve_scan_loop;
+use crate::compliance::canonical::semantic_digest;
+use crate::compliance::resolver::{
+    AssignmentMode, ResolutionOutcome, resolve_systems_effective_policies_for_evaluation_batch,
+};
 use crate::config::{CrystalForgeConfig, FlakeConfig};
 use crate::deployment::spawn_deployment_policy_manager;
 use crate::flake::commits::sync_all_watched_flakes_commits_with_ids;
@@ -40,8 +44,8 @@ use crate::queries::commits::{
     reset_stuck_commit_evaluations,
 };
 use crate::queries::deployment_policies::{
-    list_enabled_deployment_policies, list_enabled_policies_for_flake,
-    list_policy_rows_by_configuration_for_flake, list_registered_configuration_names_for_flake,
+    get_deployment_policies_by_versions, list_enabled_deployment_policies,
+    list_enabled_policies_for_flake, list_policy_rows_by_configuration_for_flake,
 };
 use crate::queries::derivations::{
     cleanup_partial_derivations, reset_stuck_builds, set_closure_counts,
@@ -357,15 +361,35 @@ fn parse_deployment_policy_record(
         }
         "require_packages" => {
             let strict = cfg.get("strict").and_then(|v| v.as_bool()).unwrap_or(true);
-            let packages = cfg
-                .get("packages")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let Some(raw_packages) = cfg.get("packages").and_then(|value| value.as_array()) else {
+                warn!(
+                    "Skipping require_packages policy '{}' ({}): config.packages must be a non-empty string array",
+                    record.name, record.id
+                );
+                return None;
+            };
+            let mut packages = Vec::with_capacity(raw_packages.len());
+            for (index, value) in raw_packages.iter().enumerate() {
+                let Some(package) = value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                else {
+                    warn!(
+                        "Skipping require_packages policy '{}' ({}): config.packages[{}] must be a non-empty string",
+                        record.name, record.id, index
+                    );
+                    return None;
+                };
+                packages.push(package.to_string());
+            }
+            if packages.is_empty() {
+                warn!(
+                    "Skipping require_packages policy '{}' ({}): config.packages cannot be empty",
+                    record.name, record.id
+                );
+                return None;
+            }
             Some(DeploymentPolicy::RequirePackages { packages, strict })
         }
         "custom_check" => {
@@ -635,6 +659,172 @@ async fn load_deployment_policies_for_eval(pool: &PgPool, flake_id: i32) -> Vec<
 /// Systems with zero assigned policies produce *no entry* in the returned map.
 /// Use `policies_for_config(map, name)` to safely get an empty slice for those.
 async fn load_policies_by_configuration_for_eval(
+    pool: &PgPool,
+    flake_id: i32,
+) -> anyhow::Result<PoliciesByConfiguration> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let system_rows = sqlx::query_as::<_, (uuid::Uuid, String)>(
+        r#"
+        SELECT s.id, COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
+        FROM systems s
+        WHERE s.flake_id = $1 AND s.is_active = TRUE
+        ORDER BY 2, 1
+        "#,
+    )
+    .bind(flake_id)
+    .fetch_all(pool)
+    .await
+    .context("Failed to load systems for effective policy evaluation")?;
+
+    let mut resolved_systems = Vec::with_capacity(system_rows.len());
+    let mut policy_version_ids = BTreeSet::new();
+    let mut invalid_configurations = BTreeSet::new();
+
+    // Batch-resolve all systems in one transaction (~10 queries total),
+    // replacing the previous per-system N+1 loop of full resolver invocations.
+    let system_id_vec: Vec<uuid::Uuid> = system_rows.iter().map(|(id, _)| *id).collect();
+    let batch_outcomes =
+        resolve_systems_effective_policies_for_evaluation_batch(pool, &system_id_vec)
+            .await
+            .context("Batch policy resolution for evaluation failed")?;
+
+    for (system_id, config_name) in system_rows {
+        if invalid_configurations.contains(&config_name) {
+            continue;
+        }
+
+        let outcome = match batch_outcomes.get(&system_id) {
+            Some(o) => match o {
+                ResolutionOutcome::Resolved(set) => set.policies.clone(),
+                ResolutionOutcome::Conflict(conflicts) => {
+                    warn!(
+                        %system_id,
+                        %config_name,
+                        conflicts = ?conflicts,
+                        "Compliance policy conflict; evaluating configuration without compliance gates"
+                    );
+                    invalid_configurations.insert(config_name.clone());
+                    resolved_systems
+                        .retain(|(_, existing_config, _)| existing_config != &config_name);
+                    continue;
+                }
+            },
+            None => {
+                // System not in batch result — no active assignments (empty policy set).
+                vec![]
+            }
+        };
+
+        let enforced = outcome
+            .into_iter()
+            .filter(|policy| matches!(policy.effective_mode, AssignmentMode::Enforce))
+            .collect::<Vec<_>>();
+        policy_version_ids.extend(enforced.iter().map(|policy| policy.policy_version_id));
+        resolved_systems.push((system_id, config_name, enforced));
+    }
+
+    let policy_version_ids = policy_version_ids.into_iter().collect::<Vec<_>>();
+    let policies_by_version =
+        get_deployment_policies_by_versions(pool, &policy_version_ids).await?;
+
+    let mut map: PoliciesByConfiguration = BTreeMap::new();
+    // A configuration can be evaluated once only when the Nix-evaluation
+    // policy set is identical. The resolver's complete effective-set digest
+    // intentionally includes report-only and operational policies, which do
+    // not affect nix-eval-jobs and therefore must not block this map.
+    let mut evaluation_digest_by_config: BTreeMap<String, String> = BTreeMap::new();
+    for (_system_id, config_name, effective) in resolved_systems {
+        let mut assigned = Vec::new();
+        for effective_policy in effective {
+            let Some(record) = policies_by_version.get(&effective_policy.policy_version_id) else {
+                anyhow::bail!(
+                    "Effective policy version {} was not found",
+                    effective_policy.policy_version_id
+                );
+            };
+            let mut record = record.clone();
+
+            if !record.enabled {
+                continue;
+            }
+
+            if !effective_policy.effective_config.is_null() {
+                record.config = effective_policy.effective_config;
+            }
+
+            if let Some(policy) = parse_deployment_policy_record(&record) {
+                if policy.is_nix_evaluated()
+                    && !matches!(policy, DeploymentPolicy::RequireCrystalForgeAgent { .. })
+                {
+                    assigned.push(AssignedPolicy {
+                        policy_id: effective_policy.policy_version_id,
+                        policy_name: record.name,
+                        policy,
+                    });
+                }
+            }
+        }
+
+        // Sort the actual evaluator input by portable version identity so the
+        // generated per-policy fields and its digest are canonical. Keep an
+        // empty set in the comparison map: a shared configuration with one
+        // system having no Nix gates and another having Nix gates is a real
+        // semantic conflict, not permission to apply the latter's gates to
+        // both systems.
+        assigned.sort_by_key(|policy| policy.policy_id);
+        let evaluation_digest = evaluation_policy_digest(&assigned);
+
+        if let Some(existing_digest) = evaluation_digest_by_config.get(&config_name) {
+            if existing_digest != &evaluation_digest {
+                anyhow::bail!(
+                    "Configuration {:?} resolves to different Nix evaluation policy semantics across systems ({} vs {})",
+                    config_name,
+                    existing_digest,
+                    evaluation_digest
+                );
+            }
+        } else {
+            evaluation_digest_by_config.insert(config_name.clone(), evaluation_digest);
+            if !assigned.is_empty() {
+                map.insert(config_name, assigned);
+            }
+        }
+    }
+
+    info!(
+        flake_id,
+        unique_policies = map
+            .values()
+            .flat_map(|policies| policies.iter())
+            .map(|policy| policy.policy_id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        registered_configurations_with_policies = map.len(),
+        "effective_policies_by_configuration_loaded"
+    );
+
+    return Ok(map);
+}
+
+/// Hash only the policies that can affect the Nix evaluation for one
+/// configuration. This is deliberately distinct from the resolver's complete
+/// effective-set digest, which is used by compliance and deployment consumers.
+fn evaluation_policy_digest(assigned: &[AssignedPolicy]) -> String {
+    let policies = assigned
+        .iter()
+        .map(|policy| {
+            serde_json::json!({
+                "policy_version_id": policy.policy_id,
+                "policy": policy.policy,
+            })
+        })
+        .collect::<Vec<_>>();
+    semantic_digest(&serde_json::Value::Array(policies))
+}
+
+#[allow(dead_code)]
+async fn load_policies_by_configuration_for_eval_legacy(
     pool: &PgPool,
     flake_id: i32,
 ) -> anyhow::Result<PoliciesByConfiguration> {
@@ -1084,7 +1274,10 @@ pub async fn run_commit_evaluation_loop(
     // between derivation persistence and build-job activation.
     match recover_orphaned_derivation_build_jobs(&pool).await {
         Ok(count) if count > 0 => {
-            info!("🔄 Startup: queued {} orphaned build-eligible derivations", count);
+            info!(
+                "🔄 Startup: queued {} orphaned build-eligible derivations",
+                count
+            );
             queue_notifier.notify_build_queue();
         }
         Ok(_) => {}
@@ -1212,7 +1405,10 @@ async fn run_builder_recovery_loop(
         // created without requiring manual intervention or a service restart.
         match recover_orphaned_derivation_build_jobs(&pool).await {
             Ok(count) if count > 0 => {
-                info!("🔄 Periodic recovery: queued {} orphaned build-eligible derivations", count);
+                info!(
+                    "🔄 Periodic recovery: queued {} orphaned build-eligible derivations",
+                    count
+                );
                 queue_notifier.notify_build_queue();
             }
             Ok(_) => {}
@@ -1323,21 +1519,20 @@ async fn process_pending_commits(
             match load_policies_by_configuration_for_eval(pool, flake.id).await {
                 Ok(m) => std::sync::Arc::new(m),
                 Err(e) => {
-                    // Conflict or query failure — fail the attempt so the operator can resolve it.
+                    // Compliance policy resolution is advisory for flake
+                    // evaluation. A bad assignment, missing policy version,
+                    // or database problem must not prevent nix-eval-jobs from
+                    // running. The affected configurations simply receive no
+                    // compliance gates in this evaluation.
                     let e = e.context(format!(
                         "Failed to load per-configuration policies for flake {} (commit {})",
                         flake.id, commit.git_commit_hash,
                     ));
-                    error!("{:#}", e);
-                    let _ = mark_commit_evaluation_failed(
-                        pool,
-                        commit.id,
-                        &e.to_string(),
-                        attempt,
-                        crate::models::retry_policy::RetryFailureClass::Deterministic,
-                    )
-                    .await;
-                    return Ok(());
+                    warn!(
+                        "{:#}; continuing flake evaluation without compliance gates",
+                        e
+                    );
+                    std::sync::Arc::new(PoliciesByConfiguration::new())
                 }
             };
 
@@ -1627,10 +1822,13 @@ fn select_next_pending_commit_id_for_cycle(
 #[cfg(test)]
 mod tests {
     use super::{
-        builder_stale_timeout_secs, evaluation_due_delay, normalize_custom_policy_expression,
-        parse_deployment_policy_record, select_next_pending_commit_id_for_cycle,
+        builder_stale_timeout_secs, evaluation_due_delay, evaluation_policy_digest,
+        normalize_custom_policy_expression, parse_deployment_policy_record,
+        select_next_pending_commit_id_for_cycle,
     };
-    use crate::models::deployment_policies::{DeploymentPolicy, DeploymentPolicyRecord};
+    use crate::models::deployment_policies::{
+        AssignedPolicy, DeploymentPolicy, DeploymentPolicyRecord, PolicyRule, RuleMode,
+    };
     use chrono::Utc;
     use serde_json::json;
     use uuid::Uuid;
@@ -1697,6 +1895,38 @@ mod tests {
     }
 
     #[test]
+    fn parse_require_packages_rejects_an_empty_package_list() {
+        let record = DeploymentPolicyRecord {
+            id: Uuid::new_v4(),
+            name: "packages".to_string(),
+            description: Some("required packages".to_string()),
+            policy_type: "require_packages".to_string(),
+            config: json!({"packages": [], "strict": true}),
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        assert!(parse_deployment_policy_record(&record).is_none());
+    }
+
+    #[test]
+    fn parse_require_packages_rejects_malformed_entries() {
+        let record = DeploymentPolicyRecord {
+            id: Uuid::new_v4(),
+            name: "packages".to_string(),
+            description: Some("required packages".to_string()),
+            policy_type: "require_packages".to_string(),
+            config: json!({"packages": ["openssh", "", 42], "strict": true}),
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        assert!(parse_deployment_policy_record(&record).is_none());
+    }
+
+    #[test]
     fn normalize_custom_policy_expression_rewrites_legacy_config_prefix() {
         let (normalized, changed) =
             normalize_custom_policy_expression("config.services.auditd.enable or false");
@@ -1735,6 +1965,54 @@ mod tests {
             }
             _ => panic!("expected CustomCheck variant"),
         }
+    }
+
+    #[test]
+    fn evaluation_policy_digest_is_real_for_an_empty_set() {
+        assert_eq!(evaluation_policy_digest(&[]), evaluation_policy_digest(&[]));
+        assert_ne!(
+            evaluation_policy_digest(&[]),
+            evaluation_policy_digest(&[AssignedPolicy {
+                policy_id: Uuid::from_u128(1),
+                policy_name: "firewall".to_string(),
+                policy: DeploymentPolicy::CustomCheck {
+                    expression: "cfg.config.networking.firewall.enable".to_string(),
+                    description: "firewall enabled".to_string(),
+                    field_name: "firewallEnabled".to_string(),
+                    strict: true,
+                    rules: Vec::new(),
+                    mode: RuleMode::All,
+                },
+            },])
+        );
+    }
+
+    #[test]
+    fn evaluation_policy_digest_changes_when_a_nix_expression_changes() {
+        let make_policy = |expression: &str| AssignedPolicy {
+            policy_id: Uuid::from_u128(1),
+            policy_name: "firewall".to_string(),
+            policy: DeploymentPolicy::CustomCheck {
+                expression: String::new(),
+                description: "firewall".to_string(),
+                field_name: String::new(),
+                strict: true,
+                rules: vec![PolicyRule {
+                    expression: expression.to_string(),
+                    description: "firewall enabled".to_string(),
+                    field_name: "firewallEnabled".to_string(),
+                    strict: true,
+                }],
+                mode: RuleMode::All,
+            },
+        };
+
+        assert_ne!(
+            evaluation_policy_digest(&[make_policy("cfg.config.networking.firewall.enable")]),
+            evaluation_policy_digest(&[make_policy(
+                "cfg.config.networking.firewall.allowedTCPPorts != []"
+            )]),
+        );
     }
 
     #[test]

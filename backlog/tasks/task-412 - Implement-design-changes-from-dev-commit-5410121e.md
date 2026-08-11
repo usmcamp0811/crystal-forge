@@ -1,11 +1,11 @@
 ---
 id: TASK-412
 title: Implement CF-XCCDF bundle and policy interchange and design updates
-status: Review
+status: In Progress
 assignee:
   - gpt-5.6-terra
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-01 03:23'
+updated_date: '2026-08-09 23:37'
 labels:
   - design
   - frontend
@@ -54,7 +54,7 @@ modified_files:
     docs/design/CrystalForge/docs/crystal-forge-xccdf-interchange-profile-v0.1.md
 priority: high
 type: feature
-ordinal: 400000
+ordinal: 405500
 ---
 
 ## Description

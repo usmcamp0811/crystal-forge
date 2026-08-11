@@ -559,7 +559,8 @@ pub struct ScanningStatsResponse {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScanningQueueItemResponse {
-    pub scan_id: Uuid,
+    /// `None` when the system is deployed but has never been scanned.
+    pub scan_id: Option<Uuid>,
     pub hostname: String,
     pub flake_name: Option<String>,
     pub commit_hash: Option<String>,
@@ -575,9 +576,22 @@ pub struct ScanningQueueItemResponse {
     /// True when this is the latest scan row for its derivation.
     #[serde(default)]
     pub is_current: bool,
+    /// True when this derivation's commit is the latest known commit for its flake.
+    #[serde(default)]
+    pub is_latest_per_flake: bool,
     /// Scan trigger source (not yet tracked server-side).
     #[serde(default)]
     pub trigger: Option<String>,
+}
+
+/// Paginated deployed configurations response (P2#6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanningDeployedResponse {
+    pub items: Vec<ScanningQueueItemResponse>,
+    pub total: i64,
+    pub has_more: bool,
+    /// Opaque cursor for the next page. `None` when this is the last page.
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -966,6 +980,8 @@ pub struct EnvironmentSummary {
     pub cache: Option<EnvironmentCacheSummary>,
     #[serde(default)]
     pub compliance_bundle: Option<EnvironmentComplianceSummary>,
+    #[serde(default)]
+    pub compliance_assignments: Vec<AssignmentResponse>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -999,6 +1015,71 @@ pub struct ComplianceBundleSummary {
     pub required_envs: Vec<ComplianceEnvironmentRef>,
     pub control_count: i64,
     pub environment_count: i64,
+    /// Active versioned bundle assignments across environment and system scopes.
+    #[serde(default)]
+    pub active_assignment_count: i64,
+    #[serde(default)]
+    pub current_draft_version_id: Option<Uuid>,
+    #[serde(default)]
+    pub current_published_version_id: Option<Uuid>,
+    #[serde(default)]
+    pub current_draft_version: Option<String>,
+    #[serde(default)]
+    pub current_published_version: Option<String>,
+    #[serde(default)]
+    pub versions: Vec<ComplianceBundleVersionSummary>,
+}
+
+/// A server-backed arrangement of Security-domain policy controls.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceGroupingScheme {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub groups: Vec<ComplianceGroupingSchemeGroup>,
+}
+
+/// One named group in a custom grouping scheme. Policy IDs are lineages.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceGroupingSchemeGroup {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub pinned_policy_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub excluded_policy_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceGroupingSchemeRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub groups: Vec<ComplianceGroupingSchemeGroup>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceBundleVersionSummary {
+    pub id: Uuid,
+    pub bundle_id: Uuid,
+    pub version: String,
+    pub publication_state: String,
+    #[serde(default)]
+    pub trust_state: String,
+    pub semantic_digest: String,
+    pub created_at: DateTime<Utc>,
+    pub published_at: Option<DateTime<Utc>>,
+    pub derived_from_version_id: Option<Uuid>,
+    pub control_count: i64,
+    #[serde(default)]
+    pub is_current_published: bool,
+    #[serde(default)]
+    pub is_current_draft: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1011,6 +1092,8 @@ pub struct ComplianceEnvironmentRef {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ComplianceBundleSystemsResponse {
     pub bundle_id: Uuid,
+    #[serde(default)]
+    pub bundle_version_id: Option<Uuid>,
     pub systems: Vec<ComplianceSystemRollup>,
     pub totals: ComplianceRollupTotals,
 }
@@ -1039,6 +1122,12 @@ pub struct ComplianceRollupTotals {
     pub total_controls: i64,
     #[serde(default)]
     pub evaluated_controls: i64,
+    #[serde(default)]
+    pub not_checked: i64,
+    #[serde(default)]
+    pub not_applicable: i64,
+    #[serde(default)]
+    pub error: i64,
     pub overall_score: i64,
 }
 
@@ -1055,7 +1144,17 @@ pub struct ComplianceSystemRollup {
     pub warn: i64,
     pub fail: i64,
     pub waiver: i64,
+    #[serde(default)]
+    pub not_checked: i64,
+    #[serde(default)]
+    pub not_applicable: i64,
+    #[serde(default)]
+    pub error: i64,
+    #[serde(default)]
+    pub report_only: i64,
     pub score: i64,
+    #[serde(default)]
+    pub resolution_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1065,14 +1164,24 @@ pub enum ComplianceControlStatus {
     Warn,
     Fail,
     Waiver,
+    NotChecked,
+    NotApplicable,
+    Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ComplianceEvidenceResponse {
     pub bundle_id: Uuid,
+    #[serde(default)]
+    pub bundle_version_id: Option<Uuid>,
+    /// Framework from the exact bundle version used to produce this evidence.
+    #[serde(default)]
+    pub framework: Option<String>,
     pub system_id: Uuid,
     pub hostname: String,
     pub controls: Vec<ComplianceControlEvidence>,
+    #[serde(default)]
+    pub resolution_state: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1084,6 +1193,13 @@ pub struct ComplianceControlEvidence {
     pub summary: String,
     pub evidence_items: Vec<ComplianceEvidenceItem>,
     pub framework_mapping: String,
+    /// Grouping metadata from the exact policy version used for this control.
+    #[serde(default)]
+    pub control_family: Option<String>,
+    #[serde(default)]
+    pub cmmc_level: Option<i32>,
+    #[serde(default)]
+    pub cis_section: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1161,11 +1277,34 @@ pub struct UpdateEnvironmentPoliciesRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentPolicySummary {
     pub id: Uuid,
+    #[serde(default)]
+    pub version_id: Option<Uuid>,
     pub name: String,
     pub description: Option<String>,
     pub policy_type: String,
     pub config: serde_json::Value,
     pub enabled: bool,
+    /// Policy category from current version's compliance_metadata
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Framework from current version's compliance_metadata
+    #[serde(default)]
+    pub framework: Option<String>,
+    /// Severity from current version's compliance_metadata
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// NIST 800-53 control family
+    #[serde(default)]
+    pub control_family: Option<String>,
+    /// CMMC 2.0 level
+    #[serde(default)]
+    pub cmmc_level: Option<i32>,
+    /// CIS Benchmark section
+    #[serde(default)]
+    pub cis_section: Option<String>,
+    /// Human-readable rationale
+    #[serde(default)]
+    pub rationale: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1183,6 +1322,77 @@ pub struct DeploymentPolicyRecord {
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Exact draft version shown by the policy-management API, when available.
+    #[serde(default)]
+    pub current_version_id: Option<Uuid>,
+    #[serde(default)]
+    pub versions: Vec<DeploymentPolicyVersionSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentPolicyVersionSummary {
+    pub id: Uuid,
+    pub policy_id: Uuid,
+    pub version: String,
+    pub publication_state: String,
+    #[serde(default)]
+    pub trust_state: String,
+    pub semantic_digest: String,
+    pub created_at: DateTime<Utc>,
+    pub published_at: Option<DateTime<Utc>>,
+    pub derived_from_version_id: Option<Uuid>,
+    #[serde(default)]
+    pub is_current_published: bool,
+    #[serde(default)]
+    pub is_current_draft: bool,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub policy_type: String,
+    #[serde(default)]
+    pub config: serde_json::Value,
+    #[serde(default)]
+    pub enabled: bool,
+    /// SRG IDs for this exact revision (from compliance_metadata).
+    #[serde(default)]
+    pub srg_ids: Vec<String>,
+    /// CCI IDs for this exact revision (from compliance_metadata).
+    #[serde(default)]
+    pub cci_ids: Vec<String>,
+    /// Policy category: "deployment", "pipeline", "rollout", "security"
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Framework string, e.g. "DISA STIG", "NIST 800-53", "CMMC 2.0", "CIS Benchmark", or custom
+    #[serde(default)]
+    pub framework: Option<String>,
+    /// Severity: "high", "medium", "low" — None means unrated
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// NIST 800-53 control family, e.g. "AC", "AU", "CM", "IA", "SC", "SI", "MP"
+    #[serde(default)]
+    pub control_family: Option<String>,
+    /// CMMC 2.0 maturity level: 1, 2, or 3
+    #[serde(default)]
+    pub cmmc_level: Option<i32>,
+    /// CIS Benchmark section, e.g. "5.2.3"
+    #[serde(default)]
+    pub cis_section: Option<String>,
+    /// Human-readable rationale for this control
+    #[serde(default)]
+    pub rationale: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BundleVersionPolicyMembership {
+    pub policy_version_id: Uuid,
+    pub policy_lineage_id: Uuid,
+    pub policy_order: i32,
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
+    pub enabled: bool,
 }
 
 /// Response for listing deployment policies with pagination.
@@ -1197,6 +1407,534 @@ pub struct DeploymentPoliciesListResponse {
     pub system_counts: HashMap<Uuid, i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyInterchangePreviewPolicy {
+    pub lineage_id: Uuid,
+    pub version_id: Uuid,
+    pub version: String,
+    pub name: String,
+    pub policy_type: String,
+    pub implementation_state: String,
+    pub semantic_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyInterchangePreviewResponse {
+    pub source_sha256: String,
+    pub filename: Option<String>,
+    pub policy_count: usize,
+    pub policies: Vec<PolicyInterchangePreviewPolicy>,
+    pub publication_state: String,
+    pub enabled: bool,
+    pub trusted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyInterchangeImportResponse {
+    pub created_policy_count: u32,
+    pub reused_policy_count: u32,
+    pub publication_state: String,
+    pub enabled: bool,
+    pub trusted: bool,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// XCCDF Preview / Import DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single diagnostic (error or warning) from the XCCDF parser.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct XccdfDiagnostic {
+    pub code: String,
+    pub summary: String,
+    pub blocking: bool,
+}
+
+/// Parsed benchmark identity returned by the XCCDF preview endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct XccdfBenchmarkInfo {
+    pub id: String,
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub version: Option<String>,
+    pub status: Option<String>,
+    pub platforms: Vec<String>,
+}
+
+/// Parsed profile returned by the XCCDF preview endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct XccdfProfileInfo {
+    pub id: String,
+    pub title: Option<String>,
+    pub rule_count: usize,
+    #[serde(default)]
+    pub rule_ids: Vec<String>,
+}
+
+/// Parsed rule summary returned by the XCCDF preview endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct XccdfRuleInfo {
+    pub id: String,
+    pub title: Option<String>,
+    /// Cleaned VulnDiscussion text (XML sub-element tags stripped by the server).
+    #[serde(default)]
+    pub description: Option<String>,
+    pub severity: Option<String>,
+    pub is_native: bool,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub group_id: Option<String>,
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    #[serde(default)]
+    pub identifiers: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub checks: Vec<serde_json::Value>,
+    /// Fix/remediation.  Contains `"content"` (full text) and `"preview"` (same
+    /// as content, retained for backward compatibility), plus fix metadata.
+    #[serde(default)]
+    pub fix: Option<serde_json::Value>,
+    #[serde(default)]
+    pub inferred_assertions: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub references: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub has_opaque_xml: bool,
+}
+
+/// Response body from `POST /api/v1/compliance/xccdf/preview`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct XccdfPreviewResponse {
+    pub sha256: String,
+    #[serde(default)]
+    pub filename: Option<String>,
+    #[serde(default)]
+    pub document_class: Option<String>,
+    #[serde(default)]
+    pub fidelity: Option<String>,
+    #[serde(default)]
+    pub fidelity_losses: Vec<String>,
+    #[serde(default)]
+    pub xccdf_version: Option<String>,
+    pub benchmark: Option<XccdfBenchmarkInfo>,
+    #[serde(default)]
+    pub profiles: Vec<XccdfProfileInfo>,
+    #[serde(default)]
+    pub rules: Vec<XccdfRuleInfo>,
+    pub rule_count: usize,
+    pub profile_count: usize,
+    #[serde(default)]
+    pub errors: Vec<XccdfDiagnostic>,
+    #[serde(default)]
+    pub warnings: Vec<XccdfDiagnostic>,
+    /// CF-native reconciliation data (present only for CfNativeExact documents)
+    #[serde(default)]
+    pub cf_native_reconciliation: Option<CfNativeReconciliationPreview>,
+}
+
+/// CF-native reconciliation preview for import
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CfNativeReconciliationPreview {
+    pub bundle: CfNativeBundleReconciliation,
+    #[serde(default)]
+    pub policies: Vec<CfNativePolicyReconciliation>,
+    pub has_blocking_conflicts: bool,
+    #[serde(default)]
+    pub blocking_conflicts: Vec<CfNativeConflict>,
+    pub signature_status: String,
+    pub import_trust_state: String,
+}
+
+/// Bundle reconciliation state
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CfNativeBundleReconciliation {
+    pub lineage_id: String,
+    pub version_id: String,
+    pub name: String,
+    pub version: String,
+    pub semantic_digest: String,
+    pub source_publication_state: String,
+    pub reconciliation_state: String,
+    #[serde(default)]
+    pub local_lineage_id: Option<String>,
+    #[serde(default)]
+    pub local_version_id: Option<String>,
+    #[serde(default)]
+    pub local_semantic_digest: Option<String>,
+    #[serde(default)]
+    pub local_publication_state: Option<String>,
+    #[serde(default)]
+    pub local_trust_state: Option<String>,
+    pub name_collision: bool,
+    #[serde(default)]
+    pub blocking_conflicts: Vec<CfNativeConflict>,
+}
+
+/// Individual policy reconciliation state
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CfNativePolicyReconciliation {
+    pub lineage_id: String,
+    pub version_id: String,
+    pub name: String,
+    pub version: String,
+    pub policy_type: String,
+    pub implementation_state: String,
+    pub semantic_digest: String,
+    pub enabled_by_default: bool,
+    pub reconciliation_state: String,
+    #[serde(default)]
+    pub local_lineage_id: Option<String>,
+    #[serde(default)]
+    pub local_version_id: Option<String>,
+    #[serde(default)]
+    pub local_semantic_digest: Option<String>,
+    #[serde(default)]
+    pub local_publication_state: Option<String>,
+    #[serde(default)]
+    pub local_trust_state: Option<String>,
+    #[serde(default)]
+    pub local_enabled: Option<bool>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    pub has_opaque_content: bool,
+    pub name_collision: bool,
+    #[serde(default)]
+    pub blocking_conflicts: Vec<CfNativeConflict>,
+}
+
+/// Individual conflict during reconciliation
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CfNativeConflict {
+    pub code: String,
+    pub summary: String,
+    pub blocking: bool,
+    #[serde(default)]
+    pub details: serde_json::Value,
+}
+
+/// Single rule action in an XCCDF import plan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum XccdfRuleImportAction {
+    CreateNativeCustom {
+        rule_id: String,
+        customization: ImportedPolicyCustomization,
+        custom_check: ImportedCustomCheck,
+        evidence_requirements: Vec<ImportedEvidenceRequirement>,
+    },
+    CreateManual {
+        rule_id: String,
+        #[serde(default)]
+        customization: ImportedPolicyCustomization,
+        #[serde(default)]
+        evidence_requirements: Vec<ImportedEvidenceRequirement>,
+    },
+    CreateUnbound {
+        rule_id: String,
+        #[serde(default)]
+        customization: ImportedPolicyCustomization,
+    },
+    PreserveOpaque {
+        rule_id: String,
+        #[serde(default)]
+        customization: ImportedPolicyCustomization,
+    },
+    MapExisting {
+        rule_id: String,
+        policy_version_id: Uuid,
+    },
+    Exclude {
+        rule_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ImportedPolicyCustomization {
+    pub policy_name: Option<String>,
+    pub policy_description: Option<String>,
+    pub implementation_note: Option<String>,
+    #[serde(default)]
+    pub policy_severity: Option<String>,
+    #[serde(default)]
+    pub policy_rationale: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportedCustomCheck {
+    #[serde(default)]
+    pub mode: String,
+    pub rules: Vec<ImportedCustomCheckRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportedCustomCheckRule {
+    pub field_name: String,
+    pub expression: String,
+    pub description: String,
+    #[serde(default = "default_true")]
+    pub strict: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImportedEvidenceRequirement {
+    Command {
+        command: String,
+        expected_output: String,
+    },
+    File {
+        path: String,
+        expected_content: String,
+    },
+    UnitState {
+        unit: String,
+        state: String,
+    },
+    Log {
+        source: String,
+        unit: Option<String>,
+        pattern: String,
+    },
+    Attestation {
+        description: String,
+    },
+}
+
+/// Bundle metadata included in the XCCDF import plan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportedBundlePlan {
+    pub name: String,
+    pub framework: String,
+    pub version: String,
+    pub layer: Option<String>,
+    pub owner: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Import plan submitted to `POST /api/v1/compliance/xccdf/import`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct XccdfImportPlan {
+    pub expected_sha256: String,
+    pub selected_profile_id: Option<String>,
+    pub selected_rule_ids: Vec<String>,
+    pub rule_actions: Vec<XccdfRuleImportAction>,
+    pub bundle: ImportedBundlePlan,
+}
+
+/// Response body from `POST /api/v1/compliance/xccdf/import`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct XccdfImportResponse {
+    #[serde(default)]
+    pub bundle_version_id: Option<Uuid>,
+    pub created_policy_count: u32,
+    /// Server field name for reused exact versions
+    /// (`XccdfCommittedImportResult.reused_policy_versions`).
+    #[serde(default)]
+    pub reused_policy_versions: u32,
+    #[serde(default)]
+    pub errors: Vec<String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trust / Publication DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrustPolicyVersionRequest {
+    pub trusted: bool,
+    pub review_note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrustPolicyVersionResponse {
+    pub version_id: Uuid,
+    pub publication_state: String,
+    pub trust_state: String,
+    pub trusted_by: Option<Uuid>,
+    pub trusted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrustBundleVersionRequest {
+    pub trusted: bool,
+    pub review_note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrustBundleVersionResponse {
+    pub version_id: Uuid,
+    pub publication_state: String,
+    pub trust_state: String,
+    pub trusted_by: Option<Uuid>,
+    pub trusted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublishBundleVersionRequest {
+    pub auto_publish_draft_policies: Option<bool>,
+    pub expected_semantic_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublishBundleVersionResponse {
+    pub version_id: Uuid,
+    pub publication_state: String,
+    pub published_at: DateTime<Utc>,
+    pub semantic_digest: String,
+    pub published_policy_count: i32,
+    pub auto_published_policy_count: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateBundleDraftRequest {
+    pub new_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateBundleDraftResponse {
+    pub version_id: Uuid,
+    pub version: String,
+    pub publication_state: String,
+    pub derived_from_version_id: Uuid,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Assignment DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyValueOverride {
+    pub policy_version_id: Uuid,
+    pub value_path: String,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateAssignmentRequest {
+    pub bundle_version_id: Uuid,
+    /// "environment" or "system"
+    pub scope_type: String,
+    pub scope_id: Uuid,
+    pub enforcement_mode: Option<String>,
+    pub exclusions: Option<Vec<Uuid>>,
+    pub additions: Option<Vec<Uuid>>,
+    pub value_overrides: Option<Vec<PolicyValueOverride>>,
+}
+
+/// Request to replace an assignment's mutable overlay and enforcement mode.
+///
+/// The server creates a new immutable assignment version and compares
+/// `expected_version_id` with the current version before doing so. Bundle
+/// version rebinding is deliberately not part of this request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateAssignmentRequest {
+    pub expected_version_id: Uuid,
+    pub enforcement_mode: Option<String>,
+    pub exclusions: Option<Vec<Uuid>>,
+    pub additions: Option<Vec<Uuid>>,
+    pub value_overrides: Option<Vec<PolicyValueOverride>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssignmentResponse {
+    pub id: Uuid,
+    pub current_version_id: Uuid,
+    pub bundle_id: Uuid,
+    pub bundle_version_id: Uuid,
+    pub scope_type: String,
+    pub scope_id: Uuid,
+    pub enforcement_mode: String,
+    #[serde(default)]
+    pub exclusions: Vec<Uuid>,
+    #[serde(default)]
+    pub additions: Vec<Uuid>,
+    #[serde(default)]
+    pub value_overrides: Vec<PolicyValueOverride>,
+    pub assignment_overlay_digest: String,
+    #[serde(default = "default_assignment_active")]
+    pub active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+fn default_assignment_active() -> bool {
+    true
+}
+
+/// Server returns `{ "assignments": [...] }` — use this to deserialize then
+/// extract the inner Vec.
+/// A retained record that prevents permanent deletion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeletionBlocker {
+    /// Machine-readable blocker kind, e.g. "immutable_history", "draft_bundle_membership".
+    pub code: String,
+    /// Human-readable explanation.
+    pub message: String,
+    /// Number of references, when applicable.
+    #[serde(default)]
+    pub count: Option<i64>,
+    /// Specific immutable version UUIDs that are blocking.
+    #[serde(default)]
+    pub version_ids: Vec<Uuid>,
+    /// Classification supplied by the server. A false value means normal
+    /// lifecycle actions cannot remove the blocker.
+    #[serde(default)]
+    pub removable: bool,
+}
+
+/// Whether a policy or bundle lineage can be permanently deleted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeletionEligibility {
+    pub eligible: bool,
+    #[serde(default)]
+    pub blockers: Vec<DeletionBlocker>,
+}
+
+impl DeletionEligibility {
+    pub fn permanently_blocked(&self) -> bool {
+        self.blockers.iter().any(|blocker| !blocker.removable)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssignmentListResponse {
+    pub assignments: Vec<AssignmentResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectivePolicyDto {
+    pub policy_version_id: Uuid,
+    pub policy_lineage_id: Uuid,
+    pub policy_type: String,
+    pub source: String,
+    pub baseline_order: Option<i32>,
+    pub addition_order: Option<i32>,
+    #[serde(default)]
+    pub overrides: Vec<PolicyValueOverride>,
+    pub effective_config: serde_json::Value,
+    pub enforcement_mode: String,
+    #[serde(default)]
+    pub provenance: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectivePolicySetResponse {
+    pub bundle_version_id: Uuid,
+    pub assignment_id: Option<Uuid>,
+    pub scope_type: String,
+    pub scope_id: Uuid,
+    pub policies: Vec<EffectivePolicyDto>,
+    pub effective_set_digest: String,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 /// Request to create a new deployment policy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateDeploymentPolicyRequest {
@@ -1206,6 +1944,26 @@ pub struct CreateDeploymentPolicyRequest {
     pub config: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// SRG IDs this policy satisfies. Normalised server-side.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub srg_ids: Vec<String>,
+    /// CCI mappings. Normalised server-side.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cci_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub framework: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cmmc_level: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cis_section: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
 }
 
 /// Request to update an existing deployment policy.
@@ -1221,6 +1979,28 @@ pub struct UpdateDeploymentPolicyRequest {
     pub config: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// When `Some`, replace the curated SRG mapping; `Some([])` clears it.
+    /// `None` (omitted) preserves the existing value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub srg_ids: Option<Vec<String>>,
+    /// When `Some`, replace the curated CCI mapping; `Some([])` clears it.
+    /// `None` (omitted) preserves the existing value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cci_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub framework: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cmmc_level: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cis_section: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
