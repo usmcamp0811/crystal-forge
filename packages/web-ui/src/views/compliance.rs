@@ -2009,18 +2009,28 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                 let bm_ver = resp.benchmark.as_ref()
                                                                     .and_then(|b| b.version.clone())
                                                                     .unwrap_or_default();
-                                                                let parsed_rules = rules_from_preview(&resp);
-                                                                bundle_name.set(bm_title.clone());
-                                                                bench_title.set(bm_title);
-                                                                bench_ver.set(bm_ver);
-                                                                file_name.set(fname.clone());
+                                                                 // Branch on document class
+                                                                 let is_cf_native = resp.document_class.as_deref().unwrap_or("") == "cfnativeexact";
+                                                                 
+                                                                 bundle_name.set(bm_title.clone());
+                                                                 bench_title.set(bm_title);
+                                                                 bench_ver.set(bm_ver);
+                                                                 file_name.set(fname.clone());
                                                                  file_bytes.set(bytes_vec);
-                                                                 rules.set(parsed_rules);
-                                                                 refined_rules.set(refined_rules_from_rules(&rules.read()));
-                                                                preview_response.set(Some(resp));
-                                                                selected_envs.set(all_env_names.clone());
-                                                                previewing.set(false);
-                                                                step.set("review".to_string());
+                                                                 preview_response.set(Some(resp));
+                                                                 previewing.set(false);
+                                                                 
+                                                                 if is_cf_native {
+                                                                     // Native workflow: skip rule refinement
+                                                                     step.set("native-review".to_string());
+                                                                 } else {
+                                                                     // Foreign XCCDF workflow: do rule processing
+                                                                     let parsed_rules = rules_from_preview(&preview_response.read().as_ref().unwrap());
+                                                                     rules.set(parsed_rules);
+                                                                     refined_rules.set(refined_rules_from_rules(&rules.read()));
+                                                                     selected_envs.set(all_env_names.clone());
+                                                                     step.set("review".to_string());
+                                                                 }
                                                             }
                                                             Err(err) => {
                                                                 previewing.set(false);
@@ -2059,6 +2069,97 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                             class: "btn btn-ghost focus-ring",
                             onclick: move |_| props.on_close.call(()),
                             "Cancel"
+                        }
+                    }
+                }
+
+                // ══════════════════════════════════════════════════════
+                // STEP: native-review (CF-native only)
+                // ══════════════════════════════════════════════════════
+                if *step.read() == "native-review" {
+                    if let Some(prev) = preview_response.read().as_ref() {
+                        if let Some(recon) = prev.cf_native_reconciliation.as_ref() {
+                            div { class: "modal-head",
+                                h2 { style: "display:flex;align-items:center;gap:8px;",
+                                    Icon { name: IconName::Shield, size: 14 }
+                                    "Import Crystal Forge bundle"
+                                }
+                                p {
+                                    span { class: "mono", "{file_name.read()}" }
+                                    " · SHA: "
+                                    span { class: "mono", "{prev.sha256[..16].to_string()}…" }
+                                }
+                            }
+                            div { class: "modal-body",
+                                div { class: "card", style: "padding:12px;border-left:3px solid var(--cf-info-color);",
+                                    "Source: {prev.xccdf_version.as_deref().unwrap_or(\"XCCDF\")} · Fidelity: {human_fidelity(prev.fidelity.as_deref())}"
+                                }
+                                div { style: "margin-top:12px;font-weight:600;", "Bundle: " span { "{recon.bundle.name} v{recon.bundle.version}" } }
+                                div { style: "margin-top:8px;font-size:12px;", 
+                                    "Exact: {recon.policies.iter().filter(|p| p.reconciliation_state == \"exact_match\").count()} · "
+                                    "New version: {recon.policies.iter().filter(|p| p.reconciliation_state == \"new_version\").count()} · "
+                                    "New policy: {recon.policies.iter().filter(|p| p.reconciliation_state == \"new_lineage\").count()}"
+                                }
+                                if recon.has_blocking_conflicts {
+                                    div { class: "sd-callout sd-callout-danger", style: "margin-top:12px;",
+                                        Icon { name: IconName::Warn, size: 13 }
+                                        "Blocking conflicts must be resolved before import"
+                                    }
+                                }
+                            }
+                            div { class: "modal-foot",
+                                button {
+                                    class: "btn btn-ghost focus-ring",
+                                    onclick: move |_| step.set("upload".to_string()),
+                                    "Cancel"
+                                }
+                                button {
+                                    class: "btn btn-primary focus-ring",
+                                    disabled: recon.has_blocking_conflicts,
+                                    onclick: move |_| {
+                                        let mut step = step;
+                                        let mut committing = committing;
+                                        let mut file_bytes = file_bytes;
+                                        let mut preview_response = preview_response;
+                                        let mut import_error = import_error;
+                                        let mut import_result = import_result;
+                                        step.set("committing".to_string());
+                                        committing.set(true);
+                                        spawn(async move {
+                                            if let Some(preview) = preview_response.read().clone() {
+                                                let plan = XccdfImportPlan {
+                                                    expected_sha256: preview.sha256,
+                                                    selected_profile_id: None,
+                                                    selected_rule_ids: vec![],
+                                                    rule_actions: vec![],
+                                                    bundle: ImportedBundlePlan {
+                                                        name: String::new(),
+                                                        framework: "unknown".into(),
+                                                        version: "1.0.0".into(),
+                                                        layer: None,
+                                                        owner: None,
+                                                        description: None,
+                                                    },
+                                                };
+                                                match import_xccdf(&file_bytes.read(), "import.xccdf", &plan).await {
+                                                    Ok(result) => {
+                                                        committing.set(false);
+                                                        import_result.set(Some(result));
+                                                        step.set("done".to_string());
+                                                        props.on_success.call(());
+                                                    }
+                                                    Err(err) => {
+                                                        committing.set(false);
+                                                        import_error.set(Some(format!("Import failed: {err:?}")));
+                                                        step.set("native-review".to_string());
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    },
+                                    "Import as draft"
+                                }
+                            }
                         }
                     }
                 }
