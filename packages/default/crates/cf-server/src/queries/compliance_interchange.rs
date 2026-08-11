@@ -348,6 +348,7 @@ pub async fn commit_foreign_import(
 
     let mut created_policy_version_ids: Vec<Uuid> = Vec::new();
     let mut effective_mapped_policy_versions = std::collections::HashMap::new();
+    let mut inherited_mappings = std::collections::HashMap::new();
 
     for rec in &policy_records {
         if let Some(mapped_version_id) = rec.mapped_policy_version_id {
@@ -377,32 +378,34 @@ pub async fn commit_foreign_import(
                         )
                     },
                 )?;
-                let eligible = if requirement.unchanged_from_previous_release {
-                    let previous_requirement_version_id =
-                        requirement.previous_requirement_version_id.ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "IMPORT_REUSE_INELIGIBLE: missing prior requirement version"
-                            )
-                        })?;
-                    sqlx::query_scalar::<_, bool>(
-                        "SELECT EXISTS(SELECT 1 FROM policy_requirement_mappings \
+                let inherited_mapping: Option<(String, String, Option<String>)> =
+                    if requirement.unchanged_from_previous_release {
+                        let previous_requirement_version_id =
+                            requirement.previous_requirement_version_id.ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "IMPORT_REUSE_INELIGIBLE: missing prior requirement version"
+                                )
+                            })?;
+                        sqlx::query_as(
+                        "SELECT relationship, coverage, rationale FROM policy_requirement_mappings \
                          WHERE policy_version_id = $1 AND requirement_version_id = $2 \
-                           AND trust_state = 'trusted')",
+                           AND trust_state = 'trusted'",
                     )
                     .bind(mapped_version_id)
                     .bind(previous_requirement_version_id)
-                    .fetch_one(&mut *tx)
+                    .fetch_optional(&mut *tx)
                     .await
                     .context("failed to validate selected policy reuse")?
-                } else {
-                    false
-                };
-                if !eligible {
+                    } else {
+                        None
+                    };
+                let Some(inherited_mapping) = inherited_mapping else {
                     anyhow::bail!(
                         "IMPORT_REUSE_INELIGIBLE: policy version {} is not a trusted mapping for an unchanged prior requirement",
                         mapped_version_id
                     );
-                }
+                };
+                inherited_mappings.insert(rec.source_rule_id.clone(), inherited_mapping);
             }
             let effective_policy_version_id = if matches!(
                 publication_state.as_str(),
@@ -496,24 +499,29 @@ pub async fn commit_foreign_import(
     }
 
     // ── 4. Ordered membership ─────────────────────────────────────────────────
-    for (policy_order, rec) in policy_records.iter().enumerate() {
+    let mut bundled_policy_versions = std::collections::HashSet::new();
+    let mut policy_order = 0_i32;
+    for rec in &policy_records {
         let policy_version_id = rec
             .mapped_policy_version_id
             .and_then(|id| effective_mapped_policy_versions.get(&id).copied())
             .unwrap_or(rec.policy_version_id);
-        sqlx::query(
-            r#"
+        if bundled_policy_versions.insert(policy_version_id) {
+            sqlx::query(
+                r#"
             INSERT INTO compliance_bundle_version_policies
                 (bundle_version_id, policy_version_id, policy_order, selected)
             VALUES ($1, $2, $3, true)
             "#,
-        )
-        .bind(bundle_version_id)
-        .bind(policy_version_id)
-        .bind(policy_order as i32)
-        .execute(&mut *tx)
-        .await
-        .context("failed to insert bundle membership row")?;
+            )
+            .bind(bundle_version_id)
+            .bind(policy_version_id)
+            .bind(policy_order)
+            .execute(&mut *tx)
+            .await
+            .context("failed to insert bundle membership row")?;
+            policy_order += 1;
+        }
 
         if let Some(requirement_versions) = &normalized_requirements {
             let requirement = requirement_versions
@@ -524,18 +532,31 @@ pub async fn commit_foreign_import(
                         rec.source_rule_id
                     )
                 })?;
+            let (relationship, coverage, rationale, provenance) =
+                if rec.mapped_policy_version_id.is_some() {
+                    let (relationship, coverage, rationale) =
+                        inherited_mappings.get(&rec.source_rule_id).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "IMPORT_REUSE_INELIGIBLE: missing inherited mapping details"
+                            )
+                        })?;
+                    (
+                        relationship.as_str(),
+                        coverage.as_str(),
+                        rationale.as_deref(),
+                        "inherited",
+                    )
+                } else {
+                    ("implements", "full", None, "imported")
+                };
             insert_policy_mapping_in_tx(
                 &mut tx,
                 policy_version_id,
                 requirement.requirement_version_id,
-                "implements",
-                "full",
-                None,
-                if rec.mapped_policy_version_id.is_some() {
-                    "inherited"
-                } else {
-                    "imported"
-                },
+                relationship,
+                coverage,
+                rationale,
+                provenance,
                 Some(source_artifact_id),
                 importing_user_id,
             )
@@ -644,12 +665,19 @@ pub async fn commit_foreign_import(
             .context("failed to read bundle semantic digest")?;
 
     // ── 7. Audit event ────────────────────────────────────────────────────────
+    let created_policy_count = created_policy_version_ids.len() as u32;
+    let reused_policy_versions = effective_mapped_policy_versions
+        .values()
+        .copied()
+        .collect::<std::collections::HashSet<_>>()
+        .len() as u32;
     let metadata = serde_json::json!({
         "source_artifact_id": source_artifact_id,
         "original_sha256": source_sha256,
         "bundle_id": bundle_id,
         "bundle_version_id": bundle_version_id,
-        "created_policy_count": policy_records.len(),
+        "created_policy_count": created_policy_count,
+        "reused_policy_versions": reused_policy_versions,
         "excluded_rule_count": excluded_rule_count,
         "document_class": document_class,
         "fidelity": fidelity,
@@ -679,10 +707,10 @@ pub async fn commit_foreign_import(
         source_artifact_id,
         bundle_id,
         bundle_version_id,
-        created_policy_count: policy_records.len() as u32,
-        created_policy_lineages: policy_records.len() as u32,
-        created_policy_versions: policy_records.len() as u32,
-        reused_policy_versions: 0,
+        created_policy_count,
+        created_policy_lineages: created_policy_count,
+        created_policy_versions: created_policy_count,
+        reused_policy_versions,
         bundle_lineage_created: true,
         bundle_version_created: true,
         excluded_rule_count,
