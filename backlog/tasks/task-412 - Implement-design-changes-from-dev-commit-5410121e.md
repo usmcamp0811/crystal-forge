@@ -1,7 +1,7 @@
 ---
 id: TASK-412
 title: Implement CF-XCCDF bundle and policy interchange and design updates
-status: In Progress
+status: Done
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
