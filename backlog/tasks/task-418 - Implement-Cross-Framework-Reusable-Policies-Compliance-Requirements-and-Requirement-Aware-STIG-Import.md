@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-11 19:20'
+updated_date: '2026-08-11 19:32'
 labels: []
 milestone: m-22
 dependencies:
@@ -408,4 +408,6 @@ DATABASE_URL=... cargo test -p cf-server --lib -- --ignored queries::compliance_
 Phase F (Web UI) complete. Added API models and client functions for frameworks, requirements, mappings, and coverage. Policy editor modal now has a Mappings tab with grouped display, inline editor (framework/version/requirement search/relationship/coverage), and server-backed CRUD. Compliance view has a RequirementCoverageCard with full/partial/unmapped chips and expandable rows. nix build .#web-ui and .#server both pass. cargo fmt --all --check passes. 1066 lib tests + 5 framework_requirements DB tests + 14 compliance_interchange DB tests all green. Commits: ab9e44f9 (schema+models+adapter), a5e552ed (query layer+DB tests), a2f2dfbd (API handlers), 3a78bf28 (web UI), eada567a (fmt). Pushed to origin/TASK-418-cross-framework-requirements.
 
 Resumed with user confirmation that no completion claim is valid until Policies and Compliance views have pixel-level parity with the design using real backend behavior. A read-only audit confirmed the STIG reconciliation path and mapped/custom bundle selection remain unimplemented.
+
+Implemented an in-progress requirement-aware DISA STIG path: foreign preview now returns server-computed framework/requirement/candidate reconciliation data; the modal renders the design-aligned reconciliation summary, attention-only path, and Refine all path; exact artifact commit now returns the prior bundle result rather than creating duplicates; DISA commits persist normalized framework, requirement, bundle-baseline, and mapping rows in the existing transaction. `SQLX_OFFLINE=true nix develop ../.. --command cargo check -p cf-server` and `nix develop ../.. --command cargo check` from `packages/web-ui` passed (existing warnings remain). Further work is still required for release-change/inherited mapping semantics, bundle mapped/custom selection, full Policies parity, and browser-level pixel verification.
 <!-- SECTION:NOTES:END -->
