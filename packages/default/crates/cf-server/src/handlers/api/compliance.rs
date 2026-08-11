@@ -5217,12 +5217,12 @@ pub async fn policy_interchange_import(
     let policies = match parse_policy_interchange_upload_with_source(&upload, &actual_source_sha256)
     {
         Ok(policies) => policies,
-        Err(message) => return bad_request(&message),
+        Err(message) => return policy_interchange_invalid_response(&message).into_response(),
     };
 
     // Validate no duplicate version IDs within the document (shared validator)
     if let Err(message) = validate_policy_interchange_document(&policies) {
-        return bad_request(&message);
+        return policy_interchange_invalid_response(&message).into_response();
     }
 
     let mut tx = match pool.begin().await {
@@ -5233,10 +5233,14 @@ pub async fn policy_interchange_import(
         }
     };
     // Acquire advisory locks for all imported identities to prevent concurrent races
+    // Includes policy-name locks to protect UNIQUE name constraint (case-sensitive, exact text)
     let mut lock_keys: Vec<String> = Vec::new();
     for policy in &policies {
         lock_keys.push(format!("policy-lineage:{}", policy.lineage_id));
         lock_keys.push(format!("policy-version:{}", policy.version_id));
+        // Lock the exact policy name to prevent concurrent imports with same name
+        // DB uniqueness is case-sensitive exact text (NOT citext)
+        lock_keys.push(format!("policy-name:{}", policy.name));
     }
     lock_keys.sort();
     lock_keys.dedup();
@@ -5297,9 +5301,9 @@ pub async fn policy_interchange_import(
                 .find(|p| p.version_id == imported_identity.version_id)
                 .expect("imported policy must exist");
 
-            // Check if a different lineage already has this name
+            // Check if a different lineage already has this name (case-sensitive exact match)
             let collision_lineage_id: Option<Uuid> = match sqlx::query_scalar(
-                "SELECT id FROM deployment_policies WHERE LOWER(name) = LOWER($1) AND id != $2",
+                "SELECT id FROM deployment_policies WHERE name = $1 AND id != $2",
             )
             .bind(&imported_policy.name)
             .bind(portable_lineage_id)
@@ -6060,6 +6064,17 @@ pub async fn policy_interchange_preview(
             "policies": previews,
             "has_blocking_conflicts": has_blocking_conflicts || has_name_collisions,
             "blocking_conflicts": all_blocking_conflicts,
+        })),
+    )
+        .into_response()
+}
+
+fn policy_interchange_invalid_response(message: &str) -> impl IntoResponse {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(serde_json::json!({
+            "error": "POLICY_INTERCHANGE_INVALID",
+            "message": message,
         })),
     )
         .into_response()
