@@ -31,7 +31,7 @@ use crate::compliance::digest::{
 };
 use crate::compliance::framework_model::FrameworkVersionCanonical;
 use crate::compliance::xccdf::disa_stig_adapter::{
-    canonical_for_rule, canonical_key_for_rule, identify_framework,
+    canonical_for_rule, canonical_key_for_rule, identify_framework, is_disa_stig,
 };
 use crate::compliance::xccdf::import_models::ImportedPolicyRecord;
 use crate::compliance::xccdf::import_models::{ValidatedImportPlan, XccdfCommittedImportResult};
@@ -241,7 +241,10 @@ pub async fn commit_foreign_import(
     // DISA STIGs have a stable framework/release identity and requirement
     // lineages.  Persist those authoritative objects before choosing policy
     // implementations; the legacy policy metadata remains source provenance.
-    let normalized_requirements = if let Some(identity) = identify_framework(&pkg.parsed) {
+    let normalized_requirements = if is_disa_stig(&pkg.parsed) {
+        let identity = identify_framework(&pkg.parsed).ok_or_else(|| {
+            anyhow::anyhow!("IMPORT_FRAMEWORK_IDENTITY_UNAVAILABLE: DISA STIG has no stable identity")
+        })?;
         let framework_name = identity
             .title
             .as_deref()

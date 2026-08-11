@@ -24,7 +24,7 @@ use crate::api::models::{
 use crate::compliance::interchange::{InterchangeLimits, MAX_XCCDF_UPLOAD_BYTES};
 use crate::compliance::resolver::ResolutionOutcome;
 use crate::compliance::xccdf::disa_stig_adapter::{
-    canonical_for_rule, canonical_key_for_rule, identify_framework,
+    canonical_for_rule, canonical_key_for_rule, identify_framework, is_disa_stig,
 };
 use crate::compliance::xccdf::export_models::{
     GroupProjectionError, ImportedCheckError, ImportedFixError, XccdfBundleExport,
@@ -3864,6 +3864,9 @@ async fn compute_foreign_stig_reconciliation(
     parsed: &crate::compliance::xccdf::models::ParsedXccdf,
     source_sha256: &str,
 ) -> Result<Option<serde_json::Value>, String> {
+    if !is_disa_stig(parsed) {
+        return Ok(None);
+    }
     let Some(identity) = identify_framework(parsed) else {
         return Ok(None);
     };
