@@ -875,7 +875,8 @@ pub async fn find_policy_candidates(
             JOIN deployment_policies dp ON dp.id = pv.policy_id
             WHERE m.requirement_version_id = $1
               AND m.trust_state = 'trusted'
-              AND pv.publication_state IN ('accepted', 'deprecated')
+              AND pv.publication_state = 'accepted'
+              AND dp.current_published_version_id = pv.id
             ORDER BY pv.name
             "#,
         )
@@ -909,7 +910,8 @@ pub async fn find_policy_candidates(
             JOIN deployment_policies dp ON dp.id = pv.policy_id
             WHERE m.requirement_version_id = $1
               AND m.trust_state = 'trusted'
-              AND pv.publication_state IN ('accepted', 'deprecated')
+              AND pv.publication_state = 'accepted'
+              AND dp.current_published_version_id = pv.id
             ORDER BY pv.name
             "#,
         )

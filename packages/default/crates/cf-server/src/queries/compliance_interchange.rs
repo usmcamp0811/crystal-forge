@@ -351,14 +351,18 @@ pub async fn commit_foreign_import(
 
     for rec in &policy_records {
         if let Some(mapped_version_id) = rec.mapped_policy_version_id {
-            let selected: Option<(Uuid, String)> = sqlx::query_as(
-                "SELECT policy_id, publication_state FROM deployment_policy_versions WHERE id = $1",
+            let selected: Option<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+                "SELECT pv.policy_id, pv.publication_state, dp.current_published_version_id \
+                 FROM deployment_policy_versions pv \
+                 JOIN deployment_policies dp ON dp.id = pv.policy_id \
+                 WHERE pv.id = $1",
             )
             .bind(mapped_version_id)
             .fetch_optional(&mut *tx)
             .await
             .context("failed to verify mapped policy version")?;
-            let Some((policy_id, publication_state)) = selected else {
+            let Some((policy_id, publication_state, current_published_version_id)) = selected
+            else {
                 anyhow::bail!(
                     "IMPORT_POLICY_VERSION_NOT_FOUND: mapped policy version {} does not exist",
                     mapped_version_id
@@ -406,6 +410,13 @@ pub async fn commit_foreign_import(
             ) {
                 mapped_version_id
             } else {
+                if current_published_version_id != Some(mapped_version_id) {
+                    anyhow::bail!(
+                        "IMPORT_REUSE_INELIGIBLE: immutable policy version {} is not the current published version of policy {}",
+                        mapped_version_id,
+                        policy_id
+                    );
+                }
                 ensure_policy_draft(
                     &mut tx,
                     policy_id,
