@@ -48,7 +48,7 @@ use crate::compliance::xccdf::exact_technical_match::{
 };
 use crate::compliance::xccdf::import_models::ImportedPolicyRecord;
 use crate::compliance::xccdf::import_models::{
-    MapExistingProof, ValidatedImportPlan, XccdfCommittedImportResult,
+    MapExistingProof, ReviewedRelatedCandidate, ValidatedImportPlan, XccdfCommittedImportResult,
 };
 use crate::compliance::xccdf::importer::build_policy_records;
 use crate::compliance::xccdf::package::{ProcessedXccdfPackage, build_package_context};
@@ -61,6 +61,86 @@ use crate::queries::framework_requirements::{
     insert_bundle_version_requirement, insert_framework_version, insert_policy_mapping_in_tx,
     insert_requirement_version, upsert_framework_lineage, upsert_requirement_lineage,
 };
+
+async fn revalidate_reviewed_related_candidate(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    selected_policy_version_id: Uuid,
+    incoming_requirement_version_id: Uuid,
+    record: &ImportedPolicyRecord,
+    reviewed: &ReviewedRelatedCandidate,
+) -> Result<()> {
+    if reviewed.policy_version_id != selected_policy_version_id {
+        anyhow::bail!(
+            "IMPORT_RELATED_REUSE_INELIGIBLE: reviewed candidate policy version does not match MapExisting selection"
+        );
+    }
+
+    let incoming_ids =
+        crate::compliance::requirement_model::RelatedRequirementIdentifiers::from_metadata(
+            &record.compliance_metadata,
+        );
+    let claimed_cci: std::collections::BTreeSet<_> = reviewed
+        .shared_cci_ids
+        .iter()
+        .map(|id| id.trim().to_ascii_uppercase())
+        .collect();
+    let claimed_srg: std::collections::BTreeSet<_> = reviewed
+        .shared_srg_ids
+        .iter()
+        .map(|id| id.trim().to_ascii_uppercase())
+        .collect();
+    if !claimed_cci.is_subset(&incoming_ids.cci_ids)
+        || !claimed_srg.is_subset(&incoming_ids.srg_ids)
+    {
+        anyhow::bail!(
+            "IMPORT_RELATED_REUSE_INELIGIBLE: reviewed identifiers are not present in the authoritative requirement metadata"
+        );
+    }
+
+    let valid: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT m.requirement_version_id
+         FROM policy_requirement_mappings m
+         JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id
+         JOIN deployment_policies dp ON dp.id = pv.policy_id
+         JOIN compliance_requirement_versions rv ON rv.id = m.requirement_version_id
+         JOIN compliance_requirements r ON r.id = rv.requirement_id
+         WHERE m.policy_version_id = $1
+           AND m.trust_state = 'trusted'
+           AND pv.publication_state = 'accepted'
+           AND dp.current_published_version_id = pv.id
+           AND r.framework_id <> (
+               SELECT r_in.framework_id
+               FROM compliance_requirement_versions rv_in
+               JOIN compliance_requirements r_in ON r_in.id = rv_in.requirement_id
+               WHERE rv_in.id = $2
+           )
+           AND (
+               EXISTS (
+                   SELECT 1 FROM jsonb_array_elements_text(COALESCE(rv.metadata->'cci_ids', '[]'::jsonb)) candidate(id)
+                   WHERE upper(trim(candidate.id)) = ANY($3)
+               )
+               OR EXISTS (
+                   SELECT 1 FROM jsonb_array_elements_text(COALESCE(rv.metadata->'srg_ids', '[]'::jsonb)) candidate(id)
+                   WHERE upper(trim(candidate.id)) = ANY($4)
+               )
+           )
+         LIMIT 1",
+    )
+    .bind(selected_policy_version_id)
+    .bind(incoming_requirement_version_id)
+    .bind(&claimed_cci.iter().cloned().collect::<Vec<_>>())
+    .bind(&claimed_srg.iter().cloned().collect::<Vec<_>>())
+    .fetch_optional(&mut **tx)
+    .await
+    .context("failed to revalidate reviewed related candidate")?;
+
+    if valid.is_none() {
+        anyhow::bail!(
+            "IMPORT_RELATED_REUSE_INELIGIBLE: selected policy no longer has trusted current related evidence"
+        );
+    }
+    Ok(())
+}
 
 // ── Parser version identifier ─────────────────────────────────────────────────
 
@@ -722,8 +802,13 @@ pub async fn commit_foreign_import(
             .find(|r| r.source_rule_id == *rule_id)
             .context("IMPORT_RULE_NOT_FOUND: resolution refers to non-existent record")?;
 
-        match rec.mapped_policy_proof {
-            Some(MapExistingProof::ExactTechnicalMatch) => {
+        match (
+            rec.mapped_policy_proof,
+            rec.mapping_semantics
+                .as_ref()
+                .and_then(|semantics| semantics.reviewed_related_candidate.as_ref()),
+        ) {
+            (Some(MapExistingProof::ExactTechnicalMatch), None) => {
                 // Re-derive the technical identity from the parsed rule's
                 // authoritative fix text, then re-check that the selected
                 // policy version still exists, is accepted, is the current
@@ -755,7 +840,7 @@ pub async fn commit_foreign_import(
                     }
                 }
             }
-            Some(MapExistingProof::InheritedMapping) | None => {
+            (Some(MapExistingProof::InheritedMapping), None) | (None, None) => {
                 if let Some(requirement_versions) = &normalized_requirements {
                     let requirement = requirement_versions.get(&rec.source_rule_id).ok_or_else(
                         || {
@@ -806,6 +891,26 @@ pub async fn commit_foreign_import(
                         policy_id
                     );
                 }
+            }
+            (None, Some(reviewed_related)) => {
+                let requirement = normalized_requirements
+                    .as_ref()
+                    .and_then(|requirements| requirements.get(&rec.source_rule_id))
+                    .context("IMPORT_REQUIREMENT_NOT_FOUND: missing normalized requirement")?;
+                revalidate_reviewed_related_candidate(
+                    &mut tx,
+                    *version_id,
+                    requirement.requirement_version_id,
+                    rec,
+                    reviewed_related,
+                )
+                .await?;
+            }
+            (Some(MapExistingProof::ExactTechnicalMatch), Some(_))
+            | (Some(MapExistingProof::InheritedMapping), Some(_)) => {
+                anyhow::bail!(
+                    "IMPORT_RELATED_REVIEW_INVALID: reviewed related evidence cannot accompany deterministic MapExisting proof"
+                );
             }
         }
         let effective_policy_version_id = ensure_policy_draft(
@@ -1060,13 +1165,13 @@ pub async fn commit_foreign_import(
                         .filter(|value| matches!(*value, "full" | "partial"))
                         .unwrap_or("full");
                     let rationale = semantics.and_then(|s| s.rationale.as_deref());
-                    let provenance = if rec.mapped_policy_version_id.is_some() {
-                        "inferred"
-                    } else if semantics
+                    let provenance = if semantics
                         .and_then(|s| s.reviewed_related_candidate.as_ref())
                         .is_some()
                     {
                         "suggested"
+                    } else if rec.mapped_policy_version_id.is_some() {
+                        "inferred"
                     } else {
                         "imported"
                     };

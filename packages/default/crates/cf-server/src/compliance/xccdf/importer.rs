@@ -403,6 +403,38 @@ pub fn validate_import_plan(
         }
     }
 
+    // Related-candidate evidence is only meaningful as provenance for an
+    // explicitly reviewed MapExisting selection. It must never be attached to
+    // a newly authored policy or combined with deterministic proof.
+    for (rule_id, semantics) in &plan.mapping_semantics {
+        let Some(reviewed) = semantics.reviewed_related_candidate.as_ref() else {
+            continue;
+        };
+        let Some(action) = action_by_rule_id.get(rule_id.as_str()) else {
+            return Err(ImportPlanError::cf_native_invalid(
+                "IMPORT_RELATED_REVIEW_INVALID",
+                format!("reviewed related candidate references unknown rule {rule_id}"),
+            ));
+        };
+        let XccdfRuleImportAction::MapExisting {
+            policy_version_id,
+            proof,
+            ..
+        } = action
+        else {
+            return Err(ImportPlanError::cf_native_invalid(
+                "IMPORT_RELATED_REVIEW_INVALID",
+                format!("reviewed related candidate for {rule_id} requires MapExisting"),
+            ));
+        };
+        if proof.is_some() || *policy_version_id != reviewed.policy_version_id {
+            return Err(ImportPlanError::cf_native_invalid(
+                "IMPORT_RELATED_REVIEW_INVALID",
+                format!("reviewed related candidate for {rule_id} must match unproved MapExisting"),
+            ));
+        }
+    }
+
     // ── Profile validation ─────────────────────────────────────────────────
     let profile_rule_set: Option<HashSet<&str>> = if let Some(ref pid) = plan.selected_profile_id {
         let profile = parsed
