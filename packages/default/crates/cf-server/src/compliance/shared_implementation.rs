@@ -16,7 +16,7 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::compliance::requirement_model::PolicyCandidate;
+use crate::compliance::requirement_model::{PolicyCandidate, PolicyCandidateMatchType};
 use crate::compliance::xccdf::exact_technical_match::RequirementTechnicalIdentity;
 use crate::compliance::xccdf::import_models::{ImportedPolicyRecord, MapExistingProof};
 
@@ -218,7 +218,18 @@ pub fn common_shared_candidate(
     for rule_id in member_rule_ids {
         let candidates = member_candidates.get(rule_id);
         let set: HashMap<Uuid, &PolicyCandidate> = match candidates {
-            Some(list) => list.iter().map(|c| (c.policy_version_id, c)).collect(),
+            Some(list) => list
+                .iter()
+                .filter(|c| {
+                    matches!(
+                        c.match_type,
+                        PolicyCandidateMatchType::AuthoritativeMapping
+                            | PolicyCandidateMatchType::InheritedMapping
+                            | PolicyCandidateMatchType::ExactTechnicalMatch
+                    )
+                })
+                .map(|c| (c.policy_version_id, c))
+                .collect(),
             None => HashMap::new(),
         };
         version_sets.push(set);

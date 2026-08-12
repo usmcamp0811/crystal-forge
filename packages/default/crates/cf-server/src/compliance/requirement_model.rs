@@ -212,6 +212,17 @@ pub struct PolicyCandidate {
     /// 0–100 confidence score.
     pub confidence: u8,
     pub match_reasons: Vec<String>,
+    pub related_evidence: Option<RelatedCandidateEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelatedCandidateEvidence {
+    pub shared_cci_ids: Vec<String>,
+    pub shared_srg_ids: Vec<String>,
+    pub related_requirement_version_id: Uuid,
+    pub related_framework_id: Uuid,
+    pub related_framework_name: String,
+    pub related_external_id: String,
 }
 
 /// How a candidate policy was matched to a requirement.
@@ -267,6 +278,7 @@ mod tests {
             match_type,
             confidence: 70,
             match_reasons: vec![],
+            related_evidence: None,
         }
     }
 

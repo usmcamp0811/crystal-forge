@@ -908,6 +908,7 @@ pub async fn find_policy_candidates(
                     match_reasons: vec![
                         "Authoritative policy-requirement mapping exists.".to_string(),
                     ],
+                    related_evidence: None,
                 },
             );
         }
@@ -947,6 +948,7 @@ pub async fn find_policy_candidates(
                         "Trusted mapping on an unchanged requirement in the prior release."
                             .to_string(),
                     ],
+                    related_evidence: None,
                 });
         }
     }
@@ -977,6 +979,7 @@ pub async fn find_policy_candidates(
                                 "Exact normalized enforcement match: {}",
                                 description
                             )],
+                            related_evidence: None,
                         },
                     );
                 }
@@ -988,12 +991,24 @@ pub async fn find_policy_candidates(
     // identifiers. Restrict this to trusted mappings on the current accepted
     // policy version; stale or suggested evidence must never be promoted.
     if !related_identifiers.is_empty() {
-        let rows: Vec<(Uuid, Uuid, String, String, String, String, Value)> = sqlx::query_as(
+        let rows: Vec<(
+            Uuid,
+            Uuid,
+            String,
+            Uuid,
+            Uuid,
+            String,
+            String,
+            String,
+            Value,
+        )> = sqlx::query_as(
             r#"
                 SELECT DISTINCT
                     dp.id,
                     pv.id,
                     pv.name,
+                    rv.id,
+                    f.id,
                     COALESCE(f.name, 'Unknown framework'),
                     rv.external_id,
                     COALESCE(rv.title, rv.external_id),
@@ -1021,6 +1036,8 @@ pub async fn find_policy_candidates(
             policy_id,
             policy_version_id,
             policy_name,
+            related_requirement_version_id,
+            framework_id,
             framework_name,
             external_id,
             title,
@@ -1061,6 +1078,24 @@ pub async fn find_policy_candidates(
                     match_type: PolicyCandidateMatchType::RelatedMapping,
                     confidence: 70,
                     match_reasons: reasons,
+                    related_evidence: Some(
+                        crate::compliance::requirement_model::RelatedCandidateEvidence {
+                            shared_cci_ids: related_identifiers
+                                .cci_ids
+                                .intersection(&candidate_ids.cci_ids)
+                                .cloned()
+                                .collect(),
+                            shared_srg_ids: related_identifiers
+                                .srg_ids
+                                .intersection(&candidate_ids.srg_ids)
+                                .cloned()
+                                .collect(),
+                            related_requirement_version_id,
+                            related_framework_id: framework_id,
+                            related_framework_name: framework_name,
+                            related_external_id: external_id,
+                        },
+                    ),
                 },
             );
         }

@@ -4004,8 +4004,16 @@ async fn compute_foreign_stig_reconciliation(
                     crate::compliance::requirement_model::PolicyCandidateMatchType::FuzzySimilarity => "fuzzy_similarity",
                 },
                 "confidence": candidate.confidence,
-                "match_reasons": candidate.match_reasons,
-            })).collect::<Vec<_>>(),
+                 "match_reasons": candidate.match_reasons,
+                 "related_evidence": candidate.related_evidence.as_ref().map(|e| serde_json::json!({
+                     "shared_cci_ids": e.shared_cci_ids,
+                     "shared_srg_ids": e.shared_srg_ids,
+                     "related_requirement_version_id": e.related_requirement_version_id,
+                     "related_framework_id": e.related_framework_id,
+                     "related_framework_name": e.related_framework_name,
+                     "related_external_id": e.related_external_id,
+                 })),
+             })).collect::<Vec<_>>(),
         }));
     }
 
