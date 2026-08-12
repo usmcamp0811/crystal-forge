@@ -609,8 +609,8 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
 mod tests {
     use super::*;
     use crate::compliance::xccdf::import_models::{
-        ImportedBundlePlan, ImportedCustomCheck, ImportedCustomCheckRule,
-        ImportedPolicyCustomization, XccdfImportPlan, XccdfRuleImportAction,
+        ImportedBundlePlan, ImportedCustomCheck, ImportedCustomCheckRule, ImportedMappingSemantics,
+        ImportedPolicyCustomization, MapExistingProof, XccdfImportPlan, XccdfRuleImportAction,
     };
     use crate::compliance::xccdf::models::{DocumentClass, Fidelity, ParsedXccdf};
 
@@ -837,6 +837,44 @@ mod tests {
         assert_eq!(records[0].mapped_policy_version_id, Some(mapped_version_id));
         assert_eq!(records[0].implementation_state, "mapped");
         assert_eq!(records[0].policy_type, "imported_xccdf");
+    }
+
+    #[test]
+    fn deterministic_proof_cannot_be_combined_with_related_review() {
+        let parsed = minimal_foreign_parsed(&["rule-1"]);
+        let policy_version_id = Uuid::new_v4();
+        let related = crate::compliance::xccdf::import_models::ReviewedRelatedCandidate {
+            policy_version_id,
+            related_requirement_version_id: Uuid::new_v4(),
+            shared_cci_ids: vec!["CCI-000001".into()],
+            shared_srg_ids: vec![],
+        };
+        for proof in [
+            Some(MapExistingProof::ExactTechnicalMatch),
+            Some(MapExistingProof::InheritedMapping),
+        ] {
+            let mut plan = valid_plan(&["rule-1"]);
+            plan.rule_actions = vec![XccdfRuleImportAction::MapExisting {
+                rule_id: "rule-1".into(),
+                policy_version_id,
+                proof,
+            }];
+            plan.mapping_semantics.insert(
+                "rule-1".into(),
+                ImportedMappingSemantics {
+                    reviewed_related_candidate: Some(related.clone()),
+                    ..Default::default()
+                },
+            );
+            let result = validate_import_plan(plan, &parsed);
+            assert!(matches!(
+                result,
+                Err(ImportPlanError {
+                    code: "IMPORT_RELATED_REVIEW_INVALID",
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]
