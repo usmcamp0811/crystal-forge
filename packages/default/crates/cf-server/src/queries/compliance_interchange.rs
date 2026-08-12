@@ -1062,6 +1062,11 @@ pub async fn commit_foreign_import(
                     let rationale = semantics.and_then(|s| s.rationale.as_deref());
                     let provenance = if rec.mapped_policy_version_id.is_some() {
                         "inferred"
+                    } else if semantics
+                        .and_then(|s| s.reviewed_related_candidate.as_ref())
+                        .is_some()
+                    {
+                        "suggested"
                     } else {
                         "imported"
                     };
@@ -2275,6 +2280,7 @@ mod tests {
                     relationship: Some(relationship.to_string()),
                     coverage: Some(coverage.to_string()),
                     rationale: Some(rationale.to_string()),
+                    reviewed_related_candidate: None,
                 },
             )
         })
@@ -5003,6 +5009,7 @@ mod tests {
             relationship: Some("supports".into()),
             coverage: Some("partial".into()),
             rationale: Some("independent reviewed rationale".into()),
+            reviewed_related_candidate: None,
         };
         let (validated, records) = exact_match_plan(
             &pkg,

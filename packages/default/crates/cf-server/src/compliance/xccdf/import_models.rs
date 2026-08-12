@@ -136,6 +136,54 @@ pub struct ImportedMappingSemantics {
     pub coverage: Option<String>,
     #[serde(default)]
     pub rationale: Option<String>,
+    /// A human-reviewed related-control candidate selection. This is review
+    /// provenance only and is deliberately not a `MapExistingProof`.
+    #[serde(default)]
+    pub reviewed_related_candidate: Option<ReviewedRelatedCandidate>,
+}
+
+/// Evidence retained when a reviewer selects a cross-framework candidate.
+///
+/// Shared CCI/SRG identifiers establish a review lead, not exact technical
+/// equivalence. The selected policy version is therefore recorded separately
+/// from deterministic `MapExistingProof` values and persisted as suggested
+/// mapping provenance.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReviewedRelatedCandidate {
+    pub policy_version_id: Uuid,
+    #[serde(default)]
+    pub shared_cci_ids: Vec<String>,
+    #[serde(default)]
+    pub shared_srg_ids: Vec<String>,
+}
+
+#[cfg(test)]
+mod reviewed_related_candidate_tests {
+    use super::*;
+
+    #[test]
+    fn related_review_is_distinct_from_deterministic_proof() {
+        let semantics = ImportedMappingSemantics {
+            relationship: Some("supports".into()),
+            coverage: Some("partial".into()),
+            rationale: Some("same control family".into()),
+            reviewed_related_candidate: Some(ReviewedRelatedCandidate {
+                policy_version_id: Uuid::nil(),
+                shared_cci_ids: vec!["CCI-000770".into()],
+                shared_srg_ids: vec![],
+            }),
+        };
+
+        assert!(semantics.reviewed_related_candidate.is_some());
+        assert_eq!(
+            semantics
+                .reviewed_related_candidate
+                .as_ref()
+                .unwrap()
+                .policy_version_id,
+            Uuid::nil()
+        );
+    }
 }
 
 /// User decision about whether a set of requirements should share one policy.
