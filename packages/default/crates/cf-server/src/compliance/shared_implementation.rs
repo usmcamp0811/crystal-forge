@@ -256,6 +256,62 @@ pub struct SharedPolicyCommitRecord {
     pub group_id: SharedImplementationId,
 }
 
+/// Identify which policy_records belong to shared groups that need to be created.
+///
+/// Called at commit time (after detecting shared groups from authoritative source)
+/// to partition the policy_records into:
+/// - Records that share implementation (will map to one new shared policy)
+/// - Records that stand alone (will each get their own policy)
+///
+/// Shared groups only trigger when:
+/// - Multiple records have identical technical identity
+/// - No existing accepted policy covers all members
+///
+/// Returns (shared_groups_to_create, individual_policy_record_indices)
+pub fn partition_shared_and_individual_policies(
+    groups: &[SharedImplementationGroup],
+    policy_records: &[crate::compliance::xccdf::import_models::ImportedPolicyRecord],
+    rule_to_record_idx: &std::collections::HashMap<String, usize>,
+) -> (Vec<SharedPolicyCommitRecord>, Vec<usize>) {
+    let mut shared_records: Vec<SharedPolicyCommitRecord> = Vec::new();
+    let mut shared_rule_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for group in groups {
+        if group.existing_policy_candidate.is_some() {
+            // Existing policy covers all members; don't create new shared policy
+            continue;
+        }
+
+        // Create one shared policy for this group
+        let (policy_id, version_id) = generate_shared_policy_ids(group);
+        shared_records.push(SharedPolicyCommitRecord {
+            policy_id,
+            policy_version_id: version_id,
+            requirement_keys: group.requirement_keys.clone(),
+            group_id: group.group_id.clone(),
+        });
+
+        for req_key in &group.requirement_keys {
+            shared_rule_ids.insert(req_key.clone());
+        }
+    }
+
+    // Individual records are those NOT in any shared group
+    let individual_indices: Vec<usize> = policy_records
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, rec)| {
+            if shared_rule_ids.contains(&rec.source_rule_id) {
+                None
+            } else {
+                Some(idx)
+            }
+        })
+        .collect();
+
+    (shared_records, individual_indices)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,5 +604,76 @@ mod tests {
         assert_ne!(policy_id1, policy_id2, "policy IDs should be fresh each call");
         assert_ne!(version_id1, version_id2, "version IDs should be fresh each call");
         assert_ne!(policy_id1, version_id1, "policy and version IDs should differ");
+    }
+
+    #[test]
+    fn test_partition_shared_and_individual_with_no_groups() {
+        use super::partition_shared_and_individual_policies;
+
+        let groups = vec![];
+        let policy_records = vec![]; // Empty for this test
+        let rule_map = std::collections::HashMap::new();
+
+        let (shared, individual) = partition_shared_and_individual_policies(&groups, &policy_records, &rule_map);
+
+        assert_eq!(shared.len(), 0, "no groups should produce no shared records");
+        assert_eq!(individual.len(), 0, "no records should produce no individual records");
+    }
+
+    #[test]
+    fn test_partition_shared_with_existing_candidate() {
+        use super::partition_shared_and_individual_policies;
+
+        let identity = identity_from_options(&[("services.openssh.enable", "false")]);
+        let group = SharedImplementationGroup {
+            group_id: SharedImplementationId::from_technical_identity(&identity),
+            technical_identity: identity,
+            requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
+            existing_policy_candidate: Some((Uuid::new_v4(), "existing".to_string(), 90)),
+            action: SharedImplementationAction::ReuseExisting,
+        };
+
+        let groups = vec![group];
+        let policy_records = vec![];
+        let rule_map = std::collections::HashMap::new();
+
+        let (shared, _individual) = partition_shared_and_individual_policies(&groups, &policy_records, &rule_map);
+
+        assert_eq!(
+            shared.len(),
+            0,
+            "group with existing candidate should not create new shared policy"
+        );
+    }
+
+    #[test]
+    fn test_partition_shared_without_candidate() {
+        use super::partition_shared_and_individual_policies;
+
+        let identity = identity_from_options(&[("services.openssh.enable", "false")]);
+        let group = SharedImplementationGroup {
+            group_id: SharedImplementationId::from_technical_identity(&identity),
+            technical_identity: identity,
+            requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
+            existing_policy_candidate: None,
+            action: SharedImplementationAction::CreateShared,
+        };
+
+        let groups = vec![group];
+        let policy_records = vec![];
+        let rule_map = std::collections::HashMap::new();
+
+        let (shared, _individual) = partition_shared_and_individual_policies(&groups, &policy_records, &rule_map);
+
+        assert_eq!(
+            shared.len(),
+            1,
+            "group without existing candidate should create new shared policy"
+        );
+        assert_eq!(
+            shared[0].requirement_keys.len(),
+            2,
+            "shared policy should have both requirements"
+        );
     }
 }
