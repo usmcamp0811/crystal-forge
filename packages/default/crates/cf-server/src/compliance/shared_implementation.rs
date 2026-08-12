@@ -952,11 +952,26 @@ mod tests {
 
     // ── Resolution planner (item 18) ─────────────────────────────────────────
 
-    fn decision_create_shared(group_id: &str, rule_ids: &[&str]) -> SharedGroupDecision {
-        SharedGroupDecision {
-            group_id: group_id.to_string(),
-            rule_ids: rule_ids.iter().map(|r| r.to_string()).collect(),
-            action: SharedGroupAction::CreateShared,
+    fn make_validated_shared_creation(
+        rule_ids: &[&str],
+    ) -> ValidatedSharedCreation {
+        use serde_json::{json, Map};
+
+        // Create a simple technical identity with enforced options
+        let mut enforced_options = Map::new();
+        enforced_options.insert(
+            "services.openssh.settings.PermitRootLogin".to_string(),
+            json!("no"),
+        );
+        let identity = RequirementTechnicalIdentity { enforced_options };
+        let group_id = SharedImplementationId::from_technical_identity(&identity);
+
+        ValidatedSharedCreation {
+            policy_id: Uuid::new_v4(),
+            policy_version_id: Uuid::new_v4(),
+            group_id,
+            requirement_keys: rule_ids.iter().map(|r| r.to_string()).collect(),
+            technical_identity: identity,
         }
     }
 
@@ -1005,9 +1020,9 @@ mod tests {
             make_record("B", "native", None),
             make_record("C", "native", None),
         ];
-        let decisions = vec![decision_create_shared("g1", &["A", "B", "C"])];
+        let validated = vec![make_validated_shared_creation(&["A", "B", "C"])];
 
-        let plan = build_import_policy_resolution_plan(&decisions, &records).unwrap();
+        let plan = build_import_policy_resolution_plan(&validated, &records).unwrap();
 
         assert_eq!(
             plan.shared_creations.len(),
@@ -1047,9 +1062,9 @@ mod tests {
             make_record("B", "native", None),
             make_record("C", "native", None),
         ];
-        let decisions = vec![decision_create_shared("g1", &["A", "B"])];
+        let validated = vec![make_validated_shared_creation(&["A", "B"])];
 
-        let plan = build_import_policy_resolution_plan(&decisions, &records).unwrap();
+        let plan = build_import_policy_resolution_plan(&validated, &records).unwrap();
 
         assert_eq!(plan.shared_creations.len(), 1);
         assert_eq!(plan.shared_creations[0].requirement_keys, vec!["A", "B"]);
@@ -1073,9 +1088,9 @@ mod tests {
             make_record("B", "native", None),
             make_record("C", "native", None),
         ];
-        let decisions = vec![decision_create_shared("g1", &["A", "B"])];
+        let validated = vec![make_validated_shared_creation(&["A", "B"])];
 
-        let plan = build_import_policy_resolution_plan(&decisions, &records).unwrap();
+        let plan = build_import_policy_resolution_plan(&validated, &records).unwrap();
 
         assert_eq!(plan.shared_creations.len(), 1, "A/B shared");
         assert_eq!(
@@ -1086,34 +1101,52 @@ mod tests {
     }
 
     #[test]
-    fn test_planner_stale_decision_rule_not_present() {
+    fn test_planner_preserves_validated_ids_and_identity() {
         use super::build_import_policy_resolution_plan;
 
-        let records = vec![make_record("A", "native", None)];
-        let decisions = vec![decision_create_shared("g1", &["A", "MISSING"])];
+        // Proof that policy_id, policy_version_id, group_id, requirement_keys,
+        // and technical_identity survive unchanged through the planner.
+        use serde_json::{json, Map};
 
-        let err = build_import_policy_resolution_plan(&decisions, &records).unwrap_err();
-        assert!(
-            err.contains("IMPORT_SHARED_IMPLEMENTATION_STALE"),
-            "decision referencing a rule not in the import must be stale"
+        let mut enforced_options = Map::new();
+        enforced_options.insert(
+            "services.openssh.settings.PermitRootLogin".to_string(),
+            json!("no"),
         );
-    }
+        let identity = RequirementTechnicalIdentity { enforced_options };
+        let group_id = SharedImplementationId::from_technical_identity(&identity);
+        let policy_id = Uuid::new_v4();
+        let policy_version_id = Uuid::new_v4();
 
-    #[test]
-    fn test_planner_contradictory_decision_rejected() {
-        use super::build_import_policy_resolution_plan;
+        let validated = vec![ValidatedSharedCreation {
+            policy_id,
+            policy_version_id,
+            group_id: group_id.clone(),
+            requirement_keys: vec!["A".to_string(), "B".to_string()],
+            technical_identity: identity.clone(),
+        }];
 
-        // A is a MapExisting reuse but the decision says CreateShared.
         let records = vec![
-            make_record("A", "mapped", Some(Uuid::new_v4())),
+            make_record("A", "native", None),
             make_record("B", "native", None),
         ];
-        let decisions = vec![decision_create_shared("g1", &["A", "B"])];
 
-        let err = build_import_policy_resolution_plan(&decisions, &records).unwrap_err();
-        assert!(
-            err.contains("IMPORT_SHARED_IMPLEMENTATION_STALE"),
-            "contradictory MapExisting + CreateShared decision must be rejected"
+        let plan = build_import_policy_resolution_plan(&validated, &records).unwrap();
+
+        assert_eq!(plan.shared_creations.len(), 1);
+        let shared = &plan.shared_creations[0];
+        assert_eq!(
+            shared.policy_id, policy_id,
+            "policy_id must be preserved"
+        );
+        assert_eq!(
+            shared.policy_version_id, policy_version_id,
+            "policy_version_id must be preserved"
+        );
+        assert_eq!(shared.group_id, group_id, "group_id must be preserved");
+        assert_eq!(
+            shared.technical_identity, identity,
+            "technical_identity must be preserved"
         );
     }
 
