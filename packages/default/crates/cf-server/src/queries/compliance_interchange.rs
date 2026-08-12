@@ -2132,8 +2132,9 @@ async fn upsert_native_mapping(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compliance::requirement_model::RequirementVersionCanonical;
     use crate::compliance::xccdf::import_models::{
-        ImportedMappingSemantics, SharedGroupAction, SharedGroupDecision,
+        ImportedMappingSemantics, ReviewedRelatedCandidate, SharedGroupAction, SharedGroupDecision,
     };
 
     fn minimal_xccdf_bytes() -> Vec<u8> {
@@ -3041,6 +3042,23 @@ mod tests {
         .into_bytes()
     }
 
+    fn disa_stig_bytes_with_cci(
+        benchmark_id: &str,
+        release: &str,
+        vuln_id: &str,
+        title: &str,
+        cci_id: &str,
+    ) -> Vec<u8> {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="{benchmark_id}">
+  <status>draft</status><title>Related Candidate Test STIG</title><version>{release}</version>
+  <Rule id="xccdf_test_stig_rule_0"><title>{title}</title><description>Stable requirement {vuln_id}</description><ident system="http://cyber.mil/stigs/stig">{vuln_id}</ident><ident system="http://cyber.mil/cci">{cci_id}</ident><check system="urn:test"><check-content>Verify {vuln_id}.</check-content></check></Rule>
+</Benchmark>"#
+        )
+        .into_bytes()
+    }
+
     fn shared_stig_bytes(
         benchmark_id: &str,
         release: &str,
@@ -3470,6 +3488,197 @@ mod tests {
         .await
         .expect("load import accounting audit event");
         assert_eq!(audit_counts, (0, 1));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn reviewed_related_stig_reuses_current_policy_with_reviewed_provenance() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let source = prepare_map_existing_source(&pool, user_id, "trusted", false).await;
+        let shared_cci = "CCI-000770";
+
+        let foreign_key = format!("reviewed-related-foreign-{}", Uuid::new_v4());
+        let mut tx = pool.begin().await.expect("begin foreign requirement setup");
+        let foreign_framework = upsert_framework_lineage(
+            &mut tx,
+            "Reviewed related foreign framework",
+            None,
+            &foreign_key,
+            None,
+        )
+        .await
+        .expect("insert foreign framework lineage");
+        let foreign_framework_version = insert_framework_version(
+            &mut tx,
+            foreign_framework,
+            &FrameworkVersionCanonical {
+                canonical_source_key: foreign_key.clone(),
+                canonical_release_key: "V1R1".into(),
+                version: "V1R1".into(),
+                publisher: None,
+                title: None,
+            },
+            None,
+            None,
+        )
+        .await
+        .expect("insert foreign framework version");
+        let foreign_requirement =
+            upsert_requirement_lineage(&mut tx, foreign_framework, "FOREIGN-AC-1")
+                .await
+                .expect("insert foreign requirement lineage");
+        let foreign_requirement_version = insert_requirement_version(
+            &mut tx,
+            foreign_requirement,
+            foreign_framework_version,
+            &RequirementVersionCanonical {
+                canonical_requirement_key: "FOREIGN-AC-1".into(),
+                external_id: "FOREIGN-AC-1".into(),
+                title: Some("Foreign access control".into()),
+                description: None,
+                kind: "control".into(),
+                severity: None,
+                check_text: None,
+                fix_text: None,
+                metadata: serde_json::json!({"cci_ids": [shared_cci], "srg_ids": []}),
+            },
+            None,
+        )
+        .await
+        .expect("insert foreign requirement version");
+        insert_policy_mapping_in_tx(
+            &mut tx,
+            source.policy_version_id,
+            foreign_requirement_version,
+            "supports",
+            "partial",
+            Some("reviewed related evidence"),
+            "manual",
+            None,
+            user_id,
+        )
+        .await
+        .expect("insert trusted related mapping");
+        tx.commit().await.expect("commit foreign requirement setup");
+        publish_policy_version(&pool, user_id, source.policy_id, source.policy_version_id).await;
+
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_Reviewed_Related_{}",
+            Uuid::new_v4().simple()
+        );
+        let pkg = make_package(disa_stig_bytes_with_cci(
+            &benchmark_id,
+            "V1R2",
+            "V-418-201",
+            "Reviewed related requirement",
+            shared_cci,
+        ));
+        let (validated, mut records) = map_existing_plan(&pkg, source.policy_version_id);
+        let rule_id = records[0].source_rule_id.clone();
+        let semantics = ImportedMappingSemantics {
+            relationship: Some("supports".into()),
+            coverage: Some("partial".into()),
+            rationale: Some("human-reviewed related control".into()),
+            reviewed_related_candidate: Some(ReviewedRelatedCandidate {
+                policy_version_id: source.policy_version_id,
+                related_requirement_version_id: foreign_requirement_version,
+                shared_cci_ids: vec![shared_cci.into()],
+                shared_srg_ids: vec![],
+            }),
+        };
+        let mut mapping_semantics = std::collections::HashMap::new();
+        mapping_semantics.insert(rule_id.clone(), semantics);
+        records[0].mapping_semantics = mapping_semantics.get(&rule_id).cloned();
+        let mut validated = validated;
+        validated.mapping_semantics = mapping_semantics;
+
+        let result = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("reviewed related reuse should succeed");
+        assert_eq!(result.reused_policy_versions, 1);
+        assert_eq!(result.created_policy_versions, 0);
+
+        let draft_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(source.policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load derived reviewed draft");
+        let mappings: Vec<(String, String, Option<String>, String, String)> = sqlx::query_as(
+            "SELECT relationship, coverage, rationale, provenance, trust_state FROM policy_requirement_mappings WHERE policy_version_id = $1",
+        )
+        .bind(draft_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load reviewed mapping");
+        assert!(mappings.iter().any(|mapping| {
+            mapping.0 == "supports"
+                && mapping.1 == "partial"
+                && mapping.2.as_deref() == Some("human-reviewed related control")
+                && mapping.3 == "suggested"
+                && mapping.4 == "trusted"
+        }));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn reviewed_related_stig_rejects_forged_identifier_claim_and_rolls_back() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let source = prepare_map_existing_source(&pool, user_id, "trusted", true).await;
+        let pkg = make_package(disa_stig_bytes_with_cci(
+            &format!(
+                "xccdf_mil.disa.stig_benchmark_Reviewed_Related_Forged_{}",
+                Uuid::new_v4().simple()
+            ),
+            "V1R2",
+            "V-418-202",
+            "Forged related requirement",
+            "CCI-000771",
+        ));
+        let (mut validated, mut records) = map_existing_plan(&pkg, source.policy_version_id);
+        let rule_id = records[0].source_rule_id.clone();
+        let forged = ReviewedRelatedCandidate {
+            policy_version_id: source.policy_version_id,
+            related_requirement_version_id: Uuid::new_v4(),
+            shared_cci_ids: vec!["CCI-000770".into()],
+            shared_srg_ids: vec![],
+        };
+        let semantics = ImportedMappingSemantics {
+            reviewed_related_candidate: Some(forged),
+            ..Default::default()
+        };
+        validated
+            .mapping_semantics
+            .insert(rule_id.clone(), semantics.clone());
+        records[0].mapping_semantics = Some(semantics);
+        let bundle_name = validated.bundle.name.clone();
+        let source_sha256 = pkg.provenance.sha256.clone();
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("forged related evidence must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("IMPORT_RELATED_REUSE_INELIGIBLE")
+        );
+        let bundle_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundles WHERE name = $1")
+                .bind(bundle_name)
+                .fetch_one(&pool)
+                .await
+                .expect("count rolled back bundle");
+        assert_eq!(bundle_count, 0);
+        let artifact_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1",
+        )
+        .bind(source_sha256)
+        .fetch_one(&pool)
+        .await
+        .expect("count rolled back artifact");
+        assert_eq!(artifact_count, 0);
     }
 
     #[tokio::test]
