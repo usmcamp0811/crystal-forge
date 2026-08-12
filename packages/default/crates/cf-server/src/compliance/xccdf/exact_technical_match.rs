@@ -198,7 +198,8 @@ pub enum ExactTechnicalMatchValidation {
 /// 3. The policy config still implements the requirement's enforcement
 ///
 /// # Arguments
-/// - `pool`: database connection for policy lookup
+/// - `tx`: the open import transaction (so validation runs inside the same
+///   transaction boundary as all subsequent mutation)
 /// - `selected_policy_version_id`: the policy version the user selected (from MapExisting action)
 /// - `authoritative_fix_text`: the authoritative fix text from the imported rule (not cached)
 ///
@@ -206,7 +207,7 @@ pub enum ExactTechnicalMatchValidation {
 /// - `Valid` if revalidation succeeds
 /// - `Invalid` if any check fails (cannot be trusted for commit)
 pub async fn revalidate_exact_technical_match(
-    pool: &sqlx::PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     selected_policy_version_id: Uuid,
     authoritative_fix_text: &str,
 ) -> anyhow::Result<ExactTechnicalMatchValidation> {
@@ -230,7 +231,7 @@ pub async fn revalidate_exact_technical_match(
         "#,
     )
     .bind(selected_policy_version_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(|e| anyhow::anyhow!("failed to fetch selected policy version: {}", e))?;
 
@@ -267,7 +268,7 @@ pub async fn revalidate_exact_technical_match(
         "#,
     )
     .bind(selected_policy_version_id)
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|e| anyhow::anyhow!("failed to verify policy version recency: {}", e))?;
 

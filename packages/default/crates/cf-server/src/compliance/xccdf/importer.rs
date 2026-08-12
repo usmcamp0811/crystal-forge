@@ -223,6 +223,8 @@ pub fn validate_cf_native_document(
             compliance_metadata,
             opaque_xml: rule.preserved_xml.clone(),
             mapped_policy_version_id: None,
+            mapped_policy_proof: None,
+            mapping_semantics: None,
             evidence_requirements: Vec::new(),
         });
         rules.push((
@@ -284,6 +286,8 @@ pub fn validate_cf_native_document(
         },
         is_disa_stig: false,
         rules_to_import: rules,
+        mapping_semantics: std::collections::HashMap::new(),
+        shared_group_decisions: Vec::new(),
     };
     Ok((validated, records))
 }
@@ -448,6 +452,8 @@ pub fn validate_import_plan(
                 .and_then(|benchmark| benchmark.publisher.as_deref())
                 .is_some_and(|publisher| publisher.eq_ignore_ascii_case("DISA")),
         rules_to_import,
+        mapping_semantics: plan.mapping_semantics,
+        shared_group_decisions: plan.shared_group_decisions,
     })
 }
 
@@ -526,12 +532,15 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
             let description = customization
                 .and_then(|c| c.policy_description.clone())
                 .or_else(|| rule.description.clone());
-            let mapped_policy_version_id = match action {
+            let (mapped_policy_version_id, mapped_policy_proof) = match action {
                 XccdfRuleImportAction::MapExisting {
-                    policy_version_id, ..
-                } => Some(*policy_version_id),
-                _ => None,
+                    policy_version_id,
+                    proof,
+                    ..
+                } => (Some(*policy_version_id), *proof),
+                _ => (None, None),
             };
+            let mapping_semantics = validated.mapping_semantics.get(&rule.id).cloned();
 
             Some(ImportedPolicyRecord {
                 policy_id: Uuid::new_v4(),
@@ -554,6 +563,8 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
                 compliance_metadata,
                 opaque_xml,
                 mapped_policy_version_id,
+                mapped_policy_proof,
+                mapping_semantics,
                 evidence_requirements,
             })
         })
@@ -638,6 +649,10 @@ mod tests {
                     evidence_requirements: Vec::new(),
                 })
                 .collect(),
+            mapping_semantics: std::collections::HashMap::new(),
+
+            shared_group_decisions: Vec::new(),
+
             bundle: ImportedBundlePlan {
                 name: "Test Bundle".into(),
                 framework: "TEST".into(),
@@ -1033,6 +1048,10 @@ mod tests {
                     rule_id: "r2".into(),
                 },
             ],
+            mapping_semantics: std::collections::HashMap::new(),
+
+            shared_group_decisions: Vec::new(),
+
             bundle: ImportedBundlePlan {
                 name: "Bundle".into(),
                 framework: "FW".into(),

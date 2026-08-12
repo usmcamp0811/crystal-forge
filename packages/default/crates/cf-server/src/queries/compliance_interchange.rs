@@ -33,8 +33,11 @@ use crate::compliance::framework_model::FrameworkVersionCanonical;
 use crate::compliance::xccdf::disa_stig_adapter::{
     canonical_for_rule, canonical_key_for_rule, identify_framework, is_disa_stig,
 };
+use crate::compliance::xccdf::exact_technical_match::{
+    ExactTechnicalMatchValidation, revalidate_exact_technical_match,
+};
 use crate::compliance::xccdf::import_models::ImportedPolicyRecord;
-use crate::compliance::xccdf::import_models::{ValidatedImportPlan, XccdfCommittedImportResult};
+use crate::compliance::xccdf::import_models::{MapExistingProof, ValidatedImportPlan, XccdfCommittedImportResult};
 use crate::compliance::xccdf::importer::build_policy_records;
 use crate::compliance::xccdf::package::{ProcessedXccdfPackage, build_package_context};
 use crate::compliance::xccdf::reconciliation::{
@@ -371,52 +374,98 @@ pub async fn commit_foreign_import(
                     mapped_version_id
                 );
             };
-            if let Some(requirement_versions) = &normalized_requirements {
-                let requirement = requirement_versions.get(&rec.source_rule_id).ok_or_else(
-                    || {
-                        anyhow::anyhow!(
-                            "IMPORT_REQUIREMENT_NOT_FOUND: missing normalized requirement for {}",
-                            rec.source_rule_id
-                        )
-                    },
-                )?;
-                let inherited_mapping: Option<(String, String, Option<String>)> =
-                    if requirement.unchanged_from_previous_release {
-                        let previous_requirement_version_id =
-                            requirement.previous_requirement_version_id.ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "IMPORT_REUSE_INELIGIBLE: missing prior requirement version"
-                                )
-                            })?;
-                        sqlx::query_as(
-                        "SELECT relationship, coverage, rationale FROM policy_requirement_mappings \
-                         WHERE policy_version_id = $1 AND requirement_version_id = $2 \
-                           AND trust_state = 'trusted'",
+
+            // Every reuse decision must carry an explicit proof and the proof is
+            // never trusted from preview: it is revalidated from authoritative
+            // source bytes inside this transaction.
+            match rec.mapped_policy_proof {
+                Some(MapExistingProof::ExactTechnicalMatch) => {
+                    // Re-derive the technical identity from the parsed rule's
+                    // authoritative fix text, then re-check that the selected
+                    // policy version still exists, is accepted, is the current
+                    // published version, and its config still implements the
+                    // enforcement. Any stale or superseded decision aborts the
+                    // whole import transaction (no partial writes).
+                    let parsed_rule = pkg
+                        .parsed
+                        .rules
+                        .iter()
+                        .find(|rule| rule.id == rec.source_rule_id)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "IMPORT_RULE_NOT_FOUND: parsed rule {} disappeared before commit",
+                                rec.source_rule_id
+                            )
+                        })?;
+                    let authoritative_fix_text = parsed_rule
+                        .fix
+                        .as_ref()
+                        .map(|fix| fix.content.as_str())
+                        .unwrap_or_default();
+                    match revalidate_exact_technical_match(
+                        &mut tx,
+                        mapped_version_id,
+                        authoritative_fix_text,
                     )
-                    .bind(mapped_version_id)
-                    .bind(previous_requirement_version_id)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .context("failed to validate selected policy reuse")?
-                    } else {
-                        None
-                    };
-                let Some(inherited_mapping) = inherited_mapping else {
-                    anyhow::bail!(
-                        "IMPORT_REUSE_INELIGIBLE: policy version {} is not a trusted mapping for an unchanged prior requirement",
-                        mapped_version_id
-                    );
-                };
-                inherited_mappings.insert(rec.source_rule_id.clone(), inherited_mapping);
-            }
-            if publication_state != "accepted"
-                || current_published_version_id != Some(mapped_version_id)
-            {
-                anyhow::bail!(
-                    "IMPORT_REUSE_INELIGIBLE: policy version {} must be the current accepted version of policy {}",
-                    mapped_version_id,
-                    policy_id
-                );
+                    .await?
+                    {
+                        ExactTechnicalMatchValidation::Valid { .. } => {}
+                        ExactTechnicalMatchValidation::Invalid { code, message } => {
+                            anyhow::bail!("{code}: {message}");
+                        }
+                    }
+                }
+                Some(MapExistingProof::InheritedMapping) | None => {
+                    if let Some(requirement_versions) = &normalized_requirements {
+                        let requirement = requirement_versions.get(&rec.source_rule_id).ok_or_else(
+                            || {
+                                anyhow::anyhow!(
+                                    "IMPORT_REQUIREMENT_NOT_FOUND: missing normalized requirement for {}",
+                                    rec.source_rule_id
+                                )
+                            },
+                        )?;
+                        let inherited_mapping: Option<(String, String, Option<String>)> =
+                            if requirement.unchanged_from_previous_release {
+                                let previous_requirement_version_id =
+                                    requirement.previous_requirement_version_id.ok_or_else(|| {
+                                        anyhow::anyhow!(
+                                            "IMPORT_REUSE_INELIGIBLE: missing prior requirement version"
+                                        )
+                                    })?;
+                                sqlx::query_as(
+                                "SELECT relationship, coverage, rationale FROM policy_requirement_mappings \
+                                 WHERE policy_version_id = $1 AND requirement_version_id = $2 \
+                                   AND trust_state = 'trusted'",
+                            )
+                            .bind(mapped_version_id)
+                            .bind(previous_requirement_version_id)
+                            .fetch_optional(&mut *tx)
+                            .await
+                            .context("failed to validate selected policy reuse")?
+                            } else {
+                                None
+                            };
+                        let Some(inherited_mapping) = inherited_mapping else {
+                            anyhow::bail!(
+                                "IMPORT_REUSE_INELIGIBLE: policy version {} is not a trusted mapping for an unchanged prior requirement",
+                                mapped_version_id
+                            );
+                        };
+                        inherited_mappings.insert(rec.source_rule_id.clone(), inherited_mapping);
+                    }
+                    // Inherited reuse refers to the exact immutable local policy
+                    // version, so it must still be the current accepted version.
+                    if publication_state != "accepted"
+                        || current_published_version_id != Some(mapped_version_id)
+                    {
+                        anyhow::bail!(
+                            "IMPORT_REUSE_INELIGIBLE: policy version {} must be the current accepted version of policy {}",
+                            mapped_version_id,
+                            policy_id
+                        );
+                    }
+                }
             }
             let effective_policy_version_id = ensure_policy_draft(
                 &mut tx,
@@ -529,23 +578,44 @@ pub async fn commit_foreign_import(
                         rec.source_rule_id
                     )
                 })?;
-            let (relationship, coverage, rationale, provenance) =
-                if rec.mapped_policy_version_id.is_some() {
-                    let (relationship, coverage, rationale) =
-                        inherited_mappings.get(&rec.source_rule_id).ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "IMPORT_REUSE_INELIGIBLE: missing inherited mapping details"
-                            )
-                        })?;
-                    (
-                        relationship.as_str(),
-                        coverage.as_str(),
-                        rationale.as_deref(),
-                        "inherited",
-                    )
-                } else {
-                    ("implements", "full", None, "imported")
-                };
+            // Mapping semantics stay per requirement so a shared policy can
+            // carry a different reviewed relationship/coverage for each
+            // requirement it satisfies (item 13).
+            let (relationship, coverage, rationale, provenance) = if let Some((
+                relationship,
+                coverage,
+                rationale,
+            )) = inherited_mappings.get(&rec.source_rule_id)
+            {
+                (
+                    relationship.as_str(),
+                    coverage.as_str(),
+                    rationale.as_deref(),
+                    "inherited",
+                )
+            } else if rec.mapped_policy_version_id.is_some() {
+                // Exact-technical-match reuse: the mapping is established from
+                // technical candidate matching, so provenance is `inferred`
+                // (the only CHECK-valid value for this origin).
+                let semantics = rec.mapping_semantics.as_ref();
+                let relationship = semantics
+                    .and_then(|s| s.relationship.as_deref())
+                    .filter(|value| {
+                        matches!(
+                            *value,
+                            "implements" | "supports" | "provides_evidence_for"
+                        )
+                    })
+                    .unwrap_or("implements");
+                let coverage = semantics
+                    .and_then(|s| s.coverage.as_deref())
+                    .filter(|value| matches!(*value, "full" | "partial"))
+                    .unwrap_or("full");
+                let rationale = semantics.and_then(|s| s.rationale.as_deref());
+                (relationship, coverage, rationale, "inferred")
+            } else {
+                ("implements", "full", None, "imported")
+            };
             insert_policy_mapping_in_tx(
                 &mut tx,
                 policy_version_id,
@@ -1506,6 +1576,10 @@ mod tests {
                     evidence_requirements: Vec::new(),
                 })
                 .collect(),
+            mapping_semantics: std::collections::HashMap::new(),
+
+            shared_group_decisions: Vec::new(),
+
             bundle: ImportedBundlePlan {
                 name: "Test Import Bundle".into(),
                 framework: "XCCDF-TEST".into(),
@@ -1707,6 +1781,10 @@ mod tests {
                     proof: None,
                 })
                 .collect(),
+            mapping_semantics: std::collections::HashMap::new(),
+
+            shared_group_decisions: Vec::new(),
+
             bundle: ImportedBundlePlan {
                 name: format!("MapExisting STIG bundle {}", Uuid::new_v4()),
                 framework: "DISA STIG".into(),
@@ -2412,6 +2490,10 @@ mod tests {
                     rule_id: "xccdf_test_rule_002".into(),
                 },
             ],
+            mapping_semantics: std::collections::HashMap::new(),
+
+            shared_group_decisions: Vec::new(),
+
             bundle: ImportedBundlePlan {
                 name: "Partial Import Bundle".into(),
                 framework: "XCCDF-TEST".into(),
@@ -3375,131 +3457,392 @@ mod tests {
         assert_eq!(mapped_bundle, Some(new_bundle_version_id));
     }
 
-    #[tokio::test]
-    #[ignore = "requires live database connection"]
-    async fn exact_technical_match_reuse_validates_at_commit() {
-        // This test covers Phase 21 exact technical match workflow:
-        // 1. Brand-new requirement with no prior mapping
-        // 2. Preview finds ExactTechnicalMatch candidate
-        // 3. User selects that policy via MapExisting
-        // 4. Commit revalidates technical equality
-        // 5. Accepted version remains immutable
-        // 6. Derived draft receives mapping
-        // 7. Bundle contains derived draft
-        // 8. Stale/superseded policies are rejected
+    /// Single-rule DISA STIG whose fix text carries explicit NixOS assignments,
+    /// giving the exact-technical-match commit revalidation something
+    /// authoritative to re-derive the technical identity from.
+    fn stig_bytes_with_fix(benchmark_id: &str, vuln_id: &str, title: &str, fix_text: &str) -> Vec<u8> {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="{benchmark_id}">
+  <status>draft</status><title>Exact Match STIG</title><version>V1R1</version>
+  <Rule id="xccdf_test_stig_rule_0"><title>{title}</title><description>Stable requirement {vuln_id}</description><ident system="http://cyber.mil/stigs/stig">{vuln_id}</ident><fix>{fix_text}</fix><check system="urn:test"><check-content>Verify {vuln_id}.</check-content></check></Rule>
+</Benchmark>"#
+        )
+        .into_bytes()
+    }
 
-        let pool = test_pool().await.expect("DATABASE_URL required");
-        let _user_id = Uuid::new_v4();
+    /// Plan mapping every selected rule to one existing policy version with an
+    /// explicit proof and per-requirement reviewed mapping semantics.
+    fn exact_match_plan(
+        pkg: &ProcessedXccdfPackage,
+        policy_version_id: Uuid,
+        proof: Option<MapExistingProof>,
+        semantics: Option<crate::compliance::xccdf::import_models::ImportedMappingSemantics>,
+    ) -> (ValidatedImportPlan, Vec<ImportedPolicyRecord>) {
+        use crate::compliance::xccdf::import_models::{
+            ImportedBundlePlan, XccdfImportPlan, XccdfRuleImportAction,
+        };
+        use crate::compliance::xccdf::importer::validate_import_plan;
 
-        // Create an existing accepted policy with a known NixOS configuration.
-        // This simulates a pre-existing policy that matches a STIG requirement's enforcement.
-        let existing_policy_id = Uuid::new_v4();
-        let existing_policy_version_id = Uuid::new_v4();
+        let rule_ids: Vec<String> = pkg
+            .parsed
+            .rules
+            .iter()
+            .map(|rule| rule.id.clone())
+            .collect();
+        let plan = XccdfImportPlan {
+            expected_sha256: pkg.provenance.sha256.clone(),
+            selected_profile_id: None,
+            selected_rule_ids: rule_ids.clone(),
+            rule_actions: rule_ids
+                .iter()
+                .map(|rule_id| XccdfRuleImportAction::MapExisting {
+                    rule_id: rule_id.clone(),
+                    policy_version_id,
+                    proof,
+                })
+                .collect(),
+            mapping_semantics: semantics
+                .map(|s| {
+                    rule_ids
+                        .iter()
+                        .map(|id| (id.clone(), s.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            shared_group_decisions: Vec::new(),
+            bundle: ImportedBundlePlan {
+                name: format!("ExactMatch STIG bundle {}", Uuid::new_v4()),
+                framework: "DISA STIG".into(),
+                version: "test".into(),
+                layer: Some("os".into()),
+                owner: Some("Security Team".into()),
+                description: None,
+            },
+        };
+        let validated = validate_import_plan(plan, &pkg.parsed).expect("valid exact match plan");
+        let records = build_policy_records(&validated);
+        (validated, records)
+    }
 
-        // Insert policy lineage
+    /// Create an accepted, currently-published policy whose flat config
+    /// implements the given NixOS option assignments.  This simulates any
+    /// policy established by an earlier import from a different framework.
+    /// Policy names are randomized to avoid unique constraint violations across test runs.
+    async fn insert_published_technical_policy(
+        pool: &PgPool,
+        policy_name_base: &str,
+        config: serde_json::Value,
+    ) -> (Uuid, Uuid) {
+        // Note: this must be called from an async context and the caller should pass user_id
+        // For now, use a placeholder that violates the FK but can be fixed by the test helper
+        let trusted_user_id = ensure_test_user(pool).await;
+        let policy_id = Uuid::new_v4();
+        let policy_version_id = Uuid::new_v4();
+        let policy_name = format!("{}-{}", policy_name_base, Uuid::new_v4().simple());
         sqlx::query(
             "INSERT INTO deployment_policies (id, name, description, policy_type) \
              VALUES ($1, $2, $3, $4)",
         )
-        .bind(existing_policy_id)
-        .bind("existing-ssh-hardening")
-        .bind("SSH hardening policy")
+        .bind(policy_id)
+        .bind(&policy_name)
+        .bind(format!("{policy_name} technical enforcement"))
         .bind("native")
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
-
-        // Insert policy version with config matching SSH disable + PermitRootLogin
-        let policy_config = serde_json::json!({
-            "services.openssh.enable": false,
-            "services.openssh.settings.PermitRootLogin": "no"
-        });
+        // Insert version in draft state (required by trigger guard_version_insert_state)
         sqlx::query(
             "INSERT INTO deployment_policy_versions \
-             (id, policy_id, name, config, semantic_digest, publication_state, trust_state, \
-              implementation_state, execution_phase) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             (id, policy_id, version, publication_state, name, policy_type, \
+              implementation_state, execution_phase, config, compliance_metadata, \
+              dependencies, semantic_digest, digest_algorithm) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
-        .bind(existing_policy_version_id)
-        .bind(existing_policy_id)
-        .bind("v1.0")
-        .bind(&policy_config)
-        .bind("test-digest")
-        .bind("accepted")
-        .bind("trusted")
+        .bind(policy_version_id)
+        .bind(policy_id)
+        .bind("1.0")
+        .bind("draft")
+        .bind(&policy_name)
+        .bind("native")
         .bind("native")
         .bind("deploy")
-        .execute(&pool)
+        .bind(&config)
+        .bind(serde_json::json!({}))
+        .bind(serde_json::json!([]))
+        .bind("test-digest")
+        .bind("sha-256")
+        .execute(pool)
         .await
         .unwrap();
+        
+        // Publish the version so it becomes the current published version
+         // First mark as trusted
+         sqlx::query(
+             "UPDATE deployment_policy_versions SET trust_state = 'trusted', trusted_by = $2, \
+              trusted_at = CURRENT_TIMESTAMP WHERE id = $1",
+         )
+         .bind(policy_version_id)
+         .bind(trusted_user_id)
+         .execute(pool)
+         .await
+         .unwrap();
+         
+         // Then mark as accepted AND update pointer in same transaction
+         // (trigger validate_policy_lineage_pointer_after_state_change requires this)
+         let mut tx = pool.begin().await.unwrap();
+         sqlx::query(
+             "UPDATE deployment_policy_versions SET publication_state = 'accepted', \
+              published_at = CURRENT_TIMESTAMP WHERE id = $1",
+         )
+         .bind(policy_version_id)
+         .execute(&mut *tx)
+         .await
+         .unwrap();
+         
+         sqlx::query(
+             "UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2",
+         )
+         .bind(policy_version_id)
+         .bind(policy_id)
+         .execute(&mut *tx)
+         .await
+         .unwrap();
+         
+         tx.commit().await.unwrap();
+        (policy_id, policy_version_id)
+    }
 
-        // Set it as current published version
-        sqlx::query(
-            "UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2",
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn exact_technical_match_end_to_end_commit() {
+        // Phase 21 end-to-end: a brand-new requirement with no prior mapping
+        // whose exact technical match was found at preview, selected via
+        // MapExisting + ExactTechnicalMatch proof, and committed through
+        // commit_foreign_import.  The proof is revalidated from the parsed
+        // rule's authoritative fix text inside the import transaction.
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+
+        let ssh_config = serde_json::json!({
+            "services.openssh.enable": false,
+            "services.openssh.settings.PermitRootLogin": "no",
+        });
+        let (_existing_policy_id, existing_policy_version_id) =
+            insert_published_technical_policy(&pool, "existing-ssh-hardening", ssh_config).await;
+
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_Exact_Match_End_To_End_{}",
+            Uuid::new_v4().simple()
+        );
+        let fix_text = "services.openssh.enable = false;\nservices.openssh.settings.PermitRootLogin = \"no\";";
+        let pkg = make_package(stig_bytes_with_fix(
+            &benchmark_id,
+            "V-418-101",
+            "SSH root login must be disabled",
+            fix_text,
+        ));
+
+        let semantics = crate::compliance::xccdf::import_models::ImportedMappingSemantics {
+            relationship: Some("supports".into()),
+            coverage: Some("partial".into()),
+            rationale: Some("independent reviewed rationale".into()),
+        };
+        let (validated, records) = exact_match_plan(
+            &pkg,
+            existing_policy_version_id,
+            Some(MapExistingProof::ExactTechnicalMatch),
+            Some(semantics),
+        );
+
+        let result = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("exact technical match commit should succeed");
+
+        // Nothing new was created; the reuse path derived a mutable draft.
+        assert_eq!(result.created_policy_count, 0);
+        assert_eq!(result.created_policy_lineages, 0);
+        assert_eq!(result.created_policy_versions, 0);
+        assert_eq!(result.reused_policy_versions, 1);
+
+        // The bundle contains the derived draft (one member), not the accepted
+        // published version, which must remain untouched.
+        let members: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT policy_version_id FROM compliance_bundle_version_policies \
+             WHERE bundle_version_id = $1",
+        )
+        .bind(result.bundle_version_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(members.len(), 1);
+        let effective_draft = members[0];
+        assert_ne!(effective_draft, existing_policy_version_id);
+
+        let published_state: String = sqlx::query_scalar(
+            "SELECT publication_state FROM deployment_policy_versions WHERE id = $1",
         )
         .bind(existing_policy_version_id)
-        .bind(existing_policy_id)
-        .execute(&pool)
+        .fetch_one(&pool)
         .await
         .unwrap();
+        assert_eq!(published_state, "accepted");
 
-        // Test revalidation at commit time: verify the validation function works
-        use crate::compliance::xccdf::exact_technical_match::revalidate_exact_technical_match;
+        // The derived draft carries the independent, per-requirement reviewed
+        // mapping semantics with inferred provenance (technical candidate origin).
+        let mapping: (String, String, Option<String>, String, String) = sqlx::query_as(
+            "SELECT relationship, coverage, rationale, provenance, trust_state \
+             FROM policy_requirement_mappings WHERE policy_version_id = $1",
+        )
+        .bind(effective_draft)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(mapping.0, "supports");
+        assert_eq!(mapping.1, "partial");
+        assert_eq!(mapping.2.as_deref(), Some("independent reviewed rationale"));
+        assert_eq!(mapping.3, "inferred");
+        assert_eq!(mapping.4, "trusted");
 
-        // Test case 1: Matching enforcement should pass validation
-        let fix_text = "services.openssh.enable = false;\nservices.openssh.settings.PermitRootLogin = \"no\";";
-        let validation = revalidate_exact_technical_match(&pool, existing_policy_version_id, fix_text)
-            .await
-            .expect("validation should succeed");
+        // Source mapping points at the effective draft.
+        let mapped_rule: Uuid = sqlx::query_scalar(
+            "SELECT policy_version_id FROM compliance_source_object_mappings \
+             WHERE source_artifact_id = $1 AND object_kind = 'rule'",
+        )
+        .bind(result.source_artifact_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(mapped_rule, effective_draft);
 
-        match validation {
-            crate::compliance::xccdf::exact_technical_match::ExactTechnicalMatchValidation::Valid {
-                policy_version_id,
-                ..
-            } => {
-                assert_eq!(policy_version_id, existing_policy_version_id);
-            }
-            crate::compliance::xccdf::exact_technical_match::ExactTechnicalMatchValidation::Invalid {
-                code,
-                message,
-            } => {
-                panic!("revalidation failed: {} - {}", code, message);
-            }
-        }
+        // Requirement baseline membership exists for the one imported rule.
+        let requirement_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_bundle_version_requirements \
+             WHERE bundle_version_id = $1",
+        )
+        .bind(result.bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(requirement_count, 1);
+    }
 
-        // Test case 2: Mismatched enforcement should be rejected
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn exact_technical_match_end_to_end_mismatch_rolls_back() {
+        // A stale or mismatched enforcement must abort the whole import: the
+        // policy config no longer implements what the authoritative fix text
+        // demands, so nothing may be written (no partial import).
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+
+        let ssh_config = serde_json::json!({
+            "services.openssh.enable": false,
+            "services.openssh.settings.PermitRootLogin": "no",
+        });
+        let (_existing_policy_id, existing_policy_version_id) =
+            insert_published_technical_policy(&pool, "existing-ssh-hardening", ssh_config).await;
+
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_Exact_Match_Mismatch_{}",
+            Uuid::new_v4().simple()
+        );
+        // Authoritative fix text now demands the opposite enforcement.
         let mismatched_fix_text =
             "services.openssh.enable = true;\nservices.openssh.settings.PermitRootLogin = \"yes\";";
-        let stale_validation = revalidate_exact_technical_match(&pool, existing_policy_version_id, mismatched_fix_text)
+        let pkg = make_package(stig_bytes_with_fix(
+            &benchmark_id,
+            "V-418-102",
+            "SSH root login must be disabled",
+            mismatched_fix_text,
+        ));
+        let (validated, records) = exact_match_plan(
+            &pkg,
+            existing_policy_version_id,
+            Some(MapExistingProof::ExactTechnicalMatch),
+            None,
+        );
+        let bundle_name = validated.bundle.name.clone();
+        let source_sha256 = pkg.provenance.sha256.clone();
+
+        let err = commit_foreign_import(&pool, user_id, pkg, validated, records)
             .await
-            .expect("validation should return Invalid, not error");
+            .expect_err("mismatched enforcement must be rejected");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("IMPORT_REUSE_INELIGIBLE"),
+            "unexpected error: {message}"
+        );
 
-        match stale_validation {
-            crate::compliance::xccdf::exact_technical_match::ExactTechnicalMatchValidation::Valid { .. } => {
-                panic!("revalidation should have failed for mismatched enforcement");
-            }
-            crate::compliance::xccdf::exact_technical_match::ExactTechnicalMatchValidation::Invalid {
-                code,
-                ..
-            } => {
-                assert_eq!(code, "IMPORT_REUSE_INELIGIBLE");
-            }
-        }
+        // The entire transaction rolled back: no bundle lineage, no source
+        // artifact, and no mapping for the reused policy version.
+        let bundle_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundles WHERE name = $1")
+                .bind(&bundle_name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(bundle_count, 0);
+        let artifact_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1",
+        )
+        .bind(&source_sha256)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(artifact_count, 0);
+        let mapping_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM policy_requirement_mappings WHERE policy_version_id = $1",
+        )
+        .bind(existing_policy_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(mapping_count, 0);
+    }
 
-        // Test case 3: Nonexistent policy should be rejected
-        let fake_policy_id = Uuid::new_v4();
-        let fake_validation = revalidate_exact_technical_match(&pool, fake_policy_id, fix_text)
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn exact_technical_match_end_to_end_missing_policy_rolls_back() {
+        // Mapping onto a policy version that no longer exists must fail the
+        // commit cleanly, leaving no bundle behind.
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_Exact_Match_Missing_{}",
+            Uuid::new_v4().simple()
+        );
+        let fix_text = "services.openssh.enable = false;";
+        let pkg = make_package(stig_bytes_with_fix(
+            &benchmark_id,
+            "V-418-103",
+            "SSH service must be disabled",
+            fix_text,
+        ));
+        let (validated, records) = exact_match_plan(
+            &pkg,
+            Uuid::new_v4(),
+            Some(MapExistingProof::ExactTechnicalMatch),
+            None,
+        );
+        let bundle_name = validated.bundle.name.clone();
+
+        let err = commit_foreign_import(&pool, user_id, pkg, validated, records)
             .await
-            .expect("validation should return Invalid");
+            .expect_err("missing target policy must be rejected");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("IMPORT_POLICY_VERSION_NOT_FOUND"),
+            "unexpected error: {message}"
+        );
 
-        match fake_validation {
-            crate::compliance::xccdf::exact_technical_match::ExactTechnicalMatchValidation::Invalid {
-                code,
-                ..
-            } => {
-                assert_eq!(code, "IMPORT_REUSE_INELIGIBLE");
-            }
-            _ => panic!("should reject nonexistent policy"),
-        }
+        let bundle_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundles WHERE name = $1")
+                .bind(&bundle_name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(bundle_count, 0);
     }
 }

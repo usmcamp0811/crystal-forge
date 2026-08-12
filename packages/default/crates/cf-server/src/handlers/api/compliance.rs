@@ -3924,16 +3924,13 @@ async fn compute_foreign_stig_reconciliation(
         rule_technical_identities.push((rule.id.clone(), technical_identity));
     }
 
-    // Detect shared groups
+    // Detect shared groups (server-side only; the client never derives grouping).
     let shared_groups = detect_shared_implementations(rule_technical_identities.clone());
 
-    // Build a map of rule_id -> shared_group for quick lookup
-    let mut rule_to_group_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for (group_idx, group) in shared_groups.iter().enumerate() {
-        for req_key in &group.requirement_keys {
-            rule_to_group_map.insert(req_key.clone(), group_idx);
-        }
-    }
+    // Per-rule candidate sets keyed by rule ID, retained so shared groups can
+    // compute the common candidate intersection (item 4/5) without re-querying.
+    let mut rule_candidates: std::collections::HashMap<String, Vec<crate::compliance::requirement_model::PolicyCandidate>> =
+        std::collections::HashMap::new();
 
     let mut rows = Vec::with_capacity(parsed.rules.len());
     for (rule, requirement) in parsed.rules.iter().zip(reconciliation.requirements.iter()) {
@@ -3955,6 +3952,7 @@ async fn compute_foreign_stig_reconciliation(
         )
         .await
         .map_err(|error| format!("failed to find policy candidates: {error}"))?;
+        rule_candidates.insert(rule.id.clone(), candidates.clone());
         let inferred_enforcement = rule
             .fix
             .as_ref()
@@ -3995,6 +3993,37 @@ async fn compute_foreign_stig_reconciliation(
         }));
     }
 
+    // Join shared groups with per-requirement candidates: a group may recommend
+    // one existing policy only when the exact same policy version is a valid
+    // candidate for every participating requirement.
+    let mut shared_groups = shared_groups;
+    for group in &mut shared_groups {
+        let common = crate::compliance::shared_implementation::common_shared_candidate(
+            &rule_candidates,
+            &group.requirement_keys,
+        );
+        if let Some(candidate) = &common {
+            // Per-member reuse evidence: each member may reach the common
+            // version through a different proof. The group does not collapse
+            // these into one group-wide proof.
+            for rule_id in &group.requirement_keys {
+                if let Some(list) = rule_candidates.get(rule_id) {
+                    if let Some(c) = list.iter().find(|c| c.policy_version_id == candidate.policy_version_id) {
+                        use crate::compliance::xccdf::import_models::MapExistingProof;
+                        use crate::compliance::requirement_model::PolicyCandidateMatchType;
+                        let proof = match c.match_type {
+                            PolicyCandidateMatchType::ExactTechnicalMatch => MapExistingProof::ExactTechnicalMatch,
+                            PolicyCandidateMatchType::AuthoritativeMapping | PolicyCandidateMatchType::InheritedMapping => MapExistingProof::InheritedMapping,
+                            PolicyCandidateMatchType::RelatedMapping | PolicyCandidateMatchType::FuzzySimilarity => continue,
+                        };
+                        group.member_proofs.insert(rule_id.clone(), proof);
+                    }
+                }
+            }
+        }
+        group.existing_policy_candidate = common;
+    }
+
     // Build shared groups response
     let shared_groups_response: Vec<serde_json::Value> = shared_groups.iter().map(|group| {
         let recommended_action = recommend_action(group);
@@ -4003,19 +4032,34 @@ async fn compute_foreign_stig_reconciliation(
             SharedImplementationAction::CreateShared => "create_shared",
             SharedImplementationAction::ReviewIndividually => "review_individually",
         };
-        
+        let member_proofs: serde_json::Map<String, serde_json::Value> = group
+            .member_proofs
+            .iter()
+            .map(|(rule_id, proof)| {
+                (
+                    rule_id.clone(),
+                    serde_json::json!(match proof {
+                        crate::compliance::xccdf::import_models::MapExistingProof::InheritedMapping => "inherited_mapping",
+                        crate::compliance::xccdf::import_models::MapExistingProof::ExactTechnicalMatch => "exact_technical_match",
+                    }),
+                )
+            })
+            .collect();
+
         serde_json::json!({
             "group_id": group.group_id.technical_hash,
             "requirement_keys": group.requirement_keys,
             "recommended_action": action_str,
             "has_existing_candidate": group.existing_policy_candidate.is_some(),
-            "existing_candidate": group.existing_policy_candidate.as_ref().map(|(policy_id, name, confidence)| {
+            "existing_candidate": group.existing_policy_candidate.as_ref().map(|c| {
                 serde_json::json!({
-                    "policy_id": policy_id,
-                    "policy_name": name,
-                    "confidence": confidence,
+                    "policy_id": c.policy_id,
+                    "policy_version_id": c.policy_version_id,
+                    "policy_name": c.policy_name,
+                    "confidence": c.confidence,
                 })
             }),
+            "member_proofs": member_proofs,
         })
     }).collect();
 

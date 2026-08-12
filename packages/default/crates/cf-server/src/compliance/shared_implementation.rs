@@ -6,11 +6,21 @@
 //!
 //! This reduces duplicate policies when a compliance framework has multiple
 //! rules requiring the same system configuration.
+//!
+//! A shared group is a *reconciliation recommendation about implementation
+//! reuse*. It never merges the requirements themselves: requirements remain
+//! distinct authoritative compliance objects, each with its own mapping
+//! semantics, and the group only describes which policy satisfies them.
 
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use uuid::Uuid;
 
+use crate::compliance::requirement_model::PolicyCandidate;
 use crate::compliance::xccdf::exact_technical_match::RequirementTechnicalIdentity;
+use crate::compliance::xccdf::import_models::{
+    ImportedPolicyRecord, MapExistingProof, SharedGroupAction, SharedGroupDecision,
+};
 
 /// Stable identity for a shared technical implementation group.
 ///
@@ -28,7 +38,7 @@ impl SharedImplementationId {
     ///
     /// Uses SHA-256 hash of canonical JSON representation of enforced options.
     pub fn from_technical_identity(identity: &RequirementTechnicalIdentity) -> Self {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
 
         // Create a deterministic string representation for hashing.
         let canonical_json = serde_json::to_string(&identity.enforced_options)
@@ -42,6 +52,20 @@ impl SharedImplementationId {
     }
 }
 
+/// An exact immutable policy version that can satisfy every member of a
+/// shared implementation group.
+///
+/// The reusable object is a policy *version*, not a lineage: two members may
+/// only share a candidate when the exact same `policy_version_id` is eligible
+/// for each of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedPolicyCandidate {
+    pub policy_id: Uuid,
+    pub policy_version_id: Uuid,
+    pub policy_name: String,
+    pub confidence: u8,
+}
+
 /// A group of imported requirements sharing identical normalized technical enforcement.
 #[derive(Debug, Clone)]
 pub struct SharedImplementationGroup {
@@ -51,8 +75,13 @@ pub struct SharedImplementationGroup {
     pub technical_identity: RequirementTechnicalIdentity,
     /// Requirement canonical keys that share this enforcement.
     pub requirement_keys: Vec<String>,
-    /// Whether an existing accepted policy can satisfy all requirements in this group.
-    pub existing_policy_candidate: Option<(Uuid, String, u8)>, // (policy_id, name, confidence)
+    /// An existing policy version that is a valid candidate for *every* member.
+    /// `None` when no single exact policy version is common to all members.
+    pub existing_policy_candidate: Option<SharedPolicyCandidate>,
+    /// Per-member reuse evidence for `existing_policy_candidate`.
+    /// Each member may reach the common candidate through a different proof;
+    /// the group does not collapse those into one group-wide proof.
+    pub member_proofs: HashMap<String, MapExistingProof>,
     /// Recommended action for this group.
     pub action: SharedImplementationAction,
 }
@@ -118,11 +147,81 @@ pub fn detect_shared_implementations(
                 group_id,
                 technical_identity,
                 requirement_keys,
-                existing_policy_candidate: None, // Will be filled by caller
+                existing_policy_candidate: None, // Filled by caller via candidate intersection
+                member_proofs: HashMap::new(),   // Filled by caller per member
                 action: SharedImplementationAction::ReviewIndividually, // Default; will be refined
             })
         })
         .collect()
+}
+
+/// Compute the common existing-policy candidate for a shared group.
+///
+/// A shared group may recommend one existing policy only if the **same exact
+/// policy version** is a valid candidate for every participating requirement.
+///
+/// Candidate sets are keyed by `policy_version_id` per requirement; the
+/// common candidate is the version present in every member's set. When no
+/// single version is common to all members, returns `None` (the group should
+/// fall back to `CreateShared` even if individual members have unrelated
+/// candidates).
+///
+/// # Arguments
+/// - `member_candidates`: candidate list for each member, keyed by rule ID.
+///   Rules absent from the map are treated as having no candidates.
+/// - `member_rule_ids`: the rules belonging to the group.
+pub fn common_shared_candidate(
+    member_candidates: &HashMap<String, Vec<PolicyCandidate>>,
+    member_rule_ids: &[String],
+) -> Option<SharedPolicyCandidate> {
+    // Build per-requirement candidate sets keyed by exact policy version.
+    let mut version_sets: Vec<HashMap<Uuid, &PolicyCandidate>> = Vec::new();
+    for rule_id in member_rule_ids {
+        let candidates = member_candidates.get(rule_id);
+        let set: HashMap<Uuid, &PolicyCandidate> = match candidates {
+            Some(list) => list.iter().map(|c| (c.policy_version_id, c)).collect(),
+            None => HashMap::new(),
+        };
+        version_sets.push(set);
+    }
+
+    // Intersection across all members.
+    let mut common: HashMap<Uuid, &PolicyCandidate> = HashMap::new();
+    for (version_id, candidate) in &version_sets[0] {
+        if version_sets
+            .iter()
+            .all(|set| set.contains_key(version_id))
+        {
+            common.insert(*version_id, *candidate);
+        }
+    }
+
+    // Deterministic pick: highest total confidence across members, then lowest
+    // version UUID as tie-breaker.
+    common
+        .into_iter()
+        .max_by(|(v1, c1), (v2, c2)| {
+            let conf1 = total_confidence(&version_sets, v1);
+            let conf2 = total_confidence(&version_sets, v2);
+            conf1.cmp(&conf2).then_with(|| c2.policy_version_id.cmp(&c1.policy_version_id))
+        })
+        .map(|(version_id, candidate)| SharedPolicyCandidate {
+            policy_id: candidate.policy_id,
+            policy_version_id: version_id,
+            policy_name: candidate.policy_name.clone(),
+            confidence: candidate.confidence,
+        })
+}
+
+fn total_confidence(
+    version_sets: &[HashMap<Uuid, &PolicyCandidate>],
+    version_id: &Uuid,
+) -> u32 {
+    version_sets
+        .iter()
+        .filter_map(|set| set.get(version_id))
+        .map(|c| c.confidence as u32)
+        .sum()
 }
 
 /// Filter requirements and group ID to remove breakouts.
@@ -208,108 +307,207 @@ pub fn validate_shared_group_at_commit(
 ///
 /// Used during the import commit phase to create a single policy that
 /// satisfies multiple requirements with identical technical enforcement.
+///
+/// The policy is built from *technical behavior*, never from the first member
+/// requirement's framework metadata. Requirement identity and per-requirement
+/// mapping semantics live in `policy_requirement_mappings`; the reusable policy
+/// itself stays framework-neutral.
 #[derive(Debug, Clone)]
 pub struct SharedPolicyCreationParams {
-    /// Stable policy ID (generated from group ID to ensure determinism)
+    /// New policy lineage ID.
     pub policy_id: Uuid,
-    /// Shared policy version ID
+    /// New policy version ID.
     pub policy_version_id: Uuid,
-    /// User-readable name derived from requirements and technical identity
+    /// Human-readable name derived from the technical enforcement.
     pub name: String,
-    /// Description of the shared enforcement
+    /// Description of the shared enforcement.
     pub description: String,
-    /// Policy config (Nix options normalized from technical identity)
+    /// Policy config built from the normalized technical identity.
     pub config: Value,
-    /// Compliance metadata (JSON encoding group membership)
-    pub compliance_metadata: Value,
-    /// Requirements (keys) that share this policy
+    /// Requirements (keys) that share this policy.
     pub requirement_keys: Vec<String>,
 }
 
 /// Generate policy IDs for shared implementations.
 ///
-/// Note: IDs are generated randomly at preview time; the stable group identity
-/// persists in the group_id field which is stored in the database.
-/// At commit time, the group_id is re-validated against authoritative source bytes.
+/// IDs are freshly generated per commit. Determinism/idempotency is provided
+/// by the transaction boundary, source-artifact identity, requirement
+/// reconciliation, and persisted mappings — not by the policy UUID itself.
 pub fn generate_shared_policy_ids(_group: &SharedImplementationGroup) -> (Uuid, Uuid) {
-    // Generate fresh UUIDs for each shared policy
-    // Stability comes from persistent storage of group_id and revalidation at commit
-    let policy_id = Uuid::new_v4();
-    let version_id = Uuid::new_v4();
-    
-    (policy_id, version_id)
+    (Uuid::new_v4(), Uuid::new_v4())
 }
 
-/// A shared policy to be created at commit time, along with its associated requirements.
+// ── Import policy resolution plan ─────────────────────────────────────────────
+
+/// Explicit resolution outcome for exactly one imported requirement.
 ///
-/// Used internally during commit_foreign_import to track which requirements
-/// should be mapped to the same policy lineage.
+/// Every imported requirement that needs a policy has exactly one of these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyResolution {
+    /// Reuse an existing policy version (MapExisting action).
+    ReuseExisting {
+        selected_policy_version_id: Uuid,
+    },
+    /// Create one new shared policy for a group of requirements.
+    CreateShared {
+        group_id: SharedImplementationId,
+    },
+    /// Create an individual policy for a single requirement record.
+    CreateIndividual {
+        record_index: usize,
+    },
+}
+
+/// A new shared policy to create for one shared-implementation decision.
 #[derive(Debug, Clone)]
-pub struct SharedPolicyCommitRecord {
-    /// Policy lineage ID
+pub struct SharedCreation {
     pub policy_id: Uuid,
-    /// Policy version ID
     pub policy_version_id: Uuid,
-    /// Requirement keys (rule IDs) that map to this policy
+    /// Rule IDs that map to this shared policy.
     pub requirement_keys: Vec<String>,
-    /// Group identity (for revalidation)
+    /// Group identity re-derived from authoritative source at commit time.
     pub group_id: SharedImplementationId,
 }
 
-/// Identify which policy_records belong to shared groups that need to be created.
-///
-/// Called at commit time (after detecting shared groups from authoritative source)
-/// to partition the policy_records into:
-/// - Records that share implementation (will map to one new shared policy)
-/// - Records that stand alone (will each get their own policy)
-///
-/// Shared groups only trigger when:
-/// - Multiple records have identical technical identity
-/// - No existing accepted policy covers all members
-///
-/// Returns (shared_groups_to_create, individual_policy_record_indices)
-pub fn partition_shared_and_individual_policies(
-    groups: &[SharedImplementationGroup],
-    policy_records: &[crate::compliance::xccdf::import_models::ImportedPolicyRecord],
-    rule_to_record_idx: &std::collections::HashMap<String, usize>,
-) -> (Vec<SharedPolicyCommitRecord>, Vec<usize>) {
-    let mut shared_records: Vec<SharedPolicyCommitRecord> = Vec::new();
-    let mut shared_rule_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+/// A group of requirements reusing one existing policy version.
+#[derive(Debug, Clone)]
+pub struct SharedReuse {
+    pub selected_policy_version_id: Uuid,
+    pub requirement_keys: Vec<String>,
+}
 
-    for group in groups {
-        if group.existing_policy_candidate.is_some() {
-            // Existing policy covers all members; don't create new shared policy
+/// Complete resolution plan for the foreign import commit.
+///
+/// Every non-excluded requirement record has exactly one entry in
+/// `rule_resolutions`; `rule_to_policy_version` is derived from this plan
+/// after policy creation/reuse resolution.
+#[derive(Debug, Clone, Default)]
+pub struct ImportPolicyResolutionPlan {
+    pub shared_creations: Vec<SharedCreation>,
+    pub shared_reuses: Vec<SharedReuse>,
+    pub individual_creations: Vec<usize>,
+    /// rule_id -> selected published version for MapExisting actions.
+    pub individual_reuses: HashMap<String, Uuid>,
+    /// Every imported requirement that needs a policy has exactly one entry.
+    pub rule_resolutions: HashMap<String, PolicyResolution>,
+}
+
+/// Build the import policy resolution plan from user decisions and records.
+///
+/// The plan is pure (no I/O) so it can be unit tested with real records.
+///
+/// Rules:
+/// - Every record with `mapped_policy_version_id` (MapExisting) resolves to
+///   `ReuseExisting` with that exact version.
+/// - Every rule listed in a `CreateShared` decision resolves to one shared
+///   creation for that decision (all listed rules share one new policy).
+/// - Every other record resolves to an individual creation.
+///
+/// # Errors
+/// - `IMPORT_SHARED_IMPLEMENTATION_STALE` when a CreateShared decision lists a
+///   rule that is not in the import records, or lists a rule whose record is a
+///   MapExisting reuse (contradictory decision).
+pub fn build_import_policy_resolution_plan(
+    shared_decisions: &[SharedGroupDecision],
+    policy_records: &[ImportedPolicyRecord],
+) -> Result<ImportPolicyResolutionPlan, String> {
+    use crate::compliance::xccdf::import_models::SharedGroupAction;
+
+    let mut plan = ImportPolicyResolutionPlan::default();
+
+    // Rule -> record index lookup.
+    let rule_to_index: HashMap<&str, usize> = policy_records
+        .iter()
+        .enumerate()
+        .map(|(idx, rec)| (rec.source_rule_id.as_str(), idx))
+        .collect();
+
+    // 1. Process CreateShared decisions first.
+    for decision in shared_decisions {
+        if decision.action != SharedGroupAction::CreateShared {
             continue;
         }
+        if decision.rule_ids.len() < 2 {
+            // Degenerate "shared" decision: the single member follows its own
+            // individual action below.
+            continue;
+        }
+        // Validate every listed rule exists and is a create-native record.
+        let mut requirement_keys = Vec::with_capacity(decision.rule_ids.len());
+        for rule_id in &decision.rule_ids {
+            let Some(&idx) = rule_to_index.get(rule_id.as_str()) else {
+                return Err(format!(
+                    "IMPORT_SHARED_IMPLEMENTATION_STALE: shared decision lists rule {} \
+                     which is not present in the import",
+                    rule_id
+                ));
+            };
+            let rec = &policy_records[idx];
+            if rec.mapped_policy_version_id.is_some() {
+                return Err(format!(
+                    "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} has a MapExisting reuse \
+                     but is listed in a CreateShared group decision",
+                    rule_id
+                ));
+            }
+            requirement_keys.push(rule_id.clone());
+        }
 
-        // Create one shared policy for this group
-        let (policy_id, version_id) = generate_shared_policy_ids(group);
-        shared_records.push(SharedPolicyCommitRecord {
+        let (policy_id, policy_version_id) = (Uuid::new_v4(), Uuid::new_v4());
+        let group_id = SharedImplementationId {
+            technical_hash: decision.group_id.clone(),
+        };
+        for rule_id in &requirement_keys {
+            plan.rule_resolutions.insert(
+                rule_id.clone(),
+                PolicyResolution::CreateShared {
+                    group_id: group_id.clone(),
+                },
+            );
+        }
+        plan.shared_creations.push(SharedCreation {
             policy_id,
-            policy_version_id: version_id,
-            requirement_keys: group.requirement_keys.clone(),
-            group_id: group.group_id.clone(),
+            policy_version_id,
+            requirement_keys,
+            group_id,
         });
+    }
 
-        for req_key in &group.requirement_keys {
-            shared_rule_ids.insert(req_key.clone());
+    // 2. MapExisting records -> reuse.
+    for (idx, rec) in policy_records.iter().enumerate() {
+        if let Some(version_id) = rec.mapped_policy_version_id {
+            if plan
+                .rule_resolutions
+                .contains_key(&rec.source_rule_id)
+            {
+                // Already covered by a CreateShared decision; the contradiction
+                // was rejected above, so this should not happen.
+                continue;
+            }
+            plan.individual_reuses
+                .insert(rec.source_rule_id.clone(), version_id);
+            plan.rule_resolutions.insert(
+                rec.source_rule_id.clone(),
+                PolicyResolution::ReuseExisting {
+                    selected_policy_version_id: version_id,
+                },
+            );
         }
     }
 
-    // Individual records are those NOT in any shared group
-    let individual_indices: Vec<usize> = policy_records
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, rec)| {
-            if shared_rule_ids.contains(&rec.source_rule_id) {
-                None
-            } else {
-                Some(idx)
-            }
-        })
-        .collect();
+    // 3. Everything else -> individual creation.
+    for (idx, rec) in policy_records.iter().enumerate() {
+        if plan.rule_resolutions.contains_key(&rec.source_rule_id) {
+            continue;
+        }
+        plan.individual_creations.push(idx);
+        plan.rule_resolutions.insert(
+            rec.source_rule_id.clone(),
+            PolicyResolution::CreateIndividual { record_index: idx },
+        );
+    }
 
-    (shared_records, individual_indices)
+    Ok(plan)
 }
 
 #[cfg(test)]
@@ -324,6 +522,50 @@ mod tests {
         }
         RequirementTechnicalIdentity {
             enforced_options: map,
+        }
+    }
+
+    fn make_group(keys: &[&str], candidate: Option<SharedPolicyCandidate>) -> SharedImplementationGroup {
+        let identity = identity_from_options(&[("services.openssh.enable", "false")]);
+        SharedImplementationGroup {
+            group_id: SharedImplementationId::from_technical_identity(&identity),
+            technical_identity: identity,
+            requirement_keys: keys.iter().map(|k| k.to_string()).collect(),
+            existing_policy_candidate: candidate,
+            member_proofs: HashMap::new(),
+            action: SharedImplementationAction::ReviewIndividually,
+        }
+    }
+
+    fn make_record(
+        rule_id: &str,
+        implementation_state: &str,
+        mapped_version: Option<Uuid>,
+    ) -> ImportedPolicyRecord {
+        ImportedPolicyRecord {
+            policy_id: Uuid::new_v4(),
+            policy_version_id: Uuid::new_v4(),
+            source_rule_id: rule_id.to_string(),
+            source_rule_order: 0,
+            implementation_state: implementation_state.to_string(),
+            policy_type: "imported_xccdf".to_string(),
+            version: None,
+            execution_phase: "not-applicable".to_string(),
+            config: serde_json::json!({}),
+            dependencies: serde_json::json!([]),
+            enabled_by_default: false,
+            portable: false,
+            semantic_digest: None,
+            selected: true,
+            policy_order: 0,
+            name: rule_id.to_string(),
+            description: None,
+            compliance_metadata: serde_json::json!({}),
+            opaque_xml: None,
+            mapped_policy_version_id: mapped_version,
+            mapped_policy_proof: None,
+            mapping_semantics: None,
+            evidence_requirements: Vec::new(),
         }
     }
 
@@ -436,18 +678,11 @@ mod tests {
         assert_eq!(id1, id2, "group IDs should be deterministic");
     }
 
-    #[test]
+#[test]
     fn test_remove_from_shared_group() {
         use super::remove_from_shared_group;
-        
-        let group = SharedImplementationGroup {
-            group_id: SharedImplementationId { technical_hash: "test".to_string() },
-            technical_identity: identity_from_options(&[("services.openssh.enable", "false")]),
-            requirement_keys: vec!["V-111".to_string(), "V-222".to_string(), "V-333".to_string()],
-            existing_policy_candidate: None,
-            action: SharedImplementationAction::ReviewIndividually,
-        };
 
+        let group = make_group(&["V-111", "V-222", "V-333"], None);
         let (remaining_group, breakout) = remove_from_shared_group(group, "V-222");
         assert_eq!(breakout, "V-222");
         assert!(remaining_group.is_some(), "group should remain with 2 requirements");
@@ -457,15 +692,8 @@ mod tests {
     #[test]
     fn test_remove_last_from_shared_group() {
         use super::remove_from_shared_group;
-        
-        let group = SharedImplementationGroup {
-            group_id: SharedImplementationId { technical_hash: "test".to_string() },
-            technical_identity: identity_from_options(&[("services.openssh.enable", "false")]),
-            requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
-            existing_policy_candidate: None,
-            action: SharedImplementationAction::ReviewIndividually,
-        };
 
+        let group = make_group(&["V-111", "V-222"], None);
         let (remaining_group, _breakout) = remove_from_shared_group(group, "V-111");
         assert!(remaining_group.is_none(), "group should be removed when only 1 requirement remains");
     }
@@ -474,14 +702,7 @@ mod tests {
     fn test_recommend_action_without_candidate() {
         use super::recommend_action;
 
-        let group = SharedImplementationGroup {
-            group_id: SharedImplementationId { technical_hash: "test".to_string() },
-            technical_identity: identity_from_options(&[("services.openssh.enable", "false")]),
-            requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
-            existing_policy_candidate: None,
-            action: SharedImplementationAction::ReviewIndividually,
-        };
-
+        let group = make_group(&["V-111", "V-222"], None);
         assert_eq!(
             recommend_action(&group),
             SharedImplementationAction::CreateShared,
@@ -493,14 +714,13 @@ mod tests {
     fn test_recommend_action_with_candidate() {
         use super::recommend_action;
 
-        let group = SharedImplementationGroup {
-            group_id: SharedImplementationId { technical_hash: "test".to_string() },
-            technical_identity: identity_from_options(&[("services.openssh.enable", "false")]),
-            requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
-            existing_policy_candidate: Some((Uuid::new_v4(), "existing-policy".to_string(), 90)),
-            action: SharedImplementationAction::ReviewIndividually,
+        let candidate = SharedPolicyCandidate {
+            policy_id: Uuid::new_v4(),
+            policy_version_id: Uuid::new_v4(),
+            policy_name: "existing-policy".to_string(),
+            confidence: 90,
         };
-
+        let group = make_group(&["V-111", "V-222"], Some(candidate));
         assert_eq!(
             recommend_action(&group),
             SharedImplementationAction::ReuseExisting,
@@ -518,6 +738,7 @@ mod tests {
             technical_identity: identity.clone(),
             requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
             existing_policy_candidate: None,
+            member_proofs: HashMap::new(),
             action: SharedImplementationAction::CreateShared,
         };
 
@@ -542,6 +763,7 @@ mod tests {
             technical_identity: identity.clone(),
             requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
             existing_policy_candidate: None,
+            member_proofs: HashMap::new(),
             action: SharedImplementationAction::CreateShared,
         };
 
@@ -570,6 +792,7 @@ mod tests {
             technical_identity: identity.clone(),
             requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
             existing_policy_candidate: None,
+            member_proofs: HashMap::new(),
             action: SharedImplementationAction::CreateShared,
         };
 
@@ -588,92 +811,217 @@ mod tests {
     fn test_generate_shared_policy_ids_fresh() {
         use super::generate_shared_policy_ids;
 
-        let identity = identity_from_options(&[("services.openssh.enable", "false")]);
-        let group = SharedImplementationGroup {
-            group_id: SharedImplementationId::from_technical_identity(&identity),
-            technical_identity: identity,
-            requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
-            existing_policy_candidate: None,
-            action: SharedImplementationAction::CreateShared,
-        };
-
+        let group = make_group(&["V-111", "V-222"], None);
         let (policy_id1, version_id1) = generate_shared_policy_ids(&group);
         let (policy_id2, version_id2) = generate_shared_policy_ids(&group);
 
-        // IDs are fresh (non-deterministic); determinism comes from persistent group_id
+        // IDs are fresh (non-deterministic); determinism comes from the import
+        // transaction and persisted mappings, not the UUID itself.
         assert_ne!(policy_id1, policy_id2, "policy IDs should be fresh each call");
         assert_ne!(version_id1, version_id2, "version IDs should be fresh each call");
         assert_ne!(policy_id1, version_id1, "policy and version IDs should differ");
     }
 
-    #[test]
-    fn test_partition_shared_and_individual_with_no_groups() {
-        use super::partition_shared_and_individual_policies;
+    // ── Common candidate intersection ─────────────────────────────────────────
 
-        let groups = vec![];
-        let policy_records = vec![]; // Empty for this test
-        let rule_map = std::collections::HashMap::new();
-
-        let (shared, individual) = partition_shared_and_individual_policies(&groups, &policy_records, &rule_map);
-
-        assert_eq!(shared.len(), 0, "no groups should produce no shared records");
-        assert_eq!(individual.len(), 0, "no records should produce no individual records");
+    fn candidate(version: Uuid, confidence: u8) -> PolicyCandidate {
+        PolicyCandidate {
+            policy_id: Uuid::new_v4(),
+            policy_version_id: version,
+            policy_name: format!("policy-{}", &version.simple().to_string()[..8]),
+            match_type: crate::compliance::requirement_model::PolicyCandidateMatchType::ExactTechnicalMatch,
+            confidence,
+            match_reasons: vec!["exact technical match".to_string()],
+        }
     }
 
     #[test]
-    fn test_partition_shared_with_existing_candidate() {
-        use super::partition_shared_and_individual_policies;
+    fn test_common_candidate_intersection() {
+        use super::common_shared_candidate;
 
-        let identity = identity_from_options(&[("services.openssh.enable", "false")]);
-        let group = SharedImplementationGroup {
-            group_id: SharedImplementationId::from_technical_identity(&identity),
-            technical_identity: identity,
-            requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
-            existing_policy_candidate: Some((Uuid::new_v4(), "existing".to_string(), 90)),
-            action: SharedImplementationAction::ReuseExisting,
-        };
+        let p17 = Uuid::new_v4();
+        let p20 = Uuid::new_v4();
+        let p44 = Uuid::new_v4();
+        let mut members: HashMap<String, Vec<PolicyCandidate>> = HashMap::new();
+        members.insert("V-111".to_string(), vec![candidate(p17, 90), candidate(p20, 70)]);
+        members.insert("V-222".to_string(), vec![candidate(p17, 90)]);
+        members.insert("V-333".to_string(), vec![candidate(p17, 90), candidate(p44, 80)]);
 
-        let groups = vec![group];
-        let policy_records = vec![];
-        let rule_map = std::collections::HashMap::new();
+        let common = common_shared_candidate(&members, &["V-111".to_string(), "V-222".to_string(), "V-333".to_string()]);
+        let common = common.expect("P17 is common to all members");
+        assert_eq!(common.policy_version_id, p17, "only the version present in every member's set may be common");
+    }
 
-        let (shared, _individual) = partition_shared_and_individual_policies(&groups, &policy_records, &rule_map);
+    #[test]
+    fn test_common_candidate_none_when_not_common() {
+        use super::common_shared_candidate;
 
-        assert_eq!(
-            shared.len(),
-            0,
-            "group with existing candidate should not create new shared policy"
+        let p17 = Uuid::new_v4();
+        let p44 = Uuid::new_v4();
+        let mut members: HashMap<String, Vec<PolicyCandidate>> = HashMap::new();
+        members.insert("V-111".to_string(), vec![candidate(p17, 90)]);
+        members.insert("V-222".to_string(), vec![candidate(p44, 80)]);
+
+        let common = common_shared_candidate(&members, &["V-111".to_string(), "V-222".to_string()]);
+        assert!(common.is_none(), "no exact version is common to both members");
+    }
+
+    #[test]
+    fn test_common_candidate_not_collapsed_by_lineage() {
+        use super::common_shared_candidate;
+
+        // Same lineage, different versions: must NOT be treated as a common candidate.
+        let p17v2 = Uuid::new_v4();
+        let p17v3 = Uuid::new_v4();
+        let mut members: HashMap<String, Vec<PolicyCandidate>> = HashMap::new();
+        members.insert("V-111".to_string(), vec![candidate(p17v2, 95)]);
+        members.insert("V-222".to_string(), vec![candidate(p17v3, 95)]);
+
+        let common = common_shared_candidate(&members, &["V-111".to_string(), "V-222".to_string()]);
+        assert!(common.is_none(), "different versions of one lineage are not a common candidate");
+    }
+
+    // ── Resolution planner (item 18) ─────────────────────────────────────────
+
+    fn decision_create_shared(group_id: &str, rule_ids: &[&str]) -> SharedGroupDecision {
+        SharedGroupDecision {
+            group_id: group_id.to_string(),
+            rule_ids: rule_ids.iter().map(|r| r.to_string()).collect(),
+            action: SharedGroupAction::CreateShared,
+        }
+    }
+
+    #[test]
+    fn test_planner_existing_candidate_group_reuses() {
+        use super::build_import_policy_resolution_plan;
+
+        // A and B both reuse the same existing policy version: no new policies.
+        let version = Uuid::new_v4();
+        let records = vec![
+            make_record("A", "mapped", Some(version)),
+            make_record("B", "mapped", Some(version)),
+        ];
+
+        let plan = build_import_policy_resolution_plan(&[], &records).unwrap();
+
+        assert_eq!(plan.shared_creations.len(), 0, "no shared creations for pure reuse");
+        assert_eq!(plan.individual_creations.len(), 0, "no individual creations for reuse");
+        assert_eq!(plan.individual_reuses.len(), 2);
+        assert_eq!(plan.individual_reuses["A"], version);
+        assert_eq!(plan.individual_reuses["B"], version);
+        assert!(matches!(
+            plan.rule_resolutions["A"],
+            PolicyResolution::ReuseExisting { selected_policy_version_id } if selected_policy_version_id == version
+        ));
+        assert!(matches!(
+            plan.rule_resolutions["B"],
+            PolicyResolution::ReuseExisting { selected_policy_version_id } if selected_policy_version_id == version
+        ));
+    }
+
+    #[test]
+    fn test_planner_shared_new_group() {
+        use super::build_import_policy_resolution_plan;
+
+        let records = vec![
+            make_record("A", "native", None),
+            make_record("B", "native", None),
+            make_record("C", "native", None),
+        ];
+        let decisions = vec![decision_create_shared("g1", &["A", "B", "C"])];
+
+        let plan = build_import_policy_resolution_plan(&decisions, &records).unwrap();
+
+        assert_eq!(plan.shared_creations.len(), 1, "exactly one shared creation");
+        assert_eq!(plan.shared_creations[0].requirement_keys, vec!["A", "B", "C"]);
+        assert_eq!(plan.individual_creations.len(), 0, "no individual creations for A/B/C");
+        assert!(matches!(plan.rule_resolutions["A"], PolicyResolution::CreateShared { .. }));
+        assert!(matches!(plan.rule_resolutions["B"], PolicyResolution::CreateShared { .. }));
+        assert!(matches!(plan.rule_resolutions["C"], PolicyResolution::CreateShared { .. }));
+    }
+
+    #[test]
+    fn test_planner_breakout() {
+        use super::build_import_policy_resolution_plan;
+
+        // A/B share; C is broken out to an individual policy.
+        let records = vec![
+            make_record("A", "native", None),
+            make_record("B", "native", None),
+            make_record("C", "native", None),
+        ];
+        let decisions = vec![decision_create_shared("g1", &["A", "B"])];
+
+        let plan = build_import_policy_resolution_plan(&decisions, &records).unwrap();
+
+        assert_eq!(plan.shared_creations.len(), 1);
+        assert_eq!(plan.shared_creations[0].requirement_keys, vec!["A", "B"]);
+        assert_eq!(plan.individual_creations, vec![2], "C gets its own individual creation");
+        assert!(matches!(plan.rule_resolutions["C"], PolicyResolution::CreateIndividual { record_index: 2 }));
+    }
+
+    #[test]
+    fn test_planner_mixed_unrelated_record() {
+        use super::build_import_policy_resolution_plan;
+
+        let records = vec![
+            make_record("A", "native", None),
+            make_record("B", "native", None),
+            make_record("C", "native", None),
+        ];
+        let decisions = vec![decision_create_shared("g1", &["A", "B"])];
+
+        let plan = build_import_policy_resolution_plan(&decisions, &records).unwrap();
+
+        assert_eq!(plan.shared_creations.len(), 1, "A/B shared");
+        assert_eq!(plan.individual_creations.len(), 1, "C unrelated -> individual");
+    }
+
+    #[test]
+    fn test_planner_stale_decision_rule_not_present() {
+        use super::build_import_policy_resolution_plan;
+
+        let records = vec![make_record("A", "native", None)];
+        let decisions = vec![decision_create_shared("g1", &["A", "MISSING"])];
+
+        let err = build_import_policy_resolution_plan(&decisions, &records).unwrap_err();
+        assert!(
+            err.contains("IMPORT_SHARED_IMPLEMENTATION_STALE"),
+            "decision referencing a rule not in the import must be stale"
         );
     }
 
     #[test]
-    fn test_partition_shared_without_candidate() {
-        use super::partition_shared_and_individual_policies;
+    fn test_planner_contradictory_decision_rejected() {
+        use super::build_import_policy_resolution_plan;
 
-        let identity = identity_from_options(&[("services.openssh.enable", "false")]);
-        let group = SharedImplementationGroup {
-            group_id: SharedImplementationId::from_technical_identity(&identity),
-            technical_identity: identity,
-            requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
-            existing_policy_candidate: None,
-            action: SharedImplementationAction::CreateShared,
-        };
+        // A is a MapExisting reuse but the decision says CreateShared.
+        let records = vec![
+            make_record("A", "mapped", Some(Uuid::new_v4())),
+            make_record("B", "native", None),
+        ];
+        let decisions = vec![decision_create_shared("g1", &["A", "B"])];
 
-        let groups = vec![group];
-        let policy_records = vec![];
-        let rule_map = std::collections::HashMap::new();
-
-        let (shared, _individual) = partition_shared_and_individual_policies(&groups, &policy_records, &rule_map);
-
-        assert_eq!(
-            shared.len(),
-            1,
-            "group without existing candidate should create new shared policy"
+        let err = build_import_policy_resolution_plan(&decisions, &records).unwrap_err();
+        assert!(
+            err.contains("IMPORT_SHARED_IMPLEMENTATION_STALE"),
+            "contradictory MapExisting + CreateShared decision must be rejected"
         );
-        assert_eq!(
-            shared[0].requirement_keys.len(),
-            2,
-            "shared policy should have both requirements"
-        );
+    }
+
+    #[test]
+    fn test_planner_individual_without_decisions() {
+        use super::build_import_policy_resolution_plan;
+
+        let records = vec![
+            make_record("A", "native", None),
+            make_record("B", "manual", None),
+            make_record("C", "opaque", None),
+        ];
+
+        let plan = build_import_policy_resolution_plan(&[], &records).unwrap();
+
+        assert_eq!(plan.shared_creations.len(), 0, "no decisions -> no shared creation");
+        assert_eq!(plan.individual_creations.len(), 3, "each record gets its own policy");
     }
 }

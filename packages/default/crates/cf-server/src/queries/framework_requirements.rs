@@ -1203,6 +1203,21 @@ pub async fn insert_bundle_version_requirement(
 /// Insert a policy-requirement mapping within an open transaction.
 ///
 /// Uses ON CONFLICT DO NOTHING so re-importing does not fail on existing mappings.
+///
+/// # ON CONFLICT semantics (TASK-418 review)
+///
+/// The unique target is `(policy_version_id, requirement_version_id)`. In the
+/// current commit path (`commit_foreign_import`) every mapping target is a
+/// freshly created policy version or a freshly derived mutable draft, so the
+/// conflict cannot fire within a single import: each rule appears once per
+/// import and each draft UUID is unique to its transaction. Across imports the
+/// draft is always newly derived, so no existing pair is ever revisited either.
+/// DO NOTHING is therefore inert today; it is kept as a defensive guard for
+/// future paths that might map onto stable version IDs.  Mappings on an
+/// accepted/deprecated policy version are additionally write-protected by the
+/// `guard_policy_mapping_immutability` trigger, so a DO UPDATE counterpart
+/// would fail loudly there instead of silently overwriting authoritative
+/// semantics.
 pub async fn insert_policy_mapping_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     policy_version_id: Uuid,
