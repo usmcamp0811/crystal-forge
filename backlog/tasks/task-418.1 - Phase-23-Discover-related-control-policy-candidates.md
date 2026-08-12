@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-12 19:26'
-updated_date: '2026-08-12 20:20'
+updated_date: '2026-08-12 20:39'
 labels: []
 milestone: m-23
 dependencies:
@@ -65,4 +65,6 @@ Add candidate-only discovery for DISA STIG requirements that share exact normali
 Phase 23 candidate-discovery slice committed and pushed as f582fdea50ebc2e0ae4235c2a98001da02efbde3. Remote branch now points to this commit.
 
 Follow-up committed and pushed as b388c3f6d0d384c159fe13f9f1413984bf5c9f9a: added ReviewedRelatedCandidate provenance to ImportedMappingSemantics and persisted selected related reviews as suggested provenance without treating them as MapExistingProof. cargo fmt, git diff --check, SQLX_OFFLINE cargo check -p cf-server, and targeted unit test passed.
+
+Reviewer-directed follow-up completed in pushed slices: 9d9a4d10 exposes structured RelatedCandidateEvidence and excludes RelatedMapping from shared automatic candidate intersection; af773f39 adds reviewed-related action validation, commit-time current/trusted/exact identifier revalidation, and suggested provenance precedence; 723be541 adds regression coverage for related-only shared groups. SQLX_OFFLINE cargo check and focused unit test passed. No web-ui check run.
 <!-- SECTION:NOTES:END -->
