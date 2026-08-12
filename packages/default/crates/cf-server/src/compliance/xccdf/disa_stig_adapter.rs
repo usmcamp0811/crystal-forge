@@ -24,13 +24,16 @@ use crate::compliance::requirement_model::{
 pub const DISA_STIG_ID_SYSTEM: &str = "http://cyber.mil/cci";
 pub const DISA_VULN_ID_SYSTEM: &str = "http://cyber.mil/stigs/stig";
 
-/// Any `<ident>` whose value starts with `V-` and whose system contains
-/// `"cyber.mil"` or `"stig"` is treated as a stable DISA vulnerability ID.
+/// Any `<ident>` whose value starts with `V-` and whose system is a
+/// recognized DISA identifier system is treated as a stable DISA vulnerability ID.
+/// Recognized systems include:
+/// - DISA STIG: `http://cyber.mil/stigs/stig`
+/// - DISA CCI: `http://cyber.mil/cci`
+/// - Any system containing `"cyber.mil"` (authoritative DISA namespace)
 fn is_stig_vuln_id(ident: &StandardIdentifier) -> bool {
     ident.value.starts_with("V-")
         && (ident.system.contains("cyber.mil")
-            || ident.system.to_lowercase().contains("stig")
-            || ident.system.to_lowercase().contains("vuln"))
+            || ident.system.to_lowercase().contains("stig"))
 }
 
 /// Any `<ident>` starting with `CCI-` is a DISA CCI identifier.
@@ -370,6 +373,45 @@ mod tests {
         }
     }
 
+    // Helper to construct a minimal ParsedXccdf for testing.
+    fn minimal_parsed_xccdf(
+        benchmark_id: &str,
+        benchmark_title: &str,
+        version: &str,
+        rules: Vec<ParsedRule>,
+    ) -> ParsedXccdf {
+        use crate::compliance::xccdf::models::{DocumentClass, Fidelity};
+        ParsedXccdf {
+            class: DocumentClass::ForeignXccdf,
+            fidelity: Fidelity::NativeExact,
+            fidelity_losses: vec![],
+            source_filename: Some("test.xml".to_string()),
+            source_bytes: vec![],
+            source_sha256: "test".to_string(),
+            xccdf_namespace_version: Some("1.2"),
+            xccdf_version: Some("1.2".to_string()),
+            benchmark: Some(BenchmarkMeta {
+                id: benchmark_id.to_string(),
+                title: Some(benchmark_title.to_string()),
+                description: None,
+                version: Some(version.to_string()),
+                status: None,
+                status_date: None,
+                platforms: vec![],
+                publisher: None,
+                references: vec![],
+            }),
+            profiles: vec![],
+            rules,
+            groups: vec![],
+            values: vec![],
+            cf_bundle_meta: None,
+            signature_info: None,
+            errors: vec![],
+            warnings: vec![],
+        }
+    }
+
     #[test]
     fn canonical_key_prefers_v_id() {
         let rule = ParsedRule {
@@ -475,6 +517,199 @@ mod tests {
         assert_eq!(ccis[0].as_str().unwrap(), "CCI-000770");
         assert_eq!(srgs.len(), 1);
         assert_eq!(srgs[0].as_str().unwrap(), "SRG-OS-000109");
+    }
+
+    // ── DISA detection boundary tests ────────────────────────────────────────
+
+    #[test]
+    fn is_stig_vuln_id_official_disa_benchmark_prefix() {
+        // Official DISA benchmark ID from xccdf_mil.disa.stig_benchmark_* prefix.
+        // This is strong evidence and should always return true via is_disa_stig.
+        let parsed = minimal_parsed_xccdf(
+            "xccdf_mil.disa.stig_benchmark_Anduril_NixOS_STIG",
+            "NixOS STIG",
+            "V1R1",
+            vec![],
+        );
+        assert!(is_disa_stig(&parsed));
+    }
+
+    #[test]
+    fn is_stig_vuln_id_official_disa_fso_benchmark_prefix() {
+        // Official DISA FSO benchmark ID.
+        let parsed = minimal_parsed_xccdf(
+            "xccdf_mil.disa.fso_benchmark_Some_FSO_Benchmark",
+            "FSO Benchmark",
+            "V1R1",
+            vec![],
+        );
+        assert!(is_disa_stig(&parsed));
+    }
+
+    #[test]
+    fn is_stig_vuln_id_recognized_cyber_mil_system() {
+        // Recognized DISA identifier system: http://cyber.mil/stigs/stig
+        let rule = ParsedRule {
+            id: "rule-1".to_string(),
+            title: Some("Test Rule".to_string()),
+            identifiers: vec![ident("http://cyber.mil/stigs/stig", "V-268137")],
+            description: None,
+            rationale: None,
+            severity: None,
+            weight: None,
+            version: None,
+            checks: vec![],
+            fix: None,
+            references: vec![],
+            platforms: vec![],
+            group_id: None,
+            rule_order: None,
+            cf_policy_meta: None,
+            preserved_xml: None,
+        };
+        let parsed = minimal_parsed_xccdf("generic-benchmark", "Generic Benchmark", "1.0", vec![rule]);
+        assert!(is_disa_stig(&parsed));
+    }
+
+    #[test]
+    fn is_stig_vuln_id_cyber_mil_namespace() {
+        // Recognized DISA namespace via cyber.mil domain.
+        let rule = ParsedRule {
+            id: "rule-1".to_string(),
+            title: Some("Test Rule".to_string()),
+            identifiers: vec![ident("http://cyber.mil/custom/system", "V-999999")],
+            description: None,
+            rationale: None,
+            severity: None,
+            weight: None,
+            version: None,
+            checks: vec![],
+            fix: None,
+            references: vec![],
+            platforms: vec![],
+            group_id: None,
+            rule_order: None,
+            cf_policy_meta: None,
+            preserved_xml: None,
+        };
+        let parsed = minimal_parsed_xccdf("generic-benchmark", "Generic Benchmark", "1.0", vec![rule]);
+        assert!(is_disa_stig(&parsed));
+    }
+
+    #[test]
+    fn is_disa_stig_rejects_arbitrary_vuln_uri() {
+        // Arbitrary vulnerability URI without recognized DISA evidence.
+        // This should NOT be classified as DISA STIG.
+        let rule = ParsedRule {
+            id: "rule-1".to_string(),
+            title: Some("Test Rule".to_string()),
+            identifiers: vec![ident("http://example.com/vulnerability", "V-999999")],
+            description: None,
+            rationale: None,
+            severity: None,
+            weight: None,
+            version: None,
+            checks: vec![],
+            fix: None,
+            references: vec![],
+            platforms: vec![],
+            group_id: None,
+            rule_order: None,
+            cf_policy_meta: None,
+            preserved_xml: None,
+        };
+        let parsed =
+            minimal_parsed_xccdf("generic-cve-benchmark", "Generic CVE Benchmark", "1.0", vec![rule]);
+        assert!(!is_disa_stig(&parsed));
+    }
+
+    #[test]
+    fn is_disa_stig_rejects_title_only() {
+        // Title/description containing "STIG" alone is not authoritative.
+        let rule = ParsedRule {
+            id: "rule-1".to_string(),
+            title: Some("STIG-like rule".to_string()),
+            identifiers: vec![
+                ident("http://example.com/custom", "V-999999"),
+                ident("http://example.com/cci", "CCI-000001"),
+            ],
+            description: None,
+            rationale: None,
+            severity: None,
+            weight: None,
+            version: None,
+            checks: vec![],
+            fix: None,
+            references: vec![],
+            platforms: vec![],
+            group_id: None,
+            rule_order: None,
+            cf_policy_meta: None,
+            preserved_xml: None,
+        };
+        let parsed = minimal_parsed_xccdf(
+            "generic-benchmark-stig-like",
+            "My STIG Benchmark",
+            "1.0",
+            vec![rule],
+        );
+        assert!(!is_disa_stig(&parsed));
+    }
+
+    #[test]
+    fn is_disa_stig_accepts_stig_system_string() {
+        // System string containing "stig" (case-insensitive) is recognized.
+        let rule = ParsedRule {
+            id: "rule-1".to_string(),
+            title: Some("Test Rule".to_string()),
+            identifiers: vec![ident("http://example.com/stig-id", "V-123456")],
+            description: None,
+            rationale: None,
+            severity: None,
+            weight: None,
+            version: None,
+            checks: vec![],
+            fix: None,
+            references: vec![],
+            platforms: vec![],
+            group_id: None,
+            rule_order: None,
+            cf_policy_meta: None,
+            preserved_xml: None,
+        };
+        let parsed = minimal_parsed_xccdf("generic-benchmark", "Test", "1.0", vec![rule]);
+        assert!(is_disa_stig(&parsed));
+    }
+
+    #[test]
+    fn is_disa_stig_rejects_generic_vulnerability_without_disa_evidence() {
+        // Generic CVE or vulnerability identifier without DISA evidence.
+        // "vuln" substring is no longer accepted.
+        let rule = ParsedRule {
+            id: "rule-1".to_string(),
+            title: Some("Generic Rule".to_string()),
+            identifiers: vec![ident("http://example.com/vuln", "CVE-2021-12345")],
+            description: None,
+            rationale: None,
+            severity: None,
+            weight: None,
+            version: None,
+            checks: vec![],
+            fix: None,
+            references: vec![],
+            platforms: vec![],
+            group_id: None,
+            rule_order: None,
+            cf_policy_meta: None,
+            preserved_xml: None,
+        };
+        let parsed = minimal_parsed_xccdf(
+            "generic-benchmark",
+            "Generic Vulnerability Benchmark",
+            "1.0",
+            vec![rule],
+        );
+        assert!(!is_disa_stig(&parsed));
     }
 }
 

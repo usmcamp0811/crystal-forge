@@ -37,8 +37,8 @@ use crate::queries::framework_requirements::{
     BundleCoverageReport, FrameworkSummary, FrameworkVersionSummary, PolicyMappingRow,
     RequirementVersionSummary, compute_bundle_requirement_coverage, create_policy_mapping,
     delete_policy_mapping, list_framework_mapped_policy_versions, list_framework_versions,
-    list_frameworks, list_policy_mappings,
-    list_requirement_children, search_requirements, update_policy_mapping,
+    list_frameworks, list_policy_mappings, list_requirement_children, search_requirements,
+    update_policy_mapping,
 };
 
 // ── Local helpers ─────────────────────────────────────────────────────────────
@@ -192,10 +192,11 @@ pub async fn list_framework_mapped_policies(
         return forbidden();
     }
     match list_framework_mapped_policy_versions(&pool, framework_id).await {
-        Ok(policy_version_ids) => {
-            (StatusCode::OK, Json(serde_json::json!({ "policy_version_ids": policy_version_ids })))
-                .into_response()
-        }
+        Ok(policy_version_ids) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "policy_version_ids": policy_version_ids })),
+        )
+            .into_response(),
         Err(error) => {
             tracing::error!(error = %error, framework_id = %framework_id, "failed to list mapped policy versions");
             internal_error("Failed to list mapped policy versions")
