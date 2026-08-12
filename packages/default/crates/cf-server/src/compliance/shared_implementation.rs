@@ -148,6 +148,62 @@ pub fn remove_from_shared_group(
     (result_group, breakout_key.to_string())
 }
 
+/// Determine the recommended action for a shared implementation group.
+///
+/// Logic:
+/// 1. If an existing accepted policy matches, recommend ReuseExisting
+/// 2. Otherwise, recommend CreateShared
+/// 3. User can override to ReviewIndividually
+pub fn recommend_action(group: &SharedImplementationGroup) -> SharedImplementationAction {
+    if group.existing_policy_candidate.is_some() {
+        SharedImplementationAction::ReuseExisting
+    } else {
+        SharedImplementationAction::CreateShared
+    }
+}
+
+/// Validate that a shared implementation group is still valid at commit time.
+///
+/// Revalidates that:
+/// 1. All requirements still have the same technical identity
+/// 2. Group identity is deterministic and stable
+///
+/// Returns:
+/// - Ok if valid
+/// - Err with IMPORT_SHARED_IMPLEMENTATION_STALE if requirements changed
+pub fn validate_shared_group_at_commit(
+    group: &SharedImplementationGroup,
+    authoritative_identities: Vec<(&str, &RequirementTechnicalIdentity)>,
+) -> Result<(), String> {
+    // Verify all requirements in the group are still present in authoritative data
+    for req_key in &group.requirement_keys {
+        if !authoritative_identities.iter().any(|(k, _)| k == req_key) {
+            return Err(format!(
+                "IMPORT_SHARED_IMPLEMENTATION_STALE: requirement {} no longer present in import",
+                req_key
+            ));
+        }
+    }
+
+    // Verify all requirements still have identical technical enforcement
+    let expected_id = group.group_id.clone();
+    for (req_key, identity) in &authoritative_identities {
+        if !group.requirement_keys.contains(&req_key.to_string()) {
+            continue; // Not part of this group
+        }
+
+        let current_id = SharedImplementationId::from_technical_identity(identity);
+        if current_id != expected_id {
+            return Err(format!(
+                "IMPORT_SHARED_IMPLEMENTATION_STALE: requirement {} enforcement changed",
+                req_key
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,5 +360,119 @@ mod tests {
 
         let (remaining_group, _breakout) = remove_from_shared_group(group, "V-111");
         assert!(remaining_group.is_none(), "group should be removed when only 1 requirement remains");
+    }
+
+    #[test]
+    fn test_recommend_action_without_candidate() {
+        use super::recommend_action;
+
+        let group = SharedImplementationGroup {
+            group_id: SharedImplementationId { technical_hash: "test".to_string() },
+            technical_identity: identity_from_options(&[("services.openssh.enable", "false")]),
+            requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
+            existing_policy_candidate: None,
+            action: SharedImplementationAction::ReviewIndividually,
+        };
+
+        assert_eq!(
+            recommend_action(&group),
+            SharedImplementationAction::CreateShared,
+            "should recommend CreateShared when no existing policy"
+        );
+    }
+
+    #[test]
+    fn test_recommend_action_with_candidate() {
+        use super::recommend_action;
+
+        let group = SharedImplementationGroup {
+            group_id: SharedImplementationId { technical_hash: "test".to_string() },
+            technical_identity: identity_from_options(&[("services.openssh.enable", "false")]),
+            requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
+            existing_policy_candidate: Some((Uuid::new_v4(), "existing-policy".to_string(), 90)),
+            action: SharedImplementationAction::ReviewIndividually,
+        };
+
+        assert_eq!(
+            recommend_action(&group),
+            SharedImplementationAction::ReuseExisting,
+            "should recommend ReuseExisting when existing policy candidate found"
+        );
+    }
+
+    #[test]
+    fn test_validate_shared_group_at_commit_valid() {
+        use super::validate_shared_group_at_commit;
+
+        let identity = identity_from_options(&[("services.openssh.enable", "false")]);
+        let group = SharedImplementationGroup {
+            group_id: SharedImplementationId::from_technical_identity(&identity),
+            technical_identity: identity.clone(),
+            requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
+            existing_policy_candidate: None,
+            action: SharedImplementationAction::CreateShared,
+        };
+
+        let authoritative = vec![
+            ("V-111" as &str, &identity),
+            ("V-222" as &str, &identity),
+        ];
+
+        assert!(
+            validate_shared_group_at_commit(&group, authoritative).is_ok(),
+            "should validate group with unchanged enforcement"
+        );
+    }
+
+    #[test]
+    fn test_validate_shared_group_at_commit_stale_enforcement() {
+        use super::validate_shared_group_at_commit;
+
+        let identity = identity_from_options(&[("services.openssh.enable", "false")]);
+        let group = SharedImplementationGroup {
+            group_id: SharedImplementationId::from_technical_identity(&identity),
+            technical_identity: identity.clone(),
+            requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
+            existing_policy_candidate: None,
+            action: SharedImplementationAction::CreateShared,
+        };
+
+        // Changed enforcement for one requirement
+        let changed_identity = identity_from_options(&[("services.openssh.enable", "true")]);
+        let authoritative = vec![
+            ("V-111" as &str, &identity),
+            ("V-222" as &str, &changed_identity),
+        ];
+
+        let result = validate_shared_group_at_commit(&group, authoritative);
+        assert!(result.is_err(), "should reject group with changed enforcement");
+        assert!(
+            result.unwrap_err().contains("IMPORT_SHARED_IMPLEMENTATION_STALE"),
+            "error should indicate stale group"
+        );
+    }
+
+    #[test]
+    fn test_validate_shared_group_at_commit_missing_requirement() {
+        use super::validate_shared_group_at_commit;
+
+        let identity = identity_from_options(&[("services.openssh.enable", "false")]);
+        let group = SharedImplementationGroup {
+            group_id: SharedImplementationId::from_technical_identity(&identity),
+            technical_identity: identity.clone(),
+            requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
+            existing_policy_candidate: None,
+            action: SharedImplementationAction::CreateShared,
+        };
+
+        // Only one requirement present
+        let authoritative = vec![("V-111" as &str, &identity)];
+
+        let result = validate_shared_group_at_commit(&group, authoritative);
+        assert!(result.is_err(), "should reject group when requirement missing");
+        assert!(
+            result.unwrap_err().contains("no longer present"),
+            "error should indicate missing requirement"
+        );
     }
 }
