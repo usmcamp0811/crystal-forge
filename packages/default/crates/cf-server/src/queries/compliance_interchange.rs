@@ -76,16 +76,183 @@ pub const CF_PARSER_VERSION: &str = "cf-xccdf-parser-0.1";
 /// client SharedGroupDecision values.
 ///
 /// All fields are server-derived or verified server-side:
+/// - policy_id, policy_version_id: generated UUIDs for this shared policy
 /// - group_id: derived from authoritative technical identity
 /// - requirement_keys: validated to be unique, exist, be native, non-MapExisting
 /// - technical_identity: authoritative enforcement inferred from parsed rules
 #[derive(Debug, Clone)]
 struct ValidatedSharedCreation {
-    policy_id: Uuid,
-    policy_version_id: Uuid,
-    group_id: crate::compliance::shared_implementation::SharedImplementationId,
-    requirement_keys: Vec<String>,
-    technical_identity: RequirementTechnicalIdentity,
+    pub policy_id: Uuid,
+    pub policy_version_id: Uuid,
+    pub group_id: crate::compliance::shared_implementation::SharedImplementationId,
+    pub requirement_keys: Vec<String>,
+    pub technical_identity: RequirementTechnicalIdentity,
+}
+
+/// Validate shared creation decisions against authoritative technical identities.
+///
+/// This is the sole entry point for converting untrusted SharedGroupDecision
+/// client input into trusted ValidatedSharedCreation objects.
+///
+/// All 8 hardening checks are enforced here:
+/// 1. reject empty enforced_options
+/// 2. reject duplicate rule IDs within a decision
+/// 3. reject single-member CreateShared (stale error)
+/// 4. reject overlapping groups (rule in multiple groups)
+/// 5. reject multiple CreateShared for same technical identity
+/// 6. reject non-native policy types
+/// 7. reject MapExisting reuse in shared decisions
+/// 8. validate client group_id matches server-derived hash
+///
+/// Returns a vector of validated, trusted creations or an error with STALE code.
+fn validate_shared_creation_decisions(
+    decisions: &[crate::compliance::xccdf::import_models::SharedGroupDecision],
+    authoritative_identities: &std::collections::HashMap<
+        String,
+        RequirementTechnicalIdentity,
+    >,
+    policy_records: &[ImportedPolicyRecord],
+) -> Result<Vec<ValidatedSharedCreation>, anyhow::Error> {
+    use crate::compliance::xccdf::import_models::SharedGroupAction;
+
+    let mut validated_shared_creations: Vec<ValidatedSharedCreation> = Vec::new();
+    let mut claimed_shared_rules = std::collections::HashSet::new();
+    let mut validated_group_ids = std::collections::HashSet::new();
+
+    for decision in decisions {
+        if decision.action != SharedGroupAction::CreateShared {
+            continue;
+        }
+
+        // 1. Require at least 2 rules
+        if decision.rule_ids.len() < 2 {
+            anyhow::bail!(
+                "IMPORT_SHARED_IMPLEMENTATION_STALE: CreateShared requires at least 2 rules, got {}",
+                decision.rule_ids.len()
+            );
+        }
+
+        // 2. Require 2 DISTINCT rule IDs (no duplicates)
+        let unique_rules: std::collections::HashSet<&String> =
+            decision.rule_ids.iter().collect();
+        if unique_rules.len() != decision.rule_ids.len() {
+            anyhow::bail!(
+                "IMPORT_SHARED_IMPLEMENTATION_STALE: CreateShared contains duplicate rule IDs"
+            );
+        }
+
+        // 3. Validate every listed rule exists and is eligible for shared creation
+        for rule_id in &decision.rule_ids {
+            if !authoritative_identities.contains_key(rule_id) {
+                anyhow::bail!(
+                    "IMPORT_SHARED_IMPLEMENTATION_STALE: decision lists rule {} not in import",
+                    rule_id
+                );
+            }
+
+            // 4. Reject overlapping shared decisions (rule in multiple groups)
+            if claimed_shared_rules.contains(rule_id) {
+                anyhow::bail!(
+                    "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} participates in multiple shared groups",
+                    rule_id
+                );
+            }
+            claimed_shared_rules.insert(rule_id.clone());
+
+            let rec = policy_records
+                .iter()
+                .find(|r| r.source_rule_id == *rule_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} disappeared before commit",
+                        rule_id
+                    )
+                })?;
+
+            // Action-type validation: only native technical implementations can be shared
+            // Reject MapExisting, manual, unbound, opaque, etc.
+            if rec.mapped_policy_version_id.is_some() {
+                anyhow::bail!(
+                    "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} is MapExisting reuse, cannot be in shared group",
+                    rule_id
+                );
+            }
+
+            // Only native policy type is eligible for shared creation
+            if rec.policy_type != "native" {
+                anyhow::bail!(
+                    "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} has policy_type {}, only 'native' is eligible for shared groups",
+                    rule_id,
+                    rec.policy_type
+                );
+            }
+        }
+
+        // Verify all rules in the decision have the exact same technical identity
+        let first_identity = authoritative_identities
+            .get(&decision.rule_ids[0])
+            .ok_or_else(|| anyhow::anyhow!("first rule missing identity"))?
+            .clone();
+
+        // 1. Reject empty technical identities
+        if first_identity.enforced_options.is_empty() {
+            anyhow::bail!(
+                "IMPORT_SHARED_IMPLEMENTATION_STALE: shared group has empty technical enforcement"
+            );
+        }
+
+        let expected_group_id =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(
+                &first_identity,
+            );
+
+        for rule_id in &decision.rule_ids[1..] {
+            let identity = authoritative_identities
+                .get(rule_id)
+                .ok_or_else(|| anyhow::anyhow!("rule {} missing identity", rule_id))?;
+
+            // Reject empty technical identities
+            if identity.enforced_options.is_empty() {
+                anyhow::bail!(
+                    "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} has empty technical enforcement, cannot share",
+                    rule_id
+                );
+            }
+
+            let group_id = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(identity);
+            if group_id != expected_group_id {
+                anyhow::bail!(
+                    "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} has different technical enforcement than group",
+                    rule_id
+                );
+            }
+        }
+
+        // 5. Reject multiple CreateShared decisions for the same technical identity
+        if validated_group_ids.contains(&expected_group_id.technical_hash) {
+            anyhow::bail!(
+                "IMPORT_SHARED_IMPLEMENTATION_STALE: multiple CreateShared decisions for same technical identity"
+            );
+        }
+        validated_group_ids.insert(expected_group_id.technical_hash.clone());
+
+        // Validate client group_id matches server-derived hash (stale-decision check)
+        if decision.group_id != expected_group_id.technical_hash {
+            anyhow::bail!("IMPORT_SHARED_IMPLEMENTATION_STALE: client group hash mismatch");
+        }
+
+        // Build ValidatedSharedCreation: the trust boundary.
+        // All fields are server-derived; nothing is from raw client input.
+        validated_shared_creations.push(ValidatedSharedCreation {
+            policy_id: Uuid::new_v4(),
+            policy_version_id: Uuid::new_v4(),
+            group_id: expected_group_id,
+            requirement_keys: decision.rule_ids.clone(),
+            technical_identity: first_identity,
+        });
+    }
+
+    Ok(validated_shared_creations)
 }
 
 // ── Main entry point ──────────────────────────────────────────────────────────
@@ -409,153 +576,35 @@ pub async fn commit_foreign_import(
     }
 
     // Validate client shared-group decisions against authoritative identities.
-    // Build ValidatedSharedCreation objects: the trust boundary.
-    // Nothing below this point should inspect raw SharedGroupDecision values.
-    let mut validated_shared_creations: Vec<ValidatedSharedCreation> = Vec::new();
-    let mut claimed_shared_rules = std::collections::HashSet::new();
-    let mut validated_group_ids = std::collections::HashSet::new();
+    // This is the sole entry point for converting untrusted SharedGroupDecision
+    // into trusted ValidatedSharedCreation objects.
+    let validated_shared_creations = validate_shared_creation_decisions(
+        &validated.shared_group_decisions,
+        &authoritative_identities,
+        &policy_records,
+    )?;
 
-    for decision in &validated.shared_group_decisions {
-        use crate::compliance::xccdf::import_models::SharedGroupAction;
-        if decision.action != SharedGroupAction::CreateShared {
-            continue;
-        }
 
-        // 1. Require at least 2 rules
-        if decision.rule_ids.len() < 2 {
-            anyhow::bail!(
-                "IMPORT_SHARED_IMPLEMENTATION_STALE: CreateShared requires at least 2 rules, got {}",
-                decision.rule_ids.len()
-            );
-        }
-
-        // 2. Require 2 DISTINCT rule IDs (no duplicates)
-        let unique_rules: std::collections::HashSet<&String> = decision.rule_ids.iter().collect();
-        if unique_rules.len() != decision.rule_ids.len() {
-            anyhow::bail!(
-                "IMPORT_SHARED_IMPLEMENTATION_STALE: CreateShared contains duplicate rule IDs"
-            );
-        }
-
-        // 3. Validate every listed rule exists and is eligible for shared creation
-        for rule_id in &decision.rule_ids {
-            if !authoritative_identities.contains_key(rule_id) {
-                anyhow::bail!(
-                    "IMPORT_SHARED_IMPLEMENTATION_STALE: decision lists rule {} not in import",
-                    rule_id
-                );
-            }
-
-            // 4. Reject overlapping shared decisions (rule in multiple groups)
-            if claimed_shared_rules.contains(rule_id) {
-                anyhow::bail!(
-                    "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} participates in multiple shared groups",
-                    rule_id
-                );
-            }
-            claimed_shared_rules.insert(rule_id.clone());
-
-            let rec = policy_records
-                .iter()
-                .find(|r| r.source_rule_id == *rule_id)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} disappeared before commit",
-                        rule_id
-                    )
-                })?;
-
-            // Action-type validation: only native technical implementations can be shared
-            // Reject MapExisting, manual, unbound, opaque, etc.
-            if rec.mapped_policy_version_id.is_some() {
-                anyhow::bail!(
-                    "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} is MapExisting reuse, cannot be in shared group",
-                    rule_id
-                );
-            }
-
-            // Only native policy type is eligible for shared creation
-            if rec.policy_type != "native" {
-                anyhow::bail!(
-                    "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} has policy_type {}, only 'native' is eligible for shared groups",
-                    rule_id,
-                    rec.policy_type
-                );
-            }
-        }
-
-        // Verify all rules in the decision have the exact same technical identity
-        let first_identity = authoritative_identities
-            .get(&decision.rule_ids[0])
-            .ok_or_else(|| anyhow::anyhow!("first rule missing identity"))?
-            .clone();
-
-        // 1. Reject empty technical identities
-        if first_identity.enforced_options.is_empty() {
-            anyhow::bail!(
-                "IMPORT_SHARED_IMPLEMENTATION_STALE: shared group has empty technical enforcement"
-            );
-        }
-
-        let expected_group_id = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&first_identity);
-
-        for rule_id in &decision.rule_ids[1..] {
-            let identity = authoritative_identities
-                .get(rule_id)
-                .ok_or_else(|| anyhow::anyhow!("rule {} missing identity", rule_id))?;
-
-            // Reject empty technical identities
-            if identity.enforced_options.is_empty() {
-                anyhow::bail!(
-                    "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} has empty technical enforcement, cannot share",
-                    rule_id
-                );
-            }
-
-            let group_id =
-                crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(
-                    identity,
-                );
-            if group_id != expected_group_id {
-                anyhow::bail!(
-                    "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} has different technical enforcement than group",
-                    rule_id
-                );
-            }
-        }
-
-        // 5. Reject multiple CreateShared decisions for the same technical identity
-        if validated_group_ids.contains(&expected_group_id.technical_hash) {
-            anyhow::bail!(
-                "IMPORT_SHARED_IMPLEMENTATION_STALE: multiple CreateShared decisions for same technical identity"
-            );
-        }
-        validated_group_ids.insert(expected_group_id.technical_hash.clone());
-
-        // Validate client group_id matches server-derived hash (stale-decision check)
-        if decision.group_id != expected_group_id.technical_hash {
-            anyhow::bail!("IMPORT_SHARED_IMPLEMENTATION_STALE: client group hash mismatch");
-        }
-
-        // Build ValidatedSharedCreation: the trust boundary.
-        // All fields are server-derived; nothing is from raw client input.
-        validated_shared_creations.push(ValidatedSharedCreation {
-            policy_id: Uuid::new_v4(),
-            policy_version_id: Uuid::new_v4(),
-            group_id: expected_group_id,
-            requirement_keys: decision.rule_ids.clone(),
-            technical_identity: first_identity,
-        });
-    }
 
     // ── 4. Build resolution plan and central policy map ──────────────────────
     let excluded_rule_count =
         (validated.rules_to_import.len() as u32).saturating_sub(policy_records.len() as u32);
 
     // The resolution plan determines which policy each requirement gets.
-    // Pass validated shared groups (which now carry authoritative technical identity).
+    // Build server-derived SharedGroupDecision objects from validated creations
+    // to ensure the planner never sees raw client input.
+    use crate::compliance::xccdf::import_models::{SharedGroupDecision, SharedGroupAction};
+    let server_derived_decisions: Vec<SharedGroupDecision> = validated_shared_creations
+        .iter()
+        .map(|vsc| SharedGroupDecision {
+            group_id: vsc.group_id.technical_hash.clone(),
+            action: SharedGroupAction::CreateShared,
+            rule_ids: vsc.requirement_keys.clone(),
+        })
+        .collect();
+
     let resolution_plan =
-        build_import_policy_resolution_plan(&validated.shared_group_decisions, &policy_records)
+        build_import_policy_resolution_plan(&server_derived_decisions, &policy_records)
             .map_err(|e| anyhow::anyhow!(e))?;
 
     // Central map: rule_id -> effective_policy_version_id
@@ -701,17 +750,6 @@ pub async fn commit_foreign_import(
     // 5b. Handle CreateShared outcomes
     // For each validated shared creation, create 1 policy lineage and version with authoritative technical identity.
     for validated in &validated_shared_creations {
-        let shared = &resolution_plan
-            .shared_creations
-            .iter()
-            .find(|s| s.group_id.technical_hash == validated.group_id.technical_hash)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "IMPORT_INTERNAL_ERROR: validated shared creation has no resolution plan entry {}",
-                    validated.group_id.technical_hash
-                )
-            })?;
-
         // Use validated technical identity (item 8: trust boundary)
         let technical_identity = &validated.technical_identity;
 
