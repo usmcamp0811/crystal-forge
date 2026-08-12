@@ -3913,6 +3913,7 @@ async fn compute_foreign_stig_reconciliation(
             crate::compliance::requirement_model::FrameworkReconciliationState::ExistingRelease
                 | crate::compliance::requirement_model::FrameworkReconciliationState::ExactArtifact
         );
+        let fix_text = rule.fix.as_ref().map(|fix| fix.content.as_str());
         let candidates = find_policy_candidates(
             pool,
             is_existing_release.then_some(requirement.existing_requirement_version_id).flatten(),
@@ -3921,6 +3922,7 @@ async fn compute_foreign_stig_reconciliation(
                     == crate::compliance::requirement_model::RequirementReconciliationState::ExistingUnchanged)
                 .then_some(requirement.existing_requirement_version_id)
                 .flatten(),
+            fix_text,
         )
         .await
         .map_err(|error| format!("failed to find policy candidates: {error}"))?;

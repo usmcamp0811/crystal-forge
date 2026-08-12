@@ -857,15 +857,24 @@ pub async fn preview_requirement_reconciliation(
 /// Searches in priority order:
 /// 1. Authoritative mapping already exists for this requirement.
 /// 2. Inherited mapping from an unchanged previous requirement version.
-/// 3. (Future: exact technical match, related mapping, fuzzy similarity.)
+/// 3. Exact normalized technical enforcement match against policy config.
 ///
-/// Returns candidates with `match_type` and `confidence` for UI display.
+/// Returns candidates with `match_type` and `confidence` for UI display,
+/// deduplicated by policy version (highest confidence retained).
 pub async fn find_policy_candidates(
     pool: &PgPool,
     authoritative_requirement_version_id: Option<Uuid>,
     inherited_requirement_version_id: Option<Uuid>,
+    fix_text: Option<&str>,
 ) -> Result<Vec<PolicyCandidate>> {
-    let mut candidates = Vec::new();
+    use crate::compliance::xccdf::exact_technical_match::{
+        RequirementTechnicalIdentity, find_exact_technical_match_candidates,
+    };
+    use std::collections::HashMap;
+
+    let mut candidates: HashMap<Uuid, PolicyCandidate> = HashMap::new();
+
+    // 1. Authoritative mappings: highest confidence.
     if let Some(requirement_version_id) = authoritative_requirement_version_id {
         let rows: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
             r#"
@@ -885,9 +894,10 @@ pub async fn find_policy_candidates(
         .await
         .context("failed to find authoritative policy candidates")?;
 
-        candidates.extend(
-            rows.into_iter().map(
-                |(policy_id, policy_version_id, policy_name)| PolicyCandidate {
+        for (policy_id, policy_version_id, policy_name) in rows {
+            candidates.insert(
+                policy_version_id,
+                PolicyCandidate {
                     policy_id,
                     policy_version_id,
                     policy_name,
@@ -897,10 +907,12 @@ pub async fn find_policy_candidates(
                         "Authoritative policy-requirement mapping exists.".to_string(),
                     ],
                 },
-            ),
-        );
+            );
+        }
     }
 
+    // 2. Inherited mappings: second-highest confidence.
+    // Only add if not already present from authoritative search.
     if let Some(requirement_version_id) = inherited_requirement_version_id {
         let rows: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
             r#"
@@ -919,24 +931,65 @@ pub async fn find_policy_candidates(
         .fetch_all(pool)
         .await
         .context("failed to find inherited policy candidates")?;
-        candidates.extend(
-            rows.into_iter().map(
-                |(policy_id, policy_version_id, policy_name)| PolicyCandidate {
-                    policy_id,
-                    policy_version_id,
-                    policy_name,
-                    match_type: PolicyCandidateMatchType::InheritedMapping,
-                    confidence: 95,
-                    match_reasons: vec![
-                        "Trusted mapping on an unchanged requirement in the prior release."
-                            .to_string(),
-                    ],
-                },
-            ),
-        );
+
+        for (policy_id, policy_version_id, policy_name) in rows {
+            candidates.entry(policy_version_id).or_insert_with(|| PolicyCandidate {
+                policy_id,
+                policy_version_id,
+                policy_name,
+                match_type: PolicyCandidateMatchType::InheritedMapping,
+                confidence: 95,
+                match_reasons: vec![
+                    "Trusted mapping on an unchanged requirement in the prior release."
+                        .to_string(),
+                ],
+            });
+        }
     }
 
-    Ok(candidates)
+    // 3. Exact technical enforcement match: lowest of these three priorities.
+    // Only add if not already present from mapping searches.
+    if let Some(fix_text_content) = fix_text {
+        let technical_identity = RequirementTechnicalIdentity::from_fix_text(fix_text_content);
+
+        if !technical_identity.enforced_options.is_empty() {
+            let tech_matches =
+                find_exact_technical_match_candidates(pool, &technical_identity)
+                    .await
+                    .context("failed to find exact technical match candidates")?;
+
+            for tech_match in tech_matches {
+                // Only add if this policy version wasn't already found via mapping.
+                if !candidates.contains_key(&tech_match.policy_version_id) {
+                    let description = technical_identity.description();
+                    candidates.insert(
+                        tech_match.policy_version_id,
+                        PolicyCandidate {
+                            policy_id: tech_match.policy_id,
+                            policy_version_id: tech_match.policy_version_id,
+                            policy_name: tech_match.policy_name,
+                            match_type: PolicyCandidateMatchType::ExactTechnicalMatch,
+                            confidence: 90,
+                            match_reasons: vec![format!(
+                                "Exact normalized enforcement match: {}",
+                                description
+                            )],
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    // Sort candidates by confidence descending, then by name for stable ordering.
+    let mut result: Vec<PolicyCandidate> = candidates.into_values().collect();
+    result.sort_by(|a, b| {
+        b.confidence
+            .cmp(&a.confidence)
+            .then_with(|| a.policy_name.cmp(&b.policy_name))
+    });
+
+    Ok(result)
 }
 
 // ── Atomic commit helpers ─────────────────────────────────────────────────────
