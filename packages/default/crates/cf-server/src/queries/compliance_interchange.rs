@@ -2832,6 +2832,15 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("find existing policy name for late collision");
+        let existing_name_counts: (i64, i64) = sqlx::query_as(
+            "SELECT
+                (SELECT COUNT(*) FROM deployment_policies WHERE name = $1),
+                (SELECT COUNT(*) FROM deployment_policy_versions pv JOIN deployment_policies p ON p.id = pv.policy_id WHERE p.name = $1)",
+        )
+        .bind(&shared_name)
+        .fetch_one(&pool)
+        .await
+        .expect("count existing collision policy");
         records[2].name = shared_name.clone();
 
         let source_sha = pkg.provenance.sha256.clone();
@@ -2858,8 +2867,14 @@ mod tests {
         assert_eq!(durable_rows.0, 0, "source artifact must roll back");
         assert_eq!(durable_rows.1, 0, "bundle lineage must roll back");
         assert_eq!(durable_rows.2, 0, "bundle version must roll back");
-        assert_eq!(durable_rows.3, 0, "shared policy lineage must roll back");
-        assert_eq!(durable_rows.4, 0, "shared policy version must roll back");
+        assert_eq!(
+            durable_rows.3, existing_name_counts.0,
+            "shared policy lineage must roll back"
+        );
+        assert_eq!(
+            durable_rows.4, existing_name_counts.1,
+            "shared policy version must roll back"
+        );
         assert_eq!(durable_rows.5, 0, "source mappings must roll back");
     }
 
