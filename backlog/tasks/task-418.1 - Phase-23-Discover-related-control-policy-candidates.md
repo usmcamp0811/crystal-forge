@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-12 19:26'
-updated_date: '2026-08-12 20:13'
+updated_date: '2026-08-12 20:20'
 labels: []
 milestone: m-23
 dependencies:
@@ -63,4 +63,6 @@ Add candidate-only discovery for DISA STIG requirements that share exact normali
 2026-08-12 Phase 23 implementation in existing TASK-418 worktree: added typed RelatedRequirementIdentifiers metadata extraction with uppercase exact normalization; extended find_policy_candidates to discover trusted mappings on current accepted/current-published policy versions from other frameworks and emit RelatedMapping confidence 70 with shared identifier and existing requirement evidence; changed auto_resolvable to only accept authoritative/inherited/exact technical candidates or inferred enforcement; preserved RelatedMapping exclusion from MapExistingProof. Added unit tests for metadata normalization and review-only auto-resolution, plus an ignored DB test proving normalized related mapping discovery and trust/currentness filtering. Targeted DB test passes; cargo fmt and git diff checks pass; SQLX_OFFLINE cargo check passes with existing warnings. Work remains uncommitted.
 
 Phase 23 candidate-discovery slice committed and pushed as f582fdea50ebc2e0ae4235c2a98001da02efbde3. Remote branch now points to this commit.
+
+Follow-up committed and pushed as b388c3f6d0d384c159fe13f9f1413984bf5c9f9a: added ReviewedRelatedCandidate provenance to ImportedMappingSemantics and persisted selected related reviews as suggested provenance without treating them as MapExistingProof. cargo fmt, git diff --check, SQLX_OFFLINE cargo check -p cf-server, and targeted unit test passed.
 <!-- SECTION:NOTES:END -->
