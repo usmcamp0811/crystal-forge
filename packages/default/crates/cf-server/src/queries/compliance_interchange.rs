@@ -736,31 +736,31 @@ pub async fn commit_foreign_import(
         rule_to_policy_version.insert(rule_id.clone(), effective_policy_version_id);
     }
 
-    // 5b. Handle CreateShared outcomes
-    // For each validated shared creation, create 1 policy lineage and version with authoritative technical identity.
-    for validated in &validated_shared_creations {
-        // Use validated technical identity (item 8: trust boundary)
-        let technical_identity = &validated.technical_identity;
+     // 5b. Handle CreateShared outcomes (from resolution plan, authoritative source)
+    // For each shared creation in the plan, create 1 policy lineage and version with authoritative technical identity.
+    for shared in &resolution_plan.shared_creations {
+        // Use technical identity from resolution plan (item 8: trust boundary)
+        let technical_identity = &shared.technical_identity;
 
         // Construct policy config from authoritative technical identity.
         // This is the actual enforcement that will be evaluated.
         let policy_config = serde_json::Value::Object(technical_identity.enforced_options.clone());
 
         // Use the technical hash as the policy name (derived from enforcement, not client input)
-        let policy_name = format!("Technical: {}", validated.group_id.technical_hash);
+        let policy_name = format!("Technical: {}", shared.group_id.technical_hash);
         let policy_description = format!(
             "Shared implementation of {}",
-            validated.group_id.technical_hash
+            shared.group_id.technical_hash
         );
 
-        // Insert policy lineage using validated IDs (item 8: trust boundary)
+        // Insert policy lineage using IDs from resolution plan (item 8: trust boundary)
         sqlx::query(
             r#"
             INSERT INTO deployment_policies (id, name, description, policy_type, config, enabled)
             VALUES ($1, $2, $3, 'native', $4, false)
             "#,
         )
-        .bind(validated.policy_id)
+        .bind(shared.policy_id)
         .bind(&policy_name)
         .bind(&policy_description)
         .bind(&policy_config)
@@ -788,8 +788,8 @@ pub async fn commit_foreign_import(
             )
             "#,
         )
-        .bind(validated.policy_version_id)
-        .bind(validated.policy_id)
+        .bind(shared.policy_version_id)
+        .bind(shared.policy_id)
         .bind("0.1-draft")
         .bind(&policy_name)
         .bind(&policy_description)
@@ -807,25 +807,25 @@ pub async fn commit_foreign_import(
 
         // Set the policy's current_draft_version_id pointer
         sqlx::query("UPDATE deployment_policies SET current_draft_version_id = $1 WHERE id = $2")
-            .bind(validated.policy_version_id)
-            .bind(validated.policy_id)
+            .bind(shared.policy_version_id)
+            .bind(shared.policy_id)
             .execute(&mut *tx)
             .await
             .context("failed to set shared policy current_draft_version_id")?;
 
         // Track as created with opaque_xml = None (no source XML for shared)
-        created_policy_objects.push((validated.policy_id, validated.policy_version_id, None));
-        created_policy_version_ids.push(validated.policy_version_id);
+        created_policy_objects.push((shared.policy_id, shared.policy_version_id, None));
+        created_policy_version_ids.push(shared.policy_version_id);
 
         // Map all members to this shared policy (item 7: carry technical_identity)
-        for rule_id in &validated.requirement_keys {
-            rule_to_policy_version.insert(rule_id.clone(), validated.policy_version_id);
+        for rule_id in &shared.requirement_keys {
+            rule_to_policy_version.insert(rule_id.clone(), shared.policy_version_id);
         }
 
         created_shared_policies.push((
-            validated.policy_id,
-            validated.policy_version_id,
-            validated.requirement_keys.clone(),
+            shared.policy_id,
+            shared.policy_version_id,
+            shared.requirement_keys.clone(),
         ));
     }
 
