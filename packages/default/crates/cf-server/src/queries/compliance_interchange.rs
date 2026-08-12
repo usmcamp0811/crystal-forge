@@ -66,7 +66,6 @@ async fn revalidate_reviewed_related_candidate(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     selected_policy_version_id: Uuid,
     incoming_requirement_version_id: Uuid,
-    _record: &ImportedPolicyRecord,
     reviewed: &ReviewedRelatedCandidate,
 ) -> Result<()> {
     if reviewed.policy_version_id != selected_policy_version_id {
@@ -910,7 +909,6 @@ pub async fn commit_foreign_import(
                     &mut tx,
                     *version_id,
                     requirement.requirement_version_id,
-                    rec,
                     reviewed_related,
                 )
                 .await?;
@@ -2750,14 +2748,26 @@ mod tests {
             .await
             .expect("first shared import");
 
+        let benchmark_mapping: Uuid = sqlx::query_scalar(
+            "SELECT bundle_version_id FROM compliance_source_object_mappings
+             WHERE source_artifact_id = $1 AND object_kind = 'benchmark'",
+        )
+        .bind(first.source_artifact_id)
+        .fetch_one(&pool)
+        .await
+        .expect("benchmark mapping must exist for exact-artifact fast path");
+        assert_eq!(benchmark_mapping, first.bundle_version_id);
         let counts_before: (i64, i64, i64, i64, i64) = sqlx::query_as(
             "SELECT
-                (SELECT COUNT(*) FROM compliance_framework_versions),
-                (SELECT COUNT(*) FROM compliance_bundle_versions),
-                (SELECT COUNT(*) FROM compliance_requirement_versions),
-                (SELECT COUNT(*) FROM policy_requirement_mappings),
-                (SELECT COUNT(*) FROM compliance_bundle_version_policies)",
+                (SELECT COUNT(*) FROM compliance_framework_versions WHERE source_artifact_id = $1),
+                (SELECT COUNT(*) FROM compliance_bundle_versions WHERE bundle_id = $2),
+                (SELECT COUNT(*) FROM compliance_requirement_versions rv JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id WHERE fv.source_artifact_id = $1),
+                (SELECT COUNT(*) FROM policy_requirement_mappings m WHERE m.requirement_version_id IN (SELECT rv.id FROM compliance_requirement_versions rv JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id WHERE fv.source_artifact_id = $1)),
+                (SELECT COUNT(*) FROM compliance_bundle_version_policies WHERE bundle_version_id = $3)",
         )
+        .bind(first.source_artifact_id)
+        .bind(first.bundle_id)
+        .bind(first.bundle_version_id)
         .fetch_one(&pool)
         .await
         .expect("count rows before exact reimport");
@@ -2780,12 +2790,15 @@ mod tests {
 
         let counts_after: (i64, i64, i64, i64, i64) = sqlx::query_as(
             "SELECT
-                (SELECT COUNT(*) FROM compliance_framework_versions),
-                (SELECT COUNT(*) FROM compliance_bundle_versions),
-                (SELECT COUNT(*) FROM compliance_requirement_versions),
-                (SELECT COUNT(*) FROM policy_requirement_mappings),
-                (SELECT COUNT(*) FROM compliance_bundle_version_policies)",
+                (SELECT COUNT(*) FROM compliance_framework_versions WHERE source_artifact_id = $1),
+                (SELECT COUNT(*) FROM compliance_bundle_versions WHERE bundle_id = $2),
+                (SELECT COUNT(*) FROM compliance_requirement_versions rv JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id WHERE fv.source_artifact_id = $1),
+                (SELECT COUNT(*) FROM policy_requirement_mappings m WHERE m.requirement_version_id IN (SELECT rv.id FROM compliance_requirement_versions rv JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id WHERE fv.source_artifact_id = $1)),
+                (SELECT COUNT(*) FROM compliance_bundle_version_policies WHERE bundle_version_id = $3)",
         )
+        .bind(first.source_artifact_id)
+        .bind(first.bundle_id)
+        .bind(first.bundle_version_id)
         .fetch_one(&pool)
         .await
         .expect("count rows after exact reimport");
