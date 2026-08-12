@@ -391,18 +391,33 @@ pub async fn commit_foreign_import(
         String,
         (Vec<String>, RequirementTechnicalIdentity),
     > = std::collections::HashMap::new();
+    let mut claimed_shared_rules = std::collections::HashSet::new();
+    let mut validated_group_ids = std::collections::HashSet::new();
 
     for decision in &validated.shared_group_decisions {
         use crate::compliance::xccdf::import_models::SharedGroupAction;
         if decision.action != SharedGroupAction::CreateShared {
             continue;
         }
+
+        // 1. Require at least 2 rules
         if decision.rule_ids.len() < 2 {
-            // Degenerate single-member "shared" group; ignore
-            continue;
+            anyhow::bail!(
+                "IMPORT_SHARED_IMPLEMENTATION_STALE: CreateShared requires at least 2 rules, got {}",
+                decision.rule_ids.len()
+            );
         }
 
-        // Validate every listed rule exists and is eligible for shared creation
+        // 2. Require 2 DISTINCT rule IDs (no duplicates)
+        let unique_rules: std::collections::HashSet<&String> =
+            decision.rule_ids.iter().collect();
+        if unique_rules.len() != decision.rule_ids.len() {
+            anyhow::bail!(
+                "IMPORT_SHARED_IMPLEMENTATION_STALE: CreateShared contains duplicate rule IDs"
+            );
+        }
+
+        // 3. Validate every listed rule exists and is eligible for shared creation
         for rule_id in &decision.rule_ids {
             if !authoritative_identities.contains_key(rule_id) {
                 anyhow::bail!(
@@ -410,6 +425,16 @@ pub async fn commit_foreign_import(
                     rule_id
                 );
             }
+
+            // 4. Reject overlapping shared decisions (rule in multiple groups)
+            if claimed_shared_rules.contains(rule_id) {
+                anyhow::bail!(
+                    "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} participates in multiple shared groups",
+                    rule_id
+                );
+            }
+            claimed_shared_rules.insert(rule_id.clone());
+
             let rec = policy_records
                 .iter()
                 .find(|r| r.source_rule_id == *rule_id)
@@ -445,12 +470,28 @@ pub async fn commit_foreign_import(
             .ok_or_else(|| anyhow::anyhow!("first rule missing identity"))?
             .clone();
 
+        // 1. Reject empty technical identities
+        if first_identity.enforced_options.is_empty() {
+            anyhow::bail!(
+                "IMPORT_SHARED_IMPLEMENTATION_STALE: shared group has empty technical enforcement"
+            );
+        }
+
         let expected_group_id = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&first_identity);
 
         for rule_id in &decision.rule_ids[1..] {
             let identity = authoritative_identities
                 .get(rule_id)
                 .ok_or_else(|| anyhow::anyhow!("rule {} missing identity", rule_id))?;
+            
+            // Reject empty technical identities
+            if identity.enforced_options.is_empty() {
+                anyhow::bail!(
+                    "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} has empty technical enforcement, cannot share",
+                    rule_id
+                );
+            }
+
             let group_id =
                 crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(
                     identity,
@@ -462,6 +503,14 @@ pub async fn commit_foreign_import(
                 );
             }
         }
+
+        // 5. Reject multiple CreateShared decisions for the same technical identity
+        if validated_group_ids.contains(&expected_group_id.technical_hash) {
+            anyhow::bail!(
+                "IMPORT_SHARED_IMPLEMENTATION_STALE: multiple CreateShared decisions for same technical identity"
+            );
+        }
+        validated_group_ids.insert(expected_group_id.technical_hash.clone());
 
         // Validate client group_id matches server-derived hash (stale-decision check)
         if decision.group_id != expected_group_id.technical_hash {
