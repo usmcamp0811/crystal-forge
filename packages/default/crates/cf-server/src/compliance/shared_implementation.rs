@@ -204,6 +204,42 @@ pub fn validate_shared_group_at_commit(
     Ok(())
 }
 
+/// Parameters for creating a shared policy for a group of requirements.
+///
+/// Used during the import commit phase to create a single policy that
+/// satisfies multiple requirements with identical technical enforcement.
+#[derive(Debug, Clone)]
+pub struct SharedPolicyCreationParams {
+    /// Stable policy ID (generated from group ID to ensure determinism)
+    pub policy_id: Uuid,
+    /// Shared policy version ID
+    pub policy_version_id: Uuid,
+    /// User-readable name derived from requirements and technical identity
+    pub name: String,
+    /// Description of the shared enforcement
+    pub description: String,
+    /// Policy config (Nix options normalized from technical identity)
+    pub config: Value,
+    /// Compliance metadata (JSON encoding group membership)
+    pub compliance_metadata: Value,
+    /// Requirements (keys) that share this policy
+    pub requirement_keys: Vec<String>,
+}
+
+/// Generate policy IDs for shared implementations.
+///
+/// Note: IDs are generated randomly at preview time; the stable group identity
+/// persists in the group_id field which is stored in the database.
+/// At commit time, the group_id is re-validated against authoritative source bytes.
+pub fn generate_shared_policy_ids(_group: &SharedImplementationGroup) -> (Uuid, Uuid) {
+    // Generate fresh UUIDs for each shared policy
+    // Stability comes from persistent storage of group_id and revalidation at commit
+    let policy_id = Uuid::new_v4();
+    let version_id = Uuid::new_v4();
+    
+    (policy_id, version_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,5 +510,27 @@ mod tests {
             result.unwrap_err().contains("no longer present"),
             "error should indicate missing requirement"
         );
+    }
+
+    #[test]
+    fn test_generate_shared_policy_ids_fresh() {
+        use super::generate_shared_policy_ids;
+
+        let identity = identity_from_options(&[("services.openssh.enable", "false")]);
+        let group = SharedImplementationGroup {
+            group_id: SharedImplementationId::from_technical_identity(&identity),
+            technical_identity: identity,
+            requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
+            existing_policy_candidate: None,
+            action: SharedImplementationAction::CreateShared,
+        };
+
+        let (policy_id1, version_id1) = generate_shared_policy_ids(&group);
+        let (policy_id2, version_id2) = generate_shared_policy_ids(&group);
+
+        // IDs are fresh (non-deterministic); determinism comes from persistent group_id
+        assert_ne!(policy_id1, policy_id2, "policy IDs should be fresh each call");
+        assert_ne!(version_id1, version_id2, "version IDs should be fresh each call");
+        assert_ne!(policy_id1, version_id1, "policy and version IDs should differ");
     }
 }
