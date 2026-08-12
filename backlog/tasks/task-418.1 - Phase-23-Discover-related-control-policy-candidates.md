@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-12 19:26'
-updated_date: '2026-08-12 19:26'
+updated_date: '2026-08-12 19:58'
 labels: []
 milestone: m-23
 dependencies:
@@ -56,3 +56,9 @@ Add candidate-only discovery for DISA STIG requirements that share exact normali
 6. Add unit tests for identifier matching and precedence, plus DB-backed tests proving trust/currentness filtering against normalized rows.
 7. Run targeted candidate and Phase 22 regression tests, cargo fmt --all --check, git diff --check, and cargo check -p cf-server. Avoid the long web-ui check unless a changed UI surface makes it necessary.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-08-12 Phase 23 implementation in existing TASK-418 worktree: added typed RelatedRequirementIdentifiers metadata extraction with uppercase exact normalization; extended find_policy_candidates to discover trusted mappings on current accepted/current-published policy versions from other frameworks and emit RelatedMapping confidence 70 with shared identifier and existing requirement evidence; changed auto_resolvable to only accept authoritative/inherited/exact technical candidates or inferred enforcement; preserved RelatedMapping exclusion from MapExistingProof. Added unit tests for metadata normalization and review-only auto-resolution, plus an ignored DB test proving normalized related mapping discovery and trust/currentness filtering. Targeted DB test passes; cargo fmt and git diff checks pass; SQLX_OFFLINE cargo check passes with existing warnings. Work remains uncommitted.
+<!-- SECTION:NOTES:END -->
