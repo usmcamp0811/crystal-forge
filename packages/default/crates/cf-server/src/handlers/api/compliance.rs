@@ -26,6 +26,10 @@ use crate::compliance::resolver::ResolutionOutcome;
 use crate::compliance::xccdf::disa_stig_adapter::{
     canonical_for_rule, canonical_key_for_rule, identify_framework, is_disa_stig,
 };
+use crate::compliance::xccdf::exact_technical_match::RequirementTechnicalIdentity;
+use crate::compliance::shared_implementation::{
+    detect_shared_implementations, recommend_action, SharedImplementationAction,
+};
 use crate::compliance::xccdf::export_models::{
     GroupProjectionError, ImportedCheckError, ImportedFixError, XccdfBundleExport,
     XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
@@ -3906,6 +3910,31 @@ async fn compute_foreign_stig_reconciliation(
         },
     };
 
+    // Detect shared implementations by extracting technical identities
+    let mut rule_technical_identities: Vec<(String, RequirementTechnicalIdentity)> = Vec::new();
+    for rule in &parsed.rules {
+        // Infer technical identity from fix text if available
+        let technical_identity = rule
+            .fix
+            .as_ref()
+            .map(|fix| RequirementTechnicalIdentity::from_fix_text(&fix.content))
+            .unwrap_or_else(|| RequirementTechnicalIdentity {
+                enforced_options: serde_json::Map::new(),
+            });
+        rule_technical_identities.push((rule.id.clone(), technical_identity));
+    }
+
+    // Detect shared groups
+    let shared_groups = detect_shared_implementations(rule_technical_identities.clone());
+
+    // Build a map of rule_id -> shared_group for quick lookup
+    let mut rule_to_group_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (group_idx, group) in shared_groups.iter().enumerate() {
+        for req_key in &group.requirement_keys {
+            rule_to_group_map.insert(req_key.clone(), group_idx);
+        }
+    }
+
     let mut rows = Vec::with_capacity(parsed.rules.len());
     for (rule, requirement) in parsed.rules.iter().zip(reconciliation.requirements.iter()) {
         let is_existing_release = matches!(
@@ -3966,6 +3995,30 @@ async fn compute_foreign_stig_reconciliation(
         }));
     }
 
+    // Build shared groups response
+    let shared_groups_response: Vec<serde_json::Value> = shared_groups.iter().map(|group| {
+        let recommended_action = recommend_action(group);
+        let action_str = match recommended_action {
+            SharedImplementationAction::ReuseExisting => "reuse_existing",
+            SharedImplementationAction::CreateShared => "create_shared",
+            SharedImplementationAction::ReviewIndividually => "review_individually",
+        };
+        
+        serde_json::json!({
+            "group_id": group.group_id.technical_hash,
+            "requirement_keys": group.requirement_keys,
+            "recommended_action": action_str,
+            "has_existing_candidate": group.existing_policy_candidate.is_some(),
+            "existing_candidate": group.existing_policy_candidate.as_ref().map(|(policy_id, name, confidence)| {
+                serde_json::json!({
+                    "policy_id": policy_id,
+                    "policy_name": name,
+                    "confidence": confidence,
+                })
+            }),
+        })
+    }).collect();
+
     Ok(Some(serde_json::json!({
         "framework": {
             "canonical_source_key": framework.canonical_source_key,
@@ -3979,6 +4032,7 @@ async fn compute_foreign_stig_reconciliation(
             },
         },
         "requirements": rows,
+        "shared_implementation_groups": shared_groups_response,
         "removed_requirements": reconciliation.removed_requirements.into_iter().map(|requirement| serde_json::json!({
             "external_id": requirement.external_id,
             "state": "removed_from_release",
