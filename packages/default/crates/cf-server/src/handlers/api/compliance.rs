@@ -23,13 +23,13 @@ use crate::api::models::{
 };
 use crate::compliance::interchange::{InterchangeLimits, MAX_XCCDF_UPLOAD_BYTES};
 use crate::compliance::resolver::ResolutionOutcome;
+use crate::compliance::shared_implementation::{
+    SharedImplementationAction, detect_shared_implementations, recommend_action,
+};
 use crate::compliance::xccdf::disa_stig_adapter::{
     canonical_for_rule, canonical_key_for_rule, identify_framework, is_disa_stig,
 };
 use crate::compliance::xccdf::exact_technical_match::RequirementTechnicalIdentity;
-use crate::compliance::shared_implementation::{
-    detect_shared_implementations, recommend_action, SharedImplementationAction,
-};
 use crate::compliance::xccdf::export_models::{
     GroupProjectionError, ImportedCheckError, ImportedFixError, XccdfBundleExport,
     XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
@@ -3929,8 +3929,10 @@ async fn compute_foreign_stig_reconciliation(
 
     // Per-rule candidate sets keyed by rule ID, retained so shared groups can
     // compute the common candidate intersection (item 4/5) without re-querying.
-    let mut rule_candidates: std::collections::HashMap<String, Vec<crate::compliance::requirement_model::PolicyCandidate>> =
-        std::collections::HashMap::new();
+    let mut rule_candidates: std::collections::HashMap<
+        String,
+        Vec<crate::compliance::requirement_model::PolicyCandidate>,
+    > = std::collections::HashMap::new();
 
     let mut rows = Vec::with_capacity(parsed.rules.len());
     for (rule, requirement) in parsed.rules.iter().zip(reconciliation.requirements.iter()) {
@@ -4008,13 +4010,22 @@ async fn compute_foreign_stig_reconciliation(
             // these into one group-wide proof.
             for rule_id in &group.requirement_keys {
                 if let Some(list) = rule_candidates.get(rule_id) {
-                    if let Some(c) = list.iter().find(|c| c.policy_version_id == candidate.policy_version_id) {
-                        use crate::compliance::xccdf::import_models::MapExistingProof;
+                    if let Some(c) = list
+                        .iter()
+                        .find(|c| c.policy_version_id == candidate.policy_version_id)
+                    {
                         use crate::compliance::requirement_model::PolicyCandidateMatchType;
+                        use crate::compliance::xccdf::import_models::MapExistingProof;
                         let proof = match c.match_type {
-                            PolicyCandidateMatchType::ExactTechnicalMatch => MapExistingProof::ExactTechnicalMatch,
-                            PolicyCandidateMatchType::AuthoritativeMapping | PolicyCandidateMatchType::InheritedMapping => MapExistingProof::InheritedMapping,
-                            PolicyCandidateMatchType::RelatedMapping | PolicyCandidateMatchType::FuzzySimilarity => continue,
+                            PolicyCandidateMatchType::ExactTechnicalMatch => {
+                                MapExistingProof::ExactTechnicalMatch
+                            }
+                            PolicyCandidateMatchType::AuthoritativeMapping
+                            | PolicyCandidateMatchType::InheritedMapping => {
+                                MapExistingProof::InheritedMapping
+                            }
+                            PolicyCandidateMatchType::RelatedMapping
+                            | PolicyCandidateMatchType::FuzzySimilarity => continue,
                         };
                         group.member_proofs.insert(rule_id.clone(), proof);
                     }

@@ -218,7 +218,8 @@ pub async fn revalidate_exact_technical_match(
     if technical_identity.enforced_options.is_empty() {
         return Ok(ExactTechnicalMatchValidation::Invalid {
             code: "IMPORT_REUSE_INELIGIBLE",
-            message: "Re-parsing imported requirement produced no technical enforcement.".to_string(),
+            message: "Re-parsing imported requirement produced no technical enforcement."
+                .to_string(),
         });
     }
 
@@ -240,8 +241,11 @@ pub async fn revalidate_exact_technical_match(
         None => {
             return Ok(ExactTechnicalMatchValidation::Invalid {
                 code: "IMPORT_REUSE_INELIGIBLE",
-                message: format!("Policy version {} no longer exists.", selected_policy_version_id),
-            })
+                message: format!(
+                    "Policy version {} no longer exists.",
+                    selected_policy_version_id
+                ),
+            });
         }
     };
 
@@ -542,7 +546,10 @@ mod tests {
     #[test]
     fn description_empty() {
         let identity = RequirementTechnicalIdentity::from_assertions(vec![]);
-        assert_eq!(identity.description(), "(no technical enforcement inferred)");
+        assert_eq!(
+            identity.description(),
+            "(no technical enforcement inferred)"
+        );
     }
 
     #[test]

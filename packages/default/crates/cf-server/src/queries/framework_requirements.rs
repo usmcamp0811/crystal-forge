@@ -933,17 +933,19 @@ pub async fn find_policy_candidates(
         .context("failed to find inherited policy candidates")?;
 
         for (policy_id, policy_version_id, policy_name) in rows {
-            candidates.entry(policy_version_id).or_insert_with(|| PolicyCandidate {
-                policy_id,
-                policy_version_id,
-                policy_name,
-                match_type: PolicyCandidateMatchType::InheritedMapping,
-                confidence: 95,
-                match_reasons: vec![
-                    "Trusted mapping on an unchanged requirement in the prior release."
-                        .to_string(),
-                ],
-            });
+            candidates
+                .entry(policy_version_id)
+                .or_insert_with(|| PolicyCandidate {
+                    policy_id,
+                    policy_version_id,
+                    policy_name,
+                    match_type: PolicyCandidateMatchType::InheritedMapping,
+                    confidence: 95,
+                    match_reasons: vec![
+                        "Trusted mapping on an unchanged requirement in the prior release."
+                            .to_string(),
+                    ],
+                });
         }
     }
 
@@ -953,10 +955,9 @@ pub async fn find_policy_candidates(
         let technical_identity = RequirementTechnicalIdentity::from_fix_text(fix_text_content);
 
         if !technical_identity.enforced_options.is_empty() {
-            let tech_matches =
-                find_exact_technical_match_candidates(pool, &technical_identity)
-                    .await
-                    .context("failed to find exact technical match candidates")?;
+            let tech_matches = find_exact_technical_match_candidates(pool, &technical_identity)
+                .await
+                .context("failed to find exact technical match candidates")?;
 
             for tech_match in tech_matches {
                 // Only add if this policy version wasn't already found via mapping.

@@ -35,19 +35,21 @@ use crate::compliance::digest::{
     write_bundle_version_digest, write_policy_version_digest,
 };
 use crate::compliance::framework_model::FrameworkVersionCanonical;
+use crate::compliance::shared_implementation::{
+    PolicyResolution, SharedCreation, SharedReuse, build_import_policy_resolution_plan,
+    detect_shared_implementations, validate_shared_group_at_commit,
+};
 use crate::compliance::xccdf::disa_stig_adapter::{
     canonical_for_rule, canonical_key_for_rule, identify_framework, is_disa_stig,
 };
+use crate::compliance::xccdf::exact_technical_match::RequirementTechnicalIdentity;
 use crate::compliance::xccdf::exact_technical_match::{
     ExactTechnicalMatchValidation, revalidate_exact_technical_match,
 };
-use crate::compliance::shared_implementation::{
-    build_import_policy_resolution_plan, detect_shared_implementations,
-    validate_shared_group_at_commit, PolicyResolution, SharedCreation, SharedReuse,
-};
-use crate::compliance::xccdf::exact_technical_match::RequirementTechnicalIdentity;
 use crate::compliance::xccdf::import_models::ImportedPolicyRecord;
-use crate::compliance::xccdf::import_models::{MapExistingProof, ValidatedImportPlan, XccdfCommittedImportResult};
+use crate::compliance::xccdf::import_models::{
+    MapExistingProof, ValidatedImportPlan, XccdfCommittedImportResult,
+};
 use crate::compliance::xccdf::importer::build_policy_records;
 use crate::compliance::xccdf::package::{ProcessedXccdfPackage, build_package_context};
 use crate::compliance::xccdf::reconciliation::{
@@ -379,9 +381,11 @@ pub async fn commit_foreign_import(
     // ── 3. Authoritative shared group validation ──────────────────────────────
     // Build authoritative technical identities from parsed rules.
     // This is the single source of truth for group membership and enforcement.
-    let mut authoritative_identities: std::collections::HashMap<String, RequirementTechnicalIdentity> =
-        std::collections::HashMap::new();
-    
+    let mut authoritative_identities: std::collections::HashMap<
+        String,
+        RequirementTechnicalIdentity,
+    > = std::collections::HashMap::new();
+
     for rec in &policy_records {
         let parsed_rule = pkg
             .parsed
@@ -426,8 +430,7 @@ pub async fn commit_foreign_import(
         }
 
         // 2. Require 2 DISTINCT rule IDs (no duplicates)
-        let unique_rules: std::collections::HashSet<&String> =
-            decision.rule_ids.iter().collect();
+        let unique_rules: std::collections::HashSet<&String> = decision.rule_ids.iter().collect();
         if unique_rules.len() != decision.rule_ids.len() {
             anyhow::bail!(
                 "IMPORT_SHARED_IMPLEMENTATION_STALE: CreateShared contains duplicate rule IDs"
@@ -461,7 +464,7 @@ pub async fn commit_foreign_import(
                         rule_id
                     )
                 })?;
-            
+
             // Action-type validation: only native technical implementations can be shared
             // Reject MapExisting, manual, unbound, opaque, etc.
             if rec.mapped_policy_version_id.is_some() {
@@ -470,7 +473,7 @@ pub async fn commit_foreign_import(
                     rule_id
                 );
             }
-            
+
             // Only native policy type is eligible for shared creation
             if rec.policy_type != "native" {
                 anyhow::bail!(
@@ -500,7 +503,7 @@ pub async fn commit_foreign_import(
             let identity = authoritative_identities
                 .get(rule_id)
                 .ok_or_else(|| anyhow::anyhow!("rule {} missing identity", rule_id))?;
-            
+
             // Reject empty technical identities
             if identity.enforced_options.is_empty() {
                 anyhow::bail!(
@@ -531,9 +534,7 @@ pub async fn commit_foreign_import(
 
         // Validate client group_id matches server-derived hash (stale-decision check)
         if decision.group_id != expected_group_id.technical_hash {
-            anyhow::bail!(
-                "IMPORT_SHARED_IMPLEMENTATION_STALE: client group hash mismatch"
-            );
+            anyhow::bail!("IMPORT_SHARED_IMPLEMENTATION_STALE: client group hash mismatch");
         }
 
         // Build ValidatedSharedCreation: the trust boundary.
@@ -553,8 +554,9 @@ pub async fn commit_foreign_import(
 
     // The resolution plan determines which policy each requirement gets.
     // Pass validated shared groups (which now carry authoritative technical identity).
-    let resolution_plan = build_import_policy_resolution_plan(&validated.shared_group_decisions, &policy_records)
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let resolution_plan =
+        build_import_policy_resolution_plan(&validated.shared_group_decisions, &policy_records)
+            .map_err(|e| anyhow::anyhow!(e))?;
 
     // Central map: rule_id -> effective_policy_version_id
     // This is populated as policies are created/reused and becomes the single source of truth.
@@ -640,15 +642,16 @@ pub async fn commit_foreign_import(
                             )
                         },
                     )?;
-                    let inherited_mapping: Option<(String, String, Option<String>)> =
-                        if requirement.unchanged_from_previous_release {
-                            let previous_requirement_version_id =
-                                requirement.previous_requirement_version_id.ok_or_else(|| {
-                                    anyhow::anyhow!(
-                                        "IMPORT_REUSE_INELIGIBLE: missing prior requirement version"
-                                    )
-                                })?;
-                            sqlx::query_as(
+                    let inherited_mapping: Option<(String, String, Option<String>)> = if requirement
+                        .unchanged_from_previous_release
+                    {
+                        let previous_requirement_version_id =
+                            requirement.previous_requirement_version_id.ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "IMPORT_REUSE_INELIGIBLE: missing prior requirement version"
+                                )
+                            })?;
+                        sqlx::query_as(
                             "SELECT relationship, coverage, rationale FROM policy_requirement_mappings \
                              WHERE policy_version_id = $1 AND requirement_version_id = $2 \
                                AND trust_state = 'trusted'",
@@ -658,9 +661,9 @@ pub async fn commit_foreign_import(
                         .fetch_optional(&mut *tx)
                         .await
                         .context("failed to validate selected policy reuse")?
-                        } else {
-                            None
-                        };
+                    } else {
+                        None
+                    };
                     let Some(inherited_mapping) = inherited_mapping else {
                         anyhow::bail!(
                             "IMPORT_REUSE_INELIGIBLE: policy version {} is not a trusted mapping for an unchanged prior requirement",
@@ -671,7 +674,8 @@ pub async fn commit_foreign_import(
                 }
                 // Inherited reuse refers to the exact immutable local policy
                 // version, so it must still be the current accepted version.
-                if publication_state != "accepted" || current_published_version_id != Some(*version_id)
+                if publication_state != "accepted"
+                    || current_published_version_id != Some(*version_id)
                 {
                     anyhow::bail!(
                         "IMPORT_REUSE_INELIGIBLE: policy version {} must be the current accepted version of policy {}",
@@ -713,12 +717,14 @@ pub async fn commit_foreign_import(
 
         // Construct policy config from authoritative technical identity.
         // This is the actual enforcement that will be evaluated.
-        let policy_config =
-            serde_json::Value::Object(technical_identity.enforced_options.clone());
+        let policy_config = serde_json::Value::Object(technical_identity.enforced_options.clone());
 
         // Use the technical hash as the policy name (derived from enforcement, not client input)
         let policy_name = format!("Technical: {}", validated.group_id.technical_hash);
-        let policy_description = format!("Shared implementation of {}", validated.group_id.technical_hash);
+        let policy_description = format!(
+            "Shared implementation of {}",
+            validated.group_id.technical_hash
+        );
 
         // Insert policy lineage using validated IDs (item 8: trust boundary)
         sqlx::query(
@@ -919,41 +925,36 @@ pub async fn commit_foreign_import(
             // Mapping semantics stay per requirement so a shared policy can
             // carry a different reviewed relationship/coverage for each
             // requirement it satisfies (item 13).
-            let (relationship, coverage, rationale, provenance) = if let Some((
-                relationship,
-                coverage,
-                rationale,
-            )) = inherited_mappings.get(&rec.source_rule_id)
-            {
-                (
-                    relationship.as_str(),
-                    coverage.as_str(),
-                    rationale.as_deref(),
-                    "inherited",
-                )
-            } else if rec.mapped_policy_version_id.is_some() {
-                // Exact-technical-match reuse: the mapping is established from
-                // technical candidate matching, so provenance is `inferred`
-                // (the only CHECK-valid value for this origin).
-                let semantics = rec.mapping_semantics.as_ref();
-                let relationship = semantics
-                    .and_then(|s| s.relationship.as_deref())
-                    .filter(|value| {
-                        matches!(
-                            *value,
-                            "implements" | "supports" | "provides_evidence_for"
-                        )
-                    })
-                    .unwrap_or("implements");
-                let coverage = semantics
-                    .and_then(|s| s.coverage.as_deref())
-                    .filter(|value| matches!(*value, "full" | "partial"))
-                    .unwrap_or("full");
-                let rationale = semantics.and_then(|s| s.rationale.as_deref());
-                (relationship, coverage, rationale, "inferred")
-            } else {
-                ("implements", "full", None, "imported")
-            };
+            let (relationship, coverage, rationale, provenance) =
+                if let Some((relationship, coverage, rationale)) =
+                    inherited_mappings.get(&rec.source_rule_id)
+                {
+                    (
+                        relationship.as_str(),
+                        coverage.as_str(),
+                        rationale.as_deref(),
+                        "inherited",
+                    )
+                } else if rec.mapped_policy_version_id.is_some() {
+                    // Exact-technical-match reuse: the mapping is established from
+                    // technical candidate matching, so provenance is `inferred`
+                    // (the only CHECK-valid value for this origin).
+                    let semantics = rec.mapping_semantics.as_ref();
+                    let relationship = semantics
+                        .and_then(|s| s.relationship.as_deref())
+                        .filter(|value| {
+                            matches!(*value, "implements" | "supports" | "provides_evidence_for")
+                        })
+                        .unwrap_or("implements");
+                    let coverage = semantics
+                        .and_then(|s| s.coverage.as_deref())
+                        .filter(|value| matches!(*value, "full" | "partial"))
+                        .unwrap_or("full");
+                    let rationale = semantics.and_then(|s| s.rationale.as_deref());
+                    (relationship, coverage, rationale, "inferred")
+                } else {
+                    ("implements", "full", None, "imported")
+                };
 
             insert_policy_mapping_in_tx(
                 &mut tx,
@@ -1026,7 +1027,16 @@ pub async fn commit_foreign_import(
     // Read the persisted versions and build canonical from what was actually inserted.
     for (policy_id, policy_version_id, opaque_xml_opt) in &created_policy_objects {
         // Read back the persisted policy version to ensure digest matches persisted state
-        let (name, description, policy_type, implementation_state, execution_phase, config, compliance_metadata, dependencies): (
+        let (
+            name,
+            description,
+            policy_type,
+            implementation_state,
+            execution_phase,
+            config,
+            compliance_metadata,
+            dependencies,
+        ): (
             String,
             Option<String>,
             String,
@@ -3829,7 +3839,12 @@ mod tests {
     /// Single-rule DISA STIG whose fix text carries explicit NixOS assignments,
     /// giving the exact-technical-match commit revalidation something
     /// authoritative to re-derive the technical identity from.
-    fn stig_bytes_with_fix(benchmark_id: &str, vuln_id: &str, title: &str, fix_text: &str) -> Vec<u8> {
+    fn stig_bytes_with_fix(
+        benchmark_id: &str,
+        vuln_id: &str,
+        title: &str,
+        fix_text: &str,
+    ) -> Vec<u8> {
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="{benchmark_id}">
@@ -3872,12 +3887,7 @@ mod tests {
                 })
                 .collect(),
             mapping_semantics: semantics
-                .map(|s| {
-                    rule_ids
-                        .iter()
-                        .map(|id| (id.clone(), s.clone()))
-                        .collect()
-                })
+                .map(|s| rule_ids.iter().map(|id| (id.clone(), s.clone())).collect())
                 .unwrap_or_default(),
             shared_group_decisions: Vec::new(),
             bundle: ImportedBundlePlan {
@@ -3944,41 +3954,41 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
-        
+
         // Publish the version so it becomes the current published version
-         // First mark as trusted
-         sqlx::query(
-             "UPDATE deployment_policy_versions SET trust_state = 'trusted', trusted_by = $2, \
+        // First mark as trusted
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET trust_state = 'trusted', trusted_by = $2, \
               trusted_at = CURRENT_TIMESTAMP WHERE id = $1",
-         )
-         .bind(policy_version_id)
-         .bind(trusted_user_id)
-         .execute(pool)
-         .await
-         .unwrap();
-         
-         // Then mark as accepted AND update pointer in same transaction
-         // (trigger validate_policy_lineage_pointer_after_state_change requires this)
-         let mut tx = pool.begin().await.unwrap();
-         sqlx::query(
-             "UPDATE deployment_policy_versions SET publication_state = 'accepted', \
+        )
+        .bind(policy_version_id)
+        .bind(trusted_user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        // Then mark as accepted AND update pointer in same transaction
+        // (trigger validate_policy_lineage_pointer_after_state_change requires this)
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET publication_state = 'accepted', \
               published_at = CURRENT_TIMESTAMP WHERE id = $1",
-         )
-         .bind(policy_version_id)
-         .execute(&mut *tx)
-         .await
-         .unwrap();
-         
-         sqlx::query(
-             "UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2",
-         )
-         .bind(policy_version_id)
-         .bind(policy_id)
-         .execute(&mut *tx)
-         .await
-         .unwrap();
-         
-         tx.commit().await.unwrap();
+        )
+        .bind(policy_version_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(policy_version_id)
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+        tx.commit().await.unwrap();
         (policy_id, policy_version_id)
     }
 
@@ -4004,7 +4014,8 @@ mod tests {
             "xccdf_mil.disa.stig_benchmark_Exact_Match_End_To_End_{}",
             Uuid::new_v4().simple()
         );
-        let fix_text = "services.openssh.enable = false;\nservices.openssh.settings.PermitRootLogin = \"no\";";
+        let fix_text =
+            "services.openssh.enable = false;\nservices.openssh.settings.PermitRootLogin = \"no\";";
         let pkg = make_package(stig_bytes_with_fix(
             &benchmark_id,
             "V-418-101",
@@ -4214,9 +4225,6 @@ mod tests {
                 .unwrap();
         assert_eq!(bundle_count, 0);
     }
-
-
-
 }
 
 // ── Phase 22 unit tests: ValidatedSharedCreation trust boundary ────────────────
@@ -4225,11 +4233,13 @@ mod tests {
 mod phase_22_shared_validation_unit_tests {
     use super::*;
     use crate::compliance::xccdf::exact_technical_match::RequirementTechnicalIdentity;
-    use crate::compliance::xccdf::import_models::{SharedGroupDecision, SharedGroupAction};
+    use crate::compliance::xccdf::import_models::{SharedGroupAction, SharedGroupDecision};
     use serde_json::json;
 
     /// Helper: build a technical identity from a serde_json::Map of enforced options
-    fn identity_from_options(options: serde_json::Map<String, serde_json::Value>) -> RequirementTechnicalIdentity {
+    fn identity_from_options(
+        options: serde_json::Map<String, serde_json::Value>,
+    ) -> RequirementTechnicalIdentity {
         RequirementTechnicalIdentity {
             enforced_options: options,
         }
@@ -4256,29 +4266,35 @@ mod phase_22_shared_validation_unit_tests {
         // Phase 22 item 1: reject empty enforced_options
         let identity = identity_from_options(serde_json::Map::new());
         let _group_id = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
-        
+
         // An empty identity should still produce a hash, but in real validation,
         // we check `enforced_options.is_empty()` explicitly.
-        assert!(identity.enforced_options.is_empty(), "empty options must be detected");
+        assert!(
+            identity.enforced_options.is_empty(),
+            "empty options must be detected"
+        );
     }
 
     #[test]
     fn test_duplicate_member_rejected() {
         // Phase 22 item 2: reject duplicate member IDs
         let decisions = vec![create_shared_decision("hash1", &["A", "A"])];
-        
+
         // The validation logic checks: unique_rules.len() != decision.rule_ids.len()
         let unique_rules: std::collections::HashSet<&String> =
             decisions[0].rule_ids.iter().collect();
-        assert_ne!(unique_rules.len(), decisions[0].rule_ids.len(),
-                   "duplicate detection must catch [A, A]");
+        assert_ne!(
+            unique_rules.len(),
+            decisions[0].rule_ids.len(),
+            "duplicate detection must catch [A, A]"
+        );
     }
 
     #[test]
     fn test_single_member_rejected() {
         // Phase 22 item 3: reject single-member CreateShared
         let decision = create_shared_decision("hash1", &["A"]);
-        
+
         // Validation checks: decision.rule_ids.len() < 2
         assert!(decision.rule_ids.len() < 2, "single member must be caught");
     }
@@ -4291,11 +4307,11 @@ mod phase_22_shared_validation_unit_tests {
             create_shared_decision("hash1", &["A", "B"]),
             create_shared_decision("hash2", &["B", "C"]),
         ];
-        
+
         // The validation logic tracks claimed_shared_rules.
         let mut claimed = std::collections::HashSet::new();
         let mut has_overlap = false;
-        
+
         for decision in &decisions {
             for rule_id in &decision.rule_ids {
                 if claimed.contains(rule_id) {
@@ -4308,7 +4324,7 @@ mod phase_22_shared_validation_unit_tests {
                 break;
             }
         }
-        
+
         assert!(has_overlap, "must detect overlapping groups (B in both)");
     }
 
@@ -4317,17 +4333,17 @@ mod phase_22_shared_validation_unit_tests {
         // Phase 22 item 5: reject multiple CreateShared for same technical identity
         let identity_ab = identity_with("key1", "value1");
         let group_id_ab = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity_ab);
-        
+
         let decisions = vec![
             create_shared_decision(&group_id_ab.technical_hash, &["A", "B"]),
             create_shared_decision(&group_id_ab.technical_hash, &["C", "D"]),
         ];
-        
+
         // Both decisions have the same group_id (same technical identity).
         // Validation tracks validated_group_ids and must detect the duplicate.
         let mut seen_hashes = std::collections::HashSet::new();
         let mut has_duplicate = false;
-        
+
         for decision in &decisions {
             if seen_hashes.contains(&decision.group_id) {
                 has_duplicate = true;
@@ -4335,9 +4351,13 @@ mod phase_22_shared_validation_unit_tests {
             }
             seen_hashes.insert(&decision.group_id);
         }
-        
+
         assert!(has_duplicate, "must detect duplicate group IDs");
-        assert_eq!(seen_hashes.len(), 1, "both decisions should share the same hash");
+        assert_eq!(
+            seen_hashes.len(),
+            1,
+            "both decisions should share the same hash"
+        );
     }
 
     #[test]
@@ -4345,12 +4365,14 @@ mod phase_22_shared_validation_unit_tests {
         // If A has {key1: val1} and B has {key1: val2}, they should not share.
         let identity_a = identity_with("key1", "valueA");
         let identity_b = identity_with("key1", "valueB");
-        
+
         let hash_a = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity_a);
         let hash_b = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity_b);
-        
-        assert_ne!(hash_a.technical_hash, hash_b.technical_hash,
-                   "different enforced options must produce different hashes");
+
+        assert_ne!(
+            hash_a.technical_hash, hash_b.technical_hash,
+            "different enforced options must produce different hashes"
+        );
     }
 
     #[test]
@@ -4358,26 +4380,31 @@ mod phase_22_shared_validation_unit_tests {
         // Phase 22 validation: client group_id must match server-derived hash
         let identity = identity_with("key1", "value1");
         let server_group_id = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
-        
+
         // Client submitted a different group_id (stale decision)
         let client_submitted_group_id = "fake_hash_from_old_preview";
-        
-        assert_ne!(server_group_id.technical_hash, client_submitted_group_id,
-                   "mismatch must be detected as stale decision");
+
+        assert_ne!(
+            server_group_id.technical_hash, client_submitted_group_id,
+            "mismatch must be detected as stale decision"
+        );
     }
 
     #[test]
     fn test_valid_native_pair_produces_one_validated_creation() {
         // Happy path: A and B both native, same technical identity
         let identity = identity_with("key1", "value1");
-        
+
         // In a real scenario, we'd validate both A and B have this identity,
         // then produce exactly one ValidatedSharedCreation.
         let _group_id = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
-        
+
         // Validate: non-empty, distinct members, same group_id
         assert!(!identity.enforced_options.is_empty());
-        assert!(!_group_id.technical_hash.is_empty(), "hash must be non-empty");
+        assert!(
+            !_group_id.technical_hash.is_empty(),
+            "hash must be non-empty"
+        );
     }
 
     #[test]
@@ -4385,12 +4412,12 @@ mod phase_22_shared_validation_unit_tests {
         // A/B/C share technical identity.
         // User chooses to share only A/B; C is individual.
         // This is valid: A/B produce one policy, C gets its own.
-        
+
         let _identity = identity_with("key1", "value1");
-        
+
         // Decision: share A/B
         let shared_decision = create_shared_decision("hash1", &["A", "B"]);
-        
+
         // C is not in the decision → individual creation
         // Validation should accept this
         assert_eq!(shared_decision.rule_ids.len(), 2, "subset is valid");
@@ -4405,13 +4432,17 @@ mod phase_22_shared_validation_unit_tests {
             let mut opts = serde_json::Map::new();
             opts.insert("timeout".to_string(), json!("10"));
             opts.insert("retries".to_string(), json!("3"));
-            RequirementTechnicalIdentity { enforced_options: opts }
+            RequirementTechnicalIdentity {
+                enforced_options: opts,
+            }
         };
-        
+
         let hash_a = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity_a);
         let hash_ab = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity_ab);
-        
-        assert_ne!(hash_a.technical_hash, hash_ab.technical_hash,
-                   "{{A}} and {{A,B}} must have different hashes");
+
+        assert_ne!(
+            hash_a.technical_hash, hash_ab.technical_hash,
+            "{{A}} and {{A,B}} must have different hashes"
+        );
     }
 }

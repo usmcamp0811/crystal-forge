@@ -127,7 +127,10 @@ pub fn detect_shared_implementations(
         }
 
         let group_id = SharedImplementationId::from_technical_identity(&identity);
-        groups.entry(group_id.clone()).or_insert_with(Vec::new).push(req_key);
+        groups
+            .entry(group_id.clone())
+            .or_insert_with(Vec::new)
+            .push(req_key);
         identity_map.insert(group_id, identity);
     }
 
@@ -188,10 +191,7 @@ pub fn common_shared_candidate(
     // Intersection across all members.
     let mut common: HashMap<Uuid, &PolicyCandidate> = HashMap::new();
     for (version_id, candidate) in &version_sets[0] {
-        if version_sets
-            .iter()
-            .all(|set| set.contains_key(version_id))
-        {
+        if version_sets.iter().all(|set| set.contains_key(version_id)) {
             common.insert(*version_id, *candidate);
         }
     }
@@ -203,7 +203,9 @@ pub fn common_shared_candidate(
         .max_by(|(v1, c1), (v2, c2)| {
             let conf1 = total_confidence(&version_sets, v1);
             let conf2 = total_confidence(&version_sets, v2);
-            conf1.cmp(&conf2).then_with(|| c2.policy_version_id.cmp(&c1.policy_version_id))
+            conf1
+                .cmp(&conf2)
+                .then_with(|| c2.policy_version_id.cmp(&c1.policy_version_id))
         })
         .map(|(version_id, candidate)| SharedPolicyCandidate {
             policy_id: candidate.policy_id,
@@ -213,10 +215,7 @@ pub fn common_shared_candidate(
         })
 }
 
-fn total_confidence(
-    version_sets: &[HashMap<Uuid, &PolicyCandidate>],
-    version_id: &Uuid,
-) -> u32 {
+fn total_confidence(version_sets: &[HashMap<Uuid, &PolicyCandidate>], version_id: &Uuid) -> u32 {
     version_sets
         .iter()
         .filter_map(|set| set.get(version_id))
@@ -345,17 +344,11 @@ pub fn generate_shared_policy_ids(_group: &SharedImplementationGroup) -> (Uuid, 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyResolution {
     /// Reuse an existing policy version (MapExisting action).
-    ReuseExisting {
-        selected_policy_version_id: Uuid,
-    },
+    ReuseExisting { selected_policy_version_id: Uuid },
     /// Create one new shared policy for a group of requirements.
-    CreateShared {
-        group_id: SharedImplementationId,
-    },
+    CreateShared { group_id: SharedImplementationId },
     /// Create an individual policy for a single requirement record.
-    CreateIndividual {
-        record_index: usize,
-    },
+    CreateIndividual { record_index: usize },
 }
 
 /// A new shared policy to create for one shared-implementation decision.
@@ -476,10 +469,7 @@ pub fn build_import_policy_resolution_plan(
     // 2. MapExisting records -> reuse.
     for (idx, rec) in policy_records.iter().enumerate() {
         if let Some(version_id) = rec.mapped_policy_version_id {
-            if plan
-                .rule_resolutions
-                .contains_key(&rec.source_rule_id)
-            {
+            if plan.rule_resolutions.contains_key(&rec.source_rule_id) {
                 // Already covered by a CreateShared decision; the contradiction
                 // was rejected above, so this should not happen.
                 continue;
@@ -525,7 +515,10 @@ mod tests {
         }
     }
 
-    fn make_group(keys: &[&str], candidate: Option<SharedPolicyCandidate>) -> SharedImplementationGroup {
+    fn make_group(
+        keys: &[&str],
+        candidate: Option<SharedPolicyCandidate>,
+    ) -> SharedImplementationGroup {
         let identity = identity_from_options(&[("services.openssh.enable", "false")]);
         SharedImplementationGroup {
             group_id: SharedImplementationId::from_technical_identity(&identity),
@@ -587,8 +580,16 @@ mod tests {
         ];
 
         let groups = detect_shared_implementations(requirements);
-        assert_eq!(groups.len(), 1, "should create one group for identical enforcement");
-        assert_eq!(groups[0].requirement_keys.len(), 3, "should contain all three requirements");
+        assert_eq!(
+            groups.len(),
+            1,
+            "should create one group for identical enforcement"
+        );
+        assert_eq!(
+            groups[0].requirement_keys.len(),
+            3,
+            "should contain all three requirements"
+        );
         assert_eq!(
             groups[0].requirement_keys,
             vec!["V-111", "V-222", "V-333"],
@@ -610,17 +611,30 @@ mod tests {
         ];
 
         let groups = detect_shared_implementations(requirements);
-        assert_eq!(groups.len(), 0, "different values should not create a shared group");
+        assert_eq!(
+            groups.len(),
+            0,
+            "different values should not create a shared group"
+        );
     }
 
     #[test]
     fn different_option_sets_not_grouped() {
         let mut options_a = Map::new();
-        options_a.insert("services.openssh.enable".to_string(), Value::String("false".to_string()));
-        options_a.insert("services.openssh.settings.PermitRootLogin".to_string(), Value::String("no".to_string()));
+        options_a.insert(
+            "services.openssh.enable".to_string(),
+            Value::String("false".to_string()),
+        );
+        options_a.insert(
+            "services.openssh.settings.PermitRootLogin".to_string(),
+            Value::String("no".to_string()),
+        );
 
         let mut options_b = Map::new();
-        options_b.insert("services.openssh.enable".to_string(), Value::String("false".to_string()));
+        options_b.insert(
+            "services.openssh.enable".to_string(),
+            Value::String("false".to_string()),
+        );
 
         let identity_a = RequirementTechnicalIdentity {
             enforced_options: options_a,
@@ -629,7 +643,10 @@ mod tests {
             enforced_options: options_b,
         };
 
-        let requirements = vec![("V-111".to_string(), identity_a), ("V-222".to_string(), identity_b)];
+        let requirements = vec![
+            ("V-111".to_string(), identity_a),
+            ("V-222".to_string(), identity_b),
+        ];
 
         let groups = detect_shared_implementations(requirements);
         assert_eq!(
@@ -657,16 +674,26 @@ mod tests {
     #[test]
     fn empty_enforcement_not_grouped() {
         let requirements = vec![
-            ("V-111".to_string(), RequirementTechnicalIdentity {
-                enforced_options: Map::new(),
-            }),
-            ("V-222".to_string(), RequirementTechnicalIdentity {
-                enforced_options: Map::new(),
-            }),
+            (
+                "V-111".to_string(),
+                RequirementTechnicalIdentity {
+                    enforced_options: Map::new(),
+                },
+            ),
+            (
+                "V-222".to_string(),
+                RequirementTechnicalIdentity {
+                    enforced_options: Map::new(),
+                },
+            ),
         ];
 
         let groups = detect_shared_implementations(requirements);
-        assert_eq!(groups.len(), 0, "empty enforcement should not create a group");
+        assert_eq!(
+            groups.len(),
+            0,
+            "empty enforcement should not create a group"
+        );
     }
 
     #[test]
@@ -678,14 +705,17 @@ mod tests {
         assert_eq!(id1, id2, "group IDs should be deterministic");
     }
 
-#[test]
+    #[test]
     fn test_remove_from_shared_group() {
         use super::remove_from_shared_group;
 
         let group = make_group(&["V-111", "V-222", "V-333"], None);
         let (remaining_group, breakout) = remove_from_shared_group(group, "V-222");
         assert_eq!(breakout, "V-222");
-        assert!(remaining_group.is_some(), "group should remain with 2 requirements");
+        assert!(
+            remaining_group.is_some(),
+            "group should remain with 2 requirements"
+        );
         assert_eq!(remaining_group.unwrap().requirement_keys.len(), 2);
     }
 
@@ -695,7 +725,10 @@ mod tests {
 
         let group = make_group(&["V-111", "V-222"], None);
         let (remaining_group, _breakout) = remove_from_shared_group(group, "V-111");
-        assert!(remaining_group.is_none(), "group should be removed when only 1 requirement remains");
+        assert!(
+            remaining_group.is_none(),
+            "group should be removed when only 1 requirement remains"
+        );
     }
 
     #[test]
@@ -742,10 +775,7 @@ mod tests {
             action: SharedImplementationAction::CreateShared,
         };
 
-        let authoritative = vec![
-            ("V-111" as &str, &identity),
-            ("V-222" as &str, &identity),
-        ];
+        let authoritative = vec![("V-111" as &str, &identity), ("V-222" as &str, &identity)];
 
         assert!(
             validate_shared_group_at_commit(&group, authoritative).is_ok(),
@@ -775,9 +805,14 @@ mod tests {
         ];
 
         let result = validate_shared_group_at_commit(&group, authoritative);
-        assert!(result.is_err(), "should reject group with changed enforcement");
         assert!(
-            result.unwrap_err().contains("IMPORT_SHARED_IMPLEMENTATION_STALE"),
+            result.is_err(),
+            "should reject group with changed enforcement"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .contains("IMPORT_SHARED_IMPLEMENTATION_STALE"),
             "error should indicate stale group"
         );
     }
@@ -800,7 +835,10 @@ mod tests {
         let authoritative = vec![("V-111" as &str, &identity)];
 
         let result = validate_shared_group_at_commit(&group, authoritative);
-        assert!(result.is_err(), "should reject group when requirement missing");
+        assert!(
+            result.is_err(),
+            "should reject group when requirement missing"
+        );
         assert!(
             result.unwrap_err().contains("no longer present"),
             "error should indicate missing requirement"
@@ -817,9 +855,18 @@ mod tests {
 
         // IDs are fresh (non-deterministic); determinism comes from the import
         // transaction and persisted mappings, not the UUID itself.
-        assert_ne!(policy_id1, policy_id2, "policy IDs should be fresh each call");
-        assert_ne!(version_id1, version_id2, "version IDs should be fresh each call");
-        assert_ne!(policy_id1, version_id1, "policy and version IDs should differ");
+        assert_ne!(
+            policy_id1, policy_id2,
+            "policy IDs should be fresh each call"
+        );
+        assert_ne!(
+            version_id1, version_id2,
+            "version IDs should be fresh each call"
+        );
+        assert_ne!(
+            policy_id1, version_id1,
+            "policy and version IDs should differ"
+        );
     }
 
     // ── Common candidate intersection ─────────────────────────────────────────
@@ -829,7 +876,8 @@ mod tests {
             policy_id: Uuid::new_v4(),
             policy_version_id: version,
             policy_name: format!("policy-{}", &version.simple().to_string()[..8]),
-            match_type: crate::compliance::requirement_model::PolicyCandidateMatchType::ExactTechnicalMatch,
+            match_type:
+                crate::compliance::requirement_model::PolicyCandidateMatchType::ExactTechnicalMatch,
             confidence,
             match_reasons: vec!["exact technical match".to_string()],
         }
@@ -843,13 +891,29 @@ mod tests {
         let p20 = Uuid::new_v4();
         let p44 = Uuid::new_v4();
         let mut members: HashMap<String, Vec<PolicyCandidate>> = HashMap::new();
-        members.insert("V-111".to_string(), vec![candidate(p17, 90), candidate(p20, 70)]);
+        members.insert(
+            "V-111".to_string(),
+            vec![candidate(p17, 90), candidate(p20, 70)],
+        );
         members.insert("V-222".to_string(), vec![candidate(p17, 90)]);
-        members.insert("V-333".to_string(), vec![candidate(p17, 90), candidate(p44, 80)]);
+        members.insert(
+            "V-333".to_string(),
+            vec![candidate(p17, 90), candidate(p44, 80)],
+        );
 
-        let common = common_shared_candidate(&members, &["V-111".to_string(), "V-222".to_string(), "V-333".to_string()]);
+        let common = common_shared_candidate(
+            &members,
+            &[
+                "V-111".to_string(),
+                "V-222".to_string(),
+                "V-333".to_string(),
+            ],
+        );
         let common = common.expect("P17 is common to all members");
-        assert_eq!(common.policy_version_id, p17, "only the version present in every member's set may be common");
+        assert_eq!(
+            common.policy_version_id, p17,
+            "only the version present in every member's set may be common"
+        );
     }
 
     #[test]
@@ -863,7 +927,10 @@ mod tests {
         members.insert("V-222".to_string(), vec![candidate(p44, 80)]);
 
         let common = common_shared_candidate(&members, &["V-111".to_string(), "V-222".to_string()]);
-        assert!(common.is_none(), "no exact version is common to both members");
+        assert!(
+            common.is_none(),
+            "no exact version is common to both members"
+        );
     }
 
     #[test]
@@ -878,7 +945,10 @@ mod tests {
         members.insert("V-222".to_string(), vec![candidate(p17v3, 95)]);
 
         let common = common_shared_candidate(&members, &["V-111".to_string(), "V-222".to_string()]);
-        assert!(common.is_none(), "different versions of one lineage are not a common candidate");
+        assert!(
+            common.is_none(),
+            "different versions of one lineage are not a common candidate"
+        );
     }
 
     // ── Resolution planner (item 18) ─────────────────────────────────────────
@@ -904,8 +974,16 @@ mod tests {
 
         let plan = build_import_policy_resolution_plan(&[], &records).unwrap();
 
-        assert_eq!(plan.shared_creations.len(), 0, "no shared creations for pure reuse");
-        assert_eq!(plan.individual_creations.len(), 0, "no individual creations for reuse");
+        assert_eq!(
+            plan.shared_creations.len(),
+            0,
+            "no shared creations for pure reuse"
+        );
+        assert_eq!(
+            plan.individual_creations.len(),
+            0,
+            "no individual creations for reuse"
+        );
         assert_eq!(plan.individual_reuses.len(), 2);
         assert_eq!(plan.individual_reuses["A"], version);
         assert_eq!(plan.individual_reuses["B"], version);
@@ -932,12 +1010,32 @@ mod tests {
 
         let plan = build_import_policy_resolution_plan(&decisions, &records).unwrap();
 
-        assert_eq!(plan.shared_creations.len(), 1, "exactly one shared creation");
-        assert_eq!(plan.shared_creations[0].requirement_keys, vec!["A", "B", "C"]);
-        assert_eq!(plan.individual_creations.len(), 0, "no individual creations for A/B/C");
-        assert!(matches!(plan.rule_resolutions["A"], PolicyResolution::CreateShared { .. }));
-        assert!(matches!(plan.rule_resolutions["B"], PolicyResolution::CreateShared { .. }));
-        assert!(matches!(plan.rule_resolutions["C"], PolicyResolution::CreateShared { .. }));
+        assert_eq!(
+            plan.shared_creations.len(),
+            1,
+            "exactly one shared creation"
+        );
+        assert_eq!(
+            plan.shared_creations[0].requirement_keys,
+            vec!["A", "B", "C"]
+        );
+        assert_eq!(
+            plan.individual_creations.len(),
+            0,
+            "no individual creations for A/B/C"
+        );
+        assert!(matches!(
+            plan.rule_resolutions["A"],
+            PolicyResolution::CreateShared { .. }
+        ));
+        assert!(matches!(
+            plan.rule_resolutions["B"],
+            PolicyResolution::CreateShared { .. }
+        ));
+        assert!(matches!(
+            plan.rule_resolutions["C"],
+            PolicyResolution::CreateShared { .. }
+        ));
     }
 
     #[test]
@@ -956,8 +1054,15 @@ mod tests {
 
         assert_eq!(plan.shared_creations.len(), 1);
         assert_eq!(plan.shared_creations[0].requirement_keys, vec!["A", "B"]);
-        assert_eq!(plan.individual_creations, vec![2], "C gets its own individual creation");
-        assert!(matches!(plan.rule_resolutions["C"], PolicyResolution::CreateIndividual { record_index: 2 }));
+        assert_eq!(
+            plan.individual_creations,
+            vec![2],
+            "C gets its own individual creation"
+        );
+        assert!(matches!(
+            plan.rule_resolutions["C"],
+            PolicyResolution::CreateIndividual { record_index: 2 }
+        ));
     }
 
     #[test]
@@ -974,7 +1079,11 @@ mod tests {
         let plan = build_import_policy_resolution_plan(&decisions, &records).unwrap();
 
         assert_eq!(plan.shared_creations.len(), 1, "A/B shared");
-        assert_eq!(plan.individual_creations.len(), 1, "C unrelated -> individual");
+        assert_eq!(
+            plan.individual_creations.len(),
+            1,
+            "C unrelated -> individual"
+        );
     }
 
     #[test]
@@ -1021,7 +1130,15 @@ mod tests {
 
         let plan = build_import_policy_resolution_plan(&[], &records).unwrap();
 
-        assert_eq!(plan.shared_creations.len(), 0, "no decisions -> no shared creation");
-        assert_eq!(plan.individual_creations.len(), 3, "each record gets its own policy");
+        assert_eq!(
+            plan.shared_creations.len(),
+            0,
+            "no decisions -> no shared creation"
+        );
+        assert_eq!(
+            plan.individual_creations.len(),
+            3,
+            "each record gets its own policy"
+        );
     }
 }

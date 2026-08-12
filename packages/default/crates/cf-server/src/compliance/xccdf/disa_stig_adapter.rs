@@ -32,8 +32,7 @@ pub const DISA_VULN_ID_SYSTEM: &str = "http://cyber.mil/stigs/stig";
 /// - Any system containing `"cyber.mil"` (authoritative DISA namespace)
 fn is_stig_vuln_id(ident: &StandardIdentifier) -> bool {
     ident.value.starts_with("V-")
-        && (ident.system.contains("cyber.mil")
-            || ident.system.to_lowercase().contains("stig"))
+        && (ident.system.contains("cyber.mil") || ident.system.to_lowercase().contains("stig"))
 }
 
 /// Any `<ident>` starting with `CCI-` is a DISA CCI identifier.
@@ -567,7 +566,8 @@ mod tests {
             cf_policy_meta: None,
             preserved_xml: None,
         };
-        let parsed = minimal_parsed_xccdf("generic-benchmark", "Generic Benchmark", "1.0", vec![rule]);
+        let parsed =
+            minimal_parsed_xccdf("generic-benchmark", "Generic Benchmark", "1.0", vec![rule]);
         assert!(is_disa_stig(&parsed));
     }
 
@@ -592,7 +592,8 @@ mod tests {
             cf_policy_meta: None,
             preserved_xml: None,
         };
-        let parsed = minimal_parsed_xccdf("generic-benchmark", "Generic Benchmark", "1.0", vec![rule]);
+        let parsed =
+            minimal_parsed_xccdf("generic-benchmark", "Generic Benchmark", "1.0", vec![rule]);
         assert!(is_disa_stig(&parsed));
     }
 
@@ -618,8 +619,12 @@ mod tests {
             cf_policy_meta: None,
             preserved_xml: None,
         };
-        let parsed =
-            minimal_parsed_xccdf("generic-cve-benchmark", "Generic CVE Benchmark", "1.0", vec![rule]);
+        let parsed = minimal_parsed_xccdf(
+            "generic-cve-benchmark",
+            "Generic CVE Benchmark",
+            "1.0",
+            vec![rule],
+        );
         assert!(!is_disa_stig(&parsed));
     }
 
