@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-12 19:26'
-updated_date: '2026-08-12 21:19'
+updated_date: '2026-08-12 22:36'
 labels: []
 milestone: m-23
 dependencies:
@@ -73,4 +73,6 @@ Verification update: related candidate DB test passed; map_existing_stig regress
 Latest Phase 22 run: 6/7 passed. Rollback collision test now passes; exact reimport idempotency still fails with counts increasing by (1 framework version, 1 bundle version, 3 requirement versions, 3 mappings), indicating fixture/database state or exact-artifact identity behavior remains unresolved. Worktree is clean at pushed commit cc6aadc7.
 
 Diagnosed exact reimport as test interference: the test passed alone; serialized Phase 22 suite passed 8/8. Replaced global-count idempotency assertions with source-artifact/bundle-scoped counts and explicitly asserted the benchmark source-object mapping fast-path prerequisite. Removed the unused reviewed-revalidation record parameter. Changes pushed as 195e0fc4.
+
+2026-08-12 follow-up pushed as 53848d1f: added ignored DB-backed reviewed-related commit tests for successful cross-framework reuse with suggested provenance and forged evidence rollback, plus a metadata-bearing STIG fixture. Verified with nix develop cargo fmt --all --check, git diff --check, cargo check -p cf-server, targeted related unit tests (7 passed, 3 ignored), the existing related-candidate DB test (1 passed), and both reviewed-related DB tests (2 passed). The Phase 22 wildcard invocation was not useful because Cargo does not support wildcard test filters; prior serialized Phase 22 suite had passed 8/8. Remaining: broader candidate negative/precedence DB coverage and final serialized Phase 21/22/23 regression/build gate.
 <!-- SECTION:NOTES:END -->
