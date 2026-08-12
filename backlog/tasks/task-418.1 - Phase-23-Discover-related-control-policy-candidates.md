@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-12 19:26'
-updated_date: '2026-08-12 20:39'
+updated_date: '2026-08-12 20:41'
 labels: []
 milestone: m-23
 dependencies:
@@ -67,4 +67,6 @@ Phase 23 candidate-discovery slice committed and pushed as f582fdea50ebc2e0ae423
 Follow-up committed and pushed as b388c3f6d0d384c159fe13f9f1413984bf5c9f9a: added ReviewedRelatedCandidate provenance to ImportedMappingSemantics and persisted selected related reviews as suggested provenance without treating them as MapExistingProof. cargo fmt, git diff --check, SQLX_OFFLINE cargo check -p cf-server, and targeted unit test passed.
 
 Reviewer-directed follow-up completed in pushed slices: 9d9a4d10 exposes structured RelatedCandidateEvidence and excludes RelatedMapping from shared automatic candidate intersection; af773f39 adds reviewed-related action validation, commit-time current/trusted/exact identifier revalidation, and suggested provenance precedence; 723be541 adds regression coverage for related-only shared groups. SQLX_OFFLINE cargo check and focused unit test passed. No web-ui check run.
+
+Verification update: related candidate DB test passed; map_existing_stig regression group passed 3/3. Phase 22 shared-creation group ran 7 tests with 6 passing; exact reimport idempotency test failed due shared test-database deployment_policies_name_key collision during fixture setup, not an implementation assertion. Worktree clean and remote branch remains at 723be5415a07efda8c3033e38939f8e14cfa5674.
 <!-- SECTION:NOTES:END -->
