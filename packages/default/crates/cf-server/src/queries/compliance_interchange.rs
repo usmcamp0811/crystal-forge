@@ -1704,6 +1704,7 @@ mod tests {
                 .map(|rule_id| XccdfRuleImportAction::MapExisting {
                     rule_id: rule_id.clone(),
                     policy_version_id,
+                    proof: None,
                 })
                 .collect(),
             bundle: ImportedBundlePlan {

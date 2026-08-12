@@ -9,6 +9,10 @@ use uuid::Uuid;
 
 use crate::compliance::xccdf::models::{CheckContent, FixContent, ParsedRule};
 
+// Make serde derive available for all local structs
+#[allow(unused_imports)]
+use serde::{self};
+
 // ── Import plan (inbound from caller) ─────────────────────────────────────────
 
 /// The JSON import plan submitted alongside the XCCDF file.
@@ -100,8 +104,18 @@ pub struct ImportedBundlePlan {
     pub description: Option<String>,
 }
 
+/// Proof/justification for reusing an existing policy via MapExisting.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MapExistingProof {
+    /// The requirement unchanged from prior release; there is a trusted mapping.
+    InheritedMapping,
+    /// Exact normalized technical enforcement match discovered at preview time.
+    ExactTechnicalMatch,
+}
+
 /// Action for one selected rule.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum XccdfRuleImportAction {
     CreateNativeCustom {
@@ -135,6 +149,9 @@ pub enum XccdfRuleImportAction {
     MapExisting {
         rule_id: String,
         policy_version_id: Uuid,
+        /// Explicit proof/justification for this reuse decision.
+        #[serde(default)]
+        proof: Option<MapExistingProof>,
     },
     /// Exclude the rule — create no policy or membership row.
     Exclude { rule_id: String },

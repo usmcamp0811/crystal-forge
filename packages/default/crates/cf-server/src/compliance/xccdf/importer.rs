@@ -782,6 +782,7 @@ mod tests {
         plan.rule_actions = vec![XccdfRuleImportAction::MapExisting {
             rule_id: "rule-1".into(),
             policy_version_id: mapped_version_id,
+            proof: None,
         }];
 
         let validated = validate_import_plan(plan, &parsed).expect("mapping plan is valid");
