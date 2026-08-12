@@ -36,9 +36,8 @@ use crate::compliance::digest::{
 };
 use crate::compliance::framework_model::FrameworkVersionCanonical;
 use crate::compliance::shared_implementation::{
-    PolicyResolution, SharedCreation, SharedReuse, build_import_policy_resolution_plan,
-    detect_shared_implementations, validate_shared_group_at_commit,
-    ValidatedSharedCreation, SharedValidationError, SharedImplementationId,
+    PolicyResolution, SharedCreation, SharedReuse, SharedValidationError, ValidatedSharedCreation,
+    build_import_policy_resolution_plan,
 };
 use crate::compliance::xccdf::disa_stig_adapter::{
     canonical_for_rule, canonical_key_for_rule, identify_framework, is_disa_stig,
@@ -91,10 +90,7 @@ pub const CF_PARSER_VERSION: &str = "cf-xccdf-parser-0.1";
 /// Returns a vector of validated, trusted creations or SharedValidationError with STALE code.
 fn validate_shared_creation_decisions(
     decisions: &[crate::compliance::xccdf::import_models::SharedGroupDecision],
-    authoritative_identities: &std::collections::HashMap<
-        String,
-        RequirementTechnicalIdentity,
-    >,
+    authoritative_identities: &std::collections::HashMap<String, RequirementTechnicalIdentity>,
     policy_records: &[ImportedPolicyRecord],
 ) -> Result<Vec<ValidatedSharedCreation>, SharedValidationError> {
     use crate::compliance::xccdf::import_models::SharedGroupAction;
@@ -112,13 +108,15 @@ fn validate_shared_creation_decisions(
         if decision.rule_ids.len() < 2 {
             return Err(SharedValidationError {
                 code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
-                message: format!("CreateShared requires at least 2 rules, got {}", decision.rule_ids.len()),
+                message: format!(
+                    "CreateShared requires at least 2 rules, got {}",
+                    decision.rule_ids.len()
+                ),
             });
         }
 
         // 2. Require 2 DISTINCT rule IDs (no duplicates)
-        let unique_rules: std::collections::HashSet<&String> =
-            decision.rule_ids.iter().collect();
+        let unique_rules: std::collections::HashSet<&String> = decision.rule_ids.iter().collect();
         if unique_rules.len() != decision.rule_ids.len() {
             return Err(SharedValidationError {
                 code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
@@ -157,7 +155,10 @@ fn validate_shared_creation_decisions(
             if rec.mapped_policy_version_id.is_some() {
                 return Err(SharedValidationError {
                     code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
-                    message: format!("rule {} is MapExisting reuse, cannot be in shared group", rule_id),
+                    message: format!(
+                        "rule {} is MapExisting reuse, cannot be in shared group",
+                        rule_id
+                    ),
                 });
             }
 
@@ -196,18 +197,22 @@ fn validate_shared_creation_decisions(
             );
 
         for rule_id in &decision.rule_ids[1..] {
-            let identity = authoritative_identities
-                .get(rule_id)
-                .ok_or_else(|| SharedValidationError {
-                    code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
-                    message: format!("rule {} missing identity", rule_id),
-                })?;
+            let identity =
+                authoritative_identities
+                    .get(rule_id)
+                    .ok_or_else(|| SharedValidationError {
+                        code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                        message: format!("rule {} missing identity", rule_id),
+                    })?;
 
             // Reject empty technical identities
             if identity.enforced_options.is_empty() {
                 return Err(SharedValidationError {
                     code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
-                    message: format!("rule {} has empty technical enforcement, cannot share", rule_id),
+                    message: format!(
+                        "rule {} has empty technical enforcement, cannot share",
+                        rule_id
+                    ),
                 });
             }
 
@@ -215,7 +220,10 @@ fn validate_shared_creation_decisions(
             if group_id != expected_group_id {
                 return Err(SharedValidationError {
                     code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
-                    message: format!("rule {} has different technical enforcement than group", rule_id),
+                    message: format!(
+                        "rule {} has different technical enforcement than group",
+                        rule_id
+                    ),
                 });
             }
         }
@@ -584,8 +592,6 @@ pub async fn commit_foreign_import(
         &policy_records,
     )?;
 
-
-
     // ── 4. Build resolution plan and central policy map ──────────────────────
     let excluded_rule_count =
         (validated.rules_to_import.len() as u32).saturating_sub(policy_records.len() as u32);
@@ -736,7 +742,7 @@ pub async fn commit_foreign_import(
         rule_to_policy_version.insert(rule_id.clone(), effective_policy_version_id);
     }
 
-     // 5b. Handle CreateShared outcomes (from resolution plan, authoritative source)
+    // 5b. Handle CreateShared outcomes (from resolution plan, authoritative source)
     // For each shared creation in the plan, create 1 policy lineage and version with authoritative technical identity.
     for shared in &resolution_plan.shared_creations {
         // Use technical identity from resolution plan (item 8: trust boundary)
@@ -4262,6 +4268,7 @@ mod phase_22_shared_validation_unit_tests {
     use crate::compliance::xccdf::exact_technical_match::RequirementTechnicalIdentity;
     use crate::compliance::xccdf::import_models::{SharedGroupAction, SharedGroupDecision};
     use serde_json::json;
+    use uuid::Uuid;
 
     /// Helper: build a technical identity from a serde_json::Map of enforced options
     fn identity_from_options(
@@ -4279,6 +4286,51 @@ mod phase_22_shared_validation_unit_tests {
         identity_from_options(opts)
     }
 
+    /// Helper: create a native (non-mapped) ImportedPolicyRecord eligible for shared groups
+    fn native_record(rule_id: &str) -> ImportedPolicyRecord {
+        ImportedPolicyRecord {
+            policy_id: Uuid::new_v4(),
+            policy_version_id: Uuid::new_v4(),
+            source_rule_id: rule_id.to_string(),
+            source_rule_order: 0,
+            implementation_state: "native".to_string(),
+            policy_type: "native".to_string(), // Must be "native" for shared groups
+            version: None,
+            execution_phase: "not-applicable".to_string(),
+            config: serde_json::json!({}),
+            dependencies: serde_json::json!([]),
+            enabled_by_default: false,
+            portable: false,
+            semantic_digest: None,
+            selected: true,
+            policy_order: 0,
+            name: rule_id.to_string(),
+            description: None,
+            compliance_metadata: serde_json::json!({}),
+            opaque_xml: None,
+            mapped_policy_version_id: None,
+            mapped_policy_proof: None,
+            mapping_semantics: None,
+            evidence_requirements: Vec::new(),
+        }
+    }
+
+    /// Helper: create a manual ImportedPolicyRecord
+    fn manual_record(rule_id: &str) -> ImportedPolicyRecord {
+        let mut rec = native_record(rule_id);
+        rec.implementation_state = "manual".to_string();
+        rec.policy_type = "manual".to_string();
+        rec
+    }
+
+    /// Helper: create a mapped (MapExisting) ImportedPolicyRecord
+    fn mapped_record(rule_id: &str, version: Uuid) -> ImportedPolicyRecord {
+        let mut rec = native_record(rule_id);
+        rec.implementation_state = "mapped".to_string();
+        rec.mapped_policy_version_id = Some(version);
+        rec
+    }
+
     /// Helper: create a test SharedGroupDecision for CreateShared
     fn create_shared_decision(group_id: &str, rule_ids: &[&str]) -> SharedGroupDecision {
         SharedGroupDecision {
@@ -4288,188 +4340,324 @@ mod phase_22_shared_validation_unit_tests {
         }
     }
 
+    /// Helper: build an authoritative_identities map from records
+    fn build_authoritative_identities(
+        _records: &[ImportedPolicyRecord],
+        identities: &[(&str, RequirementTechnicalIdentity)],
+    ) -> std::collections::HashMap<String, RequirementTechnicalIdentity> {
+        let mut map = std::collections::HashMap::new();
+        for (rule_id, identity) in identities {
+            map.insert(rule_id.to_string(), identity.clone());
+        }
+        map
+    }
+
     #[test]
     fn test_empty_technical_identity_rejected() {
-        // Phase 22 item 1: reject empty enforced_options
-        let identity = identity_from_options(serde_json::Map::new());
-        let _group_id = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
+        // Phase 22 item 1: reject empty enforced_options by invoking real validator
+        let records = vec![native_record("A"), native_record("B")];
+        let empty_identity = identity_from_options(serde_json::Map::new());
+        let authoritative_identities = build_authoritative_identities(
+            &records,
+            &[("A", empty_identity.clone()), ("B", empty_identity)],
+        );
+        let decisions = vec![create_shared_decision("hash1", &["A", "B"])];
 
-        // An empty identity should still produce a hash, but in real validation,
-        // we check `enforced_options.is_empty()` explicitly.
-        assert!(
-            identity.enforced_options.is_empty(),
-            "empty options must be detected"
+        let err =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .unwrap_err();
+
+        assert_eq!(
+            err.code, "IMPORT_SHARED_IMPLEMENTATION_STALE",
+            "empty enforced_options must be rejected"
         );
     }
 
     #[test]
     fn test_duplicate_member_rejected() {
-        // Phase 22 item 2: reject duplicate member IDs
-        let decisions = vec![create_shared_decision("hash1", &["A", "A"])];
+        // Phase 22 item 2: reject duplicate member IDs by invoking real validator
+        let records = vec![native_record("A")];
+        let identity = identity_with("key1", "value1");
+        let group_id =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
+        let authoritative_identities = build_authoritative_identities(&records, &[("A", identity)]);
+        let decisions = vec![create_shared_decision(
+            &group_id.technical_hash,
+            &["A", "A"],
+        )];
 
-        // The validation logic checks: unique_rules.len() != decision.rule_ids.len()
-        let unique_rules: std::collections::HashSet<&String> =
-            decisions[0].rule_ids.iter().collect();
-        assert_ne!(
-            unique_rules.len(),
-            decisions[0].rule_ids.len(),
-            "duplicate detection must catch [A, A]"
+        let err =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .unwrap_err();
+
+        assert_eq!(
+            err.code, "IMPORT_SHARED_IMPLEMENTATION_STALE",
+            "duplicate members [A, A] must be rejected"
         );
     }
 
     #[test]
     fn test_single_member_rejected() {
-        // Phase 22 item 3: reject single-member CreateShared
-        let decision = create_shared_decision("hash1", &["A"]);
+        // Phase 22 item 3: reject single-member CreateShared by invoking real validator
+        let records = vec![native_record("A")];
+        let identity = identity_with("key1", "value1");
+        let group_id =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
+        let authoritative_identities = build_authoritative_identities(&records, &[("A", identity)]);
+        let decisions = vec![create_shared_decision(&group_id.technical_hash, &["A"])];
 
-        // Validation checks: decision.rule_ids.len() < 2
-        assert!(decision.rule_ids.len() < 2, "single member must be caught");
+        let err =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .unwrap_err();
+
+        assert_eq!(
+            err.code, "IMPORT_SHARED_IMPLEMENTATION_STALE",
+            "single-member [A] must be rejected"
+        );
     }
 
     #[test]
     fn test_overlapping_groups_rejected() {
-        // Phase 22 item 4: reject overlapping shared decisions
+        // Phase 22 item 4: reject overlapping shared decisions by invoking real validator
         // B appears in both decisions → overlap must be detected
+        let records = vec![native_record("A"), native_record("B"), native_record("C")];
+        let identity = identity_with("key1", "value1");
+        let group_id =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
+        let authoritative_identities = build_authoritative_identities(
+            &records,
+            &[
+                ("A", identity.clone()),
+                ("B", identity.clone()),
+                ("C", identity),
+            ],
+        );
         let decisions = vec![
-            create_shared_decision("hash1", &["A", "B"]),
-            create_shared_decision("hash2", &["B", "C"]),
+            create_shared_decision(&group_id.technical_hash, &["A", "B"]),
+            create_shared_decision(&group_id.technical_hash, &["B", "C"]),
         ];
 
-        // The validation logic tracks claimed_shared_rules.
-        let mut claimed = std::collections::HashSet::new();
-        let mut has_overlap = false;
+        let err =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .unwrap_err();
 
-        for decision in &decisions {
-            for rule_id in &decision.rule_ids {
-                if claimed.contains(rule_id) {
-                    has_overlap = true;
-                    break;
-                }
-                claimed.insert(rule_id.clone());
-            }
-            if has_overlap {
-                break;
-            }
-        }
-
-        assert!(has_overlap, "must detect overlapping groups (B in both)");
+        assert_eq!(
+            err.code, "IMPORT_SHARED_IMPLEMENTATION_STALE",
+            "overlapping groups (B in both) must be rejected"
+        );
     }
 
     #[test]
     fn test_two_shared_decisions_same_technical_hash_rejected() {
         // Phase 22 item 5: reject multiple CreateShared for same technical identity
-        let identity_ab = identity_with("key1", "value1");
-        let group_id_ab = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity_ab);
+        // by invoking real validator
+        let records = vec![
+            native_record("A"),
+            native_record("B"),
+            native_record("C"),
+            native_record("D"),
+        ];
+        let identity = identity_with("key1", "value1");
+        let group_id =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
+
+        let authoritative_identities = build_authoritative_identities(
+            &records,
+            &[
+                ("A", identity.clone()),
+                ("B", identity.clone()),
+                ("C", identity.clone()),
+                ("D", identity),
+            ],
+        );
 
         let decisions = vec![
-            create_shared_decision(&group_id_ab.technical_hash, &["A", "B"]),
-            create_shared_decision(&group_id_ab.technical_hash, &["C", "D"]),
+            create_shared_decision(&group_id.technical_hash, &["A", "B"]),
+            create_shared_decision(&group_id.technical_hash, &["C", "D"]),
         ];
 
-        // Both decisions have the same group_id (same technical identity).
-        // Validation tracks validated_group_ids and must detect the duplicate.
-        let mut seen_hashes = std::collections::HashSet::new();
-        let mut has_duplicate = false;
+        let err =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .unwrap_err();
 
-        for decision in &decisions {
-            if seen_hashes.contains(&decision.group_id) {
-                has_duplicate = true;
-                break;
-            }
-            seen_hashes.insert(&decision.group_id);
-        }
-
-        assert!(has_duplicate, "must detect duplicate group IDs");
         assert_eq!(
-            seen_hashes.len(),
-            1,
-            "both decisions should share the same hash"
+            err.code, "IMPORT_SHARED_IMPLEMENTATION_STALE",
+            "multiple CreateShared for same technical identity must be rejected"
         );
     }
 
     #[test]
-    fn test_different_technical_identities_rejected() {
+    fn test_different_technical_identities_cannot_share() {
         // If A has {key1: val1} and B has {key1: val2}, they should not share.
+        // Attempting to share them should be rejected by the real validator.
+        let records = vec![native_record("A"), native_record("B")];
         let identity_a = identity_with("key1", "valueA");
         let identity_b = identity_with("key1", "valueB");
 
-        let hash_a = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity_a);
-        let hash_b = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity_b);
+        let hash_a =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity_a);
+        // Client claims they share the hash of A
+        let authoritative_identities =
+            build_authoritative_identities(&records, &[("A", identity_a), ("B", identity_b)]);
+        let decisions = vec![create_shared_decision(&hash_a.technical_hash, &["A", "B"])];
 
-        assert_ne!(
-            hash_a.technical_hash, hash_b.technical_hash,
-            "different enforced options must produce different hashes"
+        let err =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .unwrap_err();
+
+        assert_eq!(
+            err.code, "IMPORT_SHARED_IMPLEMENTATION_STALE",
+            "different technical identities cannot share"
         );
     }
 
     #[test]
     fn test_client_group_id_mismatch_rejected() {
         // Phase 22 validation: client group_id must match server-derived hash
+        // by invoking real validator
+        let records = vec![native_record("A"), native_record("B")];
         let identity = identity_with("key1", "value1");
-        let server_group_id = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
-
         // Client submitted a different group_id (stale decision)
         let client_submitted_group_id = "fake_hash_from_old_preview";
 
-        assert_ne!(
-            server_group_id.technical_hash, client_submitted_group_id,
-            "mismatch must be detected as stale decision"
+        let authoritative_identities =
+            build_authoritative_identities(&records, &[("A", identity.clone()), ("B", identity)]);
+        let decisions = vec![create_shared_decision(
+            client_submitted_group_id,
+            &["A", "B"],
+        )];
+
+        let err =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .unwrap_err();
+
+        assert_eq!(
+            err.code, "IMPORT_SHARED_IMPLEMENTATION_STALE",
+            "client group_id mismatch must be rejected as stale"
         );
     }
 
     #[test]
     fn test_valid_native_pair_produces_one_validated_creation() {
         // Happy path: A and B both native, same technical identity
+        // by invoking real validator
+        let records = vec![native_record("A"), native_record("B")];
         let identity = identity_with("key1", "value1");
+        let group_id =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
 
-        // In a real scenario, we'd validate both A and B have this identity,
-        // then produce exactly one ValidatedSharedCreation.
-        let _group_id = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
+        let authoritative_identities = build_authoritative_identities(
+            &records,
+            &[("A", identity.clone()), ("B", identity.clone())],
+        );
+        let decisions = vec![create_shared_decision(
+            &group_id.technical_hash,
+            &["A", "B"],
+        )];
 
-        // Validate: non-empty, distinct members, same group_id
-        assert!(!identity.enforced_options.is_empty());
+        let validated =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .expect("valid A/B pair should succeed");
+
+        assert_eq!(validated.len(), 1, "exactly one shared creation");
+        let shared = &validated[0];
+        assert_eq!(
+            shared.requirement_keys,
+            vec!["A".to_string(), "B".to_string()]
+        );
+        assert_eq!(shared.technical_identity, identity);
+        assert_eq!(shared.group_id, group_id);
+        assert!(!shared.policy_id.is_nil(), "policy_id must be generated");
         assert!(
-            !_group_id.technical_hash.is_empty(),
-            "hash must be non-empty"
+            !shared.policy_version_id.is_nil(),
+            "policy_version_id must be generated"
         );
     }
 
     #[test]
-    fn test_breakout_subset_valid() {
-        // A/B/C share technical identity.
-        // User chooses to share only A/B; C is individual.
-        // This is valid: A/B produce one policy, C gets its own.
+    fn test_manual_record_rejected_in_shared_group() {
+        // Phase 22 validation: manual (not native) records cannot be in shared groups
+        let records = vec![native_record("A"), manual_record("B")];
+        let identity = identity_with("key1", "value1");
+        let group_id =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
 
-        let _identity = identity_with("key1", "value1");
+        let authoritative_identities =
+            build_authoritative_identities(&records, &[("A", identity.clone()), ("B", identity)]);
+        let decisions = vec![create_shared_decision(
+            &group_id.technical_hash,
+            &["A", "B"],
+        )];
 
-        // Decision: share A/B
-        let shared_decision = create_shared_decision("hash1", &["A", "B"]);
+        let err =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .unwrap_err();
 
-        // C is not in the decision → individual creation
-        // Validation should accept this
-        assert_eq!(shared_decision.rule_ids.len(), 2, "subset is valid");
+        assert_eq!(
+            err.code, "IMPORT_SHARED_IMPLEMENTATION_STALE",
+            "manual records cannot be in shared groups"
+        );
     }
 
     #[test]
-    fn test_split_technical_identities_independent() {
-        // {A} has tech id X, {A,B} has different tech id Y.
-        // These do not group together.
-        let identity_a = identity_with("timeout", "10");
-        let identity_ab = {
-            let mut opts = serde_json::Map::new();
-            opts.insert("timeout".to_string(), json!("10"));
-            opts.insert("retries".to_string(), json!("3"));
-            RequirementTechnicalIdentity {
-                enforced_options: opts,
-            }
-        };
+    fn test_mapped_record_rejected_in_shared_group() {
+        // Phase 22 validation: mapped (MapExisting) records cannot be in shared groups
+        let version = Uuid::new_v4();
+        let records = vec![native_record("A"), mapped_record("B", version)];
+        let identity = identity_with("key1", "value1");
+        let group_id =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
 
-        let hash_a = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity_a);
-        let hash_ab = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity_ab);
+        let authoritative_identities =
+            build_authoritative_identities(&records, &[("A", identity.clone()), ("B", identity)]);
+        let decisions = vec![create_shared_decision(
+            &group_id.technical_hash,
+            &["A", "B"],
+        )];
 
-        assert_ne!(
-            hash_a.technical_hash, hash_ab.technical_hash,
-            "{{A}} and {{A,B}} must have different hashes"
+        let err =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .unwrap_err();
+
+        assert_eq!(
+            err.code, "IMPORT_SHARED_IMPLEMENTATION_STALE",
+            "mapped records cannot be in shared groups"
         );
+    }
+
+    #[test]
+    fn test_valid_three_way_shared() {
+        // Happy path: A, B, C all native, same technical identity
+        // by invoking real validator
+        let records = vec![native_record("A"), native_record("B"), native_record("C")];
+        let identity = identity_with("key1", "value1");
+        let group_id =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
+
+        let authoritative_identities = build_authoritative_identities(
+            &records,
+            &[
+                ("A", identity.clone()),
+                ("B", identity.clone()),
+                ("C", identity.clone()),
+            ],
+        );
+        let decisions = vec![create_shared_decision(
+            &group_id.technical_hash,
+            &["A", "B", "C"],
+        )];
+
+        let validated =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .expect("valid A/B/C triple should succeed");
+
+        assert_eq!(validated.len(), 1, "exactly one shared creation");
+        let shared = &validated[0];
+        assert_eq!(
+            shared.requirement_keys,
+            vec!["A".to_string(), "B".to_string(), "C".to_string()]
+        );
+        assert_eq!(shared.technical_identity, identity);
+        assert_eq!(shared.group_id, group_id);
     }
 }

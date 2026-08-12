@@ -18,9 +18,7 @@ use uuid::Uuid;
 
 use crate::compliance::requirement_model::PolicyCandidate;
 use crate::compliance::xccdf::exact_technical_match::RequirementTechnicalIdentity;
-use crate::compliance::xccdf::import_models::{
-    ImportedPolicyRecord, MapExistingProof, SharedGroupAction, SharedGroupDecision,
-};
+use crate::compliance::xccdf::import_models::{ImportedPolicyRecord, MapExistingProof};
 
 // ── Validation errors ─────────────────────────────────────────────────────────
 
@@ -296,48 +294,6 @@ pub fn recommend_action(group: &SharedImplementationGroup) -> SharedImplementati
     } else {
         SharedImplementationAction::CreateShared
     }
-}
-
-/// Validate that a shared implementation group is still valid at commit time.
-///
-/// Revalidates that:
-/// 1. All requirements still have the same technical identity
-/// 2. Group identity is deterministic and stable
-///
-/// Returns:
-/// - Ok if valid
-/// - Err with IMPORT_SHARED_IMPLEMENTATION_STALE if requirements changed
-pub fn validate_shared_group_at_commit(
-    group: &SharedImplementationGroup,
-    authoritative_identities: Vec<(&str, &RequirementTechnicalIdentity)>,
-) -> Result<(), String> {
-    // Verify all requirements in the group are still present in authoritative data
-    for req_key in &group.requirement_keys {
-        if !authoritative_identities.iter().any(|(k, _)| k == req_key) {
-            return Err(format!(
-                "IMPORT_SHARED_IMPLEMENTATION_STALE: requirement {} no longer present in import",
-                req_key
-            ));
-        }
-    }
-
-    // Verify all requirements still have identical technical enforcement
-    let expected_id = group.group_id.clone();
-    for (req_key, identity) in &authoritative_identities {
-        if !group.requirement_keys.contains(&req_key.to_string()) {
-            continue; // Not part of this group
-        }
-
-        let current_id = SharedImplementationId::from_technical_identity(identity);
-        if current_id != expected_id {
-            return Err(format!(
-                "IMPORT_SHARED_IMPLEMENTATION_STALE: requirement {} enforcement changed",
-                req_key
-            ));
-        }
-    }
-
-    Ok(())
 }
 
 /// Parameters for creating a shared policy for a group of requirements.
@@ -761,90 +717,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_shared_group_at_commit_valid() {
-        use super::validate_shared_group_at_commit;
-
-        let identity = identity_from_options(&[("services.openssh.enable", "false")]);
-        let group = SharedImplementationGroup {
-            group_id: SharedImplementationId::from_technical_identity(&identity),
-            technical_identity: identity.clone(),
-            requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
-            existing_policy_candidate: None,
-            member_proofs: HashMap::new(),
-            action: SharedImplementationAction::CreateShared,
-        };
-
-        let authoritative = vec![("V-111" as &str, &identity), ("V-222" as &str, &identity)];
-
-        assert!(
-            validate_shared_group_at_commit(&group, authoritative).is_ok(),
-            "should validate group with unchanged enforcement"
-        );
-    }
-
-    #[test]
-    fn test_validate_shared_group_at_commit_stale_enforcement() {
-        use super::validate_shared_group_at_commit;
-
-        let identity = identity_from_options(&[("services.openssh.enable", "false")]);
-        let group = SharedImplementationGroup {
-            group_id: SharedImplementationId::from_technical_identity(&identity),
-            technical_identity: identity.clone(),
-            requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
-            existing_policy_candidate: None,
-            member_proofs: HashMap::new(),
-            action: SharedImplementationAction::CreateShared,
-        };
-
-        // Changed enforcement for one requirement
-        let changed_identity = identity_from_options(&[("services.openssh.enable", "true")]);
-        let authoritative = vec![
-            ("V-111" as &str, &identity),
-            ("V-222" as &str, &changed_identity),
-        ];
-
-        let result = validate_shared_group_at_commit(&group, authoritative);
-        assert!(
-            result.is_err(),
-            "should reject group with changed enforcement"
-        );
-        assert!(
-            result
-                .unwrap_err()
-                .contains("IMPORT_SHARED_IMPLEMENTATION_STALE"),
-            "error should indicate stale group"
-        );
-    }
-
-    #[test]
-    fn test_validate_shared_group_at_commit_missing_requirement() {
-        use super::validate_shared_group_at_commit;
-
-        let identity = identity_from_options(&[("services.openssh.enable", "false")]);
-        let group = SharedImplementationGroup {
-            group_id: SharedImplementationId::from_technical_identity(&identity),
-            technical_identity: identity.clone(),
-            requirement_keys: vec!["V-111".to_string(), "V-222".to_string()],
-            existing_policy_candidate: None,
-            member_proofs: HashMap::new(),
-            action: SharedImplementationAction::CreateShared,
-        };
-
-        // Only one requirement present
-        let authoritative = vec![("V-111" as &str, &identity)];
-
-        let result = validate_shared_group_at_commit(&group, authoritative);
-        assert!(
-            result.is_err(),
-            "should reject group when requirement missing"
-        );
-        assert!(
-            result.unwrap_err().contains("no longer present"),
-            "error should indicate missing requirement"
-        );
-    }
-
-    #[test]
     fn test_generate_shared_policy_ids_fresh() {
         use super::generate_shared_policy_ids;
 
@@ -952,10 +824,8 @@ mod tests {
 
     // ── Resolution planner (item 18) ─────────────────────────────────────────
 
-    fn make_validated_shared_creation(
-        rule_ids: &[&str],
-    ) -> ValidatedSharedCreation {
-        use serde_json::{json, Map};
+    fn make_validated_shared_creation(rule_ids: &[&str]) -> ValidatedSharedCreation {
+        use serde_json::{Map, json};
 
         // Create a simple technical identity with enforced options
         let mut enforced_options = Map::new();
@@ -1106,7 +976,7 @@ mod tests {
 
         // Proof that policy_id, policy_version_id, group_id, requirement_keys,
         // and technical_identity survive unchanged through the planner.
-        use serde_json::{json, Map};
+        use serde_json::{Map, json};
 
         let mut enforced_options = Map::new();
         enforced_options.insert(
@@ -1135,15 +1005,16 @@ mod tests {
 
         assert_eq!(plan.shared_creations.len(), 1);
         let shared = &plan.shared_creations[0];
-        assert_eq!(
-            shared.policy_id, policy_id,
-            "policy_id must be preserved"
-        );
+        assert_eq!(shared.policy_id, policy_id, "policy_id must be preserved");
         assert_eq!(
             shared.policy_version_id, policy_version_id,
             "policy_version_id must be preserved"
         );
         assert_eq!(shared.group_id, group_id, "group_id must be preserved");
+        assert_eq!(
+            shared.requirement_keys, validated[0].requirement_keys,
+            "requirement_keys must be preserved"
+        );
         assert_eq!(
             shared.technical_identity, identity,
             "technical_identity must be preserved"
