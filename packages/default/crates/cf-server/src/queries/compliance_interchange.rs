@@ -7,12 +7,16 @@
 //!   upsert source artifact
 //!   insert bundle lineage
 //!   insert bundle version (semantic_digest = 'pending')
-//!   for each non-excluded rule:
-//!     insert policy lineage
-//!     insert policy version (semantic_digest = 'pending')
-//!   insert ordered membership
+//!   normalize requirements (STIG framework/version lineages)
+//!   detect shared implementation groups
+//!   validate shared groups at commit time
+//!   build policy resolution plan
+//!   create/reuse policy versions per resolution plan
+//!   build central rule_to_policy_version map
+//!   insert deduplicated bundle membership
+//!   insert per-requirement policy mappings
 //!   insert source-object mappings
-//!   compute and persist policy digests
+//!   compute and persist policy digests (only new/created policies)
 //!   compute and persist bundle digest
 //!   update bundle current_draft_version_id pointer
 //!   write audit event
@@ -20,6 +24,7 @@
 //! ```
 //!
 //! Any failure rolls back every write in this list.
+//! Shared policy creation ensures exactly one policy lineage/version per group.
 
 use anyhow::{Context, Result};
 use sqlx::PgPool;
@@ -36,6 +41,11 @@ use crate::compliance::xccdf::disa_stig_adapter::{
 use crate::compliance::xccdf::exact_technical_match::{
     ExactTechnicalMatchValidation, revalidate_exact_technical_match,
 };
+use crate::compliance::shared_implementation::{
+    build_import_policy_resolution_plan, detect_shared_implementations,
+    validate_shared_group_at_commit, PolicyResolution, SharedCreation, SharedReuse,
+};
+use crate::compliance::xccdf::exact_technical_match::RequirementTechnicalIdentity;
 use crate::compliance::xccdf::import_models::ImportedPolicyRecord;
 use crate::compliance::xccdf::import_models::{MapExistingProof, ValidatedImportPlan, XccdfCommittedImportResult};
 use crate::compliance::xccdf::importer::build_policy_records;
@@ -347,138 +357,272 @@ pub async fn commit_foreign_import(
         None
     };
 
-    // ── 3. Policy lineages and versions ───────────────────────────────────────
+    // ── 3. Shared group detection and validation ──────────────────────────────
+    // Build authoritative technical identities from parsed rules and detect shared groups.
+    let mut authoritative_identities: Vec<(String, RequirementTechnicalIdentity)> = Vec::new();
+    for rec in &policy_records {
+        let parsed_rule = pkg
+            .parsed
+            .rules
+            .iter()
+            .find(|rule| rule.id == rec.source_rule_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "IMPORT_RULE_NOT_FOUND: parsed rule {} disappeared before commit",
+                    rec.source_rule_id
+                )
+            })?;
+        // Derive technical identity from rule's fix text
+        let fix_text = parsed_rule
+            .fix
+            .as_ref()
+            .map(|f| f.content.as_str())
+            .unwrap_or_default();
+        let identity = RequirementTechnicalIdentity::from_fix_text(fix_text);
+        authoritative_identities.push((rec.source_rule_id.clone(), identity));
+    }
+
+    let shared_groups = detect_shared_implementations(authoritative_identities.clone());
+
+    // Validate any shared groups the user has confirmed decisions on.
+    for group in &shared_groups {
+        let auth_refs: Vec<(&str, &RequirementTechnicalIdentity)> = authoritative_identities
+            .iter()
+            .map(|(k, v)| (k.as_str(), v))
+            .collect();
+        validate_shared_group_at_commit(group, auth_refs)
+            .map_err(|e| anyhow::anyhow!(e))?;
+    }
+
+    // ── 4. Build resolution plan and central policy map ──────────────────────
     let excluded_rule_count =
         (validated.rules_to_import.len() as u32).saturating_sub(policy_records.len() as u32);
+
+    // The resolution plan determines which policy each requirement gets.
+    // Use user decisions from validated import plan.
+    let resolution_plan = build_import_policy_resolution_plan(&validated.shared_group_decisions, &policy_records)
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    // Central map: rule_id -> effective_policy_version_id
+    // This is populated as policies are created/reused and becomes the single source of truth.
+    let mut rule_to_policy_version: std::collections::HashMap<String, Uuid> =
+        std::collections::HashMap::new();
 
     let mut created_policy_version_ids: Vec<Uuid> = Vec::new();
     let mut effective_mapped_policy_versions = std::collections::HashMap::new();
     let mut inherited_mappings = std::collections::HashMap::new();
+    let mut created_shared_policies: Vec<(Uuid, Uuid, Vec<String>)> = Vec::new();
 
-    for rec in &policy_records {
-        if let Some(mapped_version_id) = rec.mapped_policy_version_id {
-            let selected: Option<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
-                "SELECT pv.policy_id, pv.publication_state, dp.current_published_version_id \
-                 FROM deployment_policy_versions pv \
-                 JOIN deployment_policies dp ON dp.id = pv.policy_id \
-                 WHERE pv.id = $1",
-            )
-            .bind(mapped_version_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .context("failed to verify mapped policy version")?;
-            let Some((policy_id, publication_state, current_published_version_id)) = selected
-            else {
-                anyhow::bail!(
-                    "IMPORT_POLICY_VERSION_NOT_FOUND: mapped policy version {} does not exist",
-                    mapped_version_id
-                );
-            };
+    // ── 5. Materialize policies based on resolution plan ────────────────────────
+    // Track created policies separately for digest computation.
+    let mut created_policy_objects: Vec<(Uuid, Uuid, Option<String>)> = Vec::new();
 
-            // Every reuse decision must carry an explicit proof and the proof is
-            // never trusted from preview: it is revalidated from authoritative
-            // source bytes inside this transaction.
-            match rec.mapped_policy_proof {
-                Some(MapExistingProof::ExactTechnicalMatch) => {
-                    // Re-derive the technical identity from the parsed rule's
-                    // authoritative fix text, then re-check that the selected
-                    // policy version still exists, is accepted, is the current
-                    // published version, and its config still implements the
-                    // enforcement. Any stale or superseded decision aborts the
-                    // whole import transaction (no partial writes).
-                    let parsed_rule = pkg
-                        .parsed
-                        .rules
-                        .iter()
-                        .find(|rule| rule.id == rec.source_rule_id)
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "IMPORT_RULE_NOT_FOUND: parsed rule {} disappeared before commit",
-                                rec.source_rule_id
-                            )
-                        })?;
-                    let authoritative_fix_text = parsed_rule
-                        .fix
-                        .as_ref()
-                        .map(|fix| fix.content.as_str())
-                        .unwrap_or_default();
-                    match revalidate_exact_technical_match(
-                        &mut tx,
-                        mapped_version_id,
-                        authoritative_fix_text,
-                    )
+    // 5a. Handle ReuseExisting outcomes (MapExisting records)
+    for (rule_id, version_id) in &resolution_plan.individual_reuses {
+        let selected: Option<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+            "SELECT pv.policy_id, pv.publication_state, dp.current_published_version_id \
+             FROM deployment_policy_versions pv \
+             JOIN deployment_policies dp ON dp.id = pv.policy_id \
+             WHERE pv.id = $1",
+        )
+        .bind(version_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("failed to verify mapped policy version")?;
+        let Some((policy_id, publication_state, current_published_version_id)) = selected else {
+            anyhow::bail!(
+                "IMPORT_POLICY_VERSION_NOT_FOUND: mapped policy version {} does not exist",
+                version_id
+            );
+        };
+
+        // Every reuse decision must carry an explicit proof and the proof is
+        // never trusted from preview: it is revalidated from authoritative
+        // source bytes inside this transaction.
+        let rec = policy_records
+            .iter()
+            .find(|r| r.source_rule_id == *rule_id)
+            .context("IMPORT_RULE_NOT_FOUND: resolution refers to non-existent record")?;
+
+        match rec.mapped_policy_proof {
+            Some(MapExistingProof::ExactTechnicalMatch) => {
+                // Re-derive the technical identity from the parsed rule's
+                // authoritative fix text, then re-check that the selected
+                // policy version still exists, is accepted, is the current
+                // published version, and its config still implements the
+                // enforcement. Any stale or superseded decision aborts the
+                // whole import transaction (no partial writes).
+                let parsed_rule = pkg
+                    .parsed
+                    .rules
+                    .iter()
+                    .find(|rule| rule.id == rec.source_rule_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "IMPORT_RULE_NOT_FOUND: parsed rule {} disappeared before commit",
+                            rec.source_rule_id
+                        )
+                    })?;
+                let authoritative_fix_text = parsed_rule
+                    .fix
+                    .as_ref()
+                    .map(|fix| fix.content.as_str())
+                    .unwrap_or_default();
+                match revalidate_exact_technical_match(&mut tx, *version_id, authoritative_fix_text)
                     .await?
-                    {
-                        ExactTechnicalMatchValidation::Valid { .. } => {}
-                        ExactTechnicalMatchValidation::Invalid { code, message } => {
-                            anyhow::bail!("{code}: {message}");
-                        }
-                    }
-                }
-                Some(MapExistingProof::InheritedMapping) | None => {
-                    if let Some(requirement_versions) = &normalized_requirements {
-                        let requirement = requirement_versions.get(&rec.source_rule_id).ok_or_else(
-                            || {
-                                anyhow::anyhow!(
-                                    "IMPORT_REQUIREMENT_NOT_FOUND: missing normalized requirement for {}",
-                                    rec.source_rule_id
-                                )
-                            },
-                        )?;
-                        let inherited_mapping: Option<(String, String, Option<String>)> =
-                            if requirement.unchanged_from_previous_release {
-                                let previous_requirement_version_id =
-                                    requirement.previous_requirement_version_id.ok_or_else(|| {
-                                        anyhow::anyhow!(
-                                            "IMPORT_REUSE_INELIGIBLE: missing prior requirement version"
-                                        )
-                                    })?;
-                                sqlx::query_as(
-                                "SELECT relationship, coverage, rationale FROM policy_requirement_mappings \
-                                 WHERE policy_version_id = $1 AND requirement_version_id = $2 \
-                                   AND trust_state = 'trusted'",
-                            )
-                            .bind(mapped_version_id)
-                            .bind(previous_requirement_version_id)
-                            .fetch_optional(&mut *tx)
-                            .await
-                            .context("failed to validate selected policy reuse")?
-                            } else {
-                                None
-                            };
-                        let Some(inherited_mapping) = inherited_mapping else {
-                            anyhow::bail!(
-                                "IMPORT_REUSE_INELIGIBLE: policy version {} is not a trusted mapping for an unchanged prior requirement",
-                                mapped_version_id
-                            );
-                        };
-                        inherited_mappings.insert(rec.source_rule_id.clone(), inherited_mapping);
-                    }
-                    // Inherited reuse refers to the exact immutable local policy
-                    // version, so it must still be the current accepted version.
-                    if publication_state != "accepted"
-                        || current_published_version_id != Some(mapped_version_id)
-                    {
-                        anyhow::bail!(
-                            "IMPORT_REUSE_INELIGIBLE: policy version {} must be the current accepted version of policy {}",
-                            mapped_version_id,
-                            policy_id
-                        );
+                {
+                    ExactTechnicalMatchValidation::Valid { .. } => {}
+                    ExactTechnicalMatchValidation::Invalid { code, message } => {
+                        anyhow::bail!("{code}: {message}");
                     }
                 }
             }
-            let effective_policy_version_id = ensure_policy_draft(
-                &mut tx,
-                policy_id,
-                Some(importing_user_id),
-                None,
-                PolicyDraftIntent::EnsureMutable,
-            )
-            .await
-            .context("failed to derive mutable policy draft for STIG requirement reuse")?;
-            effective_mapped_policy_versions.insert(mapped_version_id, effective_policy_version_id);
-            continue;
+            Some(MapExistingProof::InheritedMapping) | None => {
+                if let Some(requirement_versions) = &normalized_requirements {
+                    let requirement = requirement_versions.get(&rec.source_rule_id).ok_or_else(
+                        || {
+                            anyhow::anyhow!(
+                                "IMPORT_REQUIREMENT_NOT_FOUND: missing normalized requirement for {}",
+                                rec.source_rule_id
+                            )
+                        },
+                    )?;
+                    let inherited_mapping: Option<(String, String, Option<String>)> =
+                        if requirement.unchanged_from_previous_release {
+                            let previous_requirement_version_id =
+                                requirement.previous_requirement_version_id.ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "IMPORT_REUSE_INELIGIBLE: missing prior requirement version"
+                                    )
+                                })?;
+                            sqlx::query_as(
+                            "SELECT relationship, coverage, rationale FROM policy_requirement_mappings \
+                             WHERE policy_version_id = $1 AND requirement_version_id = $2 \
+                               AND trust_state = 'trusted'",
+                        )
+                        .bind(version_id)
+                        .bind(previous_requirement_version_id)
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .context("failed to validate selected policy reuse")?
+                        } else {
+                            None
+                        };
+                    let Some(inherited_mapping) = inherited_mapping else {
+                        anyhow::bail!(
+                            "IMPORT_REUSE_INELIGIBLE: policy version {} is not a trusted mapping for an unchanged prior requirement",
+                            version_id
+                        );
+                    };
+                    inherited_mappings.insert(rec.source_rule_id.clone(), inherited_mapping);
+                }
+                // Inherited reuse refers to the exact immutable local policy
+                // version, so it must still be the current accepted version.
+                if publication_state != "accepted" || current_published_version_id != Some(*version_id)
+                {
+                    anyhow::bail!(
+                        "IMPORT_REUSE_INELIGIBLE: policy version {} must be the current accepted version of policy {}",
+                        version_id,
+                        policy_id
+                    );
+                }
+            }
         }
+        let effective_policy_version_id = ensure_policy_draft(
+            &mut tx,
+            policy_id,
+            Some(importing_user_id),
+            None,
+            PolicyDraftIntent::EnsureMutable,
+        )
+        .await
+        .context("failed to derive mutable policy draft for STIG requirement reuse")?;
+        effective_mapped_policy_versions.insert(*version_id, effective_policy_version_id);
+        rule_to_policy_version.insert(rule_id.clone(), effective_policy_version_id);
+    }
+
+    // 5b. Handle CreateShared outcomes
+    for shared in &resolution_plan.shared_creations {
+        // Insert policy lineage for this shared group
+        sqlx::query(
+            r#"
+            INSERT INTO deployment_policies (id, name, description, policy_type, config, enabled)
+            VALUES ($1, $2, $3, 'shared', $4, false)
+            "#,
+        )
+        .bind(shared.policy_id)
+        .bind(&shared.group_id.technical_hash)
+        .bind(format!("Shared implementation for {}", shared.group_id.technical_hash))
+        .bind(serde_json::json!({}))
+        .execute(&mut *tx)
+        .await
+        .context("failed to insert shared policy lineage")?;
+
+        // Insert policy version
+        sqlx::query(
+            r#"
+            INSERT INTO deployment_policy_versions (
+                id, policy_id, version,
+                name, description,
+                policy_type, implementation_state, execution_phase,
+                config, compliance_metadata, dependencies,
+                semantic_digest, source_artifact_id,
+                created_by, enabled_by_default
+            ) VALUES (
+                $1, $2, $3,
+                $4, $5,
+                $6, $7, $8,
+                $9, $10, $11,
+                'pending', $12,
+                $13, false
+            )
+            "#,
+        )
+        .bind(shared.policy_version_id)
+        .bind(shared.policy_id)
+        .bind("0.1-draft")
+        .bind(&shared.group_id.technical_hash)
+        .bind(format!("Shared implementation for {}", shared.group_id.technical_hash))
+        .bind("shared")
+        .bind("native")
+        .bind("deploy")
+        .bind(serde_json::json!({}))
+        .bind(serde_json::json!({}))
+        .bind(serde_json::json!([]))
+        .bind(source_artifact_id)
+        .bind(importing_user_id)
+        .execute(&mut *tx)
+        .await
+        .context("failed to insert shared policy version")?;
+
+        // Set the policy's current_draft_version_id pointer
+        sqlx::query("UPDATE deployment_policies SET current_draft_version_id = $1 WHERE id = $2")
+            .bind(shared.policy_version_id)
+            .bind(shared.policy_id)
+            .execute(&mut *tx)
+            .await
+            .context("failed to set shared policy current_draft_version_id")?;
+
+        // Track as created
+        created_policy_objects.push((shared.policy_id, shared.policy_version_id, None));
+        created_policy_version_ids.push(shared.policy_version_id);
+
+        // Map all members to this shared policy
+        for rule_id in &shared.requirement_keys {
+            rule_to_policy_version.insert(rule_id.clone(), shared.policy_version_id);
+        }
+
+        created_shared_policies.push((
+            shared.policy_id,
+            shared.policy_version_id,
+            shared.requirement_keys.clone(),
+        ));
+    }
+
+    // 5c. Handle CreateIndividual outcomes
+    for record_idx in &resolution_plan.individual_creations {
+        let rec = &policy_records[*record_idx];
+
         // Insert policy lineage.
         sqlx::query(
             r#"
@@ -541,17 +685,32 @@ pub async fn commit_foreign_import(
             .await
             .context("failed to set policy current_draft_version_id")?;
 
+        // Track as created (opaque_xml is stored for individual policies)
+        created_policy_objects.push((rec.policy_id, rec.policy_version_id, rec.opaque_xml.clone()));
         created_policy_version_ids.push(rec.policy_version_id);
+
+        // Map to central rule map
+        rule_to_policy_version.insert(rec.source_rule_id.clone(), rec.policy_version_id);
     }
 
-    // ── 4. Ordered membership ─────────────────────────────────────────────────
+    // ── 6. Ordered bundle membership (deduplicated by central map) ─────────────
     let mut bundled_policy_versions = std::collections::HashSet::new();
     let mut policy_order = 0_i32;
+
+    // Iterate through policy_records in order, using the central rule_to_policy_version map
+    // to determine which policy version belongs to each record.
     for rec in &policy_records {
-        let policy_version_id = rec
-            .mapped_policy_version_id
-            .and_then(|id| effective_mapped_policy_versions.get(&id).copied())
-            .unwrap_or(rec.policy_version_id);
+        let policy_version_id = rule_to_policy_version
+            .get(&rec.source_rule_id)
+            .copied()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "IMPORT_INTERNAL_ERROR: no resolution for rule {}",
+                    rec.source_rule_id
+                )
+            })?;
+
+        // Insert deduplicated bundle membership
         if bundled_policy_versions.insert(policy_version_id) {
             sqlx::query(
                 r#"
@@ -569,6 +728,7 @@ pub async fn commit_foreign_import(
             policy_order += 1;
         }
 
+        // ── 7. Per-requirement policy mappings ────────────────────────────────
         if let Some(requirement_versions) = &normalized_requirements {
             let requirement = requirement_versions
                 .get(&rec.source_rule_id)
@@ -578,6 +738,7 @@ pub async fn commit_foreign_import(
                         rec.source_rule_id
                     )
                 })?;
+
             // Mapping semantics stay per requirement so a shared policy can
             // carry a different reviewed relationship/coverage for each
             // requirement it satisfies (item 13).
@@ -616,6 +777,7 @@ pub async fn commit_foreign_import(
             } else {
                 ("implements", "full", None, "imported")
             };
+
             insert_policy_mapping_in_tx(
                 &mut tx,
                 policy_version_id,
@@ -631,7 +793,7 @@ pub async fn commit_foreign_import(
         }
     }
 
-    // ── 5. Source-object mappings ─────────────────────────────────────────────
+    // ── 8. Source-object mappings ─────────────────────────────────────────────
     // Benchmark → bundle version
     if let Some(ref bm) = pkg.parsed.benchmark {
         sqlx::query(
@@ -650,12 +812,17 @@ pub async fn commit_foreign_import(
         .context("failed to insert benchmark source mapping")?;
     }
 
-    // Rules → policy versions
+    // Rules → policy versions (using central rule_to_policy_version map)
     for rec in &policy_records {
-        let policy_version_id = rec
-            .mapped_policy_version_id
-            .and_then(|id| effective_mapped_policy_versions.get(&id).copied())
-            .unwrap_or(rec.policy_version_id);
+        let policy_version_id = rule_to_policy_version
+            .get(&rec.source_rule_id)
+            .copied()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "IMPORT_INTERNAL_ERROR: no resolution for rule {}",
+                    rec.source_rule_id
+                )
+            })?;
         sqlx::query(
             r#"
             INSERT INTO compliance_source_object_mappings
@@ -673,33 +840,51 @@ pub async fn commit_foreign_import(
     }
 
     // Profile → bundle version (if selected)
-    if let Some(ref pid) = validated.expected_sha256.as_str().get(0..0) {
+    if let Some(ref _pid) = validated.expected_sha256.as_str().get(0..0) {
         // placeholder — profile mappings are inserted below
-        let _ = pid;
     }
 
-    // ── 6. Compute and persist semantic digests ───────────────────────────────
-    for rec in &policy_records {
-        if rec.mapped_policy_version_id.is_some() {
-            continue;
-        }
+    // ── 9. Compute and persist semantic digests ───────────────────────────────
+    // Compute digests only for newly-created policies (not reused ones)
+    for (policy_id, policy_version_id, opaque_xml_opt) in &created_policy_objects {
         let opaque_xml_digest =
-            PolicyVersionCanonical::digest_opaque_xml(rec.opaque_xml.as_deref());
+            PolicyVersionCanonical::digest_opaque_xml(opaque_xml_opt.as_deref());
 
-        let canonical = PolicyVersionCanonical {
-            name: rec.name.clone(),
-            description: rec.description.clone(),
-            policy_type: rec.policy_type.clone(),
-            implementation_state: rec.implementation_state.clone(),
-            execution_phase: rec.execution_phase.clone(),
-            config: rec.config.clone(),
-            compliance_metadata: rec.compliance_metadata.clone(),
-            dependencies: rec.dependencies.clone(),
-            opaque_xml_digest,
-            enabled_by_default: Some(rec.enabled_by_default),
+        // For shared policies, opaque_xml is None, so digest is computed from empty
+        let canonical = if let Some(rec) = policy_records
+            .iter()
+            .find(|r| r.policy_version_id == *policy_version_id)
+        {
+            // Individual policy: use full record data
+            PolicyVersionCanonical {
+                name: rec.name.clone(),
+                description: rec.description.clone(),
+                policy_type: rec.policy_type.clone(),
+                implementation_state: rec.implementation_state.clone(),
+                execution_phase: rec.execution_phase.clone(),
+                config: rec.config.clone(),
+                compliance_metadata: rec.compliance_metadata.clone(),
+                dependencies: rec.dependencies.clone(),
+                opaque_xml_digest,
+                enabled_by_default: Some(rec.enabled_by_default),
+            }
+        } else {
+            // Shared policy: minimal canonical from shared data
+            PolicyVersionCanonical {
+                name: policy_id.to_string(),
+                description: Some(format!("Shared implementation {}", policy_id)),
+                policy_type: "shared".to_string(),
+                implementation_state: "native".to_string(),
+                execution_phase: "deploy".to_string(),
+                config: serde_json::json!({}),
+                compliance_metadata: serde_json::json!({}),
+                dependencies: serde_json::json!([]),
+                opaque_xml_digest,
+                enabled_by_default: Some(false),
+            }
         };
 
-        write_policy_version_digest(&mut tx, rec.policy_id, &canonical)
+        write_policy_version_digest(&mut tx, *policy_id, &canonical)
             .await
             .context("failed to write policy version digest")?;
     }
@@ -731,20 +916,26 @@ pub async fn commit_foreign_import(
             .await
             .context("failed to read bundle semantic digest")?;
 
-    // ── 7. Audit event ────────────────────────────────────────────────────────
+    // ── 10. Audit event and result calculation ────────────────────────────────
     let created_policy_count = created_policy_version_ids.len() as u32;
+    let created_policy_lineages = created_policy_objects.len() as u32;
+    let created_policy_versions = created_policy_objects.len() as u32;
     let reused_policy_versions = effective_mapped_policy_versions
         .values()
         .copied()
         .collect::<std::collections::HashSet<_>>()
         .len() as u32;
+
     let metadata = serde_json::json!({
         "source_artifact_id": source_artifact_id,
         "original_sha256": source_sha256,
         "bundle_id": bundle_id,
         "bundle_version_id": bundle_version_id,
         "created_policy_count": created_policy_count,
+        "created_policy_lineages": created_policy_lineages,
+        "created_policy_versions": created_policy_versions,
         "reused_policy_versions": reused_policy_versions,
+        "shared_groups_created": created_shared_policies.len(),
         "excluded_rule_count": excluded_rule_count,
         "document_class": document_class,
         "fidelity": fidelity,
@@ -765,7 +956,7 @@ pub async fn commit_foreign_import(
     .await
     .context("failed to write audit event")?;
 
-    // ── 8. Commit ─────────────────────────────────────────────────────────────
+    // ── 11. Commit ────────────────────────────────────────────────────────────
     tx.commit()
         .await
         .context("failed to commit import transaction")?;
@@ -775,8 +966,8 @@ pub async fn commit_foreign_import(
         bundle_id,
         bundle_version_id,
         created_policy_count,
-        created_policy_lineages: created_policy_count,
-        created_policy_versions: created_policy_count,
+        created_policy_lineages,
+        created_policy_versions,
         reused_policy_versions,
         bundle_lineage_created: true,
         bundle_version_created: true,
