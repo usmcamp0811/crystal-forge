@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-12 19:26'
-updated_date: '2026-08-12 21:09'
+updated_date: '2026-08-12 21:19'
 labels: []
 milestone: m-23
 dependencies:
@@ -71,4 +71,6 @@ Reviewer-directed follow-up completed in pushed slices: 9d9a4d10 exposes structu
 Verification update: related candidate DB test passed; map_existing_stig regression group passed 3/3. Phase 22 shared-creation group ran 7 tests with 6 passing; exact reimport idempotency test failed due shared test-database deployment_policies_name_key collision during fixture setup, not an implementation assertion. Worktree clean and remote branch remains at 723be5415a07efda8c3033e38939f8e14cfa5674.
 
 Latest Phase 22 run: 6/7 passed. Rollback collision test now passes; exact reimport idempotency still fails with counts increasing by (1 framework version, 1 bundle version, 3 requirement versions, 3 mappings), indicating fixture/database state or exact-artifact identity behavior remains unresolved. Worktree is clean at pushed commit cc6aadc7.
+
+Diagnosed exact reimport as test interference: the test passed alone; serialized Phase 22 suite passed 8/8. Replaced global-count idempotency assertions with source-artifact/bundle-scoped counts and explicitly asserted the benchmark source-object mapping fast-path prerequisite. Removed the unused reviewed-revalidation record parameter. Changes pushed as 195e0fc4.
 <!-- SECTION:NOTES:END -->
