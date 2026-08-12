@@ -240,6 +240,22 @@ pub fn generate_shared_policy_ids(_group: &SharedImplementationGroup) -> (Uuid, 
     (policy_id, version_id)
 }
 
+/// A shared policy to be created at commit time, along with its associated requirements.
+///
+/// Used internally during commit_foreign_import to track which requirements
+/// should be mapped to the same policy lineage.
+#[derive(Debug, Clone)]
+pub struct SharedPolicyCommitRecord {
+    /// Policy lineage ID
+    pub policy_id: Uuid,
+    /// Policy version ID
+    pub policy_version_id: Uuid,
+    /// Requirement keys (rule IDs) that map to this policy
+    pub requirement_keys: Vec<String>,
+    /// Group identity (for revalidation)
+    pub group_id: SharedImplementationId,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
