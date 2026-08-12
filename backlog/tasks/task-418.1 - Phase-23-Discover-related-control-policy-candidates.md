@@ -1,9 +1,11 @@
 ---
 id: TASK-418.1
 title: 'Phase 23: Discover related-control policy candidates'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@agent'
 created_date: '2026-08-12 19:26'
+updated_date: '2026-08-12 19:26'
 labels: []
 milestone: m-23
 dependencies:
@@ -40,3 +42,17 @@ Add candidate-only discovery for DISA STIG requirements that share exact normali
 - [ ] #8 Database-backed tests verify normalized CCI/SRG relationships produce RelatedMapping candidates and negative trust/currentness cases do not.
 - [ ] #9 Targeted candidate and Phase 22 regression tests pass; cargo fmt --all --check, git diff --check, and cargo check -p cf-server pass.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Phase 23 implementation plan
+
+1. Inspect the existing requirement candidate DTOs, normalized metadata representation, preview auto-resolution calculation, and import proof validation without changing behavior.
+2. Add a typed CCI/SRG identifier extraction and normalization helper backed by requirement metadata.
+3. Extend normalized candidate discovery with trusted/current accepted mappings for exact shared CCI/SRG evidence, preserving deterministic candidate precedence and review-only semantics.
+4. Adjust preview auto-resolvable calculation to recognize only permitted deterministic proof classes and inferred enforcement, never RelatedMapping alone.
+5. Add the smallest explicit reviewed-related-selection representation needed for commit semantics; preserve the existing restriction that RelatedMapping cannot become MapExistingProof.
+6. Add unit tests for identifier matching and precedence, plus DB-backed tests proving trust/currentness filtering against normalized rows.
+7. Run targeted candidate and Phase 22 regression tests, cargo fmt --all --check, git diff --check, and cargo check -p cf-server. Avoid the long web-ui check unless a changed UI surface makes it necessary.
+<!-- SECTION:PLAN:END -->
