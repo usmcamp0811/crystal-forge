@@ -2827,13 +2827,11 @@ mod tests {
         );
         cleanup_shared_policy_fixture(&pool, fix).await;
         let bundle_name = validated.bundle.name.clone();
-        let shared_name = format!(
-            "Technical: {}",
-            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(
-                &RequirementTechnicalIdentity::from_fix_text(fix),
-            )
-            .technical_hash
-        );
+        let shared_name: String =
+            sqlx::query_scalar("SELECT name FROM deployment_policies ORDER BY created_at LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .expect("find existing policy name for late collision");
         records[2].name = shared_name.clone();
 
         let source_sha = pkg.provenance.sha256.clone();
