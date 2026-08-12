@@ -22,6 +22,44 @@ use crate::compliance::xccdf::import_models::{
     ImportedPolicyRecord, MapExistingProof, SharedGroupAction, SharedGroupDecision,
 };
 
+// ── Validation errors ─────────────────────────────────────────────────────────
+
+/// Typed error result from shared-group validation.
+///
+/// All validation failures during commit produce this error with code
+/// IMPORT_SHARED_IMPLEMENTATION_STALE and a descriptive message.
+#[derive(Debug, Clone)]
+pub struct SharedValidationError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl std::fmt::Display for SharedValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for SharedValidationError {}
+
+/// A shared-group decision that has passed all authoritative validation checks.
+/// This is the trust boundary: nothing below this type should inspect raw
+/// client SharedGroupDecision values.
+///
+/// All fields are server-derived or verified server-side:
+/// - policy_id, policy_version_id: generated UUIDs for this shared policy
+/// - group_id: derived from authoritative technical identity
+/// - requirement_keys: validated client-selected rule IDs that have passed authoritative validation
+/// - technical_identity: authoritative enforcement inferred from parsed rules
+#[derive(Debug, Clone)]
+pub struct ValidatedSharedCreation {
+    pub policy_id: Uuid,
+    pub policy_version_id: Uuid,
+    pub group_id: SharedImplementationId,
+    pub requirement_keys: Vec<String>,
+    pub technical_identity: RequirementTechnicalIdentity,
+}
+
 /// Stable identity for a shared technical implementation group.
 ///
 /// Derived deterministically from the normalized technical enforcement.
@@ -352,14 +390,19 @@ pub enum PolicyResolution {
 }
 
 /// A new shared policy to create for one shared-implementation decision.
+///
+/// Created by the resolution planner from ValidatedSharedCreation.
+/// Contains the authoritative server-generated IDs and technical identity.
 #[derive(Debug, Clone)]
 pub struct SharedCreation {
     pub policy_id: Uuid,
     pub policy_version_id: Uuid,
-    /// Rule IDs that map to this shared policy.
+    /// Rule IDs that map to this shared policy (validated client-selected IDs).
     pub requirement_keys: Vec<String>,
-    /// Group identity re-derived from authoritative source at commit time.
+    /// Group identity derived from authoritative technical enforcement.
     pub group_id: SharedImplementationId,
+    /// Authoritative technical enforcement for this shared policy.
+    pub technical_identity: RequirementTechnicalIdentity,
 }
 
 /// A group of requirements reusing one existing policy version.
@@ -385,84 +428,40 @@ pub struct ImportPolicyResolutionPlan {
     pub rule_resolutions: HashMap<String, PolicyResolution>,
 }
 
-/// Build the import policy resolution plan from user decisions and records.
+/// Build the import policy resolution plan from validated shared creations and policy records.
 ///
 /// The plan is pure (no I/O) so it can be unit tested with real records.
+/// The planner receives **only** ValidatedSharedCreation objects - no raw client input.
 ///
 /// Rules:
+/// - Every ValidatedSharedCreation becomes one SharedCreation in the plan (no UUID generation).
 /// - Every record with `mapped_policy_version_id` (MapExisting) resolves to
 ///   `ReuseExisting` with that exact version.
-/// - Every rule listed in a `CreateShared` decision resolves to one shared
-///   creation for that decision (all listed rules share one new policy).
 /// - Every other record resolves to an individual creation.
-///
-/// # Errors
-/// - `IMPORT_SHARED_IMPLEMENTATION_STALE` when a CreateShared decision lists a
-///   rule that is not in the import records, or lists a rule whose record is a
-///   MapExisting reuse (contradictory decision).
 pub fn build_import_policy_resolution_plan(
-    shared_decisions: &[SharedGroupDecision],
+    validated_shared_creations: &[ValidatedSharedCreation],
     policy_records: &[ImportedPolicyRecord],
 ) -> Result<ImportPolicyResolutionPlan, String> {
-    use crate::compliance::xccdf::import_models::SharedGroupAction;
-
     let mut plan = ImportPolicyResolutionPlan::default();
 
-    // Rule -> record index lookup.
-    let rule_to_index: HashMap<&str, usize> = policy_records
-        .iter()
-        .enumerate()
-        .map(|(idx, rec)| (rec.source_rule_id.as_str(), idx))
-        .collect();
-
-    // 1. Process CreateShared decisions first.
-    for decision in shared_decisions {
-        if decision.action != SharedGroupAction::CreateShared {
-            continue;
-        }
-        if decision.rule_ids.len() < 2 {
-            // Degenerate "shared" decision: the single member follows its own
-            // individual action below.
-            continue;
-        }
-        // Validate every listed rule exists and is a create-native record.
-        let mut requirement_keys = Vec::with_capacity(decision.rule_ids.len());
-        for rule_id in &decision.rule_ids {
-            let Some(&idx) = rule_to_index.get(rule_id.as_str()) else {
-                return Err(format!(
-                    "IMPORT_SHARED_IMPLEMENTATION_STALE: shared decision lists rule {} \
-                     which is not present in the import",
-                    rule_id
-                ));
-            };
-            let rec = &policy_records[idx];
-            if rec.mapped_policy_version_id.is_some() {
-                return Err(format!(
-                    "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} has a MapExisting reuse \
-                     but is listed in a CreateShared group decision",
-                    rule_id
-                ));
-            }
-            requirement_keys.push(rule_id.clone());
-        }
-
-        let (policy_id, policy_version_id) = (Uuid::new_v4(), Uuid::new_v4());
-        let group_id = SharedImplementationId {
-            technical_hash: decision.group_id.clone(),
-        };
-        for rule_id in &requirement_keys {
+    // 1. Process validated shared creations first.
+    // These have already passed all authoritative validation.
+    for validated in validated_shared_creations {
+        // Reuse the authoritative server-generated UUIDs and identity from validation.
+        for rule_id in &validated.requirement_keys {
             plan.rule_resolutions.insert(
                 rule_id.clone(),
                 PolicyResolution::CreateShared {
-                    group_id: group_id.clone(),
+                    group_id: validated.group_id.clone(),
                 },
             );
         }
         plan.shared_creations.push(SharedCreation {
-            policy_id,
-            policy_version_id,
-            requirement_keys,
-            group_id,
+            policy_id: validated.policy_id,
+            policy_version_id: validated.policy_version_id,
+            requirement_keys: validated.requirement_keys.clone(),
+            group_id: validated.group_id.clone(),
+            technical_identity: validated.technical_identity.clone(),
         });
     }
 

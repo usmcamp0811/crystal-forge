@@ -38,6 +38,7 @@ use crate::compliance::framework_model::FrameworkVersionCanonical;
 use crate::compliance::shared_implementation::{
     PolicyResolution, SharedCreation, SharedReuse, build_import_policy_resolution_plan,
     detect_shared_implementations, validate_shared_group_at_commit,
+    ValidatedSharedCreation, SharedValidationError, SharedImplementationId,
 };
 use crate::compliance::xccdf::disa_stig_adapter::{
     canonical_for_rule, canonical_key_for_rule, identify_framework, is_disa_stig,
@@ -69,25 +70,8 @@ use crate::queries::framework_requirements::{
 /// artifacts parsed by earlier versions.
 pub const CF_PARSER_VERSION: &str = "cf-xccdf-parser-0.1";
 
-// ── Validated shared creation type ────────────────────────────────────────────
-
-/// A shared-group decision that has passed all authoritative validation checks.
-/// This is the trust boundary: nothing below this type should inspect raw
-/// client SharedGroupDecision values.
-///
-/// All fields are server-derived or verified server-side:
-/// - policy_id, policy_version_id: generated UUIDs for this shared policy
-/// - group_id: derived from authoritative technical identity
-/// - requirement_keys: validated to be unique, exist, be native, non-MapExisting
-/// - technical_identity: authoritative enforcement inferred from parsed rules
-#[derive(Debug, Clone)]
-struct ValidatedSharedCreation {
-    pub policy_id: Uuid,
-    pub policy_version_id: Uuid,
-    pub group_id: crate::compliance::shared_implementation::SharedImplementationId,
-    pub requirement_keys: Vec<String>,
-    pub technical_identity: RequirementTechnicalIdentity,
-}
+// ValidatedSharedCreation is defined in shared_implementation.rs as the
+// authoritative domain type. Import it here for use in the validator.
 
 /// Validate shared creation decisions against authoritative technical identities.
 ///
@@ -591,20 +575,9 @@ pub async fn commit_foreign_import(
         (validated.rules_to_import.len() as u32).saturating_sub(policy_records.len() as u32);
 
     // The resolution plan determines which policy each requirement gets.
-    // Build server-derived SharedGroupDecision objects from validated creations
-    // to ensure the planner never sees raw client input.
-    use crate::compliance::xccdf::import_models::{SharedGroupDecision, SharedGroupAction};
-    let server_derived_decisions: Vec<SharedGroupDecision> = validated_shared_creations
-        .iter()
-        .map(|vsc| SharedGroupDecision {
-            group_id: vsc.group_id.technical_hash.clone(),
-            action: SharedGroupAction::CreateShared,
-            rule_ids: vsc.requirement_keys.clone(),
-        })
-        .collect();
-
+    // The planner receives only ValidatedSharedCreation objects - never raw client input.
     let resolution_plan =
-        build_import_policy_resolution_plan(&server_derived_decisions, &policy_records)
+        build_import_policy_resolution_plan(&validated_shared_creations, &policy_records)
             .map_err(|e| anyhow::anyhow!(e))?;
 
     // Central map: rule_id -> effective_policy_version_id
