@@ -2408,14 +2408,14 @@ mod tests {
 
         let identity = RequirementTechnicalIdentity::from_fix_text(fix);
         let stale_name = format!(
-            "Technical: {}",
+            "Technical: {}%",
             crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(
                 &identity,
             )
             .technical_hash
         );
         let stale_policy_ids: Vec<Uuid> =
-            sqlx::query_scalar("SELECT id FROM deployment_policies WHERE name = $1")
+            sqlx::query_scalar("SELECT id FROM deployment_policies WHERE name LIKE $1")
                 .bind(stale_name)
                 .fetch_all(&pool)
                 .await
@@ -4117,14 +4117,14 @@ mod tests {
     async fn cleanup_shared_policy_fixture(pool: &PgPool, fix: &str) {
         let identity = RequirementTechnicalIdentity::from_fix_text(fix);
         let name = format!(
-            "Technical: {}",
+            "Technical: {}%",
             crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(
                 &identity,
             )
             .technical_hash
         );
         let policy_ids: Vec<Uuid> =
-            sqlx::query_scalar("SELECT id FROM deployment_policies WHERE name = $1")
+            sqlx::query_scalar("SELECT id FROM deployment_policies WHERE name LIKE $1")
                 .bind(name)
                 .fetch_all(pool)
                 .await
