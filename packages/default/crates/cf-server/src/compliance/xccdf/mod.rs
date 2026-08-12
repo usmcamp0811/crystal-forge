@@ -5,6 +5,7 @@
 //! Crystal Forge extension namespace.
 
 pub mod disa_stig_adapter;
+pub mod exact_technical_match;
 pub mod export_models;
 pub mod import_models;
 pub mod importer;
