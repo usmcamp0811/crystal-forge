@@ -402,7 +402,7 @@ pub async fn commit_foreign_import(
             continue;
         }
 
-        // Validate every listed rule exists and is in policy_records (not excluded)
+        // Validate every listed rule exists and is eligible for shared creation
         for rule_id in &decision.rule_ids {
             if !authoritative_identities.contains_key(rule_id) {
                 anyhow::bail!(
@@ -410,7 +410,6 @@ pub async fn commit_foreign_import(
                     rule_id
                 );
             }
-            // Also validate it's not a MapExisting reuse
             let rec = policy_records
                 .iter()
                 .find(|r| r.source_rule_id == *rule_id)
@@ -420,10 +419,22 @@ pub async fn commit_foreign_import(
                         rule_id
                     )
                 })?;
+            
+            // Action-type validation: only native technical implementations can be shared
+            // Reject MapExisting, manual, unbound, opaque, etc.
             if rec.mapped_policy_version_id.is_some() {
                 anyhow::bail!(
                     "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} is MapExisting reuse, cannot be in shared group",
                     rule_id
+                );
+            }
+            
+            // Only native policy type is eligible for shared creation
+            if rec.policy_type != "native" {
+                anyhow::bail!(
+                    "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} has policy_type {}, only 'native' is eligible for shared groups",
+                    rule_id,
+                    rec.policy_type
                 );
             }
         }
