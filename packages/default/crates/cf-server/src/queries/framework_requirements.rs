@@ -27,7 +27,7 @@ use crate::compliance::framework_model::{
 };
 use crate::compliance::requirement_model::{
     FrameworkReconciliation, FrameworkReconciliationState, PolicyCandidate,
-    PolicyCandidateMatchType, PolicyReconciliation, RequirementReconciliation,
+    PolicyCandidateMatchType, RelatedRequirementIdentifiers, RequirementReconciliation,
     RequirementReconciliationPreview, RequirementReconciliationState, RequirementVersionCanonical,
     write_requirement_version_digest,
 };
@@ -866,6 +866,8 @@ pub async fn find_policy_candidates(
     authoritative_requirement_version_id: Option<Uuid>,
     inherited_requirement_version_id: Option<Uuid>,
     fix_text: Option<&str>,
+    related_identifiers: &RelatedRequirementIdentifiers,
+    incoming_framework_id: Option<Uuid>,
 ) -> Result<Vec<PolicyCandidate>> {
     use crate::compliance::xccdf::exact_technical_match::{
         RequirementTechnicalIdentity, find_exact_technical_match_candidates,
@@ -979,6 +981,88 @@ pub async fn find_policy_candidates(
                     );
                 }
             }
+        }
+    }
+
+    // 4. Related mappings: review-only evidence from exact shared CCI/SRG
+    // identifiers. Restrict this to trusted mappings on the current accepted
+    // policy version; stale or suggested evidence must never be promoted.
+    if !related_identifiers.is_empty() {
+        let rows: Vec<(Uuid, Uuid, String, String, String, String, Value)> = sqlx::query_as(
+            r#"
+                SELECT DISTINCT
+                    dp.id,
+                    pv.id,
+                    pv.name,
+                    COALESCE(f.name, 'Unknown framework'),
+                    rv.external_id,
+                    COALESCE(rv.title, rv.external_id),
+                    rv.metadata
+                FROM policy_requirement_mappings m
+                JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id
+                JOIN deployment_policies dp ON dp.id = pv.policy_id
+                JOIN compliance_requirement_versions rv ON rv.id = m.requirement_version_id
+                JOIN compliance_requirements r ON r.id = rv.requirement_id
+                JOIN compliance_frameworks f ON f.id = r.framework_id
+                WHERE m.trust_state = 'trusted'
+                  AND pv.publication_state = 'accepted'
+                  AND dp.current_published_version_id = pv.id
+                  AND ($1::uuid IS NULL OR f.id <> $1)
+
+                ORDER BY pv.name, rv.external_id
+                "#,
+        )
+        .bind(incoming_framework_id)
+        .fetch_all(pool)
+        .await
+        .context("failed to find related policy candidates")?;
+
+        for (
+            policy_id,
+            policy_version_id,
+            policy_name,
+            framework_name,
+            external_id,
+            title,
+            metadata,
+        ) in rows
+        {
+            if candidates.contains_key(&policy_version_id) {
+                continue;
+            }
+            let candidate_ids = RelatedRequirementIdentifiers::from_metadata(&metadata);
+            let shared_cci = related_identifiers
+                .cci_ids
+                .intersection(&candidate_ids.cci_ids)
+                .cloned()
+                .collect::<Vec<_>>();
+            let shared_srg = related_identifiers
+                .srg_ids
+                .intersection(&candidate_ids.srg_ids)
+                .cloned()
+                .collect::<Vec<_>>();
+            if shared_cci.is_empty() && shared_srg.is_empty() {
+                continue;
+            }
+            let mut reasons = shared_cci
+                .into_iter()
+                .map(|id| format!("Shared {id}"))
+                .collect::<Vec<_>>();
+            reasons.extend(shared_srg.into_iter().map(|id| format!("Shared {id}")));
+            reasons.push(format!(
+                "Existing mapping: {framework_name} {external_id} ({title})"
+            ));
+            candidates.insert(
+                policy_version_id,
+                PolicyCandidate {
+                    policy_id,
+                    policy_version_id,
+                    policy_name,
+                    match_type: PolicyCandidateMatchType::RelatedMapping,
+                    confidence: 70,
+                    match_reasons: reasons,
+                },
+            );
         }
     }
 
@@ -1465,6 +1549,202 @@ pub mod tests {
         assert_eq!(
             preview.removed_requirements[0].state,
             RequirementReconciliationState::RemovedFromRelease
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a database"]
+    async fn related_candidates_use_trusted_current_normalized_mappings() {
+        use crate::compliance::requirement_model::RelatedRequirementIdentifiers;
+
+        let pool = test_pool().await;
+        let actor: Uuid = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let source_key = format!("related-candidate-{}", Uuid::new_v4());
+        let related_key = format!("related-source-{}", Uuid::new_v4());
+        let shared_cci = format!("CCI-TEST-{}", Uuid::new_v4().simple());
+        let mut tx = pool.begin().await.unwrap();
+        let incoming_framework =
+            upsert_framework_lineage(&mut tx, "Incoming framework", None, &source_key, None)
+                .await
+                .unwrap();
+        let related_framework =
+            upsert_framework_lineage(&mut tx, "Related framework", None, &related_key, None)
+                .await
+                .unwrap();
+        let version = FrameworkVersionCanonical {
+            canonical_source_key: source_key.clone(),
+            canonical_release_key: "V1R1".to_string(),
+            version: "V1R1".to_string(),
+            publisher: None,
+            title: None,
+        };
+        let incoming_version =
+            insert_framework_version(&mut tx, incoming_framework, &version, None, None)
+                .await
+                .unwrap();
+        let related_version = insert_framework_version(
+            &mut tx,
+            related_framework,
+            &FrameworkVersionCanonical {
+                canonical_source_key: related_key.clone(),
+                ..version.clone()
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let incoming_req = upsert_requirement_lineage(&mut tx, incoming_framework, "V-INCOMING")
+            .await
+            .unwrap();
+        let related_req = upsert_requirement_lineage(&mut tx, related_framework, "NIST-AC-X")
+            .await
+            .unwrap();
+        let _incoming_rv = insert_requirement_version(
+            &mut tx,
+            incoming_req,
+            incoming_version,
+            &RequirementVersionCanonical {
+                canonical_requirement_key: "V-INCOMING".to_string(),
+                external_id: "V-INCOMING".to_string(),
+                title: Some("Incoming".to_string()),
+                kind: "rule".to_string(),
+                metadata: serde_json::json!({"cci_ids": [&shared_cci]}),
+                description: None,
+                severity: None,
+                check_text: None,
+                fix_text: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let related_rv = insert_requirement_version(
+            &mut tx,
+            related_req,
+            related_version,
+            &RequirementVersionCanonical {
+                canonical_requirement_key: "NIST-AC-X".to_string(),
+                external_id: "NIST-AC-X".to_string(),
+                title: Some("NIST access control".to_string()),
+                kind: "control".to_string(),
+                metadata: serde_json::json!({"cci_ids": [shared_cci.to_ascii_lowercase()], "srg_ids": ["SRG-OS-000109-GPOS-00051"]}),
+                description: None,
+                severity: None,
+                check_text: None,
+                fix_text: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let policy_id = Uuid::new_v4();
+        let policy_version_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO deployment_policies (id, name, description, policy_type) VALUES ($1, $2, $3, 'native')",
+        )
+        .bind(policy_id)
+        .bind(format!("Related candidate policy {}", Uuid::new_v4()))
+        .bind("related candidate test")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO deployment_policy_versions (id, policy_id, version, publication_state, name, policy_type, implementation_state, execution_phase, config, compliance_metadata, dependencies, semantic_digest, digest_algorithm) VALUES ($1, $2, '1.0', 'draft', 'related candidate policy', 'native', 'native', 'deploy', '{}', '{}', '[]', 'related-candidate', 'sha-256')",
+        )
+        .bind(policy_version_id)
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        insert_policy_mapping_in_tx(
+            &mut tx,
+            policy_version_id,
+            related_rv,
+            "implements",
+            "full",
+            Some("shared CCI evidence"),
+            "manual",
+            None,
+            actor,
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE deployment_policy_versions SET trust_state = 'trusted', trusted_by = $2, trusted_at = NOW(), publication_state = 'accepted', published_at = NOW() WHERE id = $1")
+            .bind(policy_version_id)
+            .bind(actor)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(policy_version_id)
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        let candidates = find_policy_candidates(
+            &pool,
+            None,
+            None,
+            None,
+            &RelatedRequirementIdentifiers {
+                cci_ids: [shared_cci.to_ascii_uppercase()].into_iter().collect(),
+                srg_ids: Default::default(),
+            },
+            Some(incoming_framework),
+        )
+        .await
+        .unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].match_type,
+            PolicyCandidateMatchType::RelatedMapping
+        );
+        assert_eq!(candidates[0].confidence, 70);
+        assert!(
+            candidates[0]
+                .match_reasons
+                .iter()
+                .any(|reason| { reason == &format!("Shared {}", shared_cci.to_ascii_uppercase()) }),
+            "reasons: {:?}",
+            candidates[0].match_reasons
+        );
+        assert!(
+            candidates[0]
+                .match_reasons
+                .iter()
+                .any(|reason| reason.contains("NIST-AC-X"))
+        );
+
+        sqlx::query(
+            "UPDATE deployment_policies SET current_published_version_id = NULL WHERE id = $1",
+        )
+        .bind(policy_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            find_policy_candidates(
+                &pool,
+                None,
+                None,
+                None,
+                &RelatedRequirementIdentifiers {
+                    cci_ids: [shared_cci.to_ascii_uppercase()].into_iter().collect(),
+                    srg_ids: Default::default(),
+                },
+                Some(incoming_framework),
+            )
+            .await
+            .unwrap()
+            .is_empty()
         );
     }
 

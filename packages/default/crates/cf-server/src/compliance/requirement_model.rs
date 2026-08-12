@@ -18,6 +18,7 @@
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use super::canonical::semantic_digest;
@@ -45,6 +46,40 @@ pub struct RequirementVersionCanonical {
     pub fix_text: Option<String>,
     /// Framework-specific supplementary metadata (CCI IDs, SRG IDs, refs, …).
     pub metadata: Value,
+}
+
+/// Normalized DISA identifiers used as evidence when discovering related
+/// policy candidates. These remain metadata-derived evidence, not a second
+/// identifier store or an equivalence proof.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelatedRequirementIdentifiers {
+    pub cci_ids: BTreeSet<String>,
+    pub srg_ids: BTreeSet<String>,
+}
+
+impl RelatedRequirementIdentifiers {
+    pub fn from_metadata(metadata: &Value) -> Self {
+        Self {
+            cci_ids: normalized_metadata_ids(metadata, "cci_ids"),
+            srg_ids: normalized_metadata_ids(metadata, "srg_ids"),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cci_ids.is_empty() && self.srg_ids.is_empty()
+    }
+}
+
+fn normalized_metadata_ids(metadata: &Value, field: &str) -> BTreeSet<String> {
+    metadata
+        .get(field)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|value| value.trim().to_ascii_uppercase())
+        .filter(|value| !value.is_empty())
+        .collect()
 }
 
 impl RequirementVersionCanonical {
@@ -202,4 +237,65 @@ pub struct PolicyReconciliation {
     pub candidates: Vec<PolicyCandidate>,
     /// Whether the server can auto-resolve this requirement (no human review needed).
     pub auto_resolvable: bool,
+}
+
+/// Only deterministic evidence may resolve an import without review.
+pub fn candidates_are_auto_resolvable(
+    candidates: &[PolicyCandidate],
+    inferred_enforcement: bool,
+) -> bool {
+    inferred_enforcement
+        || candidates.iter().any(|candidate| {
+            matches!(
+                candidate.match_type,
+                PolicyCandidateMatchType::AuthoritativeMapping
+                    | PolicyCandidateMatchType::InheritedMapping
+                    | PolicyCandidateMatchType::ExactTechnicalMatch
+            )
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(match_type: PolicyCandidateMatchType) -> PolicyCandidate {
+        PolicyCandidate {
+            policy_id: Uuid::nil(),
+            policy_version_id: Uuid::nil(),
+            policy_name: "test".to_string(),
+            match_type,
+            confidence: 70,
+            match_reasons: vec![],
+        }
+    }
+
+    #[test]
+    fn related_metadata_identifiers_are_normalized_and_exact() {
+        let ids = RelatedRequirementIdentifiers::from_metadata(&json!({
+            "cci_ids": [" cci-000770", "CCI-000770", "CCI-000771"],
+            "srg_ids": ["srg-os-000109-gpos-00051"]
+        }));
+        assert_eq!(
+            ids.cci_ids.into_iter().collect::<Vec<_>>(),
+            ["CCI-000770", "CCI-000771"]
+        );
+        assert_eq!(
+            ids.srg_ids.into_iter().collect::<Vec<_>>(),
+            ["SRG-OS-000109-GPOS-00051"]
+        );
+    }
+
+    #[test]
+    fn related_candidates_require_review() {
+        assert!(!candidates_are_auto_resolvable(
+            &[candidate(PolicyCandidateMatchType::RelatedMapping)],
+            false
+        ));
+        assert!(candidates_are_auto_resolvable(
+            &[candidate(PolicyCandidateMatchType::ExactTechnicalMatch)],
+            false
+        ));
+        assert!(candidates_are_auto_resolvable(&[], true));
+    }
 }

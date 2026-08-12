@@ -3935,13 +3935,22 @@ async fn compute_foreign_stig_reconciliation(
     > = std::collections::HashMap::new();
 
     let mut rows = Vec::with_capacity(parsed.rules.len());
-    for (rule, requirement) in parsed.rules.iter().zip(reconciliation.requirements.iter()) {
+    for ((rule, requirement), proposed_requirement) in parsed
+        .rules
+        .iter()
+        .zip(reconciliation.requirements.iter())
+        .zip(proposed_requirements.iter())
+    {
         let is_existing_release = matches!(
             &framework.state,
             crate::compliance::requirement_model::FrameworkReconciliationState::ExistingRelease
                 | crate::compliance::requirement_model::FrameworkReconciliationState::ExactArtifact
         );
         let fix_text = rule.fix.as_ref().map(|fix| fix.content.as_str());
+        let related_identifiers =
+            crate::compliance::requirement_model::RelatedRequirementIdentifiers::from_metadata(
+                &proposed_requirement.metadata,
+            );
         let candidates = find_policy_candidates(
             pool,
             is_existing_release.then_some(requirement.existing_requirement_version_id).flatten(),
@@ -3951,6 +3960,8 @@ async fn compute_foreign_stig_reconciliation(
                 .then_some(requirement.existing_requirement_version_id)
                 .flatten(),
             fix_text,
+            &related_identifiers,
+            framework.existing_framework_id,
         )
         .await
         .map_err(|error| format!("failed to find policy candidates: {error}"))?;
@@ -3963,7 +3974,10 @@ async fn compute_foreign_stig_reconciliation(
                     .is_empty()
             })
             .unwrap_or(false);
-        let auto_resolvable = !candidates.is_empty() || inferred_enforcement;
+        let auto_resolvable = crate::compliance::requirement_model::candidates_are_auto_resolvable(
+            &candidates,
+            inferred_enforcement,
+        );
         let state = match requirement.state {
             crate::compliance::requirement_model::RequirementReconciliationState::ExistingUnchanged => "existing_unchanged",
             crate::compliance::requirement_model::RequirementReconciliationState::ExistingChanged => "existing_changed",
