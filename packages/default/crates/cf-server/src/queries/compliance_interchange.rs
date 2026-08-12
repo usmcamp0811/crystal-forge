@@ -66,7 +66,7 @@ async fn revalidate_reviewed_related_candidate(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     selected_policy_version_id: Uuid,
     incoming_requirement_version_id: Uuid,
-    record: &ImportedPolicyRecord,
+    _record: &ImportedPolicyRecord,
     reviewed: &ReviewedRelatedCandidate,
 ) -> Result<()> {
     if reviewed.policy_version_id != selected_policy_version_id {
@@ -75,9 +75,16 @@ async fn revalidate_reviewed_related_candidate(
         );
     }
 
+    let incoming_metadata: serde_json::Value =
+        sqlx::query_scalar("SELECT metadata FROM compliance_requirement_versions WHERE id = $1")
+            .bind(incoming_requirement_version_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .context("failed to load authoritative incoming requirement metadata")?
+            .context("IMPORT_RELATED_REUSE_INELIGIBLE: incoming requirement version not found")?;
     let incoming_ids =
         crate::compliance::requirement_model::RelatedRequirementIdentifiers::from_metadata(
-            &record.compliance_metadata,
+            &incoming_metadata,
         );
     let claimed_cci: std::collections::BTreeSet<_> = reviewed
         .shared_cci_ids
@@ -108,6 +115,7 @@ async fn revalidate_reviewed_related_candidate(
            AND m.trust_state = 'trusted'
            AND pv.publication_state = 'accepted'
            AND dp.current_published_version_id = pv.id
+           AND rv.id = $3
            AND r.framework_id <> (
                SELECT r_in.framework_id
                FROM compliance_requirement_versions rv_in
@@ -117,17 +125,18 @@ async fn revalidate_reviewed_related_candidate(
            AND (
                EXISTS (
                    SELECT 1 FROM jsonb_array_elements_text(COALESCE(rv.metadata->'cci_ids', '[]'::jsonb)) candidate(id)
-                   WHERE upper(trim(candidate.id)) = ANY($3)
+                   WHERE upper(trim(candidate.id)) = ANY($4)
                )
                OR EXISTS (
                    SELECT 1 FROM jsonb_array_elements_text(COALESCE(rv.metadata->'srg_ids', '[]'::jsonb)) candidate(id)
-                   WHERE upper(trim(candidate.id)) = ANY($4)
+                   WHERE upper(trim(candidate.id)) = ANY($5)
                )
            )
          LIMIT 1",
     )
     .bind(selected_policy_version_id)
     .bind(incoming_requirement_version_id)
+    .bind(reviewed.related_requirement_version_id)
     .bind(&claimed_cci.iter().cloned().collect::<Vec<_>>())
     .bind(&claimed_srg.iter().cloned().collect::<Vec<_>>())
     .fetch_optional(&mut **tx)
@@ -937,7 +946,11 @@ pub async fn commit_foreign_import(
         let policy_config = serde_json::Value::Object(technical_identity.enforced_options.clone());
 
         // Use the technical hash as the policy name (derived from enforcement, not client input)
-        let policy_name = format!("Technical: {}", shared.group_id.technical_hash);
+        let policy_name = format!(
+            "Technical: {} [{}]",
+            shared.group_id.technical_hash,
+            &shared.policy_id.simple().to_string()[..8]
+        );
         let policy_description = format!(
             "Shared implementation of {}",
             shared.group_id.technical_hash

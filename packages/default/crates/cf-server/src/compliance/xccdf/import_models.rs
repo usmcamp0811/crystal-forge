@@ -151,6 +151,7 @@ pub struct ImportedMappingSemantics {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ReviewedRelatedCandidate {
     pub policy_version_id: Uuid,
+    pub related_requirement_version_id: Uuid,
     #[serde(default)]
     pub shared_cci_ids: Vec<String>,
     #[serde(default)]
@@ -169,6 +170,7 @@ mod reviewed_related_candidate_tests {
             rationale: Some("same control family".into()),
             reviewed_related_candidate: Some(ReviewedRelatedCandidate {
                 policy_version_id: Uuid::nil(),
+                related_requirement_version_id: Uuid::nil(),
                 shared_cci_ids: vec!["CCI-000770".into()],
                 shared_srg_ids: vec![],
             }),
