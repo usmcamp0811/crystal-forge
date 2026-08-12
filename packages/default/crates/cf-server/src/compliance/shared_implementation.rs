@@ -762,6 +762,7 @@ mod tests {
                 crate::compliance::requirement_model::PolicyCandidateMatchType::ExactTechnicalMatch,
             confidence,
             match_reasons: vec!["exact technical match".to_string()],
+            related_evidence: None,
         }
     }
 
@@ -796,6 +797,25 @@ mod tests {
             common.policy_version_id, p17,
             "only the version present in every member's set may be common"
         );
+    }
+
+    #[test]
+    fn related_only_common_candidate_is_not_reuse_candidate() {
+        let version = Uuid::new_v4();
+        let related = PolicyCandidate {
+            policy_id: Uuid::new_v4(),
+            policy_version_id: version,
+            policy_name: "related".into(),
+            match_type: PolicyCandidateMatchType::RelatedMapping,
+            confidence: 70,
+            match_reasons: vec!["Shared CCI-000770".into()],
+            related_evidence: None,
+        };
+        let members = HashMap::from([
+            ("V-111".into(), vec![related.clone()]),
+            ("V-222".into(), vec![related]),
+        ]);
+        assert!(common_shared_candidate(&members, &["V-111".into(), "V-222".into()]).is_none());
     }
 
     #[test]
