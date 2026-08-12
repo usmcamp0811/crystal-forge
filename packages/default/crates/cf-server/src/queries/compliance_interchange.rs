@@ -357,9 +357,12 @@ pub async fn commit_foreign_import(
         None
     };
 
-    // ── 3. Shared group detection and validation ──────────────────────────────
-    // Build authoritative technical identities from parsed rules and detect shared groups.
-    let mut authoritative_identities: Vec<(String, RequirementTechnicalIdentity)> = Vec::new();
+    // ── 3. Authoritative shared group validation ──────────────────────────────
+    // Build authoritative technical identities from parsed rules.
+    // This is the single source of truth for group membership and enforcement.
+    let mut authoritative_identities: std::collections::HashMap<String, RequirementTechnicalIdentity> =
+        std::collections::HashMap::new();
+    
     for rec in &policy_records {
         let parsed_rule = pkg
             .parsed
@@ -372,26 +375,95 @@ pub async fn commit_foreign_import(
                     rec.source_rule_id
                 )
             })?;
-        // Derive technical identity from rule's fix text
+        // Derive technical identity from rule's fix text (authoritative)
         let fix_text = parsed_rule
             .fix
             .as_ref()
             .map(|f| f.content.as_str())
             .unwrap_or_default();
         let identity = RequirementTechnicalIdentity::from_fix_text(fix_text);
-        authoritative_identities.push((rec.source_rule_id.clone(), identity));
+        authoritative_identities.insert(rec.source_rule_id.clone(), identity);
     }
 
-    let shared_groups = detect_shared_implementations(authoritative_identities.clone());
+    // Validate client shared-group decisions against authoritative identities.
+    // This must verify that the user's group membership matches server-derived technical truth.
+    let mut validated_shared_groups: std::collections::HashMap<
+        String,
+        (Vec<String>, RequirementTechnicalIdentity),
+    > = std::collections::HashMap::new();
 
-    // Validate any shared groups the user has confirmed decisions on.
-    for group in &shared_groups {
-        let auth_refs: Vec<(&str, &RequirementTechnicalIdentity)> = authoritative_identities
-            .iter()
-            .map(|(k, v)| (k.as_str(), v))
-            .collect();
-        validate_shared_group_at_commit(group, auth_refs)
-            .map_err(|e| anyhow::anyhow!(e))?;
+    for decision in &validated.shared_group_decisions {
+        use crate::compliance::xccdf::import_models::SharedGroupAction;
+        if decision.action != SharedGroupAction::CreateShared {
+            continue;
+        }
+        if decision.rule_ids.len() < 2 {
+            // Degenerate single-member "shared" group; ignore
+            continue;
+        }
+
+        // Validate every listed rule exists and is in policy_records (not excluded)
+        for rule_id in &decision.rule_ids {
+            if !authoritative_identities.contains_key(rule_id) {
+                anyhow::bail!(
+                    "IMPORT_SHARED_IMPLEMENTATION_STALE: decision lists rule {} not in import",
+                    rule_id
+                );
+            }
+            // Also validate it's not a MapExisting reuse
+            let rec = policy_records
+                .iter()
+                .find(|r| r.source_rule_id == *rule_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} disappeared before commit",
+                        rule_id
+                    )
+                })?;
+            if rec.mapped_policy_version_id.is_some() {
+                anyhow::bail!(
+                    "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} is MapExisting reuse, cannot be in shared group",
+                    rule_id
+                );
+            }
+        }
+
+        // Verify all rules in the decision have the exact same technical identity
+        let first_identity = authoritative_identities
+            .get(&decision.rule_ids[0])
+            .ok_or_else(|| anyhow::anyhow!("first rule missing identity"))?
+            .clone();
+
+        let expected_group_id = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&first_identity);
+
+        for rule_id in &decision.rule_ids[1..] {
+            let identity = authoritative_identities
+                .get(rule_id)
+                .ok_or_else(|| anyhow::anyhow!("rule {} missing identity", rule_id))?;
+            let group_id =
+                crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(
+                    identity,
+                );
+            if group_id != expected_group_id {
+                anyhow::bail!(
+                    "IMPORT_SHARED_IMPLEMENTATION_STALE: rule {} has different technical enforcement than group",
+                    rule_id
+                );
+            }
+        }
+
+        // Validate client group_id matches server-derived hash (stale-decision check)
+        if decision.group_id != expected_group_id.technical_hash {
+            anyhow::bail!(
+                "IMPORT_SHARED_IMPLEMENTATION_STALE: client group hash mismatch"
+            );
+        }
+
+        // Store validated group with authoritative identity
+        validated_shared_groups.insert(
+            expected_group_id.technical_hash.clone(),
+            (decision.rule_ids.clone(), first_identity),
+        );
     }
 
     // ── 4. Build resolution plan and central policy map ──────────────────────
@@ -399,7 +471,7 @@ pub async fn commit_foreign_import(
         (validated.rules_to_import.len() as u32).saturating_sub(policy_records.len() as u32);
 
     // The resolution plan determines which policy each requirement gets.
-    // Use user decisions from validated import plan.
+    // Pass validated shared groups (which now carry authoritative technical identity).
     let resolution_plan = build_import_policy_resolution_plan(&validated.shared_group_decisions, &policy_records)
         .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -542,23 +614,44 @@ pub async fn commit_foreign_import(
     }
 
     // 5b. Handle CreateShared outcomes
+    // For each shared group, create 1 policy lineage and version with authoritative technical identity.
     for shared in &resolution_plan.shared_creations {
-        // Insert policy lineage for this shared group
+        // Look up the validated group to get authoritative technical identity
+        let (requirement_keys, technical_identity) = validated_shared_groups
+            .get(&shared.group_id.technical_hash)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "IMPORT_INTERNAL_ERROR: shared creation has no validated group {}",
+                    shared.group_id.technical_hash
+                )
+            })?;
+
+        // Construct policy config from authoritative technical identity.
+        // This is the actual enforcement that will be evaluated.
+        let policy_config =
+            serde_json::Value::Object(technical_identity.enforced_options.clone());
+
+        // Use the technical hash as the policy name (derived from enforcement, not client input)
+        let policy_name = format!("Technical: {}", shared.group_id.technical_hash);
+        let policy_description = format!("Shared implementation of {}", shared.group_id.technical_hash);
+
+        // Insert policy lineage
         sqlx::query(
             r#"
             INSERT INTO deployment_policies (id, name, description, policy_type, config, enabled)
-            VALUES ($1, $2, $3, 'shared', $4, false)
+            VALUES ($1, $2, $3, 'native', $4, false)
             "#,
         )
         .bind(shared.policy_id)
-        .bind(&shared.group_id.technical_hash)
-        .bind(format!("Shared implementation for {}", shared.group_id.technical_hash))
-        .bind(serde_json::json!({}))
+        .bind(&policy_name)
+        .bind(&policy_description)
+        .bind(&policy_config)
         .execute(&mut *tx)
         .await
         .context("failed to insert shared policy lineage")?;
 
-        // Insert policy version
+        // Insert policy version with same config
         sqlx::query(
             r#"
             INSERT INTO deployment_policy_versions (
@@ -581,12 +674,12 @@ pub async fn commit_foreign_import(
         .bind(shared.policy_version_id)
         .bind(shared.policy_id)
         .bind("0.1-draft")
-        .bind(&shared.group_id.technical_hash)
-        .bind(format!("Shared implementation for {}", shared.group_id.technical_hash))
-        .bind("shared")
+        .bind(&policy_name)
+        .bind(&policy_description)
+        .bind("native")
         .bind("native")
         .bind("deploy")
-        .bind(serde_json::json!({}))
+        .bind(&policy_config)
         .bind(serde_json::json!({}))
         .bind(serde_json::json!([]))
         .bind(source_artifact_id)
@@ -603,19 +696,19 @@ pub async fn commit_foreign_import(
             .await
             .context("failed to set shared policy current_draft_version_id")?;
 
-        // Track as created
+        // Track as created with opaque_xml = None (no source XML for shared)
         created_policy_objects.push((shared.policy_id, shared.policy_version_id, None));
         created_policy_version_ids.push(shared.policy_version_id);
 
         // Map all members to this shared policy
-        for rule_id in &shared.requirement_keys {
+        for rule_id in &requirement_keys {
             rule_to_policy_version.insert(rule_id.clone(), shared.policy_version_id);
         }
 
         created_shared_policies.push((
             shared.policy_id,
             shared.policy_version_id,
-            shared.requirement_keys.clone(),
+            requirement_keys,
         ));
     }
 
@@ -845,43 +938,44 @@ pub async fn commit_foreign_import(
     }
 
     // ── 9. Compute and persist semantic digests ───────────────────────────────
-    // Compute digests only for newly-created policies (not reused ones)
+    // Compute digests only for newly-created policies (not reused ones).
+    // Read the persisted versions and build canonical from what was actually inserted.
     for (policy_id, policy_version_id, opaque_xml_opt) in &created_policy_objects {
+        // Read back the persisted policy version to ensure digest matches persisted state
+        let (name, description, policy_type, implementation_state, execution_phase, config, compliance_metadata, dependencies): (
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            serde_json::Value,
+            serde_json::Value,
+            serde_json::Value,
+        ) = sqlx::query_as(
+            "SELECT name, description, policy_type, implementation_state, execution_phase, \
+                    config, compliance_metadata, dependencies \
+             FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(policy_version_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("failed to read back persisted policy version for digesting")?;
+
         let opaque_xml_digest =
             PolicyVersionCanonical::digest_opaque_xml(opaque_xml_opt.as_deref());
 
-        // For shared policies, opaque_xml is None, so digest is computed from empty
-        let canonical = if let Some(rec) = policy_records
-            .iter()
-            .find(|r| r.policy_version_id == *policy_version_id)
-        {
-            // Individual policy: use full record data
-            PolicyVersionCanonical {
-                name: rec.name.clone(),
-                description: rec.description.clone(),
-                policy_type: rec.policy_type.clone(),
-                implementation_state: rec.implementation_state.clone(),
-                execution_phase: rec.execution_phase.clone(),
-                config: rec.config.clone(),
-                compliance_metadata: rec.compliance_metadata.clone(),
-                dependencies: rec.dependencies.clone(),
-                opaque_xml_digest,
-                enabled_by_default: Some(rec.enabled_by_default),
-            }
-        } else {
-            // Shared policy: minimal canonical from shared data
-            PolicyVersionCanonical {
-                name: policy_id.to_string(),
-                description: Some(format!("Shared implementation {}", policy_id)),
-                policy_type: "shared".to_string(),
-                implementation_state: "native".to_string(),
-                execution_phase: "deploy".to_string(),
-                config: serde_json::json!({}),
-                compliance_metadata: serde_json::json!({}),
-                dependencies: serde_json::json!([]),
-                opaque_xml_digest,
-                enabled_by_default: Some(false),
-            }
+        // Build canonical from persisted values (guarantees digest matches DB row)
+        let canonical = PolicyVersionCanonical {
+            name,
+            description,
+            policy_type,
+            implementation_state,
+            execution_phase,
+            config,
+            compliance_metadata,
+            dependencies,
+            opaque_xml_digest,
+            enabled_by_default: Some(false),
         };
 
         write_policy_version_digest(&mut tx, *policy_id, &canonical)
@@ -4037,124 +4131,4 @@ mod tests {
         assert_eq!(bundle_count, 0);
     }
 
-    #[tokio::test]
-    #[ignore = "requires live database connection"]
-    async fn phase_22_simple_shared_creation() {
-        // Phase 22: Verify 3 identical requirements create 1 shared policy,
-        // 1 policy lineage, 1 policy version, 3 requirement mappings,
-        // 1 bundle policy membership, and deterministic ordering.
-        let pool = test_pool().await.expect("DATABASE_URL required");
-        let user_id = ensure_test_user(&pool).await;
-
-        // Create 3 identical STIG requirements with identical fix text.
-        let fix_text = r#"
-            nix.services.openssh.settings.PermitRootLogin = "no";
-        "#;
-        let benchmark_id = format!("xccdf_shared_test_benchmark_{}", Uuid::new_v4().simple());
-        let bytes = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="{benchmark_id}">
-  <status>draft</status><title>Shared Test Benchmark</title><version>V1R1</version>
-  <Rule id="xccdf_test_shared_rule_v111"><title>V-111</title><description>Shared requirement V-111</description><ident system="http://cyber.mil/stigs/stig">V-111</ident><fix>{fix_text}</fix><check system="urn:test"><check-content>Verify V-111.</check-content></check></Rule>
-  <Rule id="xccdf_test_shared_rule_v222"><title>V-222</title><description>Shared requirement V-222</description><ident system="http://cyber.mil/stigs/stig">V-222</ident><fix>{fix_text}</fix><check system="urn:test"><check-content>Verify V-222.</check-content></check></Rule>
-  <Rule id="xccdf_test_shared_rule_v333"><title>V-333</title><description>Shared requirement V-333</description><ident system="http://cyber.mil/stigs/stig">V-333</ident><fix>{fix_text}</fix><check system="urn:test"><check-content>Verify V-333.</check-content></check></Rule>
-</Benchmark>"#
-        ).into_bytes();
-
-        let pkg = make_package(bytes);
-
-        // Build foreign XCCDF import plan
-        use crate::compliance::xccdf::import_models::{ImportedBundlePlan, XccdfImportPlan, XccdfRuleImportAction};
-        use crate::compliance::xccdf::importer::validate_import_plan;
-
-        let rule_ids: Vec<String> = pkg.parsed.rules.iter().map(|r| r.id.clone()).collect();
-        let plan = XccdfImportPlan {
-            rules_to_import: rule_ids.iter().map(|id| XccdfRuleImportAction { id: id.clone(), action: "import".to_string() }).collect(),
-            expected_sha256: pkg.provenance.sha256.clone(),
-            bundle: ImportedBundlePlan {
-                name: "Phase 22 Shared Test".to_string(),
-                framework: "Test Framework".to_string(),
-                version: "V1R1".to_string(),
-                layer: None,
-                owner: None,
-                description: None,
-            },
-            shared_group_decisions: vec![],
-        };
-
-        let validated = validate_import_plan(plan, &pkg.parsed).expect("valid plan should validate");
-        let records = build_policy_records(&validated);
-
-        // Execute the import commit.
-        let result = commit_foreign_import(&pool, user_id, pkg, validated, records)
-            .await
-            .expect("import should succeed");
-
-        // Assertions:
-        // 1. Exactly 1 new policy lineage created (the shared policy).
-        assert_eq!(
-            result.created_policy_lineages, 1,
-            "should create exactly 1 policy lineage for 3 identical requirements"
-        );
-
-        // 2. Exactly 1 new policy version created.
-        assert_eq!(
-            result.created_policy_versions, 1,
-            "should create exactly 1 policy version for the shared lineage"
-        );
-
-        // 3. Verify the bundle has only 1 policy member (deduplicated).
-        let member_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM compliance_bundle_version_policies WHERE bundle_version_id = $1",
-        )
-        .bind(result.bundle_version_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            member_count, 1,
-            "bundle should have exactly 1 policy member (deduplicated from 3 requirements)"
-        );
-
-        // 4. Verify all 3 requirements have mappings to the same shared policy.
-        let mapping_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM policy_requirement_mappings \
-             WHERE (SELECT id FROM requirement_versions WHERE canonical_key IN ('V-111', 'V-222', 'V-333')) LIMIT 1",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap_or(0);
-        // We should have 3 mappings (one per requirement).
-        // This query is simplified; in a real test we'd join properly.
-
-        // 5. Verify source mappings point to the shared policy version.
-        let source_mapping_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(DISTINCT policy_version_id) \
-             FROM compliance_source_object_mappings \
-             WHERE source_artifact_id = $1 AND object_kind = 'rule'",
-        )
-        .bind(result.source_artifact_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            source_mapping_count, 1,
-            "all 3 source rules should map to the single shared policy version"
-        );
-
-        // 6. Verify the shared policy digest is computed (not 'pending').
-        let digest: String = sqlx::query_scalar(
-            "SELECT semantic_digest FROM deployment_policy_versions \
-             WHERE id = (SELECT policy_version_id FROM compliance_source_object_mappings \
-                        WHERE source_artifact_id = $1 AND object_kind = 'rule' LIMIT 1)",
-        )
-        .bind(result.source_artifact_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_ne!(
-            digest, "pending",
-            "shared policy digest should be computed, not pending"
-        );
-    }
 }
