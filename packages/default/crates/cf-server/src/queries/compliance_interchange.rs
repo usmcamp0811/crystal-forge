@@ -3163,7 +3163,8 @@ mod tests {
         rule_ids: &[&str],
     ) -> (ValidatedImportPlan, Vec<ImportedPolicyRecord>) {
         use crate::compliance::xccdf::import_models::{
-            ImportedBundlePlan, MapExistingProof, XccdfImportPlan, XccdfRuleImportAction,
+            ImportedBundlePlan, ImportedMappingSemantics, MapExistingProof, XccdfImportPlan,
+            XccdfRuleImportAction,
         };
         use crate::compliance::xccdf::importer::validate_import_plan;
 
@@ -3180,7 +3181,19 @@ mod tests {
                     proof: Some(MapExistingProof::ExactTechnicalMatch),
                 })
                 .collect(),
-            mapping_semantics: std::collections::HashMap::new(),
+            mapping_semantics: rule_ids_owned
+                .iter()
+                .map(|rule_id| {
+                    (
+                        rule_id.clone(),
+                        ImportedMappingSemantics {
+                            relationship: Some("implements".into()),
+                            coverage: Some("full".into()),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
             shared_group_decisions: vec![SharedGroupDecision {
                 group_id: SharedImplementationId::from_technical_identity(
                     &RequirementTechnicalIdentity::from_fix_text("services.openssh.enable = true;"),
