@@ -27,6 +27,49 @@ use crate::views::policies_api;
 
 use super::types::{is_policy_version_editable, PolicyCategory, PolicyDefinition, PolicyFormat};
 
+#[derive(Clone, Debug, PartialEq)]
+struct PendingPolicyMapping {
+    requirement_version_id: Uuid,
+    framework_name: String,
+    framework_version: String,
+    requirement_external_id: String,
+    requirement_kind: String,
+    requirement_title: Option<String>,
+    relationship: String,
+    coverage: String,
+    rationale: Option<String>,
+}
+
+impl PendingPolicyMapping {
+    fn mapping_request(&self) -> CreatePolicyMappingRequest {
+        CreatePolicyMappingRequest {
+            requirement_version_id: self.requirement_version_id,
+            relationship: self.relationship.clone(),
+            coverage: self.coverage.clone(),
+            rationale: self.rationale.clone(),
+            provenance: "manual".to_string(),
+        }
+    }
+}
+
+fn add_pending_mapping(
+    mappings: &mut Vec<PendingPolicyMapping>,
+    mapping: PendingPolicyMapping,
+) -> Result<(), &'static str> {
+    if mappings
+        .iter()
+        .any(|existing| existing.requirement_version_id == mapping.requirement_version_id)
+    {
+        return Err("This requirement is already mapped.");
+    }
+    mappings.push(mapping);
+    Ok(())
+}
+
+fn remove_pending_mapping(mappings: &mut Vec<PendingPolicyMapping>, requirement_version_id: Uuid) {
+    mappings.retain(|mapping| mapping.requirement_version_id != requirement_version_id);
+}
+
 const STANDARD_FRAMEWORKS: [&str; 4] = ["DISA STIG", "NIST 800-53", "CMMC 2.0", "CIS Benchmark"];
 const NIST_CONTROL_FAMILIES: [&str; 7] = ["AC", "AU", "CM", "IA", "SC", "SI", "MP"];
 
@@ -1904,6 +1947,25 @@ fn EvidenceEditorRow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pending(id: u128) -> PendingPolicyMapping {
+        PendingPolicyMapping {
+            requirement_version_id: Uuid::from_u128(id), framework_name: "NIST 800-53".into(), framework_version: "Rev 5".into(), requirement_external_id: "SC-45".into(), requirement_kind: "control".into(), requirement_title: Some("System time synchronization".into()), relationship: "supports".into(), coverage: "partial".into(), rationale: Some("reviewed mapping".into()),
+        }
+    }
+
+    #[test]
+    fn pending_mapping_helpers_preserve_convert_and_reject_duplicates() {
+        let mut mappings = Vec::new();
+        let mapping = pending(1);
+        assert!(add_pending_mapping(&mut mappings, mapping.clone()).is_ok());
+        assert_eq!(mappings[0].mapping_request().relationship, "supports");
+        assert_eq!(mappings[0].mapping_request().coverage, "partial");
+        assert_eq!(mappings[0].mapping_request().provenance, "manual");
+        assert!(add_pending_mapping(&mut mappings, mapping).is_err());
+        remove_pending_mapping(&mut mappings, Uuid::from_u128(1));
+        assert!(mappings.is_empty());
+    }
 
     #[test]
     fn cve_rule_is_not_serialized_as_always_true_custom_check() {
