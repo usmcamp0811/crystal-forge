@@ -769,6 +769,7 @@ pub fn PolicyEditorModal(
     let mut new_map_framework_id: Signal<Option<Uuid>> = use_signal(|| None);
     let mut new_map_fv_id: Signal<Option<Uuid>> = use_signal(|| None);
     let mut new_map_req_id: Signal<Option<Uuid>> = use_signal(|| None);
+    let mut new_map_requirement: Signal<Option<RequirementVersionSummary>> = use_signal(|| None);
     let mut new_map_req_label = use_signal(String::new);
     let mut new_map_search = use_signal(String::new);
     let mut new_map_relationship = use_signal(|| "implements".to_string());
@@ -804,6 +805,7 @@ pub fn PolicyEditorModal(
     let rule_count = rules.read().len();
     let evidence_count = evidence.read().len();
     let delete_matches = delete_typed.read().as_str() == name_value;
+    let requirement_search_results = req_search_results.read().clone();
 
     rsx! {
         div {
@@ -1107,26 +1109,21 @@ pub fn PolicyEditorModal(
                             {
                                 let pv_id = editing_policy_version_id;
                                 if !*mappings_loaded.read() {
-                                    if let Some(pv_id) = pv_id {
-                                        spawn(async move {
+                                    mappings_loaded.set(true);
+                                    spawn(async move {
+                                        match fetch_compliance_frameworks().await {
+                                            Ok(frameworks) => frameworks_list.set(frameworks),
+                                            Err(error) => mappings_error.set(Some(format!("Failed to load frameworks: {error}"))),
+                                        }
+                                        if let Some(pv_id) = pv_id {
                                             match fetch_policy_requirement_mappings(&pv_id).await {
-                                                Ok(rows) => {
-                                                    mappings.set(rows);
-                                                    mappings_loaded.set(true);
-                                                }
+                                                Ok(rows) => mappings.set(rows),
                                                 Err(e) => {
                                                     mappings_error.set(Some(format!("Failed to load mappings: {e}")));
-                                                    mappings_loaded.set(true);
                                                 }
                                             }
-                                            // Also load the framework list for the editor.
-                                            if let Ok(fws) = fetch_compliance_frameworks().await {
-                                                frameworks_list.set(fws);
-                                            }
-                                        });
-                                    } else {
-                                        mappings_loaded.set(true);
-                                    }
+                                        }
+                                    });
                                 }
                                 rsx! { div {} }
                             }
@@ -1317,7 +1314,7 @@ pub fn PolicyEditorModal(
                                             // Search results dropdown.
                                             if !req_search_results.read().is_empty() && new_map_req_id.read().is_none() {
                                                 div { style: "border:1px solid var(--cf-border);border-radius:6px;max-height:160px;overflow-y:auto;margin-top:4px;",
-                                                    for req in req_search_results.read().iter() {
+                                                     for req in requirement_search_results.clone() {
                                                         {
                                                             let req_id = req.id;
                                                             let req_label = format!("{} · {} · {}", req.external_id, req.kind, req.title.as_deref().unwrap_or(""));
@@ -1328,7 +1325,8 @@ pub fn PolicyEditorModal(
                                                                 class: "btn btn-ghost focus-ring",
                                                                 style: "width:100%;text-align:left;padding:6px 10px;font-size:11px;border-radius:0;",
                                                                 onclick: move |_| {
-                                                                    new_map_req_id.set(Some(req_id));
+                                                                     new_map_req_id.set(Some(req_id));
+                                                                     new_map_requirement.set(Some(req.clone()));
                                                                     new_map_req_label.set(req_label.clone());
                                                                     req_search_results.set(vec![]);
                                                                     new_map_search.set(req_label_clone.clone());
