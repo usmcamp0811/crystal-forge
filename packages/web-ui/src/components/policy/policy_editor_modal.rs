@@ -667,6 +667,16 @@ fn PolicyMappingsTab(
     }
 
     let rows = mappings.read().clone();
+    let pending_rows = pending_mappings.read().clone();
+    let mut pending_grouped: Vec<(String, Vec<PendingPolicyMapping>)> = Vec::new();
+    for row in pending_rows {
+        let name = format!("{} · {}", row.framework_name, row.framework_version);
+        if let Some(group) = pending_grouped.iter_mut().find(|(key, _)| *key == name) {
+            group.1.push(row);
+        } else {
+            pending_grouped.push((name, vec![row]));
+        }
+    }
     let mut grouped: Vec<(String, Vec<PolicyMappingRow>)> = Vec::new();
     for row in rows {
         let name = format!("{} · {}", row.framework_name, row.framework_version);
@@ -679,7 +689,7 @@ fn PolicyMappingsTab(
 
     rsx! {
         div { style: "margin-top:6px;display:flex;flex-direction:column;gap:14px;",
-            if grouped.is_empty() {
+            if grouped.is_empty() && pending_grouped.is_empty() {
                 div { style: "color:var(--cf-text-muted);font-size:12px;padding:12px 0;",
                     {match mapping_target {
                         MappingEditorTarget::Pending => "No requirement mappings yet. Add mappings below; they will be saved when this policy is created.",
@@ -688,6 +698,26 @@ fn PolicyMappingsTab(
                     }}
                 }
             } else {
+                div { style: "display:flex;flex-direction:column;gap:10px;",
+                    for (name, group) in pending_grouped {
+                        div { key: "pending-{name}", style: "border:1px solid var(--cf-border);border-radius:8px;overflow:hidden;",
+                            div { style: "background:var(--cf-subtle-bg);padding:8px 12px;font-size:11px;font-weight:600;color:var(--cf-text-secondary);", "{name}" }
+                            for row in group {
+                                {
+                                    let requirement_version_id = row.requirement_version_id;
+                                    rsx! { div { style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:start;padding:8px 12px;border-top:1px solid var(--cf-border);font-size:12px;",
+                                        div { style: "display:flex;flex-direction:column;gap:2px;",
+                                            div { style: "font-weight:600;", span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{row.requirement_external_id}" } " — {row.requirement_title.clone().unwrap_or_default()}" }
+                                            div { style: "display:flex;gap:6px;margin-top:2px;", span { class: "chip chip-neutral", style: "font-size:10px;", {match row.relationship.as_str() { "implements" => "Implements", "supports" => "Supports", _ => "Evidence for" }} }, span { class: if row.coverage == "full" { "chip chip-success" } else { "chip chip-warn" }, style: "font-size:10px;", {if row.coverage == "full" { "Full" } else { "Partial" }} }, span { class: "chip chip-neutral", style: "font-size:10px;", "Pending" } }
+                                            if let Some(text) = &row.rationale { if !text.is_empty() { div { style: "color:var(--cf-text-muted);font-size:11px;margin-top:2px;", "{text}" } } }
+                                        }
+                                        button { class: "btn btn-ghost xs focus-ring", style: "color:var(--cf-text-muted);padding:4px 6px;", title: "Remove mapping", onclick: move |_| { let mut next = pending_mappings.read().clone(); remove_pending_mapping(&mut next, requirement_version_id); pending_mappings.set(next); }, "×" }
+                                    } }
+                                }
+                            }
+                        }
+                    }
+                }
                 div { style: "display:flex;flex-direction:column;gap:10px;",
                     for (name, group) in grouped {
                         div { key: "{name}", style: "border:1px solid var(--cf-border);border-radius:8px;overflow:hidden;",
@@ -731,7 +761,7 @@ fn PolicyMappingsTab(
                                         rsx! { button {
                                             class: "btn btn-ghost focus-ring",
                                             style: "width:100%;text-align:left;padding:6px 10px;font-size:11px;",
-                                            onclick: move |_| { requirement_id.set(Some(item.id)); requirement.set(Some(item.clone())); search.set(display_label.clone()); results.set(Vec::new()); },
+                                             onclick: move |_| { requirement_id.set(Some(item.id)); requirement.set(Some(item.clone())); search.set(display_label.clone()); results.set(Vec::new()); },
                                             span { "{display_label}" }
                                         } }
                                     }
