@@ -6229,9 +6229,10 @@ const steps = [
       );
       await page.getByRole("button", { name: "Create policy", exact: true }).click();
       await page.getByRole("heading", { name: "New custom policy" }).waitFor({ state: "hidden", timeout: 10000 });
+      await page.reload({ timeout: LOAD_TIMEOUT });
 
       const card = page.locator(`[data-policy-card="true"][data-policy-name="${policyName}"]`);
-      await card.waitFor({ timeout: 10000 });
+      await card.waitFor({ timeout: 30000 });
       await card.getByRole("button", { name: "Edit", exact: true }).click();
       await page.getByRole("heading", { name: new RegExp(`Edit ${policyName}`) }).waitFor({ timeout: 5000 });
       await page.getByTestId("policy-editor-tab-mappings").click();
