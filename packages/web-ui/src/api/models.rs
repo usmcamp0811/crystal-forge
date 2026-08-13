@@ -1708,10 +1708,19 @@ pub enum XccdfRuleImportAction {
     MapExisting {
         rule_id: String,
         policy_version_id: Uuid,
+        #[serde(default)]
+        proof: Option<MapExistingProof>,
     },
     Exclude {
         rule_id: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MapExistingProof {
+    InheritedMapping,
+    ExactTechnicalMatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -1798,6 +1807,52 @@ pub struct ImportedMappingSemantics {
     pub relationship: Option<String>,
     pub coverage: Option<String>,
     pub rationale: Option<String>,
+    #[serde(default)]
+    pub reviewed_related_candidate: Option<ReviewedRelatedCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedRelatedCandidate {
+    pub policy_version_id: Uuid,
+    pub related_requirement_version_id: Uuid,
+    #[serde(default)]
+    pub shared_cci_ids: Vec<String>,
+    #[serde(default)]
+    pub shared_srg_ids: Vec<String>,
+}
+
+#[cfg(test)]
+mod xccdf_mapping_contract_tests {
+    use super::*;
+
+    #[test]
+    fn map_existing_proofs_use_server_wire_names() {
+        let action = XccdfRuleImportAction::MapExisting {
+            rule_id: "rule-1".into(),
+            policy_version_id: Uuid::nil(),
+            proof: Some(MapExistingProof::ExactTechnicalMatch),
+        };
+        let value = serde_json::to_value(action).expect("serialize map action");
+        assert_eq!(value["proof"], "exact_technical_match");
+    }
+
+    #[test]
+    fn reviewed_related_candidate_preserves_evidence() {
+        let semantics = ImportedMappingSemantics {
+            relationship: Some("supports".into()),
+            coverage: Some("partial".into()),
+            rationale: Some("reviewed shared CCI".into()),
+            reviewed_related_candidate: Some(ReviewedRelatedCandidate {
+                policy_version_id: Uuid::nil(),
+                related_requirement_version_id: Uuid::from_u128(1),
+                shared_cci_ids: vec!["CCI-000770".into()],
+                shared_srg_ids: vec!["SRG-OS-000109-GPOS-00051".into()],
+            }),
+        };
+        let value = serde_json::to_value(semantics).expect("serialize reviewed semantics");
+        assert_eq!(value["reviewed_related_candidate"]["shared_cci_ids"][0], "CCI-000770");
+        assert_eq!(value["coverage"], "partial");
+    }
 }
 
 /// Response body from `POST /api/v1/compliance/xccdf/import`.

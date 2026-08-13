@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use crate::api::models::{
     ImportedCustomCheck, ImportedCustomCheckRule, ImportedEvidenceRequirement,
-    ImportedPolicyCustomization, XccdfRuleImportAction,
+    ImportedPolicyCustomization, MapExistingProof, XccdfRuleImportAction,
 };
 use crate::components::icon::{Icon, IconName};
 
@@ -241,12 +241,18 @@ pub struct RefinedStigRule {
     pub mapping_relationship: Option<String>,
     pub mapping_coverage: Option<String>,
     pub mapping_rationale: Option<String>,
+    pub mapping_proof: Option<MapExistingProof>,
 }
 impl RefinedStigRule {
     pub fn is_valid(&self) -> bool {
         match &self.draft.action {
             RefinedRuleAction::Native => !self.draft.assertions.is_empty(),
-            RefinedRuleAction::Existing(id) => id.is_some(),
+            RefinedRuleAction::Existing(id) => {
+                id.is_some()
+                    && self.mapping_proof.is_some()
+                    && self.mapping_relationship.is_some()
+                    && self.mapping_coverage.is_some()
+            }
             _ => true,
         }
     }
@@ -304,6 +310,7 @@ pub fn action_to_import(rule: &RefinedStigRule) -> XccdfRuleImportAction {
         RefinedRuleAction::Existing(Some(id)) => XccdfRuleImportAction::MapExisting {
             rule_id: rule.source.rule_id.clone(),
             policy_version_id: *id,
+            proof: rule.mapping_proof,
         },
         RefinedRuleAction::Existing(None) => XccdfRuleImportAction::CreateUnbound {
             rule_id: rule.source.rule_id.clone(),
@@ -686,9 +693,48 @@ fn ImplementationChoice(
     existing_policies: Vec<(uuid::Uuid, String)>,
 ) -> Element {
     let current = action_key(&rules.read()[index].draft.action);
+    let proof_value = rules.read()[index]
+        .mapping_proof
+        .map(|proof| match proof {
+            MapExistingProof::InheritedMapping => "inherited_mapping",
+            MapExistingProof::ExactTechnicalMatch => "exact_technical_match",
+        })
+        .unwrap_or("");
+    let relationship_value = rules.read()[index]
+        .mapping_relationship
+        .clone()
+        .unwrap_or_default();
+    let coverage_value = rules.read()[index]
+        .mapping_coverage
+        .clone()
+        .unwrap_or_default();
     rsx! { div { style: "margin:14px 0;", label { style: "font-size:11px;font-weight:650;", "Implementation" }, select { class: "input focus-ring", "data-testid": "xccdf-implementation-selector", value: current, onchange: move |event| { set_action(&mut rules.write()[index].draft.action, event.value().as_str()); }, option { value: "unbound", "Unbound" }, option { value: "native", "Native assertion" }, option { value: "manual", "Manual evidence" }, option { value: "opaque", "Opaque" }, option { value: "existing", "Existing policy version" } }
         if current == "existing" {
             select { class: "input focus-ring", value: "{existing_policy_value(&rules.read()[index].draft.action)}", onchange: move |event| { let selected = uuid::Uuid::parse_str(&event.value()).ok(); rules.write()[index].draft.action = RefinedRuleAction::Existing(selected); }, option { value: "", "Select an existing policy version…" }, for (id, name) in existing_policies.iter() { option { value: "{id}", "{name}" } } }
+            div { style: "display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;",
+                select { class: "input focus-ring", value: proof_value, onchange: move |event| {
+                    rules.write()[index].mapping_proof = match event.value().as_str() {
+                        "inherited_mapping" => Some(MapExistingProof::InheritedMapping),
+                        "exact_technical_match" => Some(MapExistingProof::ExactTechnicalMatch),
+                        _ => None,
+                    };
+                },
+                    option { value: "", "Select reuse proof…" }
+                    option { value: "inherited_mapping", "Inherited mapping" }
+                    option { value: "exact_technical_match", "Exact technical match" }
+                }
+                select { class: "input focus-ring", value: relationship_value, onchange: move |event| { rules.write()[index].mapping_relationship = (!event.value().is_empty()).then(|| event.value()); },
+                    option { value: "", "Select relationship…" }
+                    option { value: "implements", "Implements" }
+                    option { value: "supports", "Supports" }
+                    option { value: "provides_evidence_for", "Provides evidence for" }
+                }
+            }
+            select { class: "input focus-ring", style: "margin-top:8px;", value: coverage_value, onchange: move |event| { rules.write()[index].mapping_coverage = (!event.value().is_empty()).then(|| event.value()); },
+                option { value: "", "Select coverage…" }
+                option { value: "full", "Full" }
+                option { value: "partial", "Partial" }
+            }
         }
     } }
 }
@@ -968,6 +1014,7 @@ mod tests {
             mapping_relationship: None,
             mapping_coverage: None,
             mapping_rationale: None,
+            mapping_proof: None,
         };
         assert_eq!(rule.source.source_severity.as_deref(), Some("high"));
         assert_eq!(rule.source.fix_text.as_deref(), Some("Fix"));

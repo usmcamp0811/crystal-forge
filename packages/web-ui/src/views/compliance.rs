@@ -1886,6 +1886,7 @@ fn refined_rules_from_rules(rules: &[StigRule]) -> Vec<RefinedStigRule> {
         mapping_relationship: None,
         mapping_coverage: None,
         mapping_rationale: None,
+        mapping_proof: None,
     }).collect()
 }
 
@@ -2107,10 +2108,11 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                               requirement.candidates.first().map(|candidate| {
                                                                                   (
                                                                                       requirement.rule_id.clone(),
-                                                                                      crate::api::models::ImportedMappingSemantics {
-                                                                                          relationship: Some("implements".into()),
-                                                                                          coverage: Some("full".into()),
-                                                                                          rationale: Some(candidate.match_reasons.join(" ")),
+                                                                                       crate::api::models::ImportedMappingSemantics {
+                                                                                           relationship: Some("implements".into()),
+                                                                                           coverage: Some("full".into()),
+                                                                                           rationale: Some(candidate.match_reasons.join(" ")),
+                                                                                           reviewed_related_candidate: None,
                                                                                       },
                                                                                   )
                                                                               })
@@ -2486,11 +2488,11 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         .filter(|r| r.selected)
                                         .map(|r| r.rule_id.clone())
                                         .collect();
-                                    let rule_actions: Vec<XccdfRuleImportAction> = rules
+                                     let rule_actions: Vec<XccdfRuleImportAction> = rules
                                         .read()
                                         .iter()
                                         .filter(|r| r.selected)
-                                        .map(import_action_from_rule)
+                                         .map(import_action_from_rule)
                                         .collect();
                                     let sha256 = preview_response
                                         .read()
@@ -2509,10 +2511,11 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                              matches!(rule.draft.action, RefinedRuleAction::Existing(Some(_))).then(|| {
                                                  (
                                                      rule.source.rule_id.clone(),
-                                                     crate::api::models::ImportedMappingSemantics {
-                                                         relationship: Some(rule.mapping_relationship.clone().unwrap_or_else(|| "implements".into())),
-                                                         coverage: Some(rule.mapping_coverage.clone().unwrap_or_else(|| "full".into())),
-                                                         rationale: rule.mapping_rationale.clone().filter(|value| !value.trim().is_empty()),
+                                                      crate::api::models::ImportedMappingSemantics {
+                                                          relationship: rule.mapping_relationship.clone(),
+                                                          coverage: rule.mapping_coverage.clone(),
+                                                          rationale: rule.mapping_rationale.clone().filter(|value| !value.trim().is_empty()),
+                                                          reviewed_related_candidate: None,
                                                      },
                                                  )
                                              })
@@ -2628,7 +2631,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                             div { style: "min-width:0;",
                                                 div { style: "font-size:12px;font-weight:600;line-height:1.4;", "{row.title.clone().unwrap_or_else(|| row.external_id.clone())}" }
                                                  div { style: "font-size:10.5px;color:var(--cf-text-muted);margin-top:1px;",
-                                                     if let Some(candidate) = row.candidates.first() { "{candidate.match_type} · Reuses {candidate.policy_name}" } else { "Enforcement inferred from the STIG fix text" }
+                                     if let Some(candidate) = row.candidates.first() { "{candidate.match_type} · Candidate: {candidate.policy_name}" } else { "Enforcement inferred from the STIG fix text" }
                                                  }
                                             }
                                         }
@@ -2701,7 +2704,23 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                     selected_profile_id: None,
                                     selected_rule_ids,
                                     rule_actions,
-                                    mapping_semantics: mapping_semantics.read().clone(),
+                                     mapping_semantics: refined_rules
+                                         .read()
+                                         .iter()
+                                         .filter_map(|rule| {
+                                             matches!(rule.draft.action, RefinedRuleAction::Existing(Some(_))).then(|| {
+                                                 (
+                                                     rule.source.rule_id.clone(),
+                                                     crate::api::models::ImportedMappingSemantics {
+                                                         relationship: rule.mapping_relationship.clone(),
+                                                         coverage: rule.mapping_coverage.clone(),
+                                                         rationale: rule.mapping_rationale.clone().filter(|value| !value.trim().is_empty()),
+                                                         reviewed_related_candidate: None,
+                                                     },
+                                                 )
+                                             })
+                                         })
+                                         .collect(),
                                     bundle: ImportedBundlePlan { name: bundle_name.read().trim().to_string(), framework: "xccdf".into(), version: bench_ver.read().clone(), layer: None, owner: None, description: None },
                                 };
                                 let bytes = file_bytes.read().clone();
