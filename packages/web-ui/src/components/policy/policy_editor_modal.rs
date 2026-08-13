@@ -25,7 +25,7 @@ use crate::api::models::{
 };
 use crate::views::policies_api;
 
-use super::types::{PolicyCategory, PolicyDefinition, PolicyFormat};
+use super::types::{is_policy_version_editable, PolicyCategory, PolicyDefinition, PolicyFormat};
 
 const STANDARD_FRAMEWORKS: [&str; 4] = ["DISA STIG", "NIST 800-53", "CMMC 2.0", "CIS Benchmark"];
 const NIST_CONTROL_FAMILIES: [&str; 7] = ["AC", "AU", "CM", "IA", "SC", "SI", "MP"];
@@ -694,6 +694,9 @@ pub fn PolicyEditorModal(
     let editing_policy_version_id: Option<Uuid> = existing_policy
         .as_ref()
         .and_then(|p| p.version_id);
+    let mappings_editable = existing_policy
+        .as_ref()
+        .is_some_and(is_policy_version_editable);
 
     let mut save_error = use_signal(String::new);
     let mut is_saving = use_signal(|| false);
@@ -817,7 +820,7 @@ pub fn PolicyEditorModal(
                     div { class: "modal-body cf-policy-modal-body", style: "overflow-y:auto;",
                         div { class: "cf-modal-tabs", role: "tablist", aria_label: "Policy editor sections",
                             PolicyEditorTabButton { tab: PolicyEditorTab::Details, active: *active_tab.read(), label: "Details", test_id: "policy-editor-tab-details", on_select: move |_| active_tab.set(PolicyEditorTab::Details) }
-                            PolicyEditorTabButton { tab: PolicyEditorTab::Mappings, active: *active_tab.read(), label: "Mappings", test_id: "policy-editor-tab-mappings", on_select: move |_| active_tab.set(PolicyEditorTab::Mappings) }
+                             PolicyEditorTabButton { tab: PolicyEditorTab::Mappings, active: *active_tab.read(), label: format!("Mappings · {}", mappings.read().len()), test_id: "policy-editor-tab-mappings", on_select: move |_| active_tab.set(PolicyEditorTab::Mappings) }
                             PolicyEditorTabButton { tab: PolicyEditorTab::Enforcement, active: *active_tab.read(), label: format!("Enforcement · {rule_count}"), test_id: "policy-editor-tab-enforcement", on_select: move |_| active_tab.set(PolicyEditorTab::Enforcement) }
                             PolicyEditorTabButton { tab: PolicyEditorTab::Evidence, active: *active_tab.read(), label: format!("Evidence · {evidence_count}"), test_id: "policy-editor-tab-evidence", on_select: move |_| active_tab.set(PolicyEditorTab::Evidence) }
                         }
@@ -1107,8 +1110,9 @@ pub fn PolicyEditorModal(
                                                                             }
                                                                         }
                                                                     }
-                                                                    if let Some(pv_id) = pv_id_for_delete {
-                                                                        button {
+                                                                     if mappings_editable {
+                                                                         if let Some(pv_id) = pv_id_for_delete {
+                                                                         button {
                                                                             class: "btn btn-ghost xs focus-ring",
                                                                             style: "color:var(--cf-text-muted);padding:4px 6px;",
                                                                             title: "Remove mapping",
@@ -1123,8 +1127,11 @@ pub fn PolicyEditorModal(
                                                                                 });
                                                                             },
                                                                             "×"
-                                                                        }
-                                                                    }
+                                                                         }
+                                                                         }
+                                                                     } else {
+                                                                         span { class: "chip chip-neutral", style: "font-size:10px;", "Read-only" }
+                                                                     }
                                                                 }
                                                                 }
                                                             }
@@ -1138,7 +1145,7 @@ pub fn PolicyEditorModal(
                             }
 
                             // New mapping editor (only for draft policy versions).
-                            if let Some(pv_id) = editing_policy_version_id {
+                             if let Some(pv_id) = editing_policy_version_id.filter(|_| mappings_editable) {
                                 div { style: "border:1px solid var(--cf-border);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:10px;",
                                     div { style: "font-size:12px;font-weight:600;", "Add mapping" }
 
@@ -1159,7 +1166,7 @@ pub fn PolicyEditorModal(
                                                     spawn(async move {
                                                         if let Ok(versions) = fetch_compliance_framework_versions(&id).await {
                                                             fw_versions_list.set(versions);
-                                                        }
+                             }
                                                     });
                                                 }
                                             },
@@ -1332,7 +1339,11 @@ pub fn PolicyEditorModal(
                         }
                         }
 
-                        // Assertions & gate rules builder
+                            if editing_policy_version_id.is_some() && !mappings_editable {
+                                div { class: "sd-callout sd-callout-info", style: "font-size:11px;", "This policy version is immutable. Create or edit a draft revision to change its requirement mappings." }
+                            }
+
+                            // Assertions & gate rules builder
                         if *active_tab.read() == PolicyEditorTab::Enforcement {
                         div { style: "margin-top:6px;",
                             div { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;",
