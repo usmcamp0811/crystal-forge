@@ -1657,6 +1657,50 @@ pub mod tests {
         )
         .await
         .unwrap();
+        let authoritative_req = upsert_requirement_lineage(&mut tx, incoming_framework, "V-AUTH")
+            .await
+            .unwrap();
+        let inherited_req = upsert_requirement_lineage(&mut tx, incoming_framework, "V-INHERITED")
+            .await
+            .unwrap();
+        let authoritative_rv = insert_requirement_version(
+            &mut tx,
+            authoritative_req,
+            incoming_version,
+            &RequirementVersionCanonical {
+                canonical_requirement_key: "V-AUTH".to_string(),
+                external_id: "V-AUTH".to_string(),
+                title: Some("Authoritative".to_string()),
+                kind: "rule".to_string(),
+                metadata: serde_json::json!({}),
+                description: None,
+                severity: None,
+                check_text: None,
+                fix_text: Some("services.openssh.enable = true;".to_string()),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let inherited_rv = insert_requirement_version(
+            &mut tx,
+            inherited_req,
+            incoming_version,
+            &RequirementVersionCanonical {
+                canonical_requirement_key: "V-INHERITED".to_string(),
+                external_id: "V-INHERITED".to_string(),
+                title: Some("Inherited".to_string()),
+                kind: "rule".to_string(),
+                metadata: serde_json::json!({}),
+                description: None,
+                severity: None,
+                check_text: None,
+                fix_text: Some("services.openssh.enable = true;".to_string()),
+            },
+            None,
+        )
+        .await
+        .unwrap();
         let related_rv = insert_requirement_version(
             &mut tx,
             related_req,
@@ -1688,7 +1732,7 @@ pub mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO deployment_policy_versions (id, policy_id, version, publication_state, name, policy_type, implementation_state, execution_phase, config, compliance_metadata, dependencies, semantic_digest, digest_algorithm) VALUES ($1, $2, '1.0', 'draft', 'related candidate policy', 'native', 'native', 'deploy', '{}', '{}', '[]', 'related-candidate', 'sha-256')",
+            "INSERT INTO deployment_policy_versions (id, policy_id, version, publication_state, name, policy_type, implementation_state, execution_phase, config, compliance_metadata, dependencies, semantic_digest, digest_algorithm) VALUES ($1, $2, '1.0', 'draft', 'related candidate policy', 'native', 'native', 'deploy', '{\"services.openssh.enable\": true}', '{}', '[]', 'related-candidate', 'sha-256')",
         )
         .bind(policy_version_id)
         .bind(policy_id)
@@ -1702,6 +1746,32 @@ pub mod tests {
             "implements",
             "full",
             Some("shared CCI evidence"),
+            "manual",
+            None,
+            actor,
+        )
+        .await
+        .unwrap();
+        insert_policy_mapping_in_tx(
+            &mut tx,
+            policy_version_id,
+            authoritative_rv,
+            "implements",
+            "full",
+            Some("authoritative precedence"),
+            "manual",
+            None,
+            actor,
+        )
+        .await
+        .unwrap();
+        insert_policy_mapping_in_tx(
+            &mut tx,
+            policy_version_id,
+            inherited_rv,
+            "implements",
+            "full",
+            Some("inherited precedence"),
             "manual",
             None,
             actor,
@@ -1751,11 +1821,203 @@ pub mod tests {
             "reasons: {:?}",
             candidates[0].match_reasons
         );
+
+        let precedence = find_policy_candidates(
+            &pool,
+            Some(authoritative_rv),
+            Some(inherited_rv),
+            Some("services.openssh.enable = true;"),
+            &RelatedRequirementIdentifiers {
+                cci_ids: [shared_cci.to_ascii_uppercase()].into_iter().collect(),
+                srg_ids: Default::default(),
+            },
+            Some(incoming_framework),
+        )
+        .await
+        .unwrap();
+        let selected = precedence
+            .iter()
+            .find(|candidate| candidate.policy_version_id == policy_version_id)
+            .expect("precedence fixture policy candidate");
+        assert_eq!(
+            selected.match_type,
+            PolicyCandidateMatchType::AuthoritativeMapping
+        );
+        assert_eq!(selected.confidence, 100);
+
+        let inherited_precedence = find_policy_candidates(
+            &pool,
+            None,
+            Some(inherited_rv),
+            Some("services.openssh.enable = true;"),
+            &RelatedRequirementIdentifiers {
+                cci_ids: [shared_cci.to_ascii_uppercase()].into_iter().collect(),
+                srg_ids: Default::default(),
+            },
+            Some(incoming_framework),
+        )
+        .await
+        .unwrap();
+        let selected = inherited_precedence
+            .iter()
+            .find(|candidate| candidate.policy_version_id == policy_version_id)
+            .expect("inherited precedence fixture policy candidate");
+        assert_eq!(
+            selected.match_type,
+            PolicyCandidateMatchType::InheritedMapping
+        );
+        assert_eq!(selected.confidence, 95);
+
+        let exact_precedence = find_policy_candidates(
+            &pool,
+            None,
+            None,
+            Some("services.openssh.enable = true;"),
+            &RelatedRequirementIdentifiers {
+                cci_ids: [shared_cci.to_ascii_uppercase()].into_iter().collect(),
+                srg_ids: Default::default(),
+            },
+            Some(incoming_framework),
+        )
+        .await
+        .unwrap();
+        let selected = exact_precedence
+            .iter()
+            .find(|candidate| candidate.policy_version_id == policy_version_id)
+            .expect("exact precedence fixture policy candidate");
+        assert_eq!(
+            selected.match_type,
+            PolicyCandidateMatchType::ExactTechnicalMatch
+        );
+        assert_eq!(selected.confidence, 90);
         assert!(
             candidates[0]
                 .match_reasons
                 .iter()
                 .any(|reason| reason.contains("NIST-AC-X"))
+        );
+
+        // Exact matching is required: a different identifier, a substring, or
+        // no identifiers must not produce a related candidate. Same-framework
+        // evidence is also deliberately excluded by the query boundary.
+        for identifiers in [
+            RelatedRequirementIdentifiers {
+                cci_ids: [format!("{shared_cci}-EXTRA")].into_iter().collect(),
+                srg_ids: Default::default(),
+            },
+            RelatedRequirementIdentifiers {
+                cci_ids: [format!("{shared_cci}-OTHER")].into_iter().collect(),
+                srg_ids: Default::default(),
+            },
+            RelatedRequirementIdentifiers::default(),
+        ] {
+            assert!(
+                find_policy_candidates(
+                    &pool,
+                    None,
+                    None,
+                    None,
+                    &identifiers,
+                    Some(incoming_framework),
+                )
+                .await
+                .unwrap()
+                .is_empty()
+            );
+        }
+
+        assert!(
+            find_policy_candidates(
+                &pool,
+                None,
+                None,
+                None,
+                &RelatedRequirementIdentifiers {
+                    cci_ids: [shared_cci.to_ascii_uppercase()].into_iter().collect(),
+                    srg_ids: Default::default(),
+                },
+                Some(related_framework),
+            )
+            .await
+            .unwrap()
+            .is_empty(),
+            "same-framework mappings must not be offered as related candidates"
+        );
+
+        // Trust is an eligibility boundary, independent of identifier overlap.
+        // Build a separate accepted/current policy whose mapping remains
+        // suggested; accepted mappings are immutable after publication.
+        let untrusted_policy_id = Uuid::new_v4();
+        let untrusted_version_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO deployment_policies (id, name, description, policy_type) VALUES ($1, $2, $3, 'native')",
+        )
+        .bind(untrusted_policy_id)
+        .bind(format!("Untrusted related policy {}", Uuid::new_v4()))
+        .bind("untrusted related candidate test")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO deployment_policy_versions (id, policy_id, version, publication_state, name, policy_type, implementation_state, execution_phase, config, compliance_metadata, dependencies, semantic_digest, digest_algorithm) VALUES ($1, $2, '1.0', 'draft', 'untrusted related policy', 'native', 'native', 'deploy', '{}', '{}', '[]', 'untrusted-related', 'sha-256')",
+        )
+        .bind(untrusted_version_id)
+        .bind(untrusted_policy_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut untrusted_tx = pool.begin().await.unwrap();
+        insert_policy_mapping_in_tx(
+            &mut untrusted_tx,
+            untrusted_version_id,
+            related_rv,
+            "implements",
+            "full",
+            Some("untrusted shared evidence"),
+            "manual",
+            None,
+            actor,
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE policy_requirement_mappings SET trust_state = 'suggested' WHERE policy_version_id = $1")
+            .bind(untrusted_version_id)
+            .execute(&mut *untrusted_tx)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE deployment_policy_versions SET trust_state = 'trusted', trusted_by = $2, trusted_at = NOW(), publication_state = 'accepted', published_at = NOW() WHERE id = $1")
+            .bind(untrusted_version_id)
+            .bind(actor)
+            .execute(&mut *untrusted_tx)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(untrusted_version_id)
+        .bind(untrusted_policy_id)
+        .execute(&mut *untrusted_tx)
+        .await
+        .unwrap();
+        untrusted_tx.commit().await.unwrap();
+        let candidates = find_policy_candidates(
+            &pool,
+            None,
+            None,
+            None,
+            &RelatedRequirementIdentifiers {
+                cci_ids: [shared_cci.to_ascii_uppercase()].into_iter().collect(),
+                srg_ids: Default::default(),
+            },
+            Some(incoming_framework),
+        )
+        .await
+        .unwrap();
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.policy_version_id != untrusted_version_id),
+            "untrusted mappings must not produce candidates"
         );
 
         sqlx::query(

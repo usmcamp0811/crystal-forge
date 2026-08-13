@@ -352,4 +352,39 @@ mod tests {
         assert!(incoming.srg_ids.is_disjoint(&different.srg_ids));
         assert!(incoming.cci_ids.is_disjoint(&substring.cci_ids));
     }
+
+    #[test]
+    fn deterministic_candidate_precedence_is_strict() {
+        let mut candidates = vec![
+            PolicyCandidate {
+                confidence: 70,
+                ..candidate(PolicyCandidateMatchType::RelatedMapping)
+            },
+            PolicyCandidate {
+                confidence: 90,
+                ..candidate(PolicyCandidateMatchType::ExactTechnicalMatch)
+            },
+            PolicyCandidate {
+                confidence: 95,
+                ..candidate(PolicyCandidateMatchType::InheritedMapping)
+            },
+            PolicyCandidate {
+                confidence: 100,
+                ..candidate(PolicyCandidateMatchType::AuthoritativeMapping)
+            },
+        ];
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.confidence));
+        assert_eq!(
+            candidates
+                .into_iter()
+                .map(|candidate| candidate.match_type)
+                .collect::<Vec<_>>(),
+            vec![
+                PolicyCandidateMatchType::AuthoritativeMapping,
+                PolicyCandidateMatchType::InheritedMapping,
+                PolicyCandidateMatchType::ExactTechnicalMatch,
+                PolicyCandidateMatchType::RelatedMapping,
+            ]
+        );
+    }
 }
