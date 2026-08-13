@@ -6126,8 +6126,11 @@ const steps = [
         await page.getByTestId("policy-editor-tab-mappings").click();
 
         const frameworkSelect = page.getByLabel("Framework").last();
+        await frameworkSelect.locator(`option[value="${frameworkId}"]`).waitFor({ state: "attached", timeout: 5000 });
         await frameworkSelect.selectOption(frameworkId);
-        await page.getByLabel("Version").last().selectOption(versionId);
+        const versionSelect = page.getByLabel("Version").last();
+        await versionSelect.locator(`option[value="${versionId}"]`).waitFor({ state: "attached", timeout: 5000 });
+        await versionSelect.selectOption(versionId);
 
         const requirementSearch = page.getByPlaceholder("Search by ID, title, CCI, SRG…").last();
         await requirementSearch.fill("SC-45");
@@ -6160,30 +6163,31 @@ const steps = [
     name: "20aa-policies-new-modal-mappings-roundtrip",
     description: "Policies new modal persists two real requirement mappings and reloads them",
     action: async (page) => {
+      await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
       const fixture = await page.evaluate(async (base) => {
         const frameworksResponse = await fetch(`${base}/api/v1/compliance/frameworks`);
         if (!frameworksResponse.ok) throw new Error(`framework list failed: ${frameworksResponse.status}`);
         const frameworks = await frameworksResponse.json();
-        for (const framework of frameworks) {
-          const versionsResponse = await fetch(`${base}/api/v1/compliance/frameworks/${framework.id}/versions`);
-          if (!versionsResponse.ok) continue;
-          for (const version of await versionsResponse.json()) {
-            const requirementsResponse = await fetch(`${base}/api/v1/compliance/framework-versions/${version.id}/requirements`);
-            if (!requirementsResponse.ok) continue;
-            const requirements = await requirementsResponse.json();
-            if (requirements.length >= 2) return { framework, version, requirements: requirements.slice(0, 2) };
-          }
-        }
-        throw new Error("Expected at least two seeded compliance requirements for mapping round-trip");
+        const framework = frameworks.find((item) => item.canonical_source_key === "web-ui-mapping-roundtrip");
+        if (!framework) throw new Error("Mapping round-trip framework fixture missing");
+        const versionsResponse = await fetch(`${base}/api/v1/compliance/frameworks/${framework.id}/versions`);
+        if (!versionsResponse.ok) throw new Error(`framework versions failed: ${versionsResponse.status}`);
+        const version = (await versionsResponse.json()).find((item) => item.canonical_release_key === "web-ui-mapping-roundtrip-v1");
+        if (!version) throw new Error("Mapping round-trip framework version fixture missing");
+        const requirementsResponse = await fetch(`${base}/api/v1/compliance/framework-versions/${version.id}/requirements`);
+        if (!requirementsResponse.ok) throw new Error(`requirements failed: ${requirementsResponse.status}`);
+        const requirements = await requirementsResponse.json();
+        const selected = ["MAP-1", "MAP-2"].map((externalId) => requirements.find((item) => item.external_id === externalId));
+        if (selected.some((item) => !item)) throw new Error("Mapping round-trip requirement fixtures missing");
+        return { framework, version, requirements: selected };
       }, baseUrl);
       const [requirementA, requirementB] = fixture.requirements;
       const policyName = `UI mapping round-trip ${Date.now()}`;
 
-      await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
       await page.getByRole("button", { name: /New custom policy/i }).first().click();
       await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
       await page.getByTestId("policy-editor-tab-details").click();
-      await page.getByLabel("Name").last().fill(policyName);
+      await page.getByPlaceholder("e.g. canary-25").fill(policyName);
       await page.getByTestId("policy-editor-tab-mappings").click();
 
       await page.getByLabel("Framework").last().selectOption(fixture.framework.id);

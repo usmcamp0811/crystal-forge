@@ -320,6 +320,7 @@ in pkgs.testers.runNixOSTest {
 
   testScript = ''
     import json
+    import base64
     import os
     import pytest
 
@@ -344,6 +345,44 @@ in pkgs.testers.runNixOSTest {
     machine.wait_for_unit("crystal-forge-builder.service")
     machine.wait_for_open_port(${toString CF_TEST_SERVER_PORT})
     machine.wait_for_open_port(5432)
+
+    # Deterministic normalized compliance fixtures used by the real mapping
+    # round-trip browser step. These are test-only rows, created after the
+    # server has applied migrations and before Playwright starts.
+    mapping_fixture_sql = """
+      INSERT INTO compliance_frameworks (name, canonical_source_key)
+      VALUES ('Test Mapping Framework', 'web-ui-mapping-roundtrip')
+      ON CONFLICT (canonical_source_key) DO NOTHING;
+      INSERT INTO compliance_framework_versions (framework_id, version, canonical_release_key, semantic_digest)
+      SELECT id, '1', 'web-ui-mapping-roundtrip-v1', 'web-ui-mapping-roundtrip-digest'
+      FROM compliance_frameworks WHERE canonical_source_key = 'web-ui-mapping-roundtrip'
+      ON CONFLICT (framework_id, canonical_release_key) DO NOTHING;
+      INSERT INTO compliance_requirements (framework_id, canonical_requirement_key)
+      SELECT id, 'MAP-1' FROM compliance_frameworks WHERE canonical_source_key = 'web-ui-mapping-roundtrip'
+      ON CONFLICT (framework_id, canonical_requirement_key) DO NOTHING;
+      INSERT INTO compliance_requirements (framework_id, canonical_requirement_key)
+      SELECT id, 'MAP-2' FROM compliance_frameworks WHERE canonical_source_key = 'web-ui-mapping-roundtrip'
+      ON CONFLICT (framework_id, canonical_requirement_key) DO NOTHING;
+      INSERT INTO compliance_requirement_versions (requirement_id, framework_version_id, external_id, title, kind, semantic_digest)
+      SELECT r.id, v.id, 'MAP-1', 'Mapping round-trip requirement one', 'control', 'web-ui-map-1'
+      FROM compliance_requirements r JOIN compliance_frameworks f ON f.id = r.framework_id
+      JOIN compliance_framework_versions v ON v.framework_id = f.id
+      WHERE f.canonical_source_key = 'web-ui-mapping-roundtrip' AND r.canonical_requirement_key = 'MAP-1'
+      ON CONFLICT (requirement_id, framework_version_id) DO NOTHING;
+      INSERT INTO compliance_requirement_versions (requirement_id, framework_version_id, external_id, title, kind, semantic_digest)
+      SELECT r.id, v.id, 'MAP-2', 'Mapping round-trip requirement two', 'control', 'web-ui-map-2'
+      FROM compliance_requirements r JOIN compliance_frameworks f ON f.id = r.framework_id
+      JOIN compliance_framework_versions v ON v.framework_id = f.id
+      WHERE f.canonical_source_key = 'web-ui-mapping-roundtrip' AND r.canonical_requirement_key = 'MAP-2'
+      ON CONFLICT (requirement_id, framework_version_id) DO NOTHING;
+    """
+    encoded_mapping_fixture_sql = base64.b64encode(
+      mapping_fixture_sql.encode("utf-8")
+    ).decode("ascii")
+    machine.succeed(
+      "printf %s " + encoded_mapping_fixture_sql
+      + " | base64 -d | sudo -u postgres psql -d crystal_forge -v ON_ERROR_STOP=1"
+    )
 
     from cf_test.vm_helpers import wait_for_git_server_ready
     wait_for_git_server_ready(gitserver, timeout=120)
