@@ -1,11 +1,11 @@
 ---
 id: TASK-420
 title: Implement STIG reconciliation review UI
-status: In Progress
+status: Backlog
 assignee:
   - '@agent'
 created_date: '2026-08-13 02:21'
-updated_date: '2026-08-13 02:22'
+updated_date: '2026-08-13 02:30'
 labels: []
 dependencies: []
 references:
@@ -58,5 +58,11 @@ author: @agent
 created: 2026-08-13 02:22
 ---
 Implementation preflight: dedicated worktree `/home/mcamp/code/crystal-forge/TASK-420-stig-reconciliation-ui`, branch `TASK-420-stig-reconciliation-ui`, based on `dev`. Scope is production STIG reconciliation/review and policy mapping UI only; fuzzy matching remains deferred. Verification will use targeted web-ui checks, formatting, diff checks, and server contract checks as applicable; the long web-ui build remains omitted unless required by the changed surface.
+---
+
+author: @agent
+created: 2026-08-13 02:30
+---
+Closed as an accidental split. The UI scope belongs to TASK-418. No application changes were made in the TASK-420 worktree.
 ---
 <!-- COMMENTS:END -->
