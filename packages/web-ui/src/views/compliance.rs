@@ -2609,7 +2609,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 (ready_count, "ready to create — enforcement inferred", "#60a5fa"),
                                 (attention_rule_ids.len(), "need review — no automatic resolution", if attention_rule_ids.is_empty() { "var(--cf-text-muted)" } else { "#fbbf24" }),
                             ] {
-                                 div { class: "card", style: "padding:14px 12px;text-align:center;min-height:72px;display:flex;flex-direction:column;justify-content:center;",
+                                 div { class: "card", style: "padding:14px 12px;text-align:center;",
                                     div { style: "font-size:24px;font-weight:700;color:{color};", "{count}" }
                                     div { style: "font-size:11px;color:var(--cf-text-muted);line-height:1.4;margin-top:2px;", "{label}" }
                                 }
@@ -2626,7 +2626,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 label { "Requiring attention · {attention_rule_ids.len()}" }
                                 div { style: "display:flex;flex-direction:column;gap:5px;max-height:220px;overflow-y:auto;",
                                     for row in reconciliation_rows.iter().filter(|row| !row.auto_resolvable || row.state == "identity_conflict") {
-                                         div { key: "attention-{row.rule_id}", style: "display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:8px;border:1px solid color-mix(in oklab, #fbbf24 28%, var(--cf-divider));background:color-mix(in oklab, #fbbf24 4%, var(--cf-card-bg));",
+                                         div { key: "attention-{row.rule_id}", style: "display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-radius:8px;border:1px solid var(--cf-divider);",
                                             span { style: "color:#fbbf24;margin-top:2px;flex-shrink:0;display:inline-flex;", Icon { name: IconName::Warn, size: 13 } }
                                             div { style: "min-width:0;",
                                                 div { style: "font-size:12.5px;font-weight:600;line-height:1.4;", "{row.title.clone().unwrap_or_else(|| row.external_id.clone())}" }
@@ -2655,7 +2655,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 summary { style: "cursor:pointer;font-size:11.5px;font-weight:600;color:var(--cf-text-muted);", "Show {reused_count + ready_count} auto-resolved controls" }
                                 div { style: "display:flex;flex-direction:column;gap:5px;margin-top:8px;max-height:220px;overflow-y:auto;",
                                       for row in reconciliation_rows.iter().filter(|row| row.auto_resolvable && row.state != "identity_conflict") {
-                                         div { key: "resolved-{row.rule_id}", style: "display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-radius:8px;background:var(--cf-subtle-bg);",
+                                         div { key: "resolved-{row.rule_id}", style: "display:flex;gap:10px;align-items:flex-start;padding:7px 10px;border-radius:8px;background:var(--cf-subtle-bg);",
                                             span { style: if !row.candidates.is_empty() { "color:#34d399;margin-top:2px;display:inline-flex;" } else { "color:#60a5fa;margin-top:2px;display:inline-flex;" }, Icon { name: if !row.candidates.is_empty() { IconName::Check } else { IconName::Shield }, size: 12 } }
                                             div { style: "min-width:0;",
                                                 div { style: "font-size:12px;font-weight:600;line-height:1.4;", "{row.title.clone().unwrap_or_else(|| row.external_id.clone())}" }
