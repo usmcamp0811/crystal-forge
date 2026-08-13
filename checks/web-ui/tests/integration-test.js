@@ -6054,6 +6054,108 @@ const steps = [
       await assertVisible(page.getByText("Block deploy when").first(), "Expected CVE gate rule editor row after adding rule");
     },
   },
+  {
+    name: "20a-policies-new-modal-pending-mappings",
+    description: "Policies new modal Mappings tab with two queued requirement mappings",
+    action: async (page) => {
+      const frameworkId = "10000000-0000-4000-8000-000000000001";
+      const versionId = "20000000-0000-4000-8000-000000000001";
+      const framework = {
+        id: frameworkId,
+        name: "NIST 800-53",
+        publisher: "NIST",
+        canonical_source_key: "nist-800-53",
+        description: "NIST Special Publication 800-53",
+        version_count: 1,
+      };
+      const version = {
+        id: versionId,
+        framework_id: frameworkId,
+        version: "Rev 5",
+        canonical_release_key: "rev-5",
+        title: "Security and Privacy Controls for Information Systems",
+        published_at: "2020-09-23T00:00:00Z",
+        semantic_digest: "fixture-nist-rev5",
+        requirement_count: 2,
+      };
+      const requirements = [
+        {
+          id: "30000000-0000-4000-8000-000000000001",
+          requirement_id: "40000000-0000-4000-8000-000000000001",
+          framework_version_id: versionId,
+          external_id: "SC-45",
+          title: "System Time Synchronization",
+          kind: "control",
+          severity: "medium",
+          parent_requirement_version_id: null,
+          semantic_digest: "fixture-sc45",
+        },
+        {
+          id: "30000000-0000-4000-8000-000000000002",
+          requirement_id: "40000000-0000-4000-8000-000000000002",
+          framework_version_id: versionId,
+          external_id: "AU-8",
+          title: "Time Stamps",
+          kind: "control",
+          severity: "medium",
+          parent_requirement_version_id: null,
+          semantic_digest: "fixture-au8",
+        },
+      ];
+
+      await page.route("**/api/v1/compliance/frameworks", async (route) => {
+        if (route.request().method() === "GET") {
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([framework]) });
+        } else {
+          await route.fallback();
+        }
+      });
+      await page.route(`**/api/v1/compliance/frameworks/${frameworkId}/versions`, async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([version]) });
+      });
+      await page.route(`**/api/v1/compliance/framework-versions/${versionId}/requirements**`, async (route) => {
+        const query = new URL(route.request().url()).searchParams.get("q")?.toLowerCase() || "";
+        const filtered = query ? requirements.filter((item) => `${item.external_id} ${item.title}`.toLowerCase().includes(query)) : requirements;
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(filtered) });
+      });
+
+      try {
+        await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+        await page.getByRole("button", { name: /New custom policy/i }).first().click();
+        await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
+        await page.getByTestId("policy-editor-tab-mappings").click();
+
+        const frameworkSelect = page.getByLabel("Framework").last();
+        await frameworkSelect.selectOption(frameworkId);
+        await page.getByLabel("Version").last().selectOption(versionId);
+
+        const requirementSearch = page.getByPlaceholder("Search by ID, title, CCI, SRG…").last();
+        await requirementSearch.fill("SC-45");
+        await page.getByRole("button", { name: /SC-45 · control · System Time Synchronization/i }).click();
+        await page.getByLabel("Relationship").last().selectOption("supports");
+        await page.getByLabel("Coverage").last().selectOption("partial");
+        await page.getByLabel("Rationale (optional)").last().fill("Provides synchronized system time configuration.");
+        await page.getByRole("button", { name: "Add mapping", exact: true }).last().click();
+
+        await requirementSearch.fill("AU-8");
+        await page.getByRole("button", { name: /AU-8 · control · Time Stamps/i }).click();
+        await page.getByRole("button", { name: "Add mapping", exact: true }).last().click();
+
+        await assertVisible(page.getByText("Mappings · 2", { exact: true }), "Expected two queued mappings in tab count");
+        await assertVisible(page.getByText("SC-45", { exact: true }), "Expected SC-45 pending mapping");
+        await assertVisible(page.getByText("AU-8", { exact: true }), "Expected AU-8 pending mapping");
+        await assertVisible(page.getByText("Supports", { exact: true }), "Expected Supports relationship");
+        await assertVisible(page.getByText("Partial", { exact: true }), "Expected Partial coverage");
+        await assertVisible(page.getByText("Pending", { exact: true }).first(), "Expected pending mapping chip");
+        await assertVisible(page.getByText("Provides synchronized system time configuration.", { exact: true }), "Expected mapping rationale");
+        await assertVisible(page.getByText("Pending", { exact: true }).nth(1), "Expected second pending mapping chip");
+      } finally {
+        await page.unroute("**/api/v1/compliance/frameworks");
+        await page.unroute(`**/api/v1/compliance/frameworks/${frameworkId}/versions`);
+        await page.unroute(`**/api/v1/compliance/framework-versions/${versionId}/requirements**`);
+      }
+    },
+  },
   // ── CVE policy API round-trip checks ────────────────────────────────────
   // These tests exercise the new policy types introduced in TASK-176 through
   // the real server API to verify the full create → parse → list round-trip.
