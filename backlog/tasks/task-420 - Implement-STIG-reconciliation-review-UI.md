@@ -1,10 +1,11 @@
 ---
 id: TASK-420
 title: Implement STIG reconciliation review UI
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@agent'
 created_date: '2026-08-13 02:21'
-updated_date: '2026-08-13 02:21'
+updated_date: '2026-08-13 02:22'
 labels: []
 dependencies: []
 references:
@@ -49,3 +50,13 @@ Build the production STIG reconciliation/review UI using the existing reconcilia
 5. Add targeted frontend behavior tests or the repository-authoritative web-ui test coverage for review and mapping interactions.
 6. Verify with focused web-ui checks, formatting, diff checks, and any required Rust/server contract checks. Skip the full web-ui build only if the targeted checks adequately cover the changed surface and document the exception.
 <!-- SECTION:PLAN:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: @agent
+created: 2026-08-13 02:22
+---
+Implementation preflight: dedicated worktree `/home/mcamp/code/crystal-forge/TASK-420-stig-reconciliation-ui`, branch `TASK-420-stig-reconciliation-ui`, based on `dev`. Scope is production STIG reconciliation/review and policy mapping UI only; fuzzy matching remains deferred. Verification will use targeted web-ui checks, formatting, diff checks, and server contract checks as applicable; the long web-ui build remains omitted unless required by the changed surface.
+---
+<!-- COMMENTS:END -->
