@@ -1401,8 +1401,9 @@ pub fn PolicyEditorModal(
                                                     };
                                                     match create_policy_mapping(&pv_id, &request).await {
                                                         Ok(_) => {
-                                                            // Reset form and reload.
-                                                            new_map_req_id.set(None);
+                                                             // Reset form and reload.
+                                                             new_map_req_id.set(None);
+                                                             new_map_requirement.set(None);
                                                             new_map_fv_id.set(None);
                                                             new_map_framework_id.set(None);
                                                             new_map_search.set(String::new());
@@ -2030,7 +2031,11 @@ mod tests {
         assert_eq!(mapping.requirement_version_id, requirement.id);
         assert_eq!(mapping.framework_name, "NIST 800-53");
         assert_eq!(mapping.framework_version, "Rev 5");
+        assert_eq!(mapping.requirement_external_id, "SC-45");
         assert_eq!(mapping.requirement_kind, "control");
+        assert_eq!(mapping.requirement_title.as_deref(), Some("System time synchronization"));
+        assert_eq!(mapping.relationship, "supports");
+        assert_eq!(mapping.coverage, "partial");
         assert_eq!(mapping.rationale.as_deref(), Some("reviewed"));
     }
 
