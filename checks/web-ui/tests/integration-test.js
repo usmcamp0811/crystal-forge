@@ -6156,6 +6156,78 @@ const steps = [
       }
     },
   },
+  {
+    name: "20aa-policies-new-modal-mappings-roundtrip",
+    description: "Policies new modal persists two real requirement mappings and reloads them",
+    action: async (page) => {
+      const fixture = await page.evaluate(async (base) => {
+        const frameworksResponse = await fetch(`${base}/api/v1/compliance/frameworks`);
+        if (!frameworksResponse.ok) throw new Error(`framework list failed: ${frameworksResponse.status}`);
+        const frameworks = await frameworksResponse.json();
+        for (const framework of frameworks) {
+          const versionsResponse = await fetch(`${base}/api/v1/compliance/frameworks/${framework.id}/versions`);
+          if (!versionsResponse.ok) continue;
+          for (const version of await versionsResponse.json()) {
+            const requirementsResponse = await fetch(`${base}/api/v1/compliance/framework-versions/${version.id}/requirements`);
+            if (!requirementsResponse.ok) continue;
+            const requirements = await requirementsResponse.json();
+            if (requirements.length >= 2) return { framework, version, requirements: requirements.slice(0, 2) };
+          }
+        }
+        throw new Error("Expected at least two seeded compliance requirements for mapping round-trip");
+      }, baseUrl);
+      const [requirementA, requirementB] = fixture.requirements;
+      const policyName = `UI mapping round-trip ${Date.now()}`;
+
+      await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+      await page.getByRole("button", { name: /New custom policy/i }).first().click();
+      await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
+      await page.getByTestId("policy-editor-tab-details").click();
+      await page.getByLabel("Name").last().fill(policyName);
+      await page.getByTestId("policy-editor-tab-mappings").click();
+
+      await page.getByLabel("Framework").last().selectOption(fixture.framework.id);
+      await page.getByLabel("Version").last().selectOption(fixture.version.id);
+      const search = page.getByPlaceholder("Search by ID, title, CCI, SRG…").last();
+      const resultButton = (requirement) => page.getByRole("button", {
+        name: new RegExp(`${requirement.external_id}.*${requirement.kind}.*${requirement.title || ""}`, "i"),
+      });
+
+      await search.fill(requirementA.external_id);
+      await resultButton(requirementA).click();
+      await page.getByLabel("Relationship").last().selectOption("supports");
+      await page.getByLabel("Coverage").last().selectOption("partial");
+      await page.getByLabel("Rationale (optional)").last().fill("test rationale");
+      await page.getByRole("button", { name: "Add mapping", exact: true }).last().click();
+
+      await search.fill(requirementB.external_id);
+      await resultButton(requirementB).click();
+      await page.getByLabel("Relationship").last().selectOption("implements");
+      await page.getByLabel("Coverage").last().selectOption("full");
+      await page.getByRole("button", { name: "Add mapping", exact: true }).last().click();
+      await assertVisible(page.getByText("Mappings · 2", { exact: true }), "Expected two queued real mappings");
+
+      await page.getByRole("button", { name: "Create policy", exact: true }).click();
+      await page.getByRole("heading", { name: "New custom policy" }).waitFor({ state: "hidden", timeout: 10000 });
+
+      const card = page.locator(`[data-policy-card="true"][data-policy-name="${policyName}"]`);
+      await card.waitFor({ timeout: 10000 });
+      await card.getByRole("button", { name: "Edit", exact: true }).click();
+      await page.getByRole("heading", { name: new RegExp(`Edit ${policyName}`) }).waitFor({ timeout: 5000 });
+      await page.getByTestId("policy-editor-tab-mappings").click();
+      await assertVisible(page.getByText("Mappings · 2", { exact: true }), "Expected two mappings after fresh server reload");
+
+      await assertVisible(page.getByText(requirementA.external_id, { exact: true }), "Expected first persisted requirement");
+      await assertVisible(page.getByText(requirementB.external_id, { exact: true }), "Expected second persisted requirement");
+      await assertVisible(page.getByText("Supports", { exact: true }), "Expected persisted Supports relationship");
+      await assertVisible(page.getByText("Partial", { exact: true }), "Expected persisted Partial coverage");
+      await assertVisible(page.getByText("test rationale", { exact: true }), "Expected persisted rationale");
+      await assertVisible(page.getByText("Implements", { exact: true }), "Expected persisted Implements relationship");
+      await assertVisible(page.getByText("Full", { exact: true }), "Expected persisted Full coverage");
+      await assertVisible(page.getByText("Manual", { exact: true }).first(), "Expected persisted manual provenance");
+      await assertVisible(page.getByText("Trusted", { exact: true }).first(), "Expected persisted trusted state");
+    },
+  },
   // ── CVE policy API round-trip checks ────────────────────────────────────
   // These tests exercise the new policy types introduced in TASK-176 through
   // the real server API to verify the full create → parse → list round-trip.

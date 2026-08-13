@@ -1492,6 +1492,20 @@
       "baseline": "advisory"
     },
     {
+      "name": "20aa-policies-new-modal-mappings-roundtrip",
+      "description": "Policies new modal persists two real requirement mappings and reloads them",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
       "name": "20b-policies-cve-gate-create-roundtrip",
       "description": "API: create require_cve_check policy and verify it round-trips correctly",
       "route": "/deployment-policies",
