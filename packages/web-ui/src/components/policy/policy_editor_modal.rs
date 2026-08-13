@@ -1548,6 +1548,11 @@ pub fn PolicyEditorModal(
                                             cmmc_level: selected_cmmc_level,
                                             cis_section: selected_cis_section,
                                             rationale: selected_rationale,
+                                            requirement_mappings: pending_mappings
+                                                .read()
+                                                .iter()
+                                                .map(PendingPolicyMapping::mapping_request)
+                                                .collect(),
                                         };
                                         create_deployment_policy(&request).await.map(|_| ())
                                     };

@@ -381,6 +381,14 @@ pub async fn create_deployment_policy(
     pool: &PgPool,
     request: &CreateDeploymentPolicyRequest,
 ) -> Result<DeploymentPolicyRecord> {
+    create_deployment_policy_with_mappings(pool, request, None).await
+}
+
+pub async fn create_deployment_policy_with_mappings(
+    pool: &PgPool,
+    request: &CreateDeploymentPolicyRequest,
+    actor_id: Option<Uuid>,
+) -> Result<DeploymentPolicyRecord> {
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
     let policy = sqlx::query_as::<_, DeploymentPolicyRecord>(
@@ -441,6 +449,31 @@ pub async fn create_deployment_policy(
     write_policy_version_digest(&mut tx, policy.id, &canonical)
         .await
         .context("Failed to write policy version digest")?;
+
+    if !request.requirement_mappings.is_empty() {
+        let version_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(policy.id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("Failed to resolve created policy draft")?;
+        for mapping in &request.requirement_mappings {
+            crate::queries::framework_requirements::insert_policy_mapping_in_tx(
+                &mut tx,
+                version_id,
+                mapping.requirement_version_id,
+                &mapping.relationship,
+                &mapping.coverage,
+                mapping.rationale.as_deref(),
+                &mapping.provenance,
+                None,
+                actor_id.unwrap_or_else(Uuid::nil),
+            )
+            .await
+            .context("Failed to persist initial policy requirement mapping")?;
+        }
+    }
 
     tx.commit()
         .await

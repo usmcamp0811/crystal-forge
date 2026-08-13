@@ -802,6 +802,32 @@ pub async fn create_deployment_policy(
         normalise_cci_ids(&request.cci_ids)
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid cci_ids: {e}")))?;
     }
+    for mapping in &request.requirement_mappings {
+        if !matches!(
+            mapping.relationship.as_str(),
+            "implements" | "supports" | "provides_evidence_for"
+        ) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid mapping relationship".to_string(),
+            ));
+        }
+        if !matches!(mapping.coverage.as_str(), "full" | "partial") {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid mapping coverage".to_string(),
+            ));
+        }
+        if !matches!(
+            mapping.provenance.as_str(),
+            "manual" | "imported" | "inherited" | "inferred"
+        ) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid mapping provenance".to_string(),
+            ));
+        }
+    }
 
     // Check for duplicate policy semantics (same type + same config).
     // Note: two policies with the same config but different SRG/CCI mappings
@@ -833,15 +859,19 @@ pub async fn create_deployment_policy(
     }
 
     // Create policy
-    let policy = deployment_policies::create_deployment_policy(&state.pool, &request)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to create deployment policy: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to create deployment policy".to_string(),
-            )
-        })?;
+    let policy = deployment_policies::create_deployment_policy_with_mappings(
+        &state.pool,
+        &request,
+        Some(_user.user_id),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to create deployment policy: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to create deployment policy".to_string(),
+        )
+    })?;
 
     Ok((StatusCode::CREATED, Json(policy)))
 }

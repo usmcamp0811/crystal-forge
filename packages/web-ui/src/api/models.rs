@@ -2092,6 +2092,8 @@ pub struct CreateDeploymentPolicyRequest {
     pub cis_section: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requirement_mappings: Vec<CreatePolicyMappingRequest>,
 }
 
 /// Request to update an existing deployment policy.
@@ -3895,7 +3897,7 @@ pub struct BundleCoverageReport {
 }
 
 /// Request body for creating a requirement mapping.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreatePolicyMappingRequest {
     pub requirement_version_id: Uuid,
     pub relationship: String,

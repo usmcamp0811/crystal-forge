@@ -1379,6 +1379,23 @@ pub struct CreateDeploymentPolicyRequest {
     /// Human-readable rationale for this control
     #[serde(default)]
     pub rationale: Option<String>,
+    /// Normalized requirement mappings to persist with the initial draft.
+    #[serde(default)]
+    pub requirement_mappings: Vec<CreatePolicyRequirementMapping>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreatePolicyRequirementMapping {
+    pub requirement_version_id: uuid::Uuid,
+    pub relationship: String,
+    pub coverage: String,
+    pub rationale: Option<String>,
+    #[serde(default = "default_mapping_provenance")]
+    pub provenance: String,
+}
+
+fn default_mapping_provenance() -> String {
+    "manual".to_string()
 }
 
 /// Request to update an existing deployment policy
