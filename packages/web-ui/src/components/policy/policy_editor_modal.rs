@@ -786,6 +786,11 @@ pub fn PolicyEditorModal(
     let mappings_editable = existing_policy
         .as_ref()
         .is_some_and(is_policy_version_editable);
+    let mapping_target = mapping_editor_target(
+        is_editing,
+        editing_policy_version_id,
+        mappings_editable,
+    );
 
     let mut save_error = use_signal(String::new);
     let mut is_saving = use_signal(|| false);
@@ -1135,11 +1140,7 @@ pub fn PolicyEditorModal(
                                 if rows.is_empty() {
                                     rsx! {
                                         div { style: "color:var(--cf-text-muted);font-size:12px;padding:12px 0;",
-                                            if editing_policy_version_id.is_none() {
-                                                "Save the policy first, then add requirement mappings."
-                                            } else {
-                                                "No requirements mapped yet. Use the editor below to add mappings."
-                                            }
+                                            "No requirement mappings yet. Add mappings below; they will be saved when this policy is created."
                                         }
                                     }
                                 } else {
@@ -1233,7 +1234,7 @@ pub fn PolicyEditorModal(
                             }
 
                             // New mapping editor (only for draft policy versions).
-                             if let Some(pv_id) = editing_policy_version_id.filter(|_| mappings_editable) {
+                             if mapping_target != MappingEditorTarget::Unavailable {
                                 div { style: "border:1px solid var(--cf-border);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:10px;",
                                     div { style: "font-size:12px;font-weight:600;", "Add mapping" }
 
@@ -1391,7 +1392,9 @@ pub fn PolicyEditorModal(
                                                 };
                                                 new_map_saving.set(true);
                                                 new_map_error.set(None);
-                                                let pv_id = pv_id;
+                                                 let MappingEditorTarget::Persisted(pv_id) = mapping_target else {
+                                                     return;
+                                                 };
                                                 spawn(async move {
                                                     let request = CreatePolicyMappingRequest {
                                                         requirement_version_id: rv_id,
