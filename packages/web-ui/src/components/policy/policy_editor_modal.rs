@@ -1140,7 +1140,11 @@ pub fn PolicyEditorModal(
                                 if rows.is_empty() {
                                     rsx! {
                                         div { style: "color:var(--cf-text-muted);font-size:12px;padding:12px 0;",
-                                            "No requirement mappings yet. Add mappings below; they will be saved when this policy is created."
+                                            {match mapping_target {
+                                                MappingEditorTarget::Pending => "No requirement mappings yet. Add mappings below; they will be saved when this policy is created.",
+                                                MappingEditorTarget::Persisted(_) => "No requirement mappings yet. Add a mapping below.",
+                                                MappingEditorTarget::Unavailable => "No requirement mappings.",
+                                            }}
                                         }
                                     }
                                 } else {
@@ -1390,12 +1394,57 @@ pub fn PolicyEditorModal(
                                                     let r = new_map_rationale.read().clone();
                                                     if r.trim().is_empty() { None } else { Some(r) }
                                                 };
-                                                new_map_saving.set(true);
-                                                new_map_error.set(None);
-                                                 let MappingEditorTarget::Persisted(pv_id) = mapping_target else {
-                                                     return;
-                                                 };
-                                                spawn(async move {
+                                                 new_map_error.set(None);
+                                                 let relationship = new_map_relationship.read().clone();
+                                                 let coverage = new_map_coverage.read().clone();
+                                                 let rationale = non_empty(new_map_rationale.read().clone());
+                                                 match mapping_target {
+                                                     MappingEditorTarget::Pending => {
+                                                         let Some(requirement) = new_map_requirement.read().clone() else { new_map_error.set(Some("Select a requirement.".into())); return; };
+                                                         let Some(framework_id) = *new_map_framework_id.read() else { new_map_error.set(Some("Select a framework.".into())); return; };
+                                                         let Some(version_id) = *new_map_fv_id.read() else { new_map_error.set(Some("Select a framework version.".into())); return; };
+                                                         let Some(framework) = frameworks_list.read().iter().find(|fw| fw.id == framework_id).cloned() else { new_map_error.set(Some("Selected framework is unavailable.".into())); return; };
+                                                         let Some(version) = fw_versions_list.read().iter().find(|fv| fv.id == version_id).cloned() else { new_map_error.set(Some("Selected framework version is unavailable.".into())); return; };
+                                                         let pending = pending_mapping_from_selection(&framework, &version, &requirement, relationship, coverage, rationale);
+                                                         let mut next = pending_mappings.read().clone();
+                                                         match add_pending_mapping(&mut next, pending) {
+                                                             Ok(()) => {
+                                                                 pending_mappings.set(next);
+                                                                 new_map_req_id.set(None);
+                                                                 new_map_requirement.set(None);
+                                                                 new_map_search.set(String::new());
+                                                                 new_map_req_label.set(String::new());
+                                                                 req_search_results.set(vec![]);
+                                                                 new_map_relationship.set("implements".into());
+                                                                 new_map_coverage.set("full".into());
+                                                                 new_map_rationale.set(String::new());
+                                                             }
+                                                             Err(error) => new_map_error.set(Some(error.to_string())),
+                                                         }
+                                                     }
+                                                     MappingEditorTarget::Persisted(pv_id) => {
+                                                         new_map_saving.set(true);
+                                                         spawn(async move {
+                                                             let request = CreatePolicyMappingRequest { requirement_version_id: rv_id, relationship, coverage, rationale, provenance: "manual".to_string() };
+                                                             match create_policy_mapping(&pv_id, &request).await {
+                                                                 Ok(_) => {
+                                                                     new_map_req_id.set(None);
+                                                                     new_map_requirement.set(None);
+                                                                     new_map_fv_id.set(None);
+                                                                     new_map_framework_id.set(None);
+                                                                     new_map_search.set(String::new());
+                                                                     new_map_rationale.set(String::new());
+                                                                     fw_versions_list.set(vec![]);
+                                                                     if let Ok(rows) = fetch_policy_requirement_mappings(&pv_id).await { mappings.set(rows); }
+                                                                 }
+                                                                 Err(e) => new_map_error.set(Some(format!("Failed to add mapping: {e}"))),
+                                                             }
+                                                             new_map_saving.set(false);
+                                                         });
+                                                     }
+                                                     MappingEditorTarget::Unavailable => {}
+                                                 }
+                                                 /* spawn(async move {
                                                     let request = CreatePolicyMappingRequest {
                                                         requirement_version_id: rv_id,
                                                         relationship,
@@ -1422,7 +1471,7 @@ pub fn PolicyEditorModal(
                                                         }
                                                     }
                                                     new_map_saving.set(false);
-                                                });
+                                                 }); */
                                             },
                                             if *new_map_saving.read() { "Adding…" } else { "Add mapping" }
                                         }
