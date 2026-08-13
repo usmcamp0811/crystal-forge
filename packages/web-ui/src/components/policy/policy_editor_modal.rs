@@ -1560,15 +1560,31 @@ pub fn PolicyEditorModal(
                                     match result {
                                         Ok(created_opt) => {
                                             // Fetch the updated list so edits (name changes, etc.) are
-                                            // reflected globally. For new policies we also insert the
-                                            // created record at the front so it is immediately
-                                            // discoverable even when there are >100 existing policies.
+                                            // reflected globally. The list response includes the
+                                            // current_version_id join that the create endpoint omits,
+                                            // so for a new policy we prefer the entry from the refreshed
+                                            // list over the raw create response. If the refresh fails we
+                                            // fall back to the create response so the card is still shown.
+                                            let created_id = created_opt.as_ref().map(|c| c.id);
                                             match policies_api::load_policies().await {
                                                 policies_api::PolicyLoadResult::Ok(mut latest) => {
-                                                    if let Some(created) = created_opt {
-                                                        let def = policies_api::policy_record_to_definition(created);
-                                                        latest.retain(|p| p.id != def.id);
-                                                        latest.insert(0, def);
+                                                    // For new policies, ensure the entry is at the front.
+                                                    // The list response carries the full current_version_id,
+                                                    // so prefer it over the raw create response.
+                                                    if let Some(id) = created_id {
+                                                        if !latest.iter().any(|p| p.id == id) {
+                                                            // Not on first page — fall back to create response.
+                                                            if let Some(created) = created_opt {
+                                                                let def = policies_api::policy_record_to_definition(created);
+                                                                latest.insert(0, def);
+                                                            }
+                                                        } else {
+                                                            // Reorder so newly created policy is first.
+                                                            if let Some(pos) = latest.iter().position(|p| p.id == id) {
+                                                                let item = latest.remove(pos);
+                                                                latest.insert(0, item);
+                                                            }
+                                                        }
                                                     }
                                                     policy_library.set(latest);
                                                 }
