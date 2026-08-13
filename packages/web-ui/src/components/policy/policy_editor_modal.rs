@@ -773,7 +773,39 @@ fn PolicyMappingsTab(
                         div { style: "display:grid;grid-template-columns:1fr 1fr;gap:8px;", div { class: "field", label { style: "font-size:11px;", "Relationship" }, select { class: "input focus-ring", onchange: move |event| relationship.set(event.value()), option { value: "implements", "Implements" }, option { value: "supports", "Supports" }, option { value: "provides_evidence_for", "Provides evidence for" } } }, div { class: "field", label { style: "font-size:11px;", "Coverage" }, select { class: "input focus-ring", onchange: move |event| coverage.set(event.value()), option { value: "full", "Full" }, option { value: "partial", "Partial" } } } }
                         div { class: "field", label { style: "font-size:11px;", "Rationale (optional)" }, textarea { class: "input focus-ring", rows: "2", value: "{rationale}", oninput: move |event| rationale.set(event.value()) } }
                         if let Some(text) = &*error.read() { div { class: "sd-callout sd-callout-error", style: "font-size:11px;", "{text}" } }
-                        button { class: "btn btn-primary focus-ring", disabled: *saving.read(), onclick: move |_| { let Some(rv_id) = *requirement_id.read() else { return; }; let relationship = relationship.read().clone(); let coverage = coverage.read().clone(); let rationale = non_empty(rationale.read().clone()); match mapping_target { MappingEditorTarget::Pending => { let Some(item) = requirement.read().clone() else { return; }; let Some(fw_id) = *framework_id.read() else { return; }; let Some(fv_id) = *version_id.read() else { return; }; let Some(fw) = frameworks.read().iter().find(|item| item.id == fw_id).cloned() else { return; }; let Some(fv) = versions.read().iter().find(|item| item.id == fv_id).cloned() else { return; }; let mut next = pending_mappings.read().clone(); match add_pending_mapping(&mut next, pending_mapping_from_selection(&fw, &fv, &item, relationship, coverage, rationale)) { Ok(()) => { pending_mappings.set(next); requirement_id.set(None); requirement.set(None); search.set(String::new()); }, Err(e) => error.set(Some(e.to_string())) } }, MappingEditorTarget::Persisted(policy_id) => { saving.set(true); spawn(async move { let request = CreatePolicyMappingRequest { requirement_version_id: rv_id, relationship, coverage, rationale, provenance: "manual".into() }; match create_policy_mapping(&policy_id, &request).await { Ok(_) => { if let Ok(value) = fetch_policy_requirement_mappings(&policy_id).await { mappings.set(value); } requirement_id.set(None); requirement.set(None); search.set(String::new()); }, Err(e) => error.set(Some(format!("Failed to add mapping: {e}"))) } saving.set(false); }); }, MappingEditorTarget::Unavailable => {} } }, if *saving.read() { "Adding..." } else { "Add mapping" } }
+                        button { class: "btn btn-primary focus-ring", disabled: *saving.read(), onclick: move |_| {
+                            error.set(None);
+                            let Some(rv_id) = *requirement_id.read() else { error.set(Some("Select a requirement.".into())); return; };
+                            let relationship_value = relationship.read().clone();
+                            let coverage_value = coverage.read().clone();
+                            let rationale_value = non_empty(rationale.read().clone());
+                            match mapping_target {
+                                MappingEditorTarget::Pending => {
+                                    let Some(item) = requirement.read().clone() else { error.set(Some("Select a requirement.".into())); return; };
+                                    let Some(fw_id) = *framework_id.read() else { error.set(Some("Select a framework.".into())); return; };
+                                    let Some(fv_id) = *version_id.read() else { error.set(Some("Select a framework version.".into())); return; };
+                                    let Some(fw) = frameworks.read().iter().find(|item| item.id == fw_id).cloned() else { error.set(Some("Selected framework is unavailable.".into())); return; };
+                                    let Some(fv) = versions.read().iter().find(|item| item.id == fv_id).cloned() else { error.set(Some("Selected framework version is unavailable.".into())); return; };
+                                    let mut next = pending_mappings.read().clone();
+                                    match add_pending_mapping(&mut next, pending_mapping_from_selection(&fw, &fv, &item, relationship_value, coverage_value, rationale_value)) {
+                                        Ok(()) => { pending_mappings.set(next); requirement_id.set(None); requirement.set(None); search.set(String::new()); results.set(Vec::new()); relationship.set("implements".into()); coverage.set("full".into()); rationale.set(String::new()); }
+                                        Err(e) => error.set(Some(e.to_string())),
+                                    }
+                                }
+                                MappingEditorTarget::Persisted(policy_id) => {
+                                    saving.set(true);
+                                    spawn(async move {
+                                        let request = CreatePolicyMappingRequest { requirement_version_id: rv_id, relationship: relationship_value, coverage: coverage_value, rationale: rationale_value, provenance: "manual".into() };
+                                        match create_policy_mapping(&policy_id, &request).await {
+                                            Ok(_) => { if let Ok(value) = fetch_policy_requirement_mappings(&policy_id).await { mappings.set(value); } requirement_id.set(None); requirement.set(None); version_id.set(None); framework_id.set(None); search.set(String::new()); rationale.set(String::new()); results.set(Vec::new()); versions.set(Vec::new()); }
+                                            Err(e) => error.set(Some(format!("Failed to add mapping: {e}"))),
+                                        }
+                                        saving.set(false);
+                                    });
+                                }
+                                MappingEditorTarget::Unavailable => {}
+                            }
+                        }, if *saving.read() { "Adding..." } else { "Add mapping" } }
                     }
                 }
             } else if editing_policy_version_id.is_some() {
