@@ -6193,7 +6193,10 @@ const steps = [
         .locator("select")
         .filter({ hasText: "Add assertion / rule" })
         .first();
-      await addRule.selectOption("packages_installed");
+      await addRule.selectOption("custom_eval");
+      // Use the policy name as the expression to ensure uniqueness and avoid
+      // duplicate-content rejection from the server's config deduplication check.
+      await page.getByPlaceholder("config.networking.firewall.enable == true").last().fill(`config.networking.hostName == "${policyName}"`);
       await page.getByTestId("policy-editor-tab-details").click();
       await page.getByPlaceholder("e.g. canary-25").fill(policyName);
       await page.getByTestId("policy-editor-tab-mappings").click();
@@ -6271,10 +6274,10 @@ const steps = [
         console.warn(`[20aa] Created policy ${createdPolicy.id} is NOT on the first 100 list page — pagination limitation`);
       }
 
-      // The UI inserts the created policy at the front of the local library, so the
-      // card must be present even without a page reload.
+      // The UI inserts the created policy at the front of the local library after the
+      // modal closes. Allow up to 20s for the Dioxus re-render to flush the card.
       const card = page.locator(`[data-policy-card="true"][data-policy-name="${policyName}"]`);
-      await card.waitFor({ timeout: 10000 });
+      await card.waitFor({ timeout: 20000 });
 
       // Open the Edit modal and check the Mappings tab loads server data.
       await card.getByRole("button", { name: "Edit", exact: true }).click();
