@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-12 18:12'
+updated_date: '2026-08-13 17:02'
 labels: []
 milestone: m-22
 dependencies:
@@ -369,6 +369,8 @@ DATABASE_URL=... cargo test -p cf-server --lib -- --ignored queries::compliance_
 - Extend `cf-server`'s existing ignored `queries::compliance_interchange` database fixtures and commit-path tests only; do not alter production matching behavior.
 - Cover accepted/current trusted inherited reuse, inherited semantics and existing-draft preservation, rejection of invalid source states/content, shared effective-draft bundle deduplication/order/accounting, and transaction rollback.
 - Verify with the requested isolated `DATABASE_URL` against the targeted ignored DB suite, plus formatting and diff checks.
+
+Next slice: persist create-mode queued requirement mappings atomically with new policy creation. Extend the create-policy request/handler/query path to accept validated mapping payloads, create the policy first, insert mappings in the same transaction, and preserve all-or-nothing behavior. Add focused server tests and update the browser round-trip step to verify persisted mappings after reload. Keep accepted-version immutability and existing edit-mode CRUD unchanged.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -435,4 +437,6 @@ Implemented and pushed immutable STIG policy reuse: `MapExisting` is revalidated
 2026-08-11 MapExisting DB-proof slice: added three ignored DB-gated STIG commit-path tests in `packages/default/crates/cf-server/src/queries/compliance_interchange.rs`. They prove current accepted trusted inherited reuse, supports/partial/rationale preservation, shared draft reuse/membership deduplication/order/accounting, mutable/suggested/superseded/deprecated/changed rejection, and rollback after a late invalid source selection. Verified with `DATABASE_URL=postgres://crystal_forge:password@127.0.0.1:3042/crystal_forge nix develop ../.. --command cargo test -p cf-server --lib -- --ignored map_existing_stig` from `packages/default`: 3 passed. `nix develop ../.. --command cargo fmt --all --check` and `git diff --check` passed. No commit or push. The worktree also contains an unrelated concurrent modification to `packages/default/crates/cf-server/src/handlers/api/framework_requirements.rs`, left untouched.
 
 2026-08-12 Phase 22 shared-policy validation follow-up: verified the 8 Phase 22 ignored DB tests, plus the complete selected ignored compliance-interchange/framework-requirements suite (34 passed, 0 failed). Also verified cargo fmt --all --check, git diff --check, and SQLX_OFFLINE=true cargo check -p cf-server. Removed unused imports exposed by the final validation pass. The only remaining worktree change is packages/default/crates/cf-server/src/queries/compliance_interchange.rs; no commit or push performed.
+
+2026-08-13: Added and pushed manifest-backed Playwright coverage for real New custom policy → Mappings UI with two queued mappings (commit 00dbc2a0). The successful web-ui check's VM artifacts were not exported into this worktree; result points only to the packaged web-ui output. Next slice is create-mode mapping persistence.
 <!-- SECTION:NOTES:END -->
