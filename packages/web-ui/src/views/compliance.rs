@@ -22,7 +22,7 @@ use crate::api::models::{
 use crate::components::compliance::{
     BundleCatalog, BundleHeader, EvidenceDrawer, ImportReview, RefinePolicyStep,
     RefinedPolicyDraft, RefinedRuleAction, RefinedStigRule, ScoreStrip, SourceCheck,
-    SourceCheckBodyPart, SourceStigRule, SystemsMatrix, action_to_import,
+    SourceCheckBodyPart, SourceStigRule, SystemsMatrix, action_to_import, mapping_semantics_for,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::components::io_menu::{IOMenu, IOMenuItem};
@@ -695,7 +695,6 @@ pub fn ComplianceView() -> Element {
         if is_admin && *show_import_stig.read() {
             ImportStigModal {
                 environments: environments.read().clone(),
-                existing_policies: policies.read().iter().filter_map(|policy| policy.version_id.map(|version_id| (version_id, policy.name.clone()))).collect(),
                 is_stig_import: *import_mode_stig.read(),
                 on_close: move |_| show_import_stig.set(false),
                 on_success: move |_| {
@@ -1886,14 +1885,14 @@ fn refined_rules_from_rules(rules: &[StigRule]) -> Vec<RefinedStigRule> {
         mapping_relationship: None,
         mapping_coverage: None,
         mapping_rationale: None,
-        mapping_proof: None,
+        candidate_options: vec![],
+        selected_candidate: None,
     }).collect()
 }
 
 #[derive(Props, Clone, PartialEq)]
 struct ImportStigModalProps {
     environments: Vec<EnvironmentSummary>,
-    existing_policies: Vec<(uuid::Uuid, String)>,
     on_close: EventHandler<()>,
     on_success: EventHandler<()>,
     is_stig_import: bool,
@@ -2096,9 +2095,17 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                      step.set("native-review".to_string());
                                                                  } else {
                                                                      // Foreign XCCDF workflow: do rule processing
-                                                                     let parsed_rules = rules_from_preview(&preview_response.read().as_ref().unwrap());
-                                                                     rules.set(parsed_rules);
-                                                                  refined_rules.set(refined_rules_from_rules(&rules.read()));
+                                                                      let parsed_rules = rules_from_preview(&preview_response.read().as_ref().unwrap());
+                                                                      rules.set(parsed_rules.clone());
+                                                                      let mut refined = refined_rules_from_rules(&parsed_rules);
+                                                                      if let Some(reconciliation) = foreign_reconciliation.as_ref() {
+                                                                          for rule in refined.iter_mut() {
+                                                                              if let Some(requirement) = reconciliation.requirements.iter().find(|requirement| requirement.rule_id == rule.source.rule_id) {
+                                                                                  rule.candidate_options = requirement.candidates.clone();
+                                                                              }
+                                                                          }
+                                                                      }
+                                                                      refined_rules.set(refined);
                                                                       mapping_semantics.set(
                                                                       foreign_reconciliation
                                                                           .as_ref()
@@ -2109,8 +2116,8 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                                   (
                                                                                       requirement.rule_id.clone(),
                                                                                        crate::api::models::ImportedMappingSemantics {
-                                                                                           relationship: Some("implements".into()),
-                                                                                           coverage: Some("full".into()),
+                                                                                           relationship: None,
+                                                                                           coverage: None,
                                                                                            rationale: Some(candidate.match_reasons.join(" ")),
                                                                                            reviewed_related_candidate: None,
                                                                                       },
@@ -2684,7 +2691,6 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                             rules: refined_rules_signal,
                             cursor: cursor_signal,
                             review_rule_ids: Some(refine_rule_ids.read().clone()),
-                            existing_policies: props.existing_policies.clone(),
                             on_back: move |_| step.set("reconcile".to_string()),
                             on_review: move |_| step.set("final-review".to_string()),
                         }
@@ -2715,7 +2721,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                          relationship: rule.mapping_relationship.clone(),
                                                          coverage: rule.mapping_coverage.clone(),
                                                          rationale: rule.mapping_rationale.clone().filter(|value| !value.trim().is_empty()),
-                                                         reviewed_related_candidate: None,
+                                                         reviewed_related_candidate: mapping_semantics_for(rule).and_then(|semantics| semantics.reviewed_related_candidate),
                                                      },
                                                  )
                                              })
