@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-13 17:02'
+updated_date: '2026-08-13 19:23'
 labels: []
 milestone: m-22
 dependencies:
@@ -439,4 +439,6 @@ Implemented and pushed immutable STIG policy reuse: `MapExisting` is revalidated
 2026-08-12 Phase 22 shared-policy validation follow-up: verified the 8 Phase 22 ignored DB tests, plus the complete selected ignored compliance-interchange/framework-requirements suite (34 passed, 0 failed). Also verified cargo fmt --all --check, git diff --check, and SQLX_OFFLINE=true cargo check -p cf-server. Removed unused imports exposed by the final validation pass. The only remaining worktree change is packages/default/crates/cf-server/src/queries/compliance_interchange.rs; no commit or push performed.
 
 2026-08-13: Added and pushed manifest-backed Playwright coverage for real New custom policy → Mappings UI with two queued mappings (commit 00dbc2a0). The successful web-ui check's VM artifacts were not exported into this worktree; result points only to the packaged web-ui output. Next slice is create-mode mapping persistence.
+
+2026-08-13: Corrected 20aa Playwright selectors to wait for asynchronously loaded framework/version options, added policy-card data-policy-id, and changed audit verification to resolve current_version_id from the policy list API before querying persisted mappings. node --check, git diff --check, cargo fmt --manifest-path packages/default/Cargo.toml --all --check, cargo check -p cf-server, and cargo check --manifest-path packages/web-ui/Cargo.toml passed; full web-ui Nix check was interrupted by the 120-second tool timeout before completion.
 <!-- SECTION:NOTES:END -->
