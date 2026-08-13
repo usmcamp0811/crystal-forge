@@ -818,13 +818,19 @@ pub async fn create_deployment_policy(
                 "Invalid mapping coverage".to_string(),
             ));
         }
-        if !matches!(
-            mapping.provenance.as_str(),
-            "manual" | "imported" | "inherited" | "inferred"
-        ) {
+        if mapping.provenance != "manual" {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "Invalid mapping provenance".to_string(),
+                "Create-policy mappings must use manual provenance".to_string(),
+            ));
+        }
+    }
+    let mut requirement_ids = HashSet::new();
+    for mapping in &request.requirement_mappings {
+        if !requirement_ids.insert(mapping.requirement_version_id) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "A requirement version may only be mapped once".to_string(),
             ));
         }
     }
