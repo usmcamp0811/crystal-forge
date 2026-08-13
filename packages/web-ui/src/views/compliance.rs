@@ -1808,6 +1808,25 @@ fn human_fidelity(value: Option<&str>) -> &'static str {
     }
 }
 
+fn reconciliation_match_label(match_type: &str) -> &'static str {
+    match match_type {
+        "authoritative_mapping" => "Existing mapping",
+        "inherited_mapping" => "Inherited mapping",
+        "exact_technical_match" => "Exact technical match",
+        "related_mapping" => "Related candidate",
+        "fuzzy_similarity" => "Similarity candidate",
+        _ => "Candidate",
+    }
+}
+
+fn reconciliation_match_class(match_type: &str) -> &'static str {
+    match match_type {
+        "authoritative_mapping" | "inherited_mapping" | "exact_technical_match" => "chip chip-success",
+        "related_mapping" | "fuzzy_similarity" => "chip chip-warning",
+        _ => "chip chip-unknown",
+    }
+}
+
 fn import_action_from_rule(rule: &StigRule) -> XccdfRuleImportAction {
     let customization = ImportedPolicyCustomization {
         policy_name: Some(rule.local_name.clone()),
@@ -2585,12 +2604,12 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                     }
                     div { class: "modal-body", style: "overflow-y:auto;",
                         div { style: "display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px;",
-                            for (count, label, color) in [
+                             for (count, label, color) in [
                                 (reused_count, "existing implementations reused", "#34d399"),
                                 (ready_count, "ready to create — enforcement inferred", "#60a5fa"),
                                 (attention_rule_ids.len(), "need review — no automatic resolution", if attention_rule_ids.is_empty() { "var(--cf-text-muted)" } else { "#fbbf24" }),
                             ] {
-                                div { class: "card", style: "padding:14px 12px;text-align:center;",
+                                 div { class: "card", style: "padding:14px 12px;text-align:center;min-height:72px;display:flex;flex-direction:column;justify-content:center;",
                                     div { style: "font-size:24px;font-weight:700;color:{color};", "{count}" }
                                     div { style: "font-size:11px;color:var(--cf-text-muted);line-height:1.4;margin-top:2px;", "{label}" }
                                 }
@@ -2607,13 +2626,16 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 label { "Requiring attention · {attention_rule_ids.len()}" }
                                 div { style: "display:flex;flex-direction:column;gap:5px;max-height:220px;overflow-y:auto;",
                                     for row in reconciliation_rows.iter().filter(|row| !row.auto_resolvable || row.state == "identity_conflict") {
-                                        div { key: "attention-{row.rule_id}", style: "display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-radius:8px;border:1px solid var(--cf-divider);",
+                                         div { key: "attention-{row.rule_id}", style: "display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:8px;border:1px solid color-mix(in oklab, #fbbf24 28%, var(--cf-divider));background:color-mix(in oklab, #fbbf24 4%, var(--cf-card-bg));",
                                             span { style: "color:#fbbf24;margin-top:2px;flex-shrink:0;display:inline-flex;", Icon { name: IconName::Warn, size: 13 } }
                                             div { style: "min-width:0;",
                                                 div { style: "font-size:12.5px;font-weight:600;line-height:1.4;", "{row.title.clone().unwrap_or_else(|| row.external_id.clone())}" }
                                                 div { class: "mono", style: "font-size:10.5px;color:var(--cf-text-muted);", "{row.external_id}" }
-                                                 div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;",
-                                                     if row.state == "identity_conflict" { "Requirement identity conflict needs a human decision." } else if let Some(candidate) = row.candidates.first() { "Candidate: {candidate.match_type} · {candidate.confidence}% confidence" } else { "No trusted mapped implementation or inferred enforcement is available." }
+                                                  div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;",
+                                                      if row.state == "identity_conflict" { "Requirement identity conflict needs a human decision." } else if let Some(candidate) = row.candidates.first() {
+                                                          span { class: reconciliation_match_class(&candidate.match_type), style: "font-size:9px;padding:2px 6px;", "{reconciliation_match_label(&candidate.match_type)}" }
+                                                          span { "{candidate.confidence}% confidence" }
+                                                      } else { "No trusted mapped implementation or inferred enforcement is available." }
                                                  }
                                                  if let Some(candidate) = row.candidates.first() {
                                                      div { style: "display:flex;gap:5px;flex-wrap:wrap;margin-top:5px;",
@@ -2632,13 +2654,16 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                             details { style: "margin-top:4px;",
                                 summary { style: "cursor:pointer;font-size:11.5px;font-weight:600;color:var(--cf-text-muted);", "Show {reused_count + ready_count} auto-resolved controls" }
                                 div { style: "display:flex;flex-direction:column;gap:5px;margin-top:8px;max-height:220px;overflow-y:auto;",
-                                    for row in reconciliation_rows.iter().filter(|row| row.auto_resolvable && row.state != "identity_conflict") {
-                                        div { key: "resolved-{row.rule_id}", style: "display:flex;gap:10px;align-items:flex-start;padding:7px 10px;border-radius:8px;background:var(--cf-subtle-bg);",
+                                      for row in reconciliation_rows.iter().filter(|row| row.auto_resolvable && row.state != "identity_conflict") {
+                                         div { key: "resolved-{row.rule_id}", style: "display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-radius:8px;background:var(--cf-subtle-bg);",
                                             span { style: if !row.candidates.is_empty() { "color:#34d399;margin-top:2px;display:inline-flex;" } else { "color:#60a5fa;margin-top:2px;display:inline-flex;" }, Icon { name: if !row.candidates.is_empty() { IconName::Check } else { IconName::Shield }, size: 12 } }
                                             div { style: "min-width:0;",
                                                 div { style: "font-size:12px;font-weight:600;line-height:1.4;", "{row.title.clone().unwrap_or_else(|| row.external_id.clone())}" }
                                                  div { style: "font-size:10.5px;color:var(--cf-text-muted);margin-top:1px;",
-                                     if let Some(candidate) = row.candidates.first() { "{candidate.match_type} · Candidate: {candidate.policy_name}" } else { "Enforcement inferred from the STIG fix text" }
+                                      if let Some(candidate) = row.candidates.first() {
+                                          span { class: reconciliation_match_class(&candidate.match_type), style: "font-size:9px;padding:2px 6px;margin-right:4px;", "{reconciliation_match_label(&candidate.match_type)}" }
+                                          "{candidate.policy_name} · {candidate.confidence}%"
+                                      } else { "Enforcement inferred from the STIG fix text" }
                                                  }
                                             }
                                         }
