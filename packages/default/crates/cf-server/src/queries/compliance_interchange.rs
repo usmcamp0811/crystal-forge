@@ -5476,7 +5476,11 @@ mod tests {
             &pkg,
             existing_policy_version_id,
             Some(MapExistingProof::ExactTechnicalMatch),
-            None,
+            Some(ImportedMappingSemantics {
+                relationship: Some("implements".into()),
+                coverage: Some("full".into()),
+                ..Default::default()
+            }),
         );
         let bundle_name = validated.bundle.name.clone();
         let source_sha256 = pkg.provenance.sha256.clone();
@@ -5540,7 +5544,11 @@ mod tests {
             &pkg,
             Uuid::new_v4(),
             Some(MapExistingProof::ExactTechnicalMatch),
-            None,
+            Some(ImportedMappingSemantics {
+                relationship: Some("implements".into()),
+                coverage: Some("full".into()),
+                ..Default::default()
+            }),
         );
         let bundle_name = validated.bundle.name.clone();
 

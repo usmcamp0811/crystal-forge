@@ -12,7 +12,7 @@ use crate::compliance::digest::{
 };
 use crate::compliance::interchange::{CANONICALIZATION_VERSION, DIGEST_ALGORITHM};
 use crate::compliance::xccdf::import_models::{
-    ImportPlanError, ImportedPolicyRecord, ValidatedImportPlan, XccdfImportPlan,
+    ImportPlanError, ImportedPolicyRecord, MapExistingProof, ValidatedImportPlan, XccdfImportPlan,
     XccdfRuleImportAction,
 };
 use crate::compliance::xccdf::models::{DocumentClass, ParsedRule, ParsedXccdf};
@@ -431,6 +431,53 @@ pub fn validate_import_plan(
             return Err(ImportPlanError::cf_native_invalid(
                 "IMPORT_RELATED_REVIEW_INVALID",
                 format!("reviewed related candidate for {rule_id} must match unproved MapExisting"),
+            ));
+        }
+        if !matches!(
+            semantics.relationship.as_deref(),
+            Some("implements" | "supports" | "provides_evidence_for")
+        ) || !matches!(semantics.coverage.as_deref(), Some("full" | "partial"))
+        {
+            return Err(ImportPlanError::cf_native_invalid(
+                "IMPORT_RELATED_REVIEW_INVALID",
+                format!(
+                    "reviewed related candidate for {rule_id} requires explicit relationship and coverage"
+                ),
+            ));
+        }
+    }
+
+    // Exact technical reuse is deterministic evidence for policy selection,
+    // but it does not establish that the whole compliance requirement is fully
+    // implemented. Require the reviewer to state the mapping semantics rather
+    // than silently applying implements/full defaults.
+    for action in &plan.rule_actions {
+        let XccdfRuleImportAction::MapExisting {
+            rule_id,
+            proof: Some(MapExistingProof::ExactTechnicalMatch),
+            ..
+        } = action
+        else {
+            continue;
+        };
+        let Some(semantics) = plan.mapping_semantics.get(rule_id) else {
+            return Err(ImportPlanError::cf_native_invalid(
+                "IMPORT_MAPPING_SEMANTICS_INVALID",
+                format!(
+                    "exact technical reuse for {rule_id} requires explicit relationship and coverage"
+                ),
+            ));
+        };
+        if !matches!(
+            semantics.relationship.as_deref(),
+            Some("implements" | "supports" | "provides_evidence_for")
+        ) || !matches!(semantics.coverage.as_deref(), Some("full" | "partial"))
+        {
+            return Err(ImportPlanError::cf_native_invalid(
+                "IMPORT_MAPPING_SEMANTICS_INVALID",
+                format!(
+                    "exact technical reuse for {rule_id} requires explicit relationship and coverage"
+                ),
             ));
         }
     }
@@ -875,6 +922,57 @@ mod tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn reviewed_related_requires_explicit_mapping_semantics() {
+        let parsed = minimal_foreign_parsed(&["rule-1"]);
+        let policy_version_id = Uuid::new_v4();
+        let related = crate::compliance::xccdf::import_models::ReviewedRelatedCandidate {
+            policy_version_id,
+            related_requirement_version_id: Uuid::new_v4(),
+            shared_cci_ids: vec!["CCI-000001".into()],
+            shared_srg_ids: vec![],
+        };
+        let mut plan = valid_plan(&["rule-1"]);
+        plan.rule_actions = vec![XccdfRuleImportAction::MapExisting {
+            rule_id: "rule-1".into(),
+            policy_version_id,
+            proof: None,
+        }];
+        plan.mapping_semantics.insert(
+            "rule-1".into(),
+            ImportedMappingSemantics {
+                reviewed_related_candidate: Some(related),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            validate_import_plan(plan, &parsed),
+            Err(ImportPlanError {
+                code: "IMPORT_RELATED_REVIEW_INVALID",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn exact_technical_reuse_requires_explicit_mapping_semantics() {
+        let parsed = minimal_foreign_parsed(&["rule-1"]);
+        let policy_version_id = Uuid::new_v4();
+        let mut plan = valid_plan(&["rule-1"]);
+        plan.rule_actions = vec![XccdfRuleImportAction::MapExisting {
+            rule_id: "rule-1".into(),
+            policy_version_id,
+            proof: Some(MapExistingProof::ExactTechnicalMatch),
+        }];
+        assert!(matches!(
+            validate_import_plan(plan, &parsed),
+            Err(ImportPlanError {
+                code: "IMPORT_MAPPING_SEMANTICS_INVALID",
+                ..
+            })
+        ));
     }
 
     #[test]
