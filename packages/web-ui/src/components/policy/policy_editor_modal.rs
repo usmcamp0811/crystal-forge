@@ -40,6 +40,50 @@ struct PendingPolicyMapping {
     rationale: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MappingEditorTarget {
+    Pending,
+    Persisted(Uuid),
+    Unavailable,
+}
+
+fn mapping_editor_target(
+    is_editing: bool,
+    editing_policy_version_id: Option<Uuid>,
+    mappings_editable: bool,
+) -> MappingEditorTarget {
+    if !is_editing {
+        MappingEditorTarget::Pending
+    } else if mappings_editable {
+        editing_policy_version_id
+            .map(MappingEditorTarget::Persisted)
+            .unwrap_or(MappingEditorTarget::Unavailable)
+    } else {
+        MappingEditorTarget::Unavailable
+    }
+}
+
+fn pending_mapping_from_selection(
+    framework: &ComplianceFrameworkSummary,
+    framework_version: &ComplianceFrameworkVersionSummary,
+    requirement: &RequirementVersionSummary,
+    relationship: String,
+    coverage: String,
+    rationale: Option<String>,
+) -> PendingPolicyMapping {
+    PendingPolicyMapping {
+        requirement_version_id: requirement.id,
+        framework_name: framework.name.clone(),
+        framework_version: framework_version.version.clone(),
+        requirement_external_id: requirement.external_id.clone(),
+        requirement_kind: requirement.kind.clone(),
+        requirement_title: requirement.title.clone(),
+        relationship,
+        coverage,
+        rationale,
+    }
+}
+
 impl PendingPolicyMapping {
     fn mapping_request(&self) -> CreatePolicyMappingRequest {
         CreatePolicyMappingRequest {
@@ -1968,6 +2012,28 @@ mod tests {
         assert!(add_pending_mapping(&mut mappings, mapping).is_err());
         remove_pending_mapping(&mut mappings, Uuid::from_u128(1));
         assert!(mappings.is_empty());
+    }
+
+    #[test]
+    fn mapping_editor_target_distinguishes_create_edit_and_immutable_modes() {
+        let version = Uuid::from_u128(7);
+        assert_eq!(mapping_editor_target(false, None, false), MappingEditorTarget::Pending);
+        assert_eq!(mapping_editor_target(true, Some(version), true), MappingEditorTarget::Persisted(version));
+        assert_eq!(mapping_editor_target(true, Some(version), false), MappingEditorTarget::Unavailable);
+        assert_eq!(mapping_editor_target(true, None, true), MappingEditorTarget::Unavailable);
+    }
+
+    #[test]
+    fn pending_mapping_builder_captures_selection_metadata() {
+        let framework = ComplianceFrameworkSummary { id: Uuid::from_u128(1), name: "NIST 800-53".into(), publisher: None, canonical_source_key: "nist".into(), description: None, version_count: 1 };
+        let version = ComplianceFrameworkVersionSummary { id: Uuid::from_u128(2), framework_id: framework.id, version: "Rev 5".into(), canonical_release_key: "rev5".into(), title: None, published_at: None, semantic_digest: "digest".into(), requirement_count: 1 };
+        let requirement = RequirementVersionSummary { id: Uuid::from_u128(3), requirement_id: Uuid::from_u128(4), framework_version_id: version.id, external_id: "SC-45".into(), title: Some("System time synchronization".into()), kind: "control".into(), severity: None, parent_requirement_version_id: None, semantic_digest: "req".into() };
+        let mapping = pending_mapping_from_selection(&framework, &version, &requirement, "supports".into(), "partial".into(), Some("reviewed".into()));
+        assert_eq!(mapping.requirement_version_id, requirement.id);
+        assert_eq!(mapping.framework_name, "NIST 800-53");
+        assert_eq!(mapping.framework_version, "Rev 5");
+        assert_eq!(mapping.requirement_kind, "control");
+        assert_eq!(mapping.rationale.as_deref(), Some("reviewed"));
     }
 
     #[test]
