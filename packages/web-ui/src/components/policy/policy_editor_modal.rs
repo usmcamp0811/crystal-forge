@@ -1959,9 +1959,12 @@ mod tests {
         let mut mappings = Vec::new();
         let mapping = pending(1);
         assert!(add_pending_mapping(&mut mappings, mapping.clone()).is_ok());
-        assert_eq!(mappings[0].mapping_request().relationship, "supports");
-        assert_eq!(mappings[0].mapping_request().coverage, "partial");
-        assert_eq!(mappings[0].mapping_request().provenance, "manual");
+        let request = mappings[0].mapping_request();
+        assert_eq!(request.requirement_version_id, Uuid::from_u128(1));
+        assert_eq!(request.relationship, "supports");
+        assert_eq!(request.coverage, "partial");
+        assert_eq!(request.rationale.as_deref(), Some("reviewed mapping"));
+        assert_eq!(request.provenance, "manual");
         assert!(add_pending_mapping(&mut mappings, mapping).is_err());
         remove_pending_mapping(&mut mappings, Uuid::from_u128(1));
         assert!(mappings.is_empty());
