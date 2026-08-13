@@ -1221,7 +1221,7 @@ mod tests {
             .execute(&pool)
             .await
             .expect("clean policy");
-        sqlx::query("DELETE FROM compliance_requirement_versions WHERE requirement_id = (SELECT id FROM compliance_requirements WHERE canonical_requirement_key = $1)")
+        sqlx::query("DELETE FROM compliance_requirement_versions v USING compliance_requirements r WHERE v.requirement_id = r.id AND r.canonical_requirement_key = $1")
             .bind("REQ-2")
             .execute(&pool)
             .await
@@ -1231,7 +1231,7 @@ mod tests {
             .execute(&pool)
             .await
             .expect("clean second requirement");
-        sqlx::query("DELETE FROM compliance_requirement_versions WHERE requirement_id = (SELECT id FROM compliance_requirements WHERE canonical_requirement_key = $1)")
+        sqlx::query("DELETE FROM compliance_requirement_versions v USING compliance_requirements r WHERE v.requirement_id = r.id AND r.canonical_requirement_key = $1")
             .bind(format!("REQ-{}", user_id.simple()))
             .execute(&pool)
             .await
