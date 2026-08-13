@@ -1883,6 +1883,9 @@ fn refined_rules_from_rules(rules: &[StigRule]) -> Vec<RefinedStigRule> {
             evidence_requirements: rule.evidence_requirements.iter().filter_map(|evidence| match evidence { ImportedEvidenceRequirement::Command { command, expected_output } => Some(crate::components::compliance::refine_policy::EvidenceRequirementDraft::Command { command: command.clone(), expected_output: expected_output.clone() }), ImportedEvidenceRequirement::Attestation { description } => Some(crate::components::compliance::refine_policy::EvidenceRequirementDraft::Attestation { description: description.clone() }), _ => None }).collect(),
         },
         selected: rule.selected,
+        mapping_relationship: None,
+        mapping_coverage: None,
+        mapping_rationale: None,
     }).collect()
 }
 
@@ -1901,6 +1904,9 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
     let mut step = use_signal(|| "upload".to_string());
     let mut rules = use_signal(|| Vec::<StigRule>::new());
     let mut refined_rules = use_signal(|| Vec::<RefinedStigRule>::new());
+    let mut mapping_semantics = use_signal(
+        std::collections::HashMap::<String, crate::api::models::ImportedMappingSemantics>::new,
+    );
     let mut bundle_name = use_signal(String::new);
     let mut file_name = use_signal(String::new);
     let mut bench_title = use_signal(String::new);
@@ -2080,7 +2086,8 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                  bench_ver.set(bm_ver);
                                                                  file_name.set(fname.clone());
                                                                  file_bytes.set(bytes_vec);
-                                                                 preview_response.set(Some(resp));
+                                                                  let foreign_reconciliation = resp.foreign_stig_reconciliation.clone();
+                                                                  preview_response.set(Some(resp));
                                                                  previewing.set(false);
                                                                  
                                                                  if is_cf_native {
@@ -2090,7 +2097,26 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                      // Foreign XCCDF workflow: do rule processing
                                                                      let parsed_rules = rules_from_preview(&preview_response.read().as_ref().unwrap());
                                                                      rules.set(parsed_rules);
-                                                                     refined_rules.set(refined_rules_from_rules(&rules.read()));
+                                                                  refined_rules.set(refined_rules_from_rules(&rules.read()));
+                                                                      mapping_semantics.set(
+                                                                      foreign_reconciliation
+                                                                          .as_ref()
+                                                                          .into_iter()
+                                                                          .flat_map(|reconciliation| reconciliation.requirements.iter())
+                                                                          .filter_map(|requirement| {
+                                                                              requirement.candidates.first().map(|candidate| {
+                                                                                  (
+                                                                                      requirement.rule_id.clone(),
+                                                                                      crate::api::models::ImportedMappingSemantics {
+                                                                                          relationship: Some("implements".into()),
+                                                                                          coverage: Some("full".into()),
+                                                                                          rationale: Some(candidate.match_reasons.join(" ")),
+                                                                                      },
+                                                                                  )
+                                                                              })
+                                                                          })
+                                                                          .collect(),
+                                                                  );
                                                                      selected_envs.set(all_env_names.clone());
                                                                      step.set("review".to_string());
                                                                  }
@@ -2190,11 +2216,12 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         committing.set(true);
                                         spawn(async move {
                                             if let Some(preview) = preview_response.read().clone() {
-                                                let plan = XccdfImportPlan {
+                                     let plan = XccdfImportPlan {
                                                     expected_sha256: preview.sha256,
                                                     selected_profile_id: None,
-                                                    selected_rule_ids: vec![],
-                                                    rule_actions: vec![],
+                                                     selected_rule_ids: vec![],
+                                                     rule_actions: vec![],
+                                                     mapping_semantics: std::collections::HashMap::new(),
                                                     bundle: ImportedBundlePlan {
                                                         name: String::new(),
                                                         framework: "unknown".into(),
@@ -2474,7 +2501,23 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         expected_sha256: sha256,
                                         selected_profile_id: None,
                                         selected_rule_ids,
-                                        rule_actions,
+                                         rule_actions,
+                                     mapping_semantics: refined_rules
+                                         .read()
+                                         .iter()
+                                         .filter_map(|rule| {
+                                             matches!(rule.draft.action, RefinedRuleAction::Existing(Some(_))).then(|| {
+                                                 (
+                                                     rule.source.rule_id.clone(),
+                                                     crate::api::models::ImportedMappingSemantics {
+                                                         relationship: Some(rule.mapping_relationship.clone().unwrap_or_else(|| "implements".into())),
+                                                         coverage: Some(rule.mapping_coverage.clone().unwrap_or_else(|| "full".into())),
+                                                         rationale: rule.mapping_rationale.clone().filter(|value| !value.trim().is_empty()),
+                                                     },
+                                                 )
+                                             })
+                                         })
+                                         .collect(),
                                         bundle: ImportedBundlePlan {
                                             name: bundle_name.read().trim().to_string(),
                                             framework: "xccdf".to_string(),
@@ -2559,9 +2602,16 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                             div { style: "min-width:0;",
                                                 div { style: "font-size:12.5px;font-weight:600;line-height:1.4;", "{row.title.clone().unwrap_or_else(|| row.external_id.clone())}" }
                                                 div { class: "mono", style: "font-size:10.5px;color:var(--cf-text-muted);", "{row.external_id}" }
-                                                div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;",
-                                                    if row.state == "identity_conflict" { "Requirement identity conflict needs a human decision." } else { "No trusted mapped implementation or inferred enforcement is available." }
-                                                }
+                                                 div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;",
+                                                     if row.state == "identity_conflict" { "Requirement identity conflict needs a human decision." } else if let Some(candidate) = row.candidates.first() { "Candidate: {candidate.match_type} · {candidate.confidence}% confidence" } else { "No trusted mapped implementation or inferred enforcement is available." }
+                                                 }
+                                                 if let Some(candidate) = row.candidates.first() {
+                                                     div { style: "display:flex;gap:5px;flex-wrap:wrap;margin-top:5px;",
+                                                         for reason in candidate.match_reasons.iter() {
+                                                             span { class: "chip mono", style: "font-size:9px;", "{reason}" }
+                                                         }
+                                                     }
+                                                 }
                                             }
                                         }
                                     }
@@ -2577,9 +2627,9 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                             span { style: if !row.candidates.is_empty() { "color:#34d399;margin-top:2px;display:inline-flex;" } else { "color:#60a5fa;margin-top:2px;display:inline-flex;" }, Icon { name: if !row.candidates.is_empty() { IconName::Check } else { IconName::Shield }, size: 12 } }
                                             div { style: "min-width:0;",
                                                 div { style: "font-size:12px;font-weight:600;line-height:1.4;", "{row.title.clone().unwrap_or_else(|| row.external_id.clone())}" }
-                                                div { style: "font-size:10.5px;color:var(--cf-text-muted);margin-top:1px;",
-                                                    if let Some(candidate) = row.candidates.first() { "Reuses {candidate.policy_name}" } else { "Enforcement inferred from the STIG fix text" }
-                                                }
+                                                 div { style: "font-size:10.5px;color:var(--cf-text-muted);margin-top:1px;",
+                                                     if let Some(candidate) = row.candidates.first() { "{candidate.match_type} · Reuses {candidate.policy_name}" } else { "Enforcement inferred from the STIG fix text" }
+                                                 }
                                             }
                                         }
                                     }
@@ -2646,11 +2696,12 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 if *committing.read() { return; }
                                 let selected_rule_ids = refined_rules.read().iter().filter(|rule| rule.selected).map(|rule| rule.source.rule_id.clone()).collect::<Vec<_>>();
                                 let rule_actions = refined_rules.read().iter().filter(|rule| rule.selected).map(action_to_import).collect::<Vec<_>>();
-                                let plan = XccdfImportPlan {
+                                 let plan = XccdfImportPlan {
                                     expected_sha256: preview_response.read().as_ref().map(|preview| preview.sha256.clone()).unwrap_or_default(),
                                     selected_profile_id: None,
                                     selected_rule_ids,
                                     rule_actions,
+                                    mapping_semantics: mapping_semantics.read().clone(),
                                     bundle: ImportedBundlePlan { name: bundle_name.read().trim().to_string(), framework: "xccdf".into(), version: bench_ver.read().clone(), layer: None, owner: None, description: None },
                                 };
                                 let bytes = file_bytes.read().clone();

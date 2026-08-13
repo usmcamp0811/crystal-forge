@@ -238,6 +238,9 @@ pub struct RefinedStigRule {
     pub source: SourceStigRule,
     pub draft: RefinedPolicyDraft,
     pub selected: bool,
+    pub mapping_relationship: Option<String>,
+    pub mapping_coverage: Option<String>,
+    pub mapping_rationale: Option<String>,
 }
 impl RefinedStigRule {
     pub fn is_valid(&self) -> bool {
@@ -392,9 +395,48 @@ pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
                                     div { class: "sd-callout sd-callout-info", "The original XCCDF rule and check content will be preserved without execution." }
                                 }
                                 textarea { class: "input focus-ring", rows: 2, placeholder: "Description", value: "{rule.draft.local_description}", oninput: move |e| { props.rules.write()[index].draft.local_description = e.value(); } }
-                                textarea { class: "input focus-ring", rows: 2, placeholder: "Rationale", value: "{rule.draft.local_rationale}", oninput: move |e| { props.rules.write()[index].draft.local_rationale = e.value(); } }
-                                textarea { class: "input focus-ring", rows: 2, placeholder: "Implementation note", value: "{rule.draft.implementation_note}", oninput: move |e| { props.rules.write()[index].draft.implementation_note = e.value(); } }
-                            }
+                                 textarea { class: "input focus-ring", rows: 2, placeholder: "Rationale", value: "{rule.draft.local_rationale}", oninput: move |e| { props.rules.write()[index].draft.local_rationale = e.value(); } }
+                                 textarea { class: "input focus-ring", rows: 2, placeholder: "Implementation note", value: "{rule.draft.implementation_note}", oninput: move |e| { props.rules.write()[index].draft.implementation_note = e.value(); } }
+                                 if matches!(rule.draft.action, RefinedRuleAction::Existing(_)) {
+                                     div { class: "sd-callout sd-callout-info", style: "font-size:11px;",
+                                         "This reuse decision is recorded as a reviewed mapping. Confirm the relationship and coverage before importing."
+                                     }
+                                     div { class: "field",
+                                         label { "Mapping relationship" }
+                                         select {
+                                             class: "input focus-ring",
+                                             "data-testid": "xccdf-mapping-relationship",
+                                             value: "{rule.mapping_relationship.clone().unwrap_or_else(|| \"implements\".into())}",
+                                             onchange: move |e| { props.rules.write()[index].mapping_relationship = Some(e.value()); },
+                                             option { value: "implements", "Implements" }
+                                             option { value: "supports", "Supports" }
+                                             option { value: "provides_evidence_for", "Provides evidence for" }
+                                         }
+                                     }
+                                     div { class: "field",
+                                         label { "Mapping coverage" }
+                                         select {
+                                             class: "input focus-ring",
+                                             "data-testid": "xccdf-mapping-coverage",
+                                             value: "{rule.mapping_coverage.clone().unwrap_or_else(|| \"full\".into())}",
+                                             onchange: move |e| { props.rules.write()[index].mapping_coverage = Some(e.value()); },
+                                             option { value: "full", "Full" }
+                                             option { value: "partial", "Partial" }
+                                         }
+                                     }
+                                     div { class: "field",
+                                         label { "Mapping rationale" }
+                                         textarea {
+                                             class: "input focus-ring",
+                                             rows: 2,
+                                             "data-testid": "xccdf-mapping-rationale",
+                                             placeholder: "Why this existing policy satisfies the requirement",
+                                             value: "{rule.mapping_rationale.clone().unwrap_or_default()}",
+                                             oninput: move |e| { props.rules.write()[index].mapping_rationale = Some(e.value()); }
+                                         }
+                                     }
+                                 }
+                             }
                         }
                     },
                     RefineTab::Evidence => rsx! { if !matches!(rule.draft.action, RefinedRuleAction::Existing(_) | RefinedRuleAction::Opaque) { EvidenceSection { rules: props.rules, index } } else { div { class: "sd-callout sd-callout-info", "This mapped or opaque control has no local evidence requirements to edit." } } },
@@ -923,6 +965,9 @@ mod tests {
                 evidence_requirements: vec![],
             },
             selected: true,
+            mapping_relationship: None,
+            mapping_coverage: None,
+            mapping_rationale: None,
         };
         assert_eq!(rule.source.source_severity.as_deref(), Some("high"));
         assert_eq!(rule.source.fix_text.as_deref(), Some("Fix"));

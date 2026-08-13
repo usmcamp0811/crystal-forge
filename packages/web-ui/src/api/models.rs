@@ -1582,6 +1582,20 @@ pub struct ForeignStigPolicyCandidate {
     pub confidence: u8,
     #[serde(default)]
     pub match_reasons: Vec<String>,
+    #[serde(default)]
+    pub related_evidence: Option<ForeignStigRelatedEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignStigRelatedEvidence {
+    #[serde(default)]
+    pub shared_cci_ids: Vec<String>,
+    #[serde(default)]
+    pub shared_srg_ids: Vec<String>,
+    pub related_requirement_version_id: Uuid,
+    pub related_framework_id: Uuid,
+    pub related_framework_name: String,
+    pub related_external_id: String,
 }
 
 /// CF-native reconciliation preview for import
@@ -1774,7 +1788,16 @@ pub struct XccdfImportPlan {
     pub selected_profile_id: Option<String>,
     pub selected_rule_ids: Vec<String>,
     pub rule_actions: Vec<XccdfRuleImportAction>,
+    #[serde(default)]
+    pub mapping_semantics: std::collections::HashMap<String, ImportedMappingSemantics>,
     pub bundle: ImportedBundlePlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ImportedMappingSemantics {
+    pub relationship: Option<String>,
+    pub coverage: Option<String>,
+    pub rationale: Option<String>,
 }
 
 /// Response body from `POST /api/v1/compliance/xccdf/import`.
