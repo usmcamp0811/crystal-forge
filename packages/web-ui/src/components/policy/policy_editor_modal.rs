@@ -1061,10 +1061,11 @@ pub fn PolicyEditorModal(
                                     // Group by framework_name.
                                     let mut grouped: Vec<(String, Vec<PolicyMappingRow>)> = vec![];
                                     for row in rows {
-                                        if let Some(group) = grouped.iter_mut().find(|(name, _)| *name == row.framework_name) {
+                                        let group_name = format!("{} · {}", row.framework_name, row.framework_version);
+                                        if let Some(group) = grouped.iter_mut().find(|(name, _)| *name == group_name) {
                                             group.1.push(row);
                                         } else {
-                                            grouped.push((row.framework_name.clone(), vec![row]));
+                                            grouped.push((group_name, vec![row]));
                                         }
                                     }
                                     rsx! {
@@ -1119,7 +1120,9 @@ pub fn PolicyEditorModal(
                                                                             onclick: move |_| {
                                                                                 let pv_id = pv_id;
                                                                                 spawn(async move {
-                                                                                    let _ = delete_policy_mapping(&pv_id, &row_id).await;
+                                                                                     if let Err(error) = delete_policy_mapping(&pv_id, &row_id).await {
+                                                                                         mappings_error.set(Some(format!("Failed to remove mapping: {error}")));
+                                                                                     }
                                                                                     // Reload mappings.
                                                                                     if let Ok(rows) = fetch_policy_requirement_mappings(&pv_id).await {
                                                                                         mappings.set(rows);
@@ -1215,7 +1218,7 @@ pub fn PolicyEditorModal(
                                                             if let Ok(results) = search_requirements(
                                                                 &fv_id,
                                                                 Some(&q),
-                                                                Some("rule"),
+                                                                None,
                                                                 25, 0
                                                             ).await {
                                                                 req_search_results.set(results);
@@ -1230,7 +1233,7 @@ pub fn PolicyEditorModal(
                                                     for req in req_search_results.read().iter() {
                                                         {
                                                             let req_id = req.id;
-                                                            let req_label = format!("{} — {}", req.external_id, req.title.as_deref().unwrap_or(""));
+                                                            let req_label = format!("{} · {} · {}", req.external_id, req.kind, req.title.as_deref().unwrap_or(""));
                                                             let req_label_clone = req_label.clone();
                                                             rsx! {
                                                             button {
