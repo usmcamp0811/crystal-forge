@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-13 19:23'
+updated_date: '2026-08-13 21:45'
 labels: []
 milestone: m-22
 dependencies:
@@ -441,4 +441,6 @@ Implemented and pushed immutable STIG policy reuse: `MapExisting` is revalidated
 2026-08-13: Added and pushed manifest-backed Playwright coverage for real New custom policy → Mappings UI with two queued mappings (commit 00dbc2a0). The successful web-ui check's VM artifacts were not exported into this worktree; result points only to the packaged web-ui output. Next slice is create-mode mapping persistence.
 
 2026-08-13: Corrected 20aa Playwright selectors to wait for asynchronously loaded framework/version options, added policy-card data-policy-id, and changed audit verification to resolve current_version_id from the policy list API before querying persisted mappings. node --check, git diff --check, cargo fmt --manifest-path packages/default/Cargo.toml --all --check, cargo check -p cf-server, and cargo check --manifest-path packages/web-ui/Cargo.toml passed; full web-ui Nix check was interrupted by the 120-second tool timeout before completion.
+
+2026-08-13: Fixed two root causes exposed by 20aa: (1) policy_editor_modal was discarding the create POST response and then re-fetching first-100 list, making new policies invisible above 100; fix inserts entry from refreshed list at front of library. (2) The create endpoint returns a bare deployment_policies row without current_version_id; the fix prefers the entry from the list-response refresh which carries the join-computed current_version_id, enabling the edit modal to load persisted mappings. TASK-421 created to track proper server-side pagination. Latest commits: 52eff5a5, 4d576936. Both cargo check and git diff --check pass. Awaiting next full web-ui Nix run to confirm 20aa green.
 <!-- SECTION:NOTES:END -->
