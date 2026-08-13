@@ -47,6 +47,7 @@ pub fn PolicyCard(
                 format!("--status-color: var(--cf-brand-purple); opacity: {opacity}; cursor: pointer;")
             },
             "data-policy-card": "true",
+            "data-policy-id": "{policy.id}",
             "data-policy-name": "{policy.name}",
             div { class: "status-rail" }
 

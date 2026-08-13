@@ -6190,8 +6190,12 @@ const steps = [
       await page.getByPlaceholder("e.g. canary-25").fill(policyName);
       await page.getByTestId("policy-editor-tab-mappings").click();
 
-      await page.getByLabel("Framework").last().selectOption(fixture.framework.id);
-      await page.getByLabel("Version").last().selectOption(fixture.version.id);
+      const frameworkSelect = page.getByLabel("Framework").last();
+      await frameworkSelect.locator(`option[value="${fixture.framework.id}"]`).waitFor({ state: "attached", timeout: 5000 });
+      await frameworkSelect.selectOption(fixture.framework.id);
+      const versionSelect = page.getByLabel("Version").last();
+      await versionSelect.locator(`option[value="${fixture.version.id}"]`).waitFor({ state: "attached", timeout: 5000 });
+      await versionSelect.selectOption(fixture.version.id);
       const search = page.getByPlaceholder("Search by ID, title, CCI, SRG…").last();
       const resultButton = (requirement) => page.getByRole("button", {
         name: new RegExp(`${requirement.external_id}.*${requirement.kind}.*${requirement.title || ""}`, "i"),
@@ -6228,8 +6232,25 @@ const steps = [
       await assertVisible(page.getByText("test rationale", { exact: true }), "Expected persisted rationale");
       await assertVisible(page.getByText("Implements", { exact: true }), "Expected persisted Implements relationship");
       await assertVisible(page.getByText("Full", { exact: true }), "Expected persisted Full coverage");
-      await assertVisible(page.getByText("Manual", { exact: true }).first(), "Expected persisted manual provenance");
-      await assertVisible(page.getByText("Trusted", { exact: true }).first(), "Expected persisted trusted state");
+      const policyId = await page.locator(`[data-policy-card="true"][data-policy-name="${policyName}"]`).getAttribute("data-policy-id");
+      const policyVersionId = await page.evaluate(async ({ base, id }) => {
+        const response = await fetch(`${base}/api/v1/deployment-policies?limit=100`, { credentials: "include" });
+        const body = await response.json();
+        const policy = body.policies.find((item) => item.id === id);
+        if (!policy) throw new Error(`Created policy ${id} was not returned by the policy list API`);
+        return policy.current_version_id;
+      }, { base: baseUrl, id: policyId });
+      const mappingResponse = await page.evaluate(async ({ base, id }) => {
+        const response = await fetch(`${base}/api/v1/policy-versions/${id}/requirement-mappings`, { credentials: "include" });
+        return { status: response.status, rows: await response.json() };
+      }, { base: baseUrl, id: policyVersionId });
+      if (mappingResponse.status !== 200) throw new Error(`Expected persisted mapping API response, got ${mappingResponse.status}`);
+      if (mappingResponse.rows.length !== 2) throw new Error(`Expected two persisted mappings, got ${mappingResponse.rows.length}`);
+      for (const row of mappingResponse.rows) {
+        if (row.provenance !== "manual" || row.trust_state !== "trusted") {
+          throw new Error(`Unexpected mapping audit state: ${JSON.stringify(row)}`);
+        }
+      }
     },
   },
   // ── CVE policy API round-trip checks ────────────────────────────────────
