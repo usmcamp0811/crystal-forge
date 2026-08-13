@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-12 19:26'
-updated_date: '2026-08-13 02:21'
+updated_date: '2026-08-13 02:31'
 labels: []
 milestone: m-23
 dependencies:
@@ -77,4 +77,6 @@ Diagnosed exact reimport as test interference: the test passed alone; serialized
 2026-08-12 follow-up pushed as 53848d1f: added ignored DB-backed reviewed-related commit tests for successful cross-framework reuse with suggested provenance and forged evidence rollback, plus a metadata-bearing STIG fixture. Verified with nix develop cargo fmt --all --check, git diff --check, cargo check -p cf-server, targeted related unit tests (7 passed, 3 ignored), the existing related-candidate DB test (1 passed), and both reviewed-related DB tests (2 passed). The Phase 22 wildcard invocation was not useful because Cargo does not support wildcard test filters; prior serialized Phase 22 suite had passed 8/8. Remaining: broader candidate negative/precedence DB coverage and final serialized Phase 21/22/23 regression/build gate.
 
 Phase 22 candidate-discovery slice is complete at pushed commit d94839bf. Verified actual DB-backed precedence and negative eligibility coverage, related identifier tests, exact technical tests, importer tests, shared implementation tests, formatting, diff check, and cf-server cargo check. Phase 23 fuzzy similarity is intentionally deferred; production reconciliation/mapping UI is the next priority. Performance debt remains tracked separately.
+
+Correction: TASK-420 was an accidental split and has been returned to Backlog; its empty worktree and branch were deleted. Continue all production UI, mapping, coverage, pixel-parity, and final verification work on TASK-418-cross-framework-requirements only. No application changes were made outside TASK-418.
 <!-- SECTION:NOTES:END -->
