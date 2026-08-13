@@ -457,9 +457,10 @@ pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
                                          select {
                                              class: "input focus-ring",
                                              "data-testid": "xccdf-mapping-relationship",
-                                             value: "{rule.mapping_relationship.clone().unwrap_or_else(|| \"implements\".into())}",
-                                             onchange: move |e| { props.rules.write()[index].mapping_relationship = Some(e.value()); },
-                                             option { value: "implements", "Implements" }
+                                              value: "{rule.mapping_relationship.clone().unwrap_or_default()}",
+                                              onchange: move |e| { props.rules.write()[index].mapping_relationship = (!e.value().is_empty()).then(|| e.value()); },
+                                              option { value: "", "Select relationship…" }
+                                              option { value: "implements", "Implements" }
                                              option { value: "supports", "Supports" }
                                              option { value: "provides_evidence_for", "Provides evidence for" }
                                          }
@@ -469,9 +470,10 @@ pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
                                          select {
                                              class: "input focus-ring",
                                              "data-testid": "xccdf-mapping-coverage",
-                                             value: "{rule.mapping_coverage.clone().unwrap_or_else(|| \"full\".into())}",
-                                             onchange: move |e| { props.rules.write()[index].mapping_coverage = Some(e.value()); },
-                                             option { value: "full", "Full" }
+                                              value: "{rule.mapping_coverage.clone().unwrap_or_default()}",
+                                              onchange: move |e| { props.rules.write()[index].mapping_coverage = (!e.value().is_empty()).then(|| e.value()); },
+                                              option { value: "", "Select coverage…" }
+                                              option { value: "full", "Full" }
                                              option { value: "partial", "Partial" }
                                          }
                                      }
@@ -1105,6 +1107,47 @@ mod tests {
         let semantics = mapping_semantics_for(&rule).unwrap();
         assert_eq!(semantics.reviewed_related_candidate.unwrap().shared_cci_ids, evidence.shared_cci_ids);
         assert!(matches!(action_to_import(&rule), XccdfRuleImportAction::MapExisting { proof: None, .. }));
+    }
+
+    #[test]
+    fn exact_and_related_candidates_require_explicit_mapping_semantics() {
+        let exact = candidate("exact_technical_match", None);
+        let related = candidate(
+            "related_mapping",
+            Some(crate::api::models::ForeignStigRelatedEvidence {
+                shared_cci_ids: vec![],
+                shared_srg_ids: vec![],
+                related_requirement_version_id: uuid::Uuid::from_u128(2),
+                related_framework_id: uuid::Uuid::from_u128(3),
+                related_framework_name: "DISA STIG".into(),
+                related_external_id: "V-1".into(),
+            }),
+        );
+        fn make_rule(selected_candidate: ForeignStigPolicyCandidate) -> RefinedStigRule {
+            let policy_version_id = selected_candidate.policy_version_id;
+            RefinedStigRule {
+                source: SourceStigRule { rule_id: "rule".into(), group_id: None, stig_id: None, title: None, description: None, source_severity: None, fix_text: None, checks: vec![], identifiers: vec![], references: vec![], platforms: vec![], rule_order: 0 },
+                draft: RefinedPolicyDraft { local_name: "name".into(), local_description: String::new(), local_severity: "medium".into(), local_rationale: String::new(), implementation_note: String::new(), action: RefinedRuleAction::Existing(Some(policy_version_id)), assertion_mode: "all".into(), assertions: vec![], evidence_requirements: vec![] },
+                selected: true,
+                mapping_relationship: None,
+                mapping_coverage: None,
+                mapping_rationale: None,
+                candidate_options: vec![selected_candidate.clone()],
+                selected_candidate: Some(selected_candidate),
+            }
+        }
+        let mut exact_rule = make_rule(exact);
+        let mut related_rule = make_rule(related);
+        assert!(!exact_rule.is_valid());
+        assert!(!related_rule.is_valid());
+        exact_rule.mapping_relationship = Some("implements".into());
+        exact_rule.mapping_coverage = Some("full".into());
+        related_rule.mapping_relationship = Some("supports".into());
+        related_rule.mapping_coverage = Some("partial".into());
+        assert!(exact_rule.is_valid());
+        assert!(related_rule.is_valid());
+        assert_eq!(mapping_semantics_for(&exact_rule).unwrap().reviewed_related_candidate, None);
+        assert!(mapping_semantics_for(&related_rule).unwrap().reviewed_related_candidate.is_some());
     }
     #[test]
     fn source_identity_prefers_vulnerability_group_over_rule_id() {
