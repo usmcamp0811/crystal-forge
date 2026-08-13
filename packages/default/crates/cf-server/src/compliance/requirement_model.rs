@@ -289,12 +289,31 @@ mod tests {
             "srg_ids": ["srg-os-000109-gpos-00051"]
         }));
         assert_eq!(
-            ids.cci_ids.into_iter().collect::<Vec<_>>(),
+            ids.cci_ids.iter().cloned().collect::<Vec<_>>(),
             ["CCI-000770", "CCI-000771"]
         );
         assert_eq!(
-            ids.srg_ids.into_iter().collect::<Vec<_>>(),
+            ids.srg_ids.iter().cloned().collect::<Vec<_>>(),
             ["SRG-OS-000109-GPOS-00051"]
+        );
+
+        let incoming = RelatedRequirementIdentifiers::from_metadata(&json!({
+            "cci_ids": ["CCI-000770"],
+            "srg_ids": ["SRG-OS-000109-GPOS-00051"],
+        }));
+        assert_eq!(
+            incoming
+                .cci_ids
+                .intersection(&ids.cci_ids)
+                .collect::<Vec<_>>(),
+            [&"CCI-000770".to_string()]
+        );
+        assert!(
+            RelatedRequirementIdentifiers::from_metadata(&json!({
+                "cci_ids": ["CCI-000770-EXTRA"],
+            }))
+            .cci_ids
+            .is_disjoint(&incoming.cci_ids)
         );
     }
 
@@ -309,5 +328,28 @@ mod tests {
             false
         ));
         assert!(candidates_are_auto_resolvable(&[], true));
+    }
+
+    #[test]
+    fn related_metadata_supports_srg_and_rejects_nonshared_or_substring_ids() {
+        let incoming = RelatedRequirementIdentifiers::from_metadata(&json!({
+            "cci_ids": ["CCI-000770"],
+            "srg_ids": ["SRG-OS-000109-GPOS-00051"],
+        }));
+        let same_srg = RelatedRequirementIdentifiers::from_metadata(&json!({
+            "srg_ids": [" srg-os-000109-gpos-00051 "],
+        }));
+        let different = RelatedRequirementIdentifiers::from_metadata(&json!({
+            "cci_ids": ["CCI-000771"],
+            "srg_ids": ["SRG-OS-000109-GPOS-00052"],
+        }));
+        let substring = RelatedRequirementIdentifiers::from_metadata(&json!({
+            "cci_ids": ["CCI-000770-EXTRA"],
+        }));
+
+        assert!(!incoming.srg_ids.is_disjoint(&same_srg.srg_ids));
+        assert!(incoming.cci_ids.is_disjoint(&different.cci_ids));
+        assert!(incoming.srg_ids.is_disjoint(&different.srg_ids));
+        assert!(incoming.cci_ids.is_disjoint(&substring.cci_ids));
     }
 }
