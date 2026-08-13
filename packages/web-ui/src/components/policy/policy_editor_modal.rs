@@ -777,6 +777,7 @@ pub fn PolicyEditorModal(
     let mut new_map_rationale = use_signal(String::new);
     let mut new_map_saving = use_signal(|| false);
     let mut new_map_error: Signal<Option<String>> = use_signal(|| None);
+    let mut pending_mappings: Signal<Vec<PendingPolicyMapping>> = use_signal(Vec::new);
 
     // Capture the editing policy version ID for mapping API calls.
     let editing_policy_version_id: Option<Uuid> = existing_policy
@@ -909,7 +910,7 @@ pub fn PolicyEditorModal(
                     div { class: "modal-body cf-policy-modal-body", style: "overflow-y:auto;",
                         div { class: "cf-modal-tabs", role: "tablist", aria_label: "Policy editor sections",
                             PolicyEditorTabButton { tab: PolicyEditorTab::Details, active: *active_tab.read(), label: "Details", test_id: "policy-editor-tab-details", on_select: move |_| active_tab.set(PolicyEditorTab::Details) }
-                             PolicyEditorTabButton { tab: PolicyEditorTab::Mappings, active: *active_tab.read(), label: format!("Mappings · {}", mappings.read().len()), test_id: "policy-editor-tab-mappings", on_select: move |_| active_tab.set(PolicyEditorTab::Mappings) }
+                             PolicyEditorTabButton { tab: PolicyEditorTab::Mappings, active: *active_tab.read(), label: format!("Mappings · {}", mappings.read().len() + pending_mappings.read().len()), test_id: "policy-editor-tab-mappings", on_select: move |_| active_tab.set(PolicyEditorTab::Mappings) }
                             PolicyEditorTabButton { tab: PolicyEditorTab::Enforcement, active: *active_tab.read(), label: format!("Enforcement · {rule_count}"), test_id: "policy-editor-tab-enforcement", on_select: move |_| active_tab.set(PolicyEditorTab::Enforcement) }
                             PolicyEditorTabButton { tab: PolicyEditorTab::Evidence, active: *active_tab.read(), label: format!("Evidence · {evidence_count}"), test_id: "policy-editor-tab-evidence", on_select: move |_| active_tab.set(PolicyEditorTab::Evidence) }
                         }
