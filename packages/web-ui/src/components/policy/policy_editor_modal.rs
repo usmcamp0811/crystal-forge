@@ -860,11 +860,10 @@ pub fn PolicyEditorModal(
     let seed_rules = if is_editing {
         rules_from_policy(&existing_type, &existing_config)
     } else {
-        // Start with a backend-supported assertion so a new policy can be
-        // created immediately after adding optional mappings. The design-only
-        // pipeline gates are still available from the rule picker, but cannot
-        // be serialized by the current policy API.
-        vec![PolicyRule::new("packages_installed")]
+        vec![
+            PolicyRule::new("eval_passed"),
+            PolicyRule::new("build_succeeded"),
+        ]
     };
     let existing_policy = editing_policy_id.read().and_then(|id| {
         policy_library

@@ -6186,6 +6186,14 @@ const steps = [
 
       await page.getByRole("button", { name: /New custom policy/i }).first().click();
       await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
+      await page.getByTestId("policy-editor-tab-enforcement").click();
+      await page.getByTitle("Remove rule").first().click();
+      await page.getByTitle("Remove rule").first().click();
+      const addRule = page
+        .locator("select")
+        .filter({ hasText: "Add assertion / rule" })
+        .first();
+      await addRule.selectOption("packages_installed");
       await page.getByTestId("policy-editor-tab-details").click();
       await page.getByPlaceholder("e.g. canary-25").fill(policyName);
       await page.getByTestId("policy-editor-tab-mappings").click();
@@ -6215,6 +6223,10 @@ const steps = [
       await page.getByRole("button", { name: "Add mapping", exact: true }).last().click();
       await assertVisible(page.getByText("Mappings · 2", { exact: true }), "Expected two queued real mappings");
 
+      await assertEnabled(
+        page.getByRole("button", { name: "Create policy", exact: true }),
+        "Expected mapped policy to be saveable after adding a persisted assertion",
+      );
       await page.getByRole("button", { name: "Create policy", exact: true }).click();
       await page.getByRole("heading", { name: "New custom policy" }).waitFor({ state: "hidden", timeout: 10000 });
 
