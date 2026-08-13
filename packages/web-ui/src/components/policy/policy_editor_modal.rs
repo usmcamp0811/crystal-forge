@@ -1531,7 +1531,7 @@ pub fn PolicyEditorModal(
                                             cis_section: selected_cis_section,
                                             rationale: selected_rationale,
                                         };
-                                        update_deployment_policy(&policy_id, &request).await.map(|_| ())
+                                        update_deployment_policy(&policy_id, &request).await.map(|_| None)
                                     } else {
                                         let request = CreateDeploymentPolicyRequest {
                                             name: name.clone(),
@@ -1554,17 +1554,37 @@ pub fn PolicyEditorModal(
                                                 .map(PendingPolicyMapping::mapping_request)
                                                 .collect(),
                                         };
-                                        create_deployment_policy(&request).await.map(|_| ())
+                                        create_deployment_policy(&request).await.map(Some)
                                     };
 
                                     match result {
-                                        Ok(()) => {
-                                             match policies_api::load_policies().await {
-                                                 policies_api::PolicyLoadResult::Ok(latest) => policy_library.set(latest),
-                                                 policies_api::PolicyLoadResult::Err(error) => {
-                                                     save_error.set(format!("Policy saved, but refresh failed: {error}"));
-                                                 }
-                                             }
+                                        Ok(created_opt) => {
+                                            // Fetch the updated list so edits (name changes, etc.) are
+                                            // reflected globally. For new policies we also insert the
+                                            // created record at the front so it is immediately
+                                            // discoverable even when there are >100 existing policies.
+                                            match policies_api::load_policies().await {
+                                                policies_api::PolicyLoadResult::Ok(mut latest) => {
+                                                    if let Some(created) = created_opt {
+                                                        let def = policies_api::policy_record_to_definition(created);
+                                                        latest.retain(|p| p.id != def.id);
+                                                        latest.insert(0, def);
+                                                    }
+                                                    policy_library.set(latest);
+                                                }
+                                                policies_api::PolicyLoadResult::Err(error) => {
+                                                    // Best-effort: if a new policy was created, still
+                                                    // insert it so the UI is not broken.
+                                                    if let Some(created) = created_opt {
+                                                        let def = policies_api::policy_record_to_definition(created);
+                                                        let mut current = policy_library.read().clone();
+                                                        current.retain(|p| p.id != def.id);
+                                                        current.insert(0, def);
+                                                        policy_library.set(current);
+                                                    }
+                                                    save_error.set(format!("Policy saved, but list refresh failed: {error}"));
+                                                }
+                                            }
                                             is_saving.set(false);
                                             on_close.call(());
                                         }
