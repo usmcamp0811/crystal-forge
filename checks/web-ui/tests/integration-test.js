@@ -8172,14 +8172,30 @@ const steps = [
   }
 
   const testProfile = process.env.CF_UI_TEST_PROFILE || "full";
-  const stepsToRun =
+  const profileSteps =
     testProfile === "full"
       ? steps
       : steps.filter((step) =>
           MANIFEST_STEPS.get(step.name).profiles.includes(testProfile),
         );
+  const requestedSteps = process.env.CF_UI_TEST_STEPS
+    ? new Set(process.env.CF_UI_TEST_STEPS.split(",").map((name) => name.trim()).filter(Boolean))
+    : null;
+  const stepsToRun = requestedSteps
+    ? profileSteps.filter((step) => requestedSteps.has(step.name))
+    : profileSteps;
+  if (requestedSteps) {
+    const missingRequestedSteps = [...requestedSteps].filter((name) => !stepNames.has(name));
+    if (missingRequestedSteps.length) {
+      fatal(`unknown requested UI test steps: [${missingRequestedSteps.join(", ")}]`);
+    }
+  }
   if (stepsToRun.length === 0) {
-    fatal(`profile "${testProfile}" selects no steps from the coverage manifest`);
+    fatal(
+      requestedSteps
+        ? `requested UI test steps are not selected by profile "${testProfile}"`
+        : `profile "${testProfile}" selects no steps from the coverage manifest`,
+    );
   }
 
   console.log("Starting Crystal Forge Web UI Integration Test");
@@ -8187,6 +8203,7 @@ const steps = [
   console.log(`  Output: ${outputDir}`);
   console.log("  Visual: design-parity comparison (design example vs Dioxus)");
   console.log(`  Profile: ${testProfile}`);
+  if (requestedSteps) console.log(`  Requested steps: ${[...requestedSteps].join(", ")}`);
   console.log(`  Steps: ${stepsToRun.length}`);
   const visualThemes = MANIFEST.settings.visualThemes || ["dark", "light"];
   console.log(`  Visual themes: ${visualThemes.join(", ")}`);
