@@ -131,11 +131,11 @@ async function captureThemedBaselines(page, step, visualThemes) {
 
 // Test user credentials
 const TEST_USER = {
-  username: "admin",
-  email: "admin@example.com",
-  password: "testpassword123",
-  firstName: "Test",
-  lastName: "Admin",
+  username: process.env.CF_UI_TEST_USERNAME || "admin",
+  email: process.env.CF_UI_TEST_EMAIL || "admin@example.com",
+  password: process.env.CF_UI_TEST_PASSWORD || "testpassword123",
+  firstName: process.env.CF_UI_TEST_FIRST_NAME || "Test",
+  lastName: process.env.CF_UI_TEST_LAST_NAME || "Admin",
 };
 
 // Timeout for page loads (don't use networkidle as it can hang)
