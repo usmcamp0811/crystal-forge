@@ -480,6 +480,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/compliance/bundle-versions/:version_id/policies",
             get(compliance::get_bundle_version_policy_membership),
         )
+        .route(
+            "/api/v1/compliance/bundle-versions/:version_id/requirements",
+            get(compliance::get_bundle_version_requirement_membership),
+        )
         // Phase 2: Bundle assignment endpoints
         .route(
             "/api/v1/compliance/assignments",

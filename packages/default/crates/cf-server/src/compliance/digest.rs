@@ -373,10 +373,9 @@ pub async fn write_policy_version_digest(
     Ok(())
 }
 
-/// Recompute a policy version digest after a mapping mutation in the same
-/// transaction. The version's modeled fields and all mapping semantics are
-/// read from the locked transaction state, so insertion order and row IDs do
-/// not affect the result.
+/// Recompute a policy version's modeled semantic digest in the same transaction.
+/// Mapping mutations refresh the separate mapping component; this helper keeps
+/// the legacy semantic digest contract independent of normalized mappings.
 pub async fn refresh_policy_version_digest(
     tx: &mut Transaction<'_, Postgres>,
     policy_version_id: Uuid,

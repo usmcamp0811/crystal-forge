@@ -1413,6 +1413,19 @@ pub struct BundleVersionPolicyMembership {
     pub enabled: bool,
 }
 
+/// An exact requirement-version member of a selected bundle version.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct BundleVersionRequirementMembership {
+    pub requirement_version_id: Uuid,
+    pub requirement_id: Uuid,
+    pub framework_version_id: Uuid,
+    pub external_id: String,
+    pub title: Option<String>,
+    pub kind: String,
+    pub selected: bool,
+    pub requirement_order: i32,
+}
+
 /// Environment with its required policies (the baseline).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvironmentWithPolicies {
@@ -1685,6 +1698,8 @@ pub struct CreateComplianceBundleRequest {
     pub layer: Option<String>,
     pub required_envs: Vec<uuid::Uuid>,
     pub policy_ids: Vec<uuid::Uuid>,
+    #[serde(default)]
+    pub requirement_version_ids: Vec<uuid::Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1695,6 +1710,8 @@ pub struct UpdateComplianceBundleRequest {
     pub description: Option<String>,
     pub required_envs: Vec<uuid::Uuid>,
     pub policy_ids: Vec<uuid::Uuid>,
+    #[serde(default)]
+    pub requirement_version_ids: Vec<uuid::Uuid>,
 }
 
 /// Request payload for creating a flake registry entry.
