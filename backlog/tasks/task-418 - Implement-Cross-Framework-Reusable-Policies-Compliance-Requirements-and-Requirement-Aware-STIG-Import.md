@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-14 02:40'
+updated_date: '2026-08-14 03:02'
 labels: []
 milestone: m-22
 dependencies:
@@ -453,5 +453,10 @@ Implemented and pushed immutable STIG policy reuse: `MapExisting` is revalidated
 created: 2026-08-14 02:40
 ---
 2026-08-14 focused 20aa follow-up: restarted run-ui-dev with repaired fixture seeding and pinned dx 0.7.3. Added focused-run auth preflight and credentials include for cross-origin API reads (commit 8a1c9b4e, pushed). The test now authenticates and reaches the framework API successfully, but the first data boundary fails because the fixture seeder loads no framework with canonical_source_key web-ui-mapping-roundtrip; MAP-1/MAP-2 are absent from the seeded database. This is a fixture/API data setup blocker, not yet a policy UI or mapping persistence failure. Local services were stopped after verification.
+---
+
+created: 2026-08-14 03:02
+---
+2026-08-14 fixture repair complete: added an optional normalized compliance fixture shape to the canonical JSON with framework web-ui-mapping-roundtrip, release web-ui-mapping-roundtrip-v1, and requirements MAP-1/MAP-2. Extended fixture seeding to upsert framework lineages, versions, requirement lineages, and requirement versions idempotently using the existing digest/query helpers. Focused 20aa now passes 1/1 with dark/light captures after selecting Security controls and resolving current_version_id from the production list response. Focused runs now skip design-parity capture automatically when CF_UI_TEST_STEPS is set. Verification: targeted fixture deserialization test passed, cargo fmt --all --check passed, node --check passed, git diff --check passed. Pushed commit 26fd22da.
 ---
 <!-- COMMENTS:END -->
