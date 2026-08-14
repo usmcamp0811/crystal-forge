@@ -581,7 +581,7 @@ async fn seed_compliance_frameworks(pool: &PgPool, fixtures: &[FixtureCompliance
                 )
                 .bind(parent_id)
                 .bind(requirement_version_id)
-                .execute(&mut **tx)
+                .execute(&mut *tx)
                 .await
                 .context("seed compliance requirement hierarchy")?;
             }

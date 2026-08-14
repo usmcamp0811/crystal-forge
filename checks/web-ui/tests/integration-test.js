@@ -6362,6 +6362,21 @@ const steps = [
       await assertVisible(page.getByText("Implements", { exact: true }), "Expected persisted Implements relationship");
       await assertVisible(page.getByText("Full", { exact: true }), "Expected persisted Full coverage");
 
+      // The same persisted policy must expose normalized mappings in its
+      // details drawer, not only in the editor's Mappings tab.
+      await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
+      await page.getByRole("heading", { name: new RegExp(`Edit ${policyName}`) }).waitFor({ state: "hidden", timeout: 5000 });
+      await card.click();
+      const drawer = page.getByRole("dialog", { name: "Policy detail" });
+      await drawer.waitFor({ timeout: 5000 });
+      await assertVisible(drawer.getByText("Mapped Requirements · 2", { exact: true }), "Expected drawer mapping count");
+      await assertVisible(drawer.getByText(requirementA.external_id, { exact: true }), "Expected first drawer requirement");
+      await assertVisible(drawer.getByText(requirementB.external_id, { exact: true }), "Expected second drawer requirement");
+      await assertVisible(drawer.getByText("Supports", { exact: true }), "Expected drawer Supports relationship");
+      await assertVisible(drawer.getByText("Partial coverage", { exact: true }), "Expected drawer Partial coverage");
+      await assertVisible(drawer.getByText("Manual mapping", { exact: true }).first(), "Expected drawer provenance label");
+      await assertVisible(drawer.getByText("test rationale", { exact: true }), "Expected drawer rationale");
+
       // Authoritative provenance + trust_state check via direct API.
        const policyVersionId = firstPage.body.policies.find((policy) => policy.id === createdPolicy.id)?.current_version_id;
        if (!policyVersionId) {
