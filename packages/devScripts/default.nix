@@ -19,6 +19,7 @@ let
 
   oidc_realm_import = ./oidc/realm-crystal-forge.json;
   tomlFormat = pkgs.formats.toml { };
+  dioxus-cli-0_7_3 = inputs.nixpkgs-dioxus-cli.legacyPackages.${system}.dioxus-cli;
 
   agent-sim = pkgs.writeShellApplication {
     name = "agent-sim";
@@ -385,7 +386,7 @@ let
     name = "run-ui-frontend";
     runtimeInputs = with pkgs; [
       coreutils
-      dioxus-cli
+      dioxus-cli-0_7_3
       wasm-bindgen-cli_0_2_108
       tailwindcss_4
       binaryen
@@ -396,6 +397,14 @@ let
 
       PROJECT_ROOT="''${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
       WEB_UI_DIR="$PROJECT_ROOT/packages/web-ui"
+      expected_dx_version="0.7.3"
+      actual_dx_version="$(dx --version | awk 'NR == 1 { print $2 }')"
+      echo "   Expected dx: $expected_dx_version"
+      echo "   Actual dx:   $actual_dx_version"
+      if [[ "$actual_dx_version" != "$expected_dx_version" ]]; then
+        echo "❌ Incompatible Dioxus CLI version; expected $expected_dx_version."
+        exit 1
+      fi
 
       # dx looks for a version-pinned wasm-bindgen under
       # $XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-<version>. Point it at the
@@ -431,7 +440,7 @@ let
       procps
       curl
       postgresql
-      dioxus-cli
+      dioxus-cli-0_7_3
       wasm-bindgen-cli_0_2_108
       tailwindcss_4
       binaryen
@@ -443,6 +452,14 @@ let
       PROJECT_ROOT="''${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
       FIXTURE_PATH="$PROJECT_ROOT/docs/design/CrystalForge/fixtures/crystal-forge.fixtures.json"
       WEB_UI_DIR="$PROJECT_ROOT/packages/web-ui"
+      expected_dx_version="0.7.3"
+      actual_dx_version="$(dx --version | awk 'NR == 1 { print $2 }')"
+      echo "   Expected dx: $expected_dx_version"
+      echo "   Actual dx:   $actual_dx_version"
+      if [[ "$actual_dx_version" != "$expected_dx_version" ]]; then
+        echo "❌ Incompatible Dioxus CLI version; expected $expected_dx_version."
+        exit 1
+      fi
 
       # ── 1. Ensure PostgreSQL is running ──────────────────────────────
       # Start db-only detached in its own process group so its TUI never grabs

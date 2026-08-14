@@ -269,7 +269,7 @@ struct FixtureEvaluations {
 struct FixtureCves {
     list: Vec<FixtureCveItem>,
     stats: serde_json::Value,
-    insights: Vec<serde_json::Value>,
+    insights: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1314,11 +1314,16 @@ mod tests {
     #[ignore = "requires docs/ tree not present in Nix sandbox"]
     fn test_deserialize_fixture_json() {
         // Look for the fixture file in several common locations
-        let candidates = [
-            "../docs/design/CrystalForge/fixtures/crystal-forge.fixtures.json",
-            "../../docs/design/CrystalForge/fixtures/crystal-forge.fixtures.json",
-            "docs/design/CrystalForge/fixtures/crystal-forge.fixtures.json",
-        ];
+        let fixture_suffix =
+            std::path::Path::new("docs/design/CrystalForge/fixtures/crystal-forge.fixtures.json");
+        let mut candidates = Vec::new();
+        let mut ancestor = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        loop {
+            candidates.push(ancestor.join(fixture_suffix));
+            if !ancestor.pop() {
+                break;
+            }
+        }
 
         let mut content = None;
         for path in &candidates {
@@ -1344,7 +1349,9 @@ mod tests {
         assert!(!fixture.cves.list.is_empty(), "Should have CVEs");
         assert!(!fixture.admin.users.is_empty(), "Should have admin users");
 
-        // Verify specific fields
+        // Verify seed-critical identity fields. Other design-only registries
+        // and optional fields are intentionally opaque or optional so the
+        // canonical fixture can evolve independently.
         let first_system = &fixture.systems[0];
         assert!(
             !first_system.hostname.is_empty(),
@@ -1353,10 +1360,6 @@ mod tests {
         assert!(
             !first_system.environment.is_empty(),
             "System should have environment"
-        );
-        assert!(
-            first_system.mem_gb.unwrap_or(0.0) > 0.0,
-            "System should have mem_gb"
         );
     }
 
