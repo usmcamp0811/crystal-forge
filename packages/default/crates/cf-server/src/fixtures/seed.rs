@@ -529,10 +529,6 @@ async fn seed_compliance_frameworks(pool: &PgPool, fixtures: &[FixtureCompliance
                 )
                 .await
                 .context("seed compliance requirement lineage")?;
-                let parent_id = requirement
-                    .parent_external_id
-                    .as_ref()
-                    .and_then(|parent| requirement_versions.get(parent).copied());
                 let canonical = RequirementVersionCanonical {
                     canonical_requirement_key: requirement.canonical_requirement_key.clone(),
                     external_id: requirement.external_id.clone(),
@@ -552,7 +548,7 @@ async fn seed_compliance_frameworks(pool: &PgPool, fixtures: &[FixtureCompliance
                     requirement_id,
                     framework_version_id,
                     &canonical,
-                    parent_id,
+                    None,
                 )
                 .await
                 .context("seed compliance requirement version")?;
@@ -562,6 +558,32 @@ async fn seed_compliance_frameworks(pool: &PgPool, fixtures: &[FixtureCompliance
                     requirement.canonical_requirement_key.clone(),
                     requirement_version_id,
                 );
+            }
+
+            // Resolve hierarchy after every requirement version has an ID so
+            // fixture order cannot drop a child-to-parent relationship.
+            for requirement in &version.requirements {
+                let Some(parent_key) = requirement.parent_external_id.as_ref() else {
+                    continue;
+                };
+                let Some(parent_id) = requirement_versions.get(parent_key).copied() else {
+                    continue;
+                };
+                let Some(requirement_version_id) =
+                    requirement_versions.get(&requirement.external_id).copied()
+                else {
+                    continue;
+                };
+                sqlx::query(
+                    "UPDATE compliance_requirement_versions\
+                     SET parent_requirement_version_id = $1\
+                     WHERE id = $2",
+                )
+                .bind(parent_id)
+                .bind(requirement_version_id)
+                .execute(&mut **tx)
+                .await
+                .context("seed compliance requirement hierarchy")?;
             }
         }
 

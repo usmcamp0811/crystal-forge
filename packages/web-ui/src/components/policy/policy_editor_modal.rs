@@ -694,6 +694,9 @@ fn PolicyMappingsTab(
 
     rsx! {
         div { style: "margin-top:6px;display:flex;flex-direction:column;gap:14px;",
+            div { style: "font-size:12px;color:var(--cf-text-secondary);margin-bottom:2px;line-height:1.5;",
+                "Map this policy to the compliance requirements it implements, supports, or provides evidence for. Policies can map to requirements from multiple frameworks."
+            }
             if grouped.is_empty() && pending_grouped.is_empty() {
                 div { style: "color:var(--cf-text-muted);font-size:12px;padding:12px 0;",
                     {match mapping_target {
@@ -705,14 +708,15 @@ fn PolicyMappingsTab(
             } else {
                 div { style: "display:flex;flex-direction:column;gap:10px;",
                     for (name, group) in pending_grouped {
-                        div { key: "pending-{name}", style: "border:1px solid var(--cf-border);border-radius:8px;overflow:hidden;",
-                            div { style: "background:var(--cf-subtle-bg);padding:8px 12px;font-size:11px;font-weight:600;color:var(--cf-text-secondary);", "{name}" }
+                        div { key: "pending-{name}",
+                            div { style: "font-size:11.5px;font-weight:700;color:var(--cf-text-primary);margin-bottom:6px;", "{name}" }
                             for row in group {
                                 {
                                     let requirement_version_id = row.requirement_version_id;
-                                    rsx! { div { style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:start;padding:8px 12px;border-top:1px solid var(--cf-border);font-size:12px;",
+                                    rsx! { div { style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:start;padding:9px 11px;background:var(--cf-subtle-bg);border:1px solid var(--cf-divider);border-radius:8px;font-size:12px;margin-bottom:6px;",
                                         div { style: "display:flex;flex-direction:column;gap:2px;",
-                                            div { style: "font-weight:600;", span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{row.requirement_external_id}" } " — {row.requirement_title.clone().unwrap_or_default()}" }
+                                            div { style: "font-size:11px;font-weight:700;color:var(--cf-text-muted);text-transform:uppercase;letter-spacing:0.04em;", "{row.framework_name} {row.framework_version}" }
+                                            div { class: "mono", style: "font-size:12.5px;font-weight:600;margin-top:2px;", "{row.requirement_external_id}" span { style: "font-family:inherit;font-weight:400;color:var(--cf-text-secondary);", " · {row.requirement_title.clone().unwrap_or_default()}" } }
                                             div { style: "display:flex;gap:6px;margin-top:2px;", span { class: "chip chip-neutral", style: "font-size:10px;", {match row.relationship.as_str() { "implements" => "Implements", "supports" => "Supports", _ => "Evidence for" }} }, span { class: if row.coverage == "full" { "chip chip-success" } else { "chip chip-warn" }, style: "font-size:10px;", {if row.coverage == "full" { "Full" } else { "Partial" }} }, span { class: "chip chip-neutral", style: "font-size:10px;", "Pending" } }
                                             if let Some(text) = &row.rationale { if !text.is_empty() { div { style: "color:var(--cf-text-muted);font-size:11px;margin-top:2px;", "{text}" } } }
                                         }
@@ -725,24 +729,28 @@ fn PolicyMappingsTab(
                 }
                 div { style: "display:flex;flex-direction:column;gap:10px;",
                     for (name, group) in grouped {
-                        div { key: "{name}", style: "border:1px solid var(--cf-border);border-radius:8px;overflow:hidden;",
-                            div { style: "background:var(--cf-subtle-bg);padding:8px 12px;font-size:11px;font-weight:600;color:var(--cf-text-secondary);", "{name}" }
+                        div { key: "{name}",
+                            div { style: "font-size:11.5px;font-weight:700;color:var(--cf-text-primary);margin-bottom:6px;", "{name}" }
                             for row in group {
-                                div { key: "{row.id}", style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:start;padding:8px 12px;border-top:1px solid var(--cf-border);font-size:12px;",
+                                {
+                                    let row_read_only = !mappings_editable || row.provenance == "imported" || row.trust_state == "suggested";
+                                    rsx! { div { key: "{row.id}", style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:start;padding:9px 11px;background:var(--cf-subtle-bg);border:1px solid var(--cf-divider);border-radius:8px;font-size:12px;margin-bottom:6px;",
                                     div { style: "display:flex;flex-direction:column;gap:2px;",
-                                        div { style: "font-weight:600;", span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{row.requirement_external_id}" } if let Some(title) = &row.requirement_title { " — {title}" } }
+                                        div { style: "font-size:11px;font-weight:700;color:var(--cf-text-muted);text-transform:uppercase;letter-spacing:0.04em;", "{row.framework_name} {row.framework_version}" }
+                                        div { class: "mono", style: "font-size:12.5px;font-weight:600;margin-top:2px;", "{row.requirement_external_id}" if let Some(title) = &row.requirement_title { span { style: "font-family:inherit;font-weight:400;color:var(--cf-text-secondary);", " · {title}" } } }
                                         div { style: "display:flex;gap:6px;margin-top:2px;",
                                             span { class: "chip chip-neutral", style: "font-size:10px;", {match row.relationship.as_str() { "implements" => "Implements", "supports" => "Supports", _ => "Evidence for" }} }
                                             span { class: if row.coverage == "full" { "chip chip-success" } else { "chip chip-warn" }, style: "font-size:10px;", {if row.coverage == "full" { "Full" } else { "Partial" }} }
-                                            span { style: "font-size:10px;color:var(--cf-text-muted);", "{row.provenance}" }
+                                            span { style: "font-size:10px;color:var(--cf-text-muted);", {if row.provenance == "imported" { "Imported from benchmark" } else { "Manual mapping" }} }
                                         }
                                         if let Some(text) = &row.rationale { if !text.is_empty() { div { style: "color:var(--cf-text-muted);font-size:11px;margin-top:2px;", "{text}" } } }
                                     }
                                     if let Some(policy_id) = editing_policy_version_id {
-                                        if mappings_editable {
-                                            button { class: "btn btn-ghost xs focus-ring", style: "color:var(--cf-text-muted);padding:4px 6px;", onclick: move |_| { let row_id = row.id; spawn(async move { if let Err(e) = delete_policy_mapping(&policy_id, &row_id).await { error.set(Some(format!("Failed to remove mapping: {e}"))); } if let Ok(value) = fetch_policy_requirement_mappings(&policy_id).await { mappings.set(value); } }); }, "×" }
-                                        } else { span { class: "chip chip-neutral", style: "font-size:10px;", "Read-only" } }
+                                         if !row_read_only {
+                                             button { class: "btn btn-ghost xs focus-ring", style: "color:var(--cf-text-muted);padding:4px 6px;", onclick: move |_| { let row_id = row.id; spawn(async move { if let Err(e) = delete_policy_mapping(&policy_id, &row_id).await { error.set(Some(format!("Failed to remove mapping: {e}"))); } if let Ok(value) = fetch_policy_requirement_mappings(&policy_id).await { mappings.set(value); } }); }, "×" }
+                                         } else { span { class: "chip chip-neutral", style: "font-size:10px;", "Read-only" } }
                                     }
+                                } }
                                 }
                             }
                         }
@@ -750,8 +758,9 @@ fn PolicyMappingsTab(
                 }
             }
             if mapping_target != MappingEditorTarget::Unavailable {
-                div { style: "border:1px solid var(--cf-border);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:10px;",
-                    div { style: "font-size:12px;font-weight:600;", "Add mapping" }
+                div { style: "border:1px solid var(--cf-brand-purple);border-radius:10px;padding:14px;background:color-mix(in oklab, var(--cf-brand-purple) 5%, var(--cf-card-bg));display:flex;flex-direction:column;gap:10px;",
+                    div { style: "font-size:12.5px;font-weight:600;", "Add mapping" }
+                    div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:-4px;line-height:1.4;", "Map this policy to a compliance requirement it implements, supports, or provides evidence for." }
                     div { class: "field", label { r#for: "policy-mapping-framework", style: "font-size:11px;", "Framework" }, select { id: "policy-mapping-framework", class: "input focus-ring", onchange: move |event| { let value = event.value(); if let Ok(id) = value.parse() { framework_id.set(Some(id)); spawn(async move { if let Ok(value) = fetch_compliance_framework_versions(&id).await { versions.set(value); } }); } }, option { value: "", "— Select framework —" }, for item in frameworks.read().iter() { option { value: "{item.id}", "{item.name}" } } } }
                     if !versions.read().is_empty() { div { class: "field", label { r#for: "policy-mapping-version", style: "font-size:11px;", "Version" }, select { id: "policy-mapping-version", class: "input focus-ring", onchange: move |event| { version_id.set(event.value().parse().ok()); }, option { value: "", "— Select version —" }, for item in versions.read().iter() { option { value: "{item.id}", "{item.version}" } } } } }
                     if version_id.read().is_some() {
