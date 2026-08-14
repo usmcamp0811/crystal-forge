@@ -6265,18 +6265,43 @@ const steps = [
       // Verify the policy is on the first list page (surface any pagination issue explicitly).
       const firstPage = await page.evaluate(async ({ base }) => {
         const response = await fetch(`${base}/api/v1/deployment-policies?limit=100&offset=0`, { credentials: "include" });
-        return await response.json();
+        return { status: response.status, body: await response.json() };
       }, { base: baseUrl });
-      const onFirstPage = firstPage.policies.some((p) => p.id === createdPolicy.id);
+      if (firstPage.status !== 200) {
+        throw new Error(`Production policy list fetch failed after create: ${firstPage.status}`);
+      }
+      const onFirstPage = firstPage.body.policies.some((p) => p.id === createdPolicy.id);
       if (!onFirstPage) {
-        // Log but do not fail — this is a known first-100 limitation tracked separately.
-        // The authoritative persistence proof follows via direct API calls.
-        console.warn(`[20aa] Created policy ${createdPolicy.id} is NOT on the first 100 list page — pagination limitation`);
+        throw new Error(
+          `[20aa] Created policy ${createdPolicy.id} is persisted but missing from the production list response ` +
+          `(total=${firstPage.body.total}, returned=${firstPage.body.policies.length}, ` +
+          `ids=${firstPage.body.policies.map((policy) => policy.id).join(",")})`,
+        );
       }
 
-      // The UI inserts the created policy at the front of the local library after the
-      // modal closes. Allow up to 20s for the Dioxus re-render to flush the card.
-      const card = page.locator(`[data-policy-card="true"][data-policy-name="${policyName}"]`);
+      // Determine whether the exact persisted ID reached the rendered card state before
+      // relying on any display-text selector. This separates a frontend state/filter
+      // problem from a stale DOM selector.
+      try {
+        await page.waitForFunction(
+          (id) => Array.from(document.querySelectorAll('[data-policy-card="true"]')).some(
+            (card) => card.getAttribute("data-policy-id") === id,
+          ),
+          createdPolicy.id,
+          { timeout: 5000 },
+        );
+      } catch (error) {
+        const renderedPolicyIds = await page.locator('[data-policy-card="true"]').evaluateAll((cards) =>
+          cards.map((card) => card.getAttribute("data-policy-id")),
+        );
+        throw new Error(
+          `[20aa] Created policy ${createdPolicy.id} is in the production list response but not rendered; ` +
+          `rendered policy IDs=${renderedPolicyIds.join(",")}; wait error=${error}`,
+        );
+      }
+
+      // Locate the card by its authoritative policy ID, not display text.
+      const card = page.locator(`[data-policy-card="true"][data-policy-id="${createdPolicy.id}"]`);
       await card.waitFor({ timeout: 20000 });
 
       // Open the Edit modal and check the Mappings tab loads server data.
