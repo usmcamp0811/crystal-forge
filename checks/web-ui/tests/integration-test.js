@@ -25,9 +25,18 @@ const { execSync } = require("child_process");
 const baseUrl = process.argv[2] || "http://127.0.0.1:3000";
 const outputDir = process.argv[3] || "/tmp/screenshots";
 
-const MANIFEST = JSON.parse(
-  fs.readFileSync(path.join(__dirname, "coverage-manifest.json"), "utf8"),
-);
+function firstExistingPath(paths) {
+  return paths.find((candidate) => fs.existsSync(candidate));
+}
+
+const coverageManifestPath = firstExistingPath([
+  path.join(__dirname, "coverage-manifest.json"),
+  path.join(__dirname, "..", "coverage-manifest.json"),
+]);
+if (!coverageManifestPath) {
+  throw new Error("coverage-manifest.json not found beside tests or in checks/web-ui");
+}
+const MANIFEST = JSON.parse(fs.readFileSync(coverageManifestPath, "utf8"));
 const MANIFEST_STEPS = new Map(MANIFEST.steps.map((s) => [s.name, s]));
 const DESIGN_FIXTURE = MANIFEST.settings.designFixture || null;
 
@@ -8277,7 +8286,10 @@ const steps = [
   const designParityDir = `${outputDir}/design-parity`;
   let designParityCaptured = 0;
   try {
-    const parityManifestPath = path.join(__dirname, "design-parity", "manifest.json");
+    const parityManifestPath = firstExistingPath([
+      path.join(__dirname, "design-parity", "manifest.json"),
+      path.join(__dirname, "..", "design-parity", "manifest.json"),
+    ]);
     if (fs.existsSync(parityManifestPath)) {
       const parityManifest = JSON.parse(fs.readFileSync(parityManifestPath, "utf8"));
       const parityThemes = parityManifest.settings.themes || ["dark", "light"];
