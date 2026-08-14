@@ -22,7 +22,7 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::compliance::digest::{refresh_bundle_version_digest, refresh_policy_version_digest};
+use crate::compliance::digest::{refresh_bundle_requirement_digest, refresh_policy_mapping_digest};
 use crate::compliance::framework_model::{
     FrameworkVersionCanonical, write_framework_version_digest,
 };
@@ -417,7 +417,7 @@ pub async fn create_policy_mapping(
     .await
     .context("failed to insert policy requirement mapping")?;
 
-    refresh_policy_version_digest(&mut tx, policy_version_id).await?;
+    refresh_policy_mapping_digest(&mut tx, policy_version_id).await?;
     tx.commit()
         .await
         .context("failed to commit mapping transaction")?;
@@ -471,7 +471,7 @@ pub async fn update_policy_mapping(
              or belongs to an immutable policy version"
         );
     }
-    refresh_policy_version_digest(&mut tx, policy_version_id).await?;
+    refresh_policy_mapping_digest(&mut tx, policy_version_id).await?;
     tx.commit()
         .await
         .context("failed to commit mapping transaction")?;
@@ -514,7 +514,7 @@ pub async fn delete_policy_mapping(pool: &PgPool, mapping_id: Uuid) -> Result<()
              or belongs to an immutable policy version"
         );
     }
-    refresh_policy_version_digest(&mut tx, policy_version_id).await?;
+    refresh_policy_mapping_digest(&mut tx, policy_version_id).await?;
     tx.commit()
         .await
         .context("failed to commit mapping transaction")?;
@@ -1361,7 +1361,7 @@ pub async fn insert_bundle_version_requirement(
     .await
     .context("failed to insert bundle version requirement")?;
 
-    refresh_bundle_version_digest(tx, bundle_version_id).await?;
+    refresh_bundle_requirement_digest(tx, bundle_version_id).await?;
 
     Ok(())
 }
@@ -1416,7 +1416,7 @@ pub async fn insert_policy_mapping_in_tx(
     .await
     .context("failed to insert policy requirement mapping in transaction")?;
 
-    refresh_policy_version_digest(tx, policy_version_id).await?;
+    refresh_policy_mapping_digest(tx, policy_version_id).await?;
 
     Ok(())
 }

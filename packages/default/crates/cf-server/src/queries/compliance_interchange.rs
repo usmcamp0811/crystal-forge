@@ -32,7 +32,7 @@ use uuid::Uuid;
 
 use crate::compliance::digest::{
     BundleVersionCanonical, PolicyVersionCanonical, load_bundle_membership,
-    write_bundle_version_digest, write_policy_version_digest,
+    refresh_bundle_requirement_digest, write_bundle_version_digest, write_policy_version_digest,
 };
 use crate::compliance::framework_model::FrameworkVersionCanonical;
 use crate::compliance::shared_implementation::{
@@ -1791,6 +1791,7 @@ pub async fn commit_cf_native_import(
             .execute(&mut *tx)
             .await
             .context("failed to finalize CF-native bundle digest")?;
+        refresh_bundle_requirement_digest(&mut tx, bundle_version_id).await?;
     }
     if let Some(benchmark) = pkg.parsed.benchmark.as_ref() {
         upsert_native_mapping(
@@ -2083,6 +2084,7 @@ async fn insert_native_bundle_version(
         .execute(&mut **tx)
         .await
         .context("failed to restore CF-native bundle digest")?;
+    refresh_bundle_requirement_digest(&mut *tx, bundle_version_id).await?;
     Ok(())
 }
 
@@ -2545,8 +2547,8 @@ mod tests {
         .expect("load mapped policy versions");
         assert_eq!(mapped_versions, vec![result.created_policy_version_ids[0]]);
 
-        let (name, description, policy_type, implementation_state, execution_phase, config, metadata, dependencies, digest, enabled): (String, Option<String>, String, String, String, serde_json::Value, serde_json::Value, serde_json::Value, String, bool) = sqlx::query_as(
-            "SELECT name, description, policy_type, implementation_state, execution_phase, config, compliance_metadata, dependencies, semantic_digest, enabled_by_default FROM deployment_policy_versions WHERE id = $1",
+        let (name, description, policy_type, implementation_state, execution_phase, config, metadata, dependencies, digest, mapping_digest, enabled): (String, Option<String>, String, String, String, serde_json::Value, serde_json::Value, serde_json::Value, String, String, bool) = sqlx::query_as(
+            "SELECT name, description, policy_type, implementation_state, execution_phase, config, compliance_metadata, dependencies, semantic_digest, mapping_digest, enabled_by_default FROM deployment_policy_versions WHERE id = $1",
         )
         .bind(result.created_policy_version_ids[0])
         .fetch_one(&pool)
@@ -2570,6 +2572,43 @@ mod tests {
         }
         .compute_digest();
         assert_eq!(digest, expected_digest);
+
+        let component_rows: Vec<(Uuid, String, String, Option<String>, String, String)> =
+            sqlx::query_as(
+                "SELECT requirement_version_id, relationship, coverage, rationale, provenance, trust_state \
+                 FROM policy_requirement_mappings WHERE policy_version_id = $1 \
+                 ORDER BY requirement_version_id",
+            )
+            .bind(result.created_policy_version_ids[0])
+            .fetch_all(&pool)
+            .await
+            .expect("load mapping digest inputs");
+        let expected_mapping_digest =
+            crate::compliance::canonical::semantic_digest(&serde_json::json!(
+                component_rows
+                    .into_iter()
+                    .map(
+                        |(
+                            requirement_version_id,
+                            relationship,
+                            coverage,
+                            rationale,
+                            provenance,
+                            trust_state,
+                        )| {
+                            serde_json::json!({
+                                "coverage": coverage,
+                                "provenance": provenance,
+                                "rationale": rationale,
+                                "relationship": relationship,
+                                "requirement_version_id": requirement_version_id.to_string(),
+                                "trust_state": trust_state,
+                            })
+                        }
+                    )
+                    .collect::<Vec<_>>()
+            ));
+        assert_eq!(mapping_digest, expected_mapping_digest);
 
         cleanup_import(&pool, result.bundle_id, &result.created_policy_version_ids).await;
     }
