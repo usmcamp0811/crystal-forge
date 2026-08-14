@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-14 21:01'
+updated_date: '2026-08-14 21:07'
 labels: []
 milestone: m-22
 dependencies:
@@ -465,6 +465,8 @@ Implemented and pushed immutable STIG policy reuse: `MapExisting` is revalidated
 2026-08-14 component-digest compatibility checkpoint committed/pushed as 192a150d. Added mapping_digest and requirement_digest columns, restored semantic_digest to plain cf-model-json-1 contracts, separated mutation refresh/backfill handling, updated mapping/import paths and Phase 22 assertions. Verification reported: cargo fmt, git diff --check, SQLX_OFFLINE cargo check, Phase 22 8/8, CF-native 11/11, digest tests 22/22, XCCDF non-ignored 267 passed/2 ignored. Full ignored XCCDF had one artifact-dependent failure because CF_TEST_ANDURIL_STIG_ZIP was unset. Worktree clean. Manual bundle API/UI remains deferred.
 
 Starting the derived policy draft mapping inheritance slice from clean 192a150d in the dedicated TASK-418 worktree. Production scope is ensure_policy_draft only; all callsites continue using the shared helper.
+
+2026-08-14 derived mapping inheritance verified and pushed as 06b1392e. `cargo fmt --all --check`, `git diff --check`, `SQLX_OFFLINE=true cargo check -p cf-server`, and ignored DB test `queries::deployment_policies::tests::derived_policy_draft_inherits_mappings_and_digests` on PostgreSQL 127.0.0.1:3042 passed. No UI/API/bundle files changed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
