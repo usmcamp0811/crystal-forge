@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-14 20:26'
+updated_date: '2026-08-14 20:47'
 labels: []
 milestone: m-22
 dependencies:
@@ -457,6 +457,8 @@ Implemented and pushed immutable STIG policy reuse: `MapExisting` is revalidated
 2026-08-14 checkpoint 2 committed/pushed as edafc663: bundle semantic digest now incorporates deterministic requirement-baseline membership; pending digest backfill and baseline insertion refresh bundle digests; ensure_bundle_draft copies exact requirement memberships. Verified cargo fmt and SQLX_OFFLINE=true cargo check -p cf-server. Manual bundle requirement API/UI, immutable import conflicts, and full DB acceptance coverage remain outstanding.
 
 2026-08-14 compatibility regression proof before further P0 work: started isolated DB on 3042 using nix run .#devScripts.db-only. Phase 22 suite ran 8 tests: 7 passed, 1 failed at phase_22_shared_creation_materializes_one_policy_for_three_requirements with persisted digest 6c84270c026f120519bdf402dd45972487aea733cbd55af87f8698f361030729 vs test's plain PolicyVersionCanonical digest a5cf35c21a80fb3e52eebc507bd47aa3c9586336c0fe343ce5d4e01c9c75408a. Ignored cf_native suite ran 9/9 passed; non-ignored cf_native filter had 2 active tests pass and 9 ignored. xccdf filter ran 267 passed, 2 ignored. This confirms the stale Phase 22 assertion and validates the need to restore CF-native semantic_digest compatibility before manual bundle API/UI. No code changes made after edafc663; worktree remains clean.
+
+2026-08-14 component-digest compatibility correction committed/pushed as 192a150d. Added migration 0214 mapping_digest/requirement_digest, restored plain cf-model-json-1 semantic digests, added guarded mutation refreshes and immutable-safe startup component backfills, and corrected Phase 22 semantic/component assertions. Verification: Nix SQLX_OFFLINE=true cargo check -p cf-server passed; cargo fmt --all and git diff --check passed; Phase 22 8/8, CF-native 11/11, focused digest 22/22, non-ignored XCCDF 267 passed with 2 ignored. Full xccdf --include-ignored had one expected artifact-dependent failure because CF_TEST_ANDURIL_STIG_ZIP was unset.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
