@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-14 04:16'
+updated_date: '2026-08-14 19:50'
 labels: []
 milestone: m-22
 dependencies:
@@ -371,6 +371,8 @@ DATABASE_URL=... cargo test -p cf-server --lib -- --ignored queries::compliance_
 - Verify with the requested isolated `DATABASE_URL` against the targeted ignored DB suite, plus formatting and diff checks.
 
 Next slice: persist create-mode queued requirement mappings atomically with new policy creation. Extend the create-policy request/handler/query path to accept validated mapping payloads, create the policy first, insert mappings in the same transaction, and preserve all-or-nothing behavior. Add focused server tests and update the browser round-trip step to verify persisted mappings after reload. Keep accepted-version immutability and existing edit-mode CRUD unchanged.
+
+2026-08-14 P0 closure slice approved by user: preserve verified browser proof first (test-only commit 3ff724b6 pushed); then implement policy-version mapping-inclusive canonical digests and same-transaction draft mutation recomputation with immutable-version guards; extend bundle canonical digests and ensure_bundle_draft to preserve exact requirement memberships; add manual bundle create/update API support for independent requirement_version_ids including zero-policy baselines; add minimal baseline UI using existing framework/version/requirement search; harden framework-release and requirement-version reimport identity conflicts and remove mutable semantic upserts; add targeted DB acceptance coverage for all invariants. Sequence checkpoints: mapping digest, bundle digest/draft, API/server baseline, UI baseline, immutable import conflicts, regression coverage. Verification gates: isolated PostgreSQL on 3042 targeted tests, cargo fmt --all --check, git diff --check, SQLX_OFFLINE=true cargo check -p cf-server, cargo check -p web-ui, nix build .#server, nix build .#web-ui. Do not start fuzzy matching or unrelated UI.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -447,6 +449,8 @@ Implemented and pushed immutable STIG policy reuse: `MapExisting` is revalidated
 2026-08-14 harness repair: canonical fixture JSON parses, but seeder FixtureCves.insights expected Vec while fixture provides an object at line 7426; changed it to opaque serde_json::Value and repaired the ignored parser regression's repository path discovery. Pinned local Nix dev-shell/run-ui-dev/run-ui-frontend Dioxus CLI to nixpkgs commit 09061f... providing dx 0.7.3 with fail-fast version output. Added focused integration-step selection, local manifest/API-layout support, configurable credentials, and authentication waits. The local focused run reaches 20aa but still receives 403 from the framework API despite whoami passing; this is not yet a valid 20aa layer classification. No full web-ui Nix build was rerun.
 
 2026-08-14 Policy Details/Drawer slice: loaded normalized policy requirement mappings from the exact selected policy version with request-generation protection, grouped by framework/release, and rendered relationship, coverage, provenance, rationale, loading/error, and zero-mapping states. Legacy classification is now labeled source/imported metadata. Extended 20aa browser coverage to open the drawer after editor reload and assert persisted normalized mappings. Fixed the fixture hierarchy transaction executor dereference exposed by the Nix server build. Verification: web-ui cargo check passed; cf-server cargo check passed; node --check and git diff --check passed. The authoritative nix web-ui check rebuilt successfully through server compilation but exceeded the 20-minute tool timeout during later VM artifact/design-parity processing; no final check result was observed.
+
+2026-08-14: Browser proof preserved in pushed test-only commit 3ff724b6; TASK-418 worktree clean before P0 feature work. 20a and 20aa both passed with screenshots. Beginning semantic-integrity and bundle requirement-baseline closure slice per user direction.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
