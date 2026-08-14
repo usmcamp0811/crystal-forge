@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-14 03:02'
+updated_date: '2026-08-14 03:19'
 labels: []
 milestone: m-22
 dependencies:
@@ -458,5 +458,10 @@ created: 2026-08-14 02:40
 created: 2026-08-14 03:02
 ---
 2026-08-14 fixture repair complete: added an optional normalized compliance fixture shape to the canonical JSON with framework web-ui-mapping-roundtrip, release web-ui-mapping-roundtrip-v1, and requirements MAP-1/MAP-2. Extended fixture seeding to upsert framework lineages, versions, requirement lineages, and requirement versions idempotently using the existing digest/query helpers. Focused 20aa now passes 1/1 with dark/light captures after selecting Security controls and resolving current_version_id from the production list response. Focused runs now skip design-parity capture automatically when CF_UI_TEST_STEPS is set. Verification: targeted fixture deserialization test passed, cargo fmt --all --check passed, node --check passed, git diff --check passed. Pushed commit 26fd22da.
+---
+
+created: 2026-08-14 03:19
+---
+2026-08-14 20aa closure / visual parity slice: closed 20aa debugging after focused 1/1 pass. Refined the Policy Mappings tab toward design commit 861fd877: explanatory intro, framework/version grouping, compact requirement rows, relationship/coverage chips, rationale/provenance presentation, read-only treatment, and purple-accent Add mapping editor. Fixture hierarchy seeding is now order-independent via two-pass parent resolution. Focused 20aa was rerun against current UI with the existing server + pinned dx frontend and passed 1/1 with dark/light captures. Verification: cargo check --manifest-path packages/web-ui/Cargo.toml, cargo fmt --all --check, node --check, git diff --check. Commits 229f29e4 and 5acfdc09 pushed. Full nix build .#web-ui intentionally not run. Policy Add/Edit mapping functionality is complete; visual parity remains in progress.
 ---
 <!-- COMMENTS:END -->
