@@ -10,9 +10,17 @@
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
+use std::collections::HashMap;
 use std::path::Path;
 use uuid::Uuid;
+
+use crate::compliance::framework_model::FrameworkVersionCanonical;
+use crate::compliance::requirement_model::RequirementVersionCanonical;
+use crate::queries::framework_requirements::{
+    insert_framework_version, insert_requirement_version, upsert_framework_lineage,
+    upsert_requirement_lineage,
+};
 
 // ---------------------------------------------------------------------------
 // Fixture JSON top-level structure
@@ -30,7 +38,7 @@ struct FixtureRoot {
     evaluations: FixtureEvaluations,
     cves: FixtureCves,
     policies: Vec<FixturePolicy>,
-    compliance: Vec<serde_json::Value>,
+    compliance: Vec<FixtureCompliance>,
     caches: Vec<serde_json::Value>,
     scanning: serde_json::Value,
     admin: FixtureAdmin,
@@ -314,6 +322,58 @@ struct FixturePolicy {
 }
 
 // ---------------------------------------------------------------------------
+// Normalized compliance fixtures
+// ---------------------------------------------------------------------------
+
+/// The existing compliance entries are design-oriented bundle summaries.  A
+/// small optional normalized shape is accepted alongside them so the fast UI
+/// harness can seed real framework/requirement API data without coupling the
+/// browser test to a database-only setup script.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct FixtureCompliance {
+    #[serde(rename = "canonicalSourceKey")]
+    canonical_source_key: Option<String>,
+    name: Option<String>,
+    publisher: Option<String>,
+    description: Option<String>,
+    versions: Option<Vec<FixtureComplianceVersion>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct FixtureComplianceVersion {
+    version: String,
+    #[serde(rename = "canonicalReleaseKey")]
+    canonical_release_key: String,
+    title: Option<String>,
+    #[serde(rename = "publishedAt")]
+    published_at: Option<String>,
+    #[serde(default)]
+    requirements: Vec<FixtureComplianceRequirement>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct FixtureComplianceRequirement {
+    #[serde(rename = "canonicalRequirementKey")]
+    canonical_requirement_key: String,
+    #[serde(rename = "externalId")]
+    external_id: String,
+    title: Option<String>,
+    description: Option<String>,
+    kind: String,
+    severity: Option<String>,
+    #[serde(rename = "checkText")]
+    check_text: Option<String>,
+    #[serde(rename = "fixText")]
+    fix_text: Option<String>,
+    metadata: Option<serde_json::Value>,
+    #[serde(rename = "parentExternalId")]
+    parent_external_id: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Admin
 // ---------------------------------------------------------------------------
 
@@ -404,6 +464,7 @@ pub async fn seed_from_fixture(pool: &PgPool, path: &Path) -> Result<()> {
     let flake_ids = seed_flakes(pool, &fixture.flakes.registry).await?;
     seed_commits(pool, &fixture.flakes.registry, &flake_ids).await?;
     let policy_ids = seed_deployment_policies(pool, &fixture.policies).await?;
+    seed_compliance_frameworks(pool, &fixture.compliance).await?;
     let _user_ids = seed_users(pool, &fixture.admin).await?;
     let system_ids = seed_systems(pool, &fixture.systems, &flake_ids, &policy_ids).await?;
     seed_system_states(pool, &fixture.systems, &system_ids).await?;
@@ -421,6 +482,131 @@ pub async fn seed_from_fixture(pool: &PgPool, path: &Path) -> Result<()> {
 
     tracing::info!("Fixture seeding complete");
     Ok(())
+}
+
+/// Seed the optional normalized framework fixtures used by focused UI checks.
+/// Existing design-only compliance entries are ignored when they do not carry
+/// a canonical framework key, so this remains backward-compatible with the
+/// original fixture format.
+async fn seed_compliance_frameworks(pool: &PgPool, fixtures: &[FixtureCompliance]) -> Result<()> {
+    for fixture in fixtures {
+        let Some(canonical_source_key) = fixture.canonical_source_key.as_deref() else {
+            continue;
+        };
+        let Some(versions) = fixture.versions.as_ref() else {
+            continue;
+        };
+
+        let mut tx = pool
+            .begin()
+            .await
+            .context("begin compliance fixture transaction")?;
+        let framework_id = upsert_framework_lineage(
+            &mut tx,
+            fixture.name.as_deref().unwrap_or(canonical_source_key),
+            fixture.publisher.as_deref(),
+            canonical_source_key,
+            fixture.description.as_deref(),
+        )
+        .await
+        .context("seed compliance framework lineage")?;
+
+        for version in versions {
+            let framework_version_id = existing_or_insert_framework_version(
+                &mut tx,
+                framework_id,
+                canonical_source_key,
+                version,
+            )
+            .await?;
+
+            let mut requirement_versions = HashMap::new();
+            for requirement in &version.requirements {
+                let requirement_id = upsert_requirement_lineage(
+                    &mut tx,
+                    framework_id,
+                    &requirement.canonical_requirement_key,
+                )
+                .await
+                .context("seed compliance requirement lineage")?;
+                let parent_id = requirement
+                    .parent_external_id
+                    .as_ref()
+                    .and_then(|parent| requirement_versions.get(parent).copied());
+                let canonical = RequirementVersionCanonical {
+                    canonical_requirement_key: requirement.canonical_requirement_key.clone(),
+                    external_id: requirement.external_id.clone(),
+                    title: requirement.title.clone(),
+                    description: requirement.description.clone(),
+                    kind: requirement.kind.clone(),
+                    severity: requirement.severity.clone(),
+                    check_text: requirement.check_text.clone(),
+                    fix_text: requirement.fix_text.clone(),
+                    metadata: requirement
+                        .metadata
+                        .clone()
+                        .unwrap_or_else(|| serde_json::json!({})),
+                };
+                let requirement_version_id = insert_requirement_version(
+                    &mut tx,
+                    requirement_id,
+                    framework_version_id,
+                    &canonical,
+                    parent_id,
+                )
+                .await
+                .context("seed compliance requirement version")?;
+                requirement_versions
+                    .insert(requirement.external_id.clone(), requirement_version_id);
+                requirement_versions.insert(
+                    requirement.canonical_requirement_key.clone(),
+                    requirement_version_id,
+                );
+            }
+        }
+
+        tx.commit()
+            .await
+            .context("commit compliance fixture transaction")?;
+    }
+    Ok(())
+}
+
+async fn existing_or_insert_framework_version(
+    tx: &mut Transaction<'_, Postgres>,
+    framework_id: Uuid,
+    canonical_source_key: &str,
+    version: &FixtureComplianceVersion,
+) -> Result<Uuid> {
+    if let Some(id) = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM compliance_framework_versions WHERE framework_id = $1 AND canonical_release_key = $2",
+    )
+    .bind(framework_id)
+    .bind(&version.canonical_release_key)
+    .fetch_optional(&mut **tx)
+    .await
+    .context("check compliance framework version fixture")?
+    {
+        return Ok(id);
+    }
+
+    let published_at = version
+        .published_at
+        .as_deref()
+        .map(chrono::DateTime::parse_from_rfc3339)
+        .transpose()
+        .context("parse compliance framework fixture publication date")?
+        .map(|value| value.with_timezone(&chrono::Utc));
+    let canonical = FrameworkVersionCanonical {
+        canonical_source_key: canonical_source_key.to_owned(),
+        canonical_release_key: version.canonical_release_key.clone(),
+        version: version.version.clone(),
+        publisher: None,
+        title: version.title.clone(),
+    };
+    insert_framework_version(tx, framework_id, &canonical, None, published_at)
+        .await
+        .context("seed compliance framework version")
 }
 
 /// Mark the setup wizard as dismissed and acknowledged for every user so the

@@ -6193,6 +6193,9 @@ const steps = [
     description: "Policies new modal persists two real requirement mappings and reloads them",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+      // custom_check policies belong to the security domain; select that tab
+      // before creating one so the new card is visible after the modal closes.
+      await page.getByRole("tab", { name: /Security controls/ }).click();
       await page.waitForFunction(async (base) => {
         const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include" });
         if (!response.ok) return false;
@@ -6355,7 +6358,10 @@ const steps = [
       await assertVisible(page.getByText("Full", { exact: true }), "Expected persisted Full coverage");
 
       // Authoritative provenance + trust_state check via direct API.
-      const policyVersionId = createdRecord.body.current_version_id;
+       const policyVersionId = firstPage.body.policies.find((policy) => policy.id === createdPolicy.id)?.current_version_id;
+       if (!policyVersionId) {
+         throw new Error(`Created policy ${createdPolicy.id} list record did not contain current_version_id`);
+       }
       const mappingResponse = await page.evaluate(async ({ base, id }) => {
         const response = await fetch(`${base}/api/v1/policy-versions/${id}/requirement-mappings`, { credentials: "include" });
         return { status: response.status, rows: await response.json() };
@@ -8323,7 +8329,8 @@ const steps = [
   // These captures never fail the check; compare-design-parity.js scores drift.
   const designParityDir = `${outputDir}/design-parity`;
   let designParityCaptured = 0;
-  try {
+  const captureDesignParity = !requestedSteps && process.env.CF_UI_SKIP_DESIGN_PARITY !== "1";
+  if (captureDesignParity) try {
     const parityManifestPath = firstExistingPath([
       path.join(__dirname, "design-parity", "manifest.json"),
       path.join(__dirname, "..", "design-parity", "manifest.json"),
