@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-14 02:22'
+updated_date: '2026-08-14 02:40'
 labels: []
 milestone: m-22
 dependencies:
@@ -446,3 +446,12 @@ Implemented and pushed immutable STIG policy reuse: `MapExisting` is revalidated
 
 2026-08-14 harness repair: canonical fixture JSON parses, but seeder FixtureCves.insights expected Vec while fixture provides an object at line 7426; changed it to opaque serde_json::Value and repaired the ignored parser regression's repository path discovery. Pinned local Nix dev-shell/run-ui-dev/run-ui-frontend Dioxus CLI to nixpkgs commit 09061f... providing dx 0.7.3 with fail-fast version output. Added focused integration-step selection, local manifest/API-layout support, configurable credentials, and authentication waits. The local focused run reaches 20aa but still receives 403 from the framework API despite whoami passing; this is not yet a valid 20aa layer classification. No full web-ui Nix build was rerun.
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+created: 2026-08-14 02:40
+---
+2026-08-14 focused 20aa follow-up: restarted run-ui-dev with repaired fixture seeding and pinned dx 0.7.3. Added focused-run auth preflight and credentials include for cross-origin API reads (commit 8a1c9b4e, pushed). The test now authenticates and reaches the framework API successfully, but the first data boundary fails because the fixture seeder loads no framework with canonical_source_key web-ui-mapping-roundtrip; MAP-1/MAP-2 are absent from the seeded database. This is a fixture/API data setup blocker, not yet a policy UI or mapping persistence failure. Local services were stopped after verification.
+---
+<!-- COMMENTS:END -->
