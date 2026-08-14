@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-14 03:37'
+updated_date: '2026-08-14 04:16'
 labels: []
 milestone: m-22
 dependencies:
@@ -445,6 +445,8 @@ Implemented and pushed immutable STIG policy reuse: `MapExisting` is revalidated
 2026-08-13: Fixed two root causes exposed by 20aa: (1) policy_editor_modal was discarding the create POST response and then re-fetching first-100 list, making new policies invisible above 100; fix inserts entry from refreshed list at front of library. (2) The create endpoint returns a bare deployment_policies row without current_version_id; the fix prefers the entry from the list-response refresh which carries the join-computed current_version_id, enabling the edit modal to load persisted mappings. TASK-421 created to track proper server-side pagination. Latest commits: 52eff5a5, 4d576936. Both cargo check and git diff --check pass. Awaiting next full web-ui Nix run to confirm 20aa green.
 
 2026-08-14 harness repair: canonical fixture JSON parses, but seeder FixtureCves.insights expected Vec while fixture provides an object at line 7426; changed it to opaque serde_json::Value and repaired the ignored parser regression's repository path discovery. Pinned local Nix dev-shell/run-ui-dev/run-ui-frontend Dioxus CLI to nixpkgs commit 09061f... providing dx 0.7.3 with fail-fast version output. Added focused integration-step selection, local manifest/API-layout support, configurable credentials, and authentication waits. The local focused run reaches 20aa but still receives 403 from the framework API despite whoami passing; this is not yet a valid 20aa layer classification. No full web-ui Nix build was rerun.
+
+2026-08-14 Policy Details/Drawer slice: loaded normalized policy requirement mappings from the exact selected policy version with request-generation protection, grouped by framework/release, and rendered relationship, coverage, provenance, rationale, loading/error, and zero-mapping states. Legacy classification is now labeled source/imported metadata. Extended 20aa browser coverage to open the drawer after editor reload and assert persisted normalized mappings. Fixed the fixture hierarchy transaction executor dereference exposed by the Nix server build. Verification: web-ui cargo check passed; cf-server cargo check passed; node --check and git diff --check passed. The authoritative nix web-ui check rebuilt successfully through server compilation but exceeded the 20-minute tool timeout during later VM artifact/design-parity processing; no final check result was observed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
