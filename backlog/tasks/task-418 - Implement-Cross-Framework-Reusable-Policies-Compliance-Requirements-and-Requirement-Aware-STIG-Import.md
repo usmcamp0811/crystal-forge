@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-14 20:48'
+updated_date: '2026-08-14 21:01'
 labels: []
 milestone: m-22
 dependencies:
@@ -373,6 +373,8 @@ DATABASE_URL=... cargo test -p cf-server --lib -- --ignored queries::compliance_
 Next slice: persist create-mode queued requirement mappings atomically with new policy creation. Extend the create-policy request/handler/query path to accept validated mapping payloads, create the policy first, insert mappings in the same transaction, and preserve all-or-nothing behavior. Add focused server tests and update the browser round-trip step to verify persisted mappings after reload. Keep accepted-version immutability and existing edit-mode CRUD unchanged.
 
 2026-08-14 P0 closure slice approved by user: preserve verified browser proof first (test-only commit 3ff724b6 pushed); then implement policy-version mapping-inclusive canonical digests and same-transaction draft mutation recomputation with immutable-version guards; extend bundle canonical digests and ensure_bundle_draft to preserve exact requirement memberships; add manual bundle create/update API support for independent requirement_version_ids including zero-policy baselines; add minimal baseline UI using existing framework/version/requirement search; harden framework-release and requirement-version reimport identity conflicts and remove mutable semantic upserts; add targeted DB acceptance coverage for all invariants. Sequence checkpoints: mapping digest, bundle digest/draft, API/server baseline, UI baseline, immutable import conflicts, regression coverage. Verification gates: isolated PostgreSQL on 3042 targeted tests, cargo fmt --all --check, git diff --check, SQLX_OFFLINE=true cargo check -p cf-server, cargo check -p web-ui, nix build .#server, nix build .#web-ui. Do not start fuzzy matching or unrelated UI.
+
+2026-08-14 derived policy draft mapping inheritance: in ensure_policy_draft, copy all policy_requirement_mappings immediately after inserting the new draft, then compute the draft digest with copied mappings present. Add one ignored DB lifecycle test covering three mappings, semantic/mapping digest parity, distinct mapping IDs, draft-only mutation, and accepted-source mutation rejection. Verify fmt, diff check, SQLX_OFFLINE cargo check, and targeted DB test on port 3042.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -461,6 +463,8 @@ Implemented and pushed immutable STIG policy reuse: `MapExisting` is revalidated
 2026-08-14 component-digest compatibility correction committed/pushed as 192a150d. Added migration 0214 mapping_digest/requirement_digest, restored plain cf-model-json-1 semantic digests, added guarded mutation refreshes and immutable-safe startup component backfills, and corrected Phase 22 semantic/component assertions. Verification: Nix SQLX_OFFLINE=true cargo check -p cf-server passed; cargo fmt --all and git diff --check passed; Phase 22 8/8, CF-native 11/11, focused digest 22/22, non-ignored XCCDF 267 passed with 2 ignored. Full xccdf --include-ignored had one expected artifact-dependent failure because CF_TEST_ANDURIL_STIG_ZIP was unset.
 
 2026-08-14 component-digest compatibility checkpoint committed/pushed as 192a150d. Added mapping_digest and requirement_digest columns, restored semantic_digest to plain cf-model-json-1 contracts, separated mutation refresh/backfill handling, updated mapping/import paths and Phase 22 assertions. Verification reported: cargo fmt, git diff --check, SQLX_OFFLINE cargo check, Phase 22 8/8, CF-native 11/11, digest tests 22/22, XCCDF non-ignored 267 passed/2 ignored. Full ignored XCCDF had one artifact-dependent failure because CF_TEST_ANDURIL_STIG_ZIP was unset. Worktree clean. Manual bundle API/UI remains deferred.
+
+Starting the derived policy draft mapping inheritance slice from clean 192a150d in the dedicated TASK-418 worktree. Production scope is ensure_policy_draft only; all callsites continue using the shared helper.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
