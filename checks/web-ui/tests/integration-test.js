@@ -158,6 +158,19 @@ async function assertVisible(locator, message, timeoutMs = 5000) {
   }
 }
 
+async function ensureAuthenticated(page) {
+  await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT });
+  await page.locator('input[type="text"]').fill(TEST_USER.username);
+  await page.locator('input[type="password"]').fill(TEST_USER.password);
+  await page.locator('button[type="submit"]').click();
+  await page.waitForFunction(async (base) => {
+    const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include" });
+    if (!response.ok) return false;
+    const auth = await response.json();
+    return auth.is_authenticated === true;
+  }, apiBaseUrl, { timeout: 5000 });
+}
+
 async function assertHidden(locator, message) {
   const visible = await locator.isVisible({ timeout: 1500 }).catch(() => false);
   if (visible) {
@@ -6187,16 +6200,17 @@ const steps = [
         return auth.is_authenticated === true;
       }, apiBaseUrl, { timeout: 5000 });
       const fixture = await page.evaluate(async (base) => {
-        const frameworksResponse = await fetch(`${base}/api/v1/compliance/frameworks`);
+        const requestOptions = { credentials: "include" };
+        const frameworksResponse = await fetch(`${base}/api/v1/compliance/frameworks`, requestOptions);
         if (!frameworksResponse.ok) throw new Error(`framework list failed: ${frameworksResponse.status}`);
         const frameworks = await frameworksResponse.json();
         const framework = frameworks.find((item) => item.canonical_source_key === "web-ui-mapping-roundtrip");
         if (!framework) throw new Error("Mapping round-trip framework fixture missing");
-        const versionsResponse = await fetch(`${base}/api/v1/compliance/frameworks/${framework.id}/versions`);
+        const versionsResponse = await fetch(`${base}/api/v1/compliance/frameworks/${framework.id}/versions`, requestOptions);
         if (!versionsResponse.ok) throw new Error(`framework versions failed: ${versionsResponse.status}`);
         const version = (await versionsResponse.json()).find((item) => item.canonical_release_key === "web-ui-mapping-roundtrip-v1");
         if (!version) throw new Error("Mapping round-trip framework version fixture missing");
-        const requirementsResponse = await fetch(`${base}/api/v1/compliance/framework-versions/${version.id}/requirements`);
+        const requirementsResponse = await fetch(`${base}/api/v1/compliance/framework-versions/${version.id}/requirements`, requestOptions);
         if (!requirementsResponse.ok) throw new Error(`requirements failed: ${requirementsResponse.status}`);
         const requirements = await requirementsResponse.json();
         const selected = ["MAP-1", "MAP-2"].map((externalId) => requirements.find((item) => item.external_id === externalId));
@@ -8249,6 +8263,17 @@ const steps = [
   };
 
   let page = await createStepPage();
+
+  // Focused runs intentionally skip the ordered auth steps. Establish the
+  // same authenticated session those steps would have created before running
+  // a post-login step directly.
+  const needsAuthPreflight =
+    requestedSteps &&
+    !requestedSteps.has("03-registration-submit") &&
+    !requestedSteps.has("05-login-submit");
+  if (needsAuthPreflight) {
+    await ensureAuthenticated(page);
+  }
 
   const results = [];
 
