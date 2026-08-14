@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-14 03:19'
+updated_date: '2026-08-14 03:37'
 labels: []
 milestone: m-22
 dependencies:
@@ -463,5 +463,10 @@ created: 2026-08-14 03:02
 created: 2026-08-14 03:19
 ---
 2026-08-14 20aa closure / visual parity slice: closed 20aa debugging after focused 1/1 pass. Refined the Policy Mappings tab toward design commit 861fd877: explanatory intro, framework/version grouping, compact requirement rows, relationship/coverage chips, rationale/provenance presentation, read-only treatment, and purple-accent Add mapping editor. Fixture hierarchy seeding is now order-independent via two-pass parent resolution. Focused 20aa was rerun against current UI with the existing server + pinned dx frontend and passed 1/1 with dark/light captures. Verification: cargo check --manifest-path packages/web-ui/Cargo.toml, cargo fmt --all --check, node --check, git diff --check. Commits 229f29e4 and 5acfdc09 pushed. Full nix build .#web-ui intentionally not run. Policy Add/Edit mapping functionality is complete; visual parity remains in progress.
+---
+
+created: 2026-08-14 03:37
+---
+2026-08-14 final Mappings-tab parity slice: Add Mapping is now collapsed by default and expands on click; Cancel closes without mutation; successful pending/persisted adds close the editor and refresh mapping count. Empty state uses the informational zero-mapping callout. Editor now matches the purple shell/gap, selected requirement card with Change/root-parent context, descriptive Implements/Supports/Provides evidence for cards, Full/Partial segmented control, rationale label/placeholder, and explicit Cancel/Add mapping footer. Focused 20aa was updated for the interaction and passed 1/1 with dark/light captures. Verification: cargo check --manifest-path packages/web-ui/Cargo.toml, cargo fmt --all --check, node --check, git diff --check. Pushed commit 2fb9c08e. Full nix web-ui build not run. Policy Add/Edit Mappings UI is complete; next area is Policy Details/Drawer.
 ---
 <!-- COMMENTS:END -->
