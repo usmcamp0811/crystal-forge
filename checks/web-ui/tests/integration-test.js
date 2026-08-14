@@ -24,6 +24,7 @@ const { execSync } = require("child_process");
 
 const baseUrl = process.argv[2] || "http://127.0.0.1:3000";
 const outputDir = process.argv[3] || "/tmp/screenshots";
+const apiBaseUrl = process.env.CF_UI_API_BASE_URL || baseUrl;
 
 function firstExistingPath(paths) {
   return paths.find((candidate) => fs.existsSync(candidate));
@@ -2786,7 +2787,7 @@ const steps = [
         if (!r.ok) return null;
         const j = await r.json();
         return j.csrf_token || null;
-      }, baseUrl);
+      }, apiBaseUrl);
 
       if (csrfToken) {
         await page.evaluate(async ({ base, token }) => {
@@ -6189,7 +6190,7 @@ const steps = [
         const selected = ["MAP-1", "MAP-2"].map((externalId) => requirements.find((item) => item.external_id === externalId));
         if (selected.some((item) => !item)) throw new Error("Mapping round-trip requirement fixtures missing");
         return { framework, version, requirements: selected };
-      }, baseUrl);
+      }, apiBaseUrl);
       const [requirementA, requirementB] = fixture.requirements;
       const policyName = `UI mapping round-trip ${Date.now()}`;
 
@@ -6265,7 +6266,7 @@ const steps = [
           const response = await fetch(`${base}/api/v1/deployment-policies/${id}`, { credentials: "include" });
           return { status: response.status, body: await response.json() };
         },
-        { base: baseUrl, id: createdPolicy.id },
+        { base: apiBaseUrl, id: createdPolicy.id },
       );
       if (createdRecord.status !== 200) {
         throw new Error(`Created policy ${createdPolicy.id} not fetchable immediately after create: ${createdRecord.status}`);
@@ -6275,7 +6276,7 @@ const steps = [
       const firstPage = await page.evaluate(async ({ base }) => {
         const response = await fetch(`${base}/api/v1/deployment-policies?limit=100&offset=0`, { credentials: "include" });
         return { status: response.status, body: await response.json() };
-      }, { base: baseUrl });
+      }, { base: apiBaseUrl });
       if (firstPage.status !== 200) {
         throw new Error(`Production policy list fetch failed after create: ${firstPage.status}`);
       }
@@ -6332,7 +6333,7 @@ const steps = [
       const mappingResponse = await page.evaluate(async ({ base, id }) => {
         const response = await fetch(`${base}/api/v1/policy-versions/${id}/requirement-mappings`, { credentials: "include" });
         return { status: response.status, rows: await response.json() };
-      }, { base: baseUrl, id: policyVersionId });
+      }, { base: apiBaseUrl, id: policyVersionId });
       if (mappingResponse.status !== 200) throw new Error(`Expected persisted mapping API response, got ${mappingResponse.status}`);
       if (mappingResponse.rows.length !== 2) throw new Error(`Expected two persisted mappings, got ${mappingResponse.rows.length}`);
       for (const row of mappingResponse.rows) {
