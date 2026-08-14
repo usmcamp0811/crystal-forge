@@ -479,7 +479,7 @@ pub async fn ensure_policy_draft(
 pub enum BundleValidationError {
     NameRequired,
     FrameworkRequired,
-    PolicyRequired,
+    EmptyBaseline,
     DuplicateRequirement(Uuid),
     RequirementNotFound(Uuid),
 }
@@ -489,7 +489,7 @@ impl std::fmt::Display for BundleValidationError {
         match self {
             Self::NameRequired => f.write_str("Bundle name is required"),
             Self::FrameworkRequired => f.write_str("Framework is required"),
-            Self::PolicyRequired => f.write_str("At least one policy is required"),
+            Self::EmptyBaseline => f.write_str("At least one policy or requirement is required"),
             Self::DuplicateRequirement(id) => {
                 write!(f, "Duplicate requirement version {id} in request")
             }
@@ -516,7 +516,7 @@ fn validate_bundle_request(
         return Err(BundleValidationError::FrameworkRequired.into());
     }
     if policy_ids.is_empty() && requirement_version_ids.is_empty() {
-        return Err(BundleValidationError::PolicyRequired.into());
+        return Err(BundleValidationError::EmptyBaseline.into());
     }
     let mut seen = std::collections::HashSet::new();
     for requirement_version_id in requirement_version_ids {
@@ -624,7 +624,10 @@ pub async fn list_bundle_version_requirement_membership(
         r#"
         SELECT bvr.requirement_version_id,
                rv.requirement_id,
+               fv.framework_id,
                rv.framework_version_id,
+               f.name AS framework_name,
+               fv.version AS framework_version,
                rv.external_id,
                rv.title,
                rv.kind,
@@ -632,6 +635,8 @@ pub async fn list_bundle_version_requirement_membership(
                bvr.requirement_order
         FROM compliance_bundle_version_requirements bvr
         JOIN compliance_requirement_versions rv ON rv.id = bvr.requirement_version_id
+        JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id
+        JOIN compliance_frameworks f ON f.id = fv.framework_id
         WHERE bvr.bundle_version_id = $1
         ORDER BY bvr.requirement_order, bvr.requirement_version_id
         "#,
@@ -656,6 +661,8 @@ struct BundleRow {
     env_ids: Vec<Uuid>,
     env_names: Vec<String>,
     env_colors: Vec<String>,
+    policy_count: i64,
+    requirement_count: i64,
     control_count: i64,
     environment_count: i64,
     active_assignment_count: i64,
@@ -713,6 +720,8 @@ fn bundle_from_row(row: BundleRow) -> ComplianceBundleSummary {
         last_review: row.last_review,
         policy_ids: row.policy_ids,
         required_envs,
+        policy_count: row.policy_count,
+        requirement_count: row.requirement_count,
         control_count: row.control_count,
         environment_count: row.environment_count,
         active_assignment_count: row.active_assignment_count,
@@ -740,7 +749,9 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
             COALESCE(e.env_ids, ARRAY[]::uuid[]) AS env_ids,
             COALESCE(e.env_names, ARRAY[]::text[]) AS env_names,
             COALESCE(e.env_colors, ARRAY[]::text[]) AS env_colors,
-            COALESCE(p.control_count, 0)::bigint AS control_count,
+            COALESCE(p.policy_count, 0)::bigint AS policy_count,
+            COALESCE(r.requirement_count, 0)::bigint AS requirement_count,
+            COALESCE(p.policy_count, 0)::bigint AS control_count,
             COALESCE(e.environment_count, 0)::bigint AS environment_count,
             COALESCE(a.active_assignment_count, 0)::bigint AS active_assignment_count,
             b.current_draft_version_id,
@@ -751,11 +762,16 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
         LEFT JOIN LATERAL (
             SELECT
                 array_agg(cbp.policy_id ORDER BY dp.name) AS policy_ids,
-                count(*)::bigint AS control_count
+                count(*)::bigint AS policy_count
             FROM compliance_bundle_policies cbp
             JOIN deployment_policies dp ON dp.id = cbp.policy_id
             WHERE cbp.bundle_id = b.id
         ) p ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT count(*)::bigint AS requirement_count
+            FROM compliance_bundle_version_requirements bvr
+            WHERE bvr.bundle_version_id = b.current_draft_version_id
+        ) r ON TRUE
         LEFT JOIN LATERAL (
             SELECT
                 array_agg(e.id ORDER BY e.name) AS env_ids,
@@ -801,14 +817,19 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
             Option<DateTime<Utc>>,
             Option<Uuid>,
             i64,
+            i64,
+            i64,
         ),
     >(
         r#"
         SELECT v.id, v.bundle_id, v.version, v.publication_state, v.trust_state,
                v.semantic_digest, v.created_at, v.published_at, v.derived_from_version_id,
-               COUNT(cbvp.policy_version_id)::bigint AS control_count
+                COUNT(DISTINCT cbvp.policy_version_id)::bigint AS policy_count,
+                COUNT(DISTINCT bvr.requirement_version_id)::bigint AS requirement_count,
+                COUNT(DISTINCT cbvp.policy_version_id)::bigint AS control_count
         FROM compliance_bundle_versions v
         LEFT JOIN compliance_bundle_version_policies cbvp ON cbvp.bundle_version_id = v.id
+        LEFT JOIN compliance_bundle_version_requirements bvr ON bvr.bundle_version_id = v.id
         WHERE v.bundle_id = ANY($1)
         GROUP BY v.id
         ORDER BY v.bundle_id, v.created_at DESC, v.id DESC
@@ -832,7 +853,9 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
                 created_at: row.6,
                 published_at: row.7,
                 derived_from_version_id: row.8,
-                control_count: row.9,
+                policy_count: row.9,
+                requirement_count: row.10,
+                control_count: row.11,
                 is_current_published: bundle.current_published_version_id == Some(row.0),
                 is_current_draft: bundle.current_draft_version_id == Some(row.0),
             })
@@ -1011,7 +1034,9 @@ pub async fn find_bundle(
             COALESCE(e.env_ids, ARRAY[]::uuid[]) AS env_ids,
             COALESCE(e.env_names, ARRAY[]::text[]) AS env_names,
             COALESCE(e.env_colors, ARRAY[]::text[]) AS env_colors,
-            COALESCE(p.control_count, 0)::bigint AS control_count,
+            COALESCE(p.policy_count, 0)::bigint AS policy_count,
+            COALESCE(r.requirement_count, 0)::bigint AS requirement_count,
+            COALESCE(p.policy_count, 0)::bigint AS control_count,
             COALESCE(e.environment_count, 0)::bigint AS environment_count,
             COALESCE(a.active_assignment_count, 0)::bigint AS active_assignment_count,
             b.current_draft_version_id,
@@ -1020,10 +1045,15 @@ pub async fn find_bundle(
             pv.version AS current_published_version
         FROM compliance_bundles b
         LEFT JOIN LATERAL (
-            SELECT array_agg(policy_id ORDER BY policy_id) AS policy_ids, count(*)::bigint AS control_count
+             SELECT array_agg(policy_id ORDER BY policy_id) AS policy_ids, count(*)::bigint AS policy_count
             FROM compliance_bundle_policies
             WHERE bundle_id = b.id
         ) p ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT count(*)::bigint AS requirement_count
+            FROM compliance_bundle_version_requirements bvr
+            WHERE bvr.bundle_version_id = b.current_draft_version_id
+        ) r ON TRUE
         LEFT JOIN LATERAL (
             SELECT
                 array_agg(e.id ORDER BY e.name) AS env_ids,
@@ -2914,7 +2944,15 @@ mod tests {
     fn requirement_validation_allows_requirement_only_baselines() {
         let requirement_id = Uuid::new_v4();
         assert!(validate_bundle_request("bundle", "framework", &[], &[requirement_id]).is_ok());
-        assert!(validate_bundle_request("bundle", "framework", &[], &[]).is_err());
+        let error = validate_bundle_request("bundle", "framework", &[], &[]).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<BundleValidationError>(),
+            Some(BundleValidationError::EmptyBaseline)
+        ));
+        assert_eq!(
+            error.to_string(),
+            "At least one policy or requirement is required"
+        );
         assert!(
             validate_bundle_request(
                 "bundle",
@@ -2953,7 +2991,7 @@ mod tests {
         .await
         .unwrap();
         let mut requirement_ids = Vec::new();
-        for key in ["REQ-A", "REQ-B"] {
+        for key in ["REQ-A", "REQ-B", "REQ-C"] {
             let requirement_id: Uuid = sqlx::query_scalar(
                 "INSERT INTO compliance_requirements (framework_id, canonical_requirement_key) VALUES ($1, $2) RETURNING id",
             )
@@ -3002,6 +3040,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             requirement_ids
         );
+        assert!(
+            members
+                .iter()
+                .all(|member| member.framework_id == framework_id)
+        );
+        assert!(
+            members
+                .iter()
+                .all(|member| member.framework_name.starts_with("Baseline framework"))
+        );
+        assert!(members.iter().all(|member| member.framework_version == "1"));
         let before: (String, String) = sqlx::query_as(
             "SELECT semantic_digest, requirement_digest FROM compliance_bundle_versions WHERE id = $1",
         )
@@ -3038,6 +3087,88 @@ mod tests {
         assert_eq!(before.0, after.0);
         assert_eq!(before.1, after.1);
         assert_ne!(after.1, "pending");
+
+        let mutated = update_bundle(
+            &pool,
+            created.id,
+            UpdateComplianceBundleRequest {
+                name: created.name.clone(),
+                framework: created.framework.clone(),
+                version: Some(created.version.clone()),
+                description: created.description.clone(),
+                required_envs: vec![],
+                policy_ids: vec![],
+                requirement_version_ids: vec![requirement_ids[0], requirement_ids[2]],
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(mutated.requirement_count, 2);
+        let mutated_digest: String = sqlx::query_scalar(
+            "SELECT requirement_digest FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(mutated.current_draft_version_id.unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_ne!(after.1, mutated_digest);
+
+        let accepted_id = mutated.current_draft_version_id.unwrap();
+        let mut publish_tx = pool.begin().await.unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundles SET current_draft_version_id = NULL WHERE current_draft_version_id = $1",
+        )
+        .bind(accepted_id)
+        .execute(&mut *publish_tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundle_versions SET publication_state = 'accepted', published_at = now() WHERE id = $1",
+        )
+        .bind(accepted_id)
+        .execute(&mut *publish_tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(accepted_id)
+        .bind(created.id)
+        .execute(&mut *publish_tx)
+        .await
+        .unwrap();
+        publish_tx.commit().await.unwrap();
+
+        let derived = update_bundle(
+            &pool,
+            created.id,
+            UpdateComplianceBundleRequest {
+                name: created.name.clone(),
+                framework: created.framework.clone(),
+                version: Some(created.version.clone()),
+                description: created.description.clone(),
+                required_envs: vec![],
+                policy_ids: vec![],
+                requirement_version_ids: vec![requirement_ids[1]],
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let derived_id = derived.current_draft_version_id.unwrap();
+        assert_ne!(derived_id, accepted_id);
+        let derived_from: Option<Uuid> = sqlx::query_scalar(
+            "SELECT derived_from_version_id FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(derived_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(derived_from, Some(accepted_id));
+        assert_eq!(derived.requirement_count, 1);
 
         let duplicate = create_bundle(
             &pool,
@@ -3218,6 +3349,8 @@ mod tests {
             last_review: None,
             policy_ids: vec![],
             required_envs: vec![],
+            policy_count: 0,
+            requirement_count: 0,
             control_count: 0,
             environment_count: 0,
             active_assignment_count: 0,

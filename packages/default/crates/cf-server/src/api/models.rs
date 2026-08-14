@@ -1418,7 +1418,10 @@ pub struct BundleVersionPolicyMembership {
 pub struct BundleVersionRequirementMembership {
     pub requirement_version_id: Uuid,
     pub requirement_id: Uuid,
+    pub framework_id: Uuid,
     pub framework_version_id: Uuid,
+    pub framework_name: String,
+    pub framework_version: String,
     pub external_id: String,
     pub title: Option<String>,
     pub kind: String,
@@ -1496,6 +1499,9 @@ pub struct ComplianceBundleSummary {
     pub last_review: Option<DateTime<Utc>>,
     pub policy_ids: Vec<uuid::Uuid>,
     pub required_envs: Vec<ComplianceEnvironmentRef>,
+    pub policy_count: i64,
+    pub requirement_count: i64,
+    /// Deprecated compatibility alias for the legacy policy count.
     pub control_count: i64,
     pub environment_count: i64,
     /// Active versioned bundle assignments across environment and system scopes.
@@ -1529,6 +1535,9 @@ pub struct ComplianceBundleVersionSummary {
     pub created_at: DateTime<Utc>,
     pub published_at: Option<DateTime<Utc>>,
     pub derived_from_version_id: Option<uuid::Uuid>,
+    pub policy_count: i64,
+    pub requirement_count: i64,
+    /// Deprecated compatibility alias for the legacy policy count.
     pub control_count: i64,
     #[serde(default)]
     pub is_current_published: bool,
