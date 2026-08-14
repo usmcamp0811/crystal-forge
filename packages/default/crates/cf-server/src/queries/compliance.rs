@@ -425,6 +425,24 @@ pub async fn ensure_policy_draft(
     .fetch_one(&mut **tx)
     .await?;
 
+    // Derived drafts inherit mapping semantics while receiving fresh row IDs.
+    sqlx::query(
+        r#"
+        INSERT INTO policy_requirement_mappings (
+            policy_version_id, requirement_version_id, relationship, coverage,
+            rationale, provenance, source_artifact_id, trust_state, created_by
+        )
+        SELECT $1, requirement_version_id, relationship, coverage,
+               rationale, provenance, source_artifact_id, trust_state, created_by
+        FROM policy_requirement_mappings
+        WHERE policy_version_id = $2
+        "#,
+    )
+    .bind(new_draft_id)
+    .bind(published_id)
+    .execute(&mut **tx)
+    .await?;
+
     sqlx::query("UPDATE deployment_policies SET current_draft_version_id = $1 WHERE id = $2")
         .bind(new_draft_id)
         .bind(policy_id)
