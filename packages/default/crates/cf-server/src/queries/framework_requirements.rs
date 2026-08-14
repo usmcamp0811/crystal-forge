@@ -22,6 +22,7 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::compliance::digest::refresh_policy_version_digest;
 use crate::compliance::framework_model::{
     FrameworkVersionCanonical, write_framework_version_digest,
 };
@@ -392,6 +393,10 @@ pub async fn create_policy_mapping(
         _ => {}
     }
 
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to begin mapping transaction")?;
     let id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO policy_requirement_mappings
@@ -408,9 +413,14 @@ pub async fn create_policy_mapping(
     .bind(rationale)
     .bind(provenance)
     .bind(created_by)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .context("failed to insert policy requirement mapping")?;
+
+    refresh_policy_version_digest(&mut tx, policy_version_id).await?;
+    tx.commit()
+        .await
+        .context("failed to commit mapping transaction")?;
 
     Ok(id)
 }
@@ -424,6 +434,19 @@ pub async fn update_policy_mapping(
     coverage: &str,
     rationale: Option<&str>,
 ) -> Result<()> {
+    let policy_version_id: Uuid = sqlx::query_scalar(
+        "SELECT policy_version_id FROM policy_requirement_mappings WHERE id = $1",
+    )
+    .bind(mapping_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| {
+        anyhow::anyhow!("POLICY_MAPPING_IMMUTABLE_OR_NOT_FOUND: mapping {mapping_id} was not found")
+    })?;
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to begin mapping transaction")?;
     let affected = sqlx::query(
         r#"
         UPDATE policy_requirement_mappings m
@@ -438,7 +461,7 @@ pub async fn update_policy_mapping(
     .bind(relationship)
     .bind(coverage)
     .bind(rationale)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .context("failed to update policy requirement mapping")?;
 
@@ -448,12 +471,29 @@ pub async fn update_policy_mapping(
              or belongs to an immutable policy version"
         );
     }
+    refresh_policy_version_digest(&mut tx, policy_version_id).await?;
+    tx.commit()
+        .await
+        .context("failed to commit mapping transaction")?;
     Ok(())
 }
 
 /// Delete a requirement mapping.
 /// Fails if the policy version is accepted/deprecated.
 pub async fn delete_policy_mapping(pool: &PgPool, mapping_id: Uuid) -> Result<()> {
+    let policy_version_id: Uuid = sqlx::query_scalar(
+        "SELECT policy_version_id FROM policy_requirement_mappings WHERE id = $1",
+    )
+    .bind(mapping_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| {
+        anyhow::anyhow!("POLICY_MAPPING_IMMUTABLE_OR_NOT_FOUND: mapping {mapping_id} was not found")
+    })?;
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to begin mapping transaction")?;
     let affected = sqlx::query(
         r#"
         DELETE FROM policy_requirement_mappings m
@@ -464,7 +504,7 @@ pub async fn delete_policy_mapping(pool: &PgPool, mapping_id: Uuid) -> Result<()
         "#,
     )
     .bind(mapping_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .context("failed to delete policy requirement mapping")?;
 
@@ -474,6 +514,10 @@ pub async fn delete_policy_mapping(pool: &PgPool, mapping_id: Uuid) -> Result<()
              or belongs to an immutable policy version"
         );
     }
+    refresh_policy_version_digest(&mut tx, policy_version_id).await?;
+    tx.commit()
+        .await
+        .context("failed to commit mapping transaction")?;
     Ok(())
 }
 
@@ -1369,6 +1413,8 @@ pub async fn insert_policy_mapping_in_tx(
     .execute(&mut **tx)
     .await
     .context("failed to insert policy requirement mapping in transaction")?;
+
+    refresh_policy_version_digest(tx, policy_version_id).await?;
 
     Ok(())
 }
