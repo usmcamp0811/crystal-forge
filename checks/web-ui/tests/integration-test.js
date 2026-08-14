@@ -6154,6 +6154,8 @@ const steps = [
         await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
         await page.getByTestId("policy-editor-tab-mappings").click();
 
+        await page.getByRole("button", { name: "+ Add mapping", exact: true }).click();
+
         const frameworkSelect = page.getByLabel("Framework").last();
         await frameworkSelect.locator(`option[value="${frameworkId}"]`).waitFor({ state: "attached", timeout: 5000 });
         await frameworkSelect.selectOption(frameworkId);
@@ -6162,14 +6164,23 @@ const steps = [
         await versionSelect.selectOption(versionId);
 
         const requirementSearch = page.getByPlaceholder("Search by ID, title, CCI, SRG…").last();
+        await requirementSearch.waitFor({ timeout: 5000 });
         await requirementSearch.fill("SC-45");
         await page.getByRole("button", { name: /SC-45 · control · System Time Synchronization/i }).click();
-        await page.getByLabel("Relationship").last().selectOption("supports");
-        await page.getByLabel("Coverage").last().selectOption("partial");
-        await page.getByLabel("Rationale (optional)").last().fill("Provides synchronized system time configuration.");
+        await page.getByText("Supports", { exact: true }).last().click();
+        await page.getByRole("button", { name: "Partial", exact: true }).last().click();
+        await page.getByPlaceholder("Why this policy satisfies the requirement").fill("Provides synchronized system time configuration.");
         await page.getByRole("button", { name: "Add mapping", exact: true }).last().click();
 
-        await requirementSearch.fill("AU-8");
+        await page.getByRole("button", { name: "+ Add mapping", exact: true }).click();
+        const secondFrameworkSelect = page.getByLabel("Framework").last();
+        await secondFrameworkSelect.locator(`option[value="${frameworkId}"]`).waitFor({ state: "attached", timeout: 5000 });
+        await secondFrameworkSelect.selectOption(frameworkId);
+        const secondVersionSelect = page.getByLabel("Version").last();
+        await secondVersionSelect.locator(`option[value="${versionId}"]`).waitFor({ state: "attached", timeout: 5000 });
+        await secondVersionSelect.selectOption(versionId);
+        const secondRequirementSearch = page.getByPlaceholder("Search by ID, title, CCI, SRG…").last();
+        await secondRequirementSearch.fill("AU-8");
         await page.getByRole("button", { name: /AU-8 · control · Time Stamps/i }).click();
         await page.getByRole("button", { name: "Add mapping", exact: true }).last().click();
 
@@ -6373,7 +6384,7 @@ const steps = [
       await assertVisible(drawer.getByText(requirementA.external_id, { exact: true }), "Expected first drawer requirement");
       await assertVisible(drawer.getByText(requirementB.external_id, { exact: true }), "Expected second drawer requirement");
       await assertVisible(drawer.getByText("Supports", { exact: true }), "Expected drawer Supports relationship");
-      await assertVisible(drawer.getByText("Partial coverage", { exact: true }), "Expected drawer Partial coverage");
+      await assertVisible(drawer.getByText("Partial coverage", { exact: false }), "Expected drawer Partial coverage");
       await assertVisible(drawer.getByText("Manual mapping", { exact: true }).first(), "Expected drawer provenance label");
       await assertVisible(drawer.getByText("test rationale", { exact: true }), "Expected drawer rationale");
 
