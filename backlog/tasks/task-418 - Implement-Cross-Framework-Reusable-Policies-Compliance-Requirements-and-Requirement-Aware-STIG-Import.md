@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-14 19:50'
+updated_date: '2026-08-14 19:59'
 labels: []
 milestone: m-22
 dependencies:
@@ -451,6 +451,10 @@ Implemented and pushed immutable STIG policy reuse: `MapExisting` is revalidated
 2026-08-14 Policy Details/Drawer slice: loaded normalized policy requirement mappings from the exact selected policy version with request-generation protection, grouped by framework/release, and rendered relationship, coverage, provenance, rationale, loading/error, and zero-mapping states. Legacy classification is now labeled source/imported metadata. Extended 20aa browser coverage to open the drawer after editor reload and assert persisted normalized mappings. Fixed the fixture hierarchy transaction executor dereference exposed by the Nix server build. Verification: web-ui cargo check passed; cf-server cargo check passed; node --check and git diff --check passed. The authoritative nix web-ui check rebuilt successfully through server compilation but exceeded the 20-minute tool timeout during later VM artifact/design-parity processing; no final check result was observed.
 
 2026-08-14: Browser proof preserved in pushed test-only commit 3ff724b6; TASK-418 worktree clean before P0 feature work. 20a and 20aa both passed with screenshots. Beginning semantic-integrity and bundle requirement-baseline closure slice per user direction.
+
+2026-08-14 checkpoint 1 committed/pushed as f0a855b8: policy semantic digests now incorporate a deterministic sorted mapping digest containing requirement_version_id, relationship, coverage, rationale, provenance, and trust_state. Standalone mapping create/update/delete and transactional import insertion recompute the mutable version digest in-transaction; accepted/deprecated versions remain rejected. Added pure tests for semantic-field changes and insertion-order stability. Verified cargo fmt --all --check, SQLX_OFFLINE=true cargo check -p cf-server, and targeted digest tests (2 passed).
+
+2026-08-14 checkpoint 2 committed/pushed as edafc663: bundle semantic digest now incorporates deterministic requirement-baseline membership; pending digest backfill and baseline insertion refresh bundle digests; ensure_bundle_draft copies exact requirement memberships. Verified cargo fmt and SQLX_OFFLINE=true cargo check -p cf-server. Manual bundle requirement API/UI, immutable import conflicts, and full DB acceptance coverage remain outstanding.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
