@@ -299,8 +299,8 @@ fn build_persisted_payload(rules: &[PolicyRule]) -> Option<(String, serde_json::
 
     // Otherwise → custom_check with rules[]
     let mut json_rules = Vec::new();
-    for rule in persistable {
-        if let Some(value) = rule_to_custom_check_entry(rule) {
+    for (index, rule) in persistable.into_iter().enumerate() {
+        if let Some(value) = rule_to_custom_check_entry(rule, index) {
             json_rules.push(value);
         }
     }
@@ -313,11 +313,14 @@ fn build_persisted_payload(rules: &[PolicyRule]) -> Option<(String, serde_json::
     ))
 }
 
-fn rule_to_custom_check_entry(rule: &PolicyRule) -> Option<serde_json::Value> {
+fn rule_to_custom_check_entry(rule: &PolicyRule, index: usize) -> Option<serde_json::Value> {
+    let field_name = format!("policy_rule_{}", index + 1);
+
     match rule.kind.as_str() {
         "custom_eval" => Some(serde_json::json!({
             "expression": rule.expr.trim(),
             "description": if rule.message.trim().is_empty() { "Custom rule failed" } else { rule.message.trim() },
+            "field_name": field_name,
             "strict": true,
         })),
         "nixos_option" => {
@@ -330,6 +333,7 @@ fn rule_to_custom_check_entry(rule: &PolicyRule) -> Option<serde_json::Value> {
             Some(serde_json::json!({
                 "expression": expression,
                 "description": format!("config.{} must be {} {}", rule.path.trim(), rule.op.trim(), rule.value.trim()),
+                "field_name": field_name,
                 "strict": true,
             }))
         }
@@ -343,6 +347,7 @@ fn rule_to_custom_check_entry(rule: &PolicyRule) -> Option<serde_json::Value> {
             Some(serde_json::json!({
                 "expression": if checks.is_empty() { "true".to_string() } else { checks },
                 "description": format!("Packages installed: {}", packages.join(", ")),
+                "field_name": field_name,
                 "strict": true,
             }))
         }
@@ -423,7 +428,7 @@ fn custom_check_config_is_representable(config: &serde_json::Value) -> bool {
 
     if let Some(entries) = config.get("rules").and_then(|value| value.as_array()) {
         return entries.iter().all(|entry| {
-            object_keys_are_subset(entry, &["expression", "description", "strict"])
+            object_keys_are_subset(entry, &["expression", "description", "field_name", "strict"])
                 && entry
                     .get("description")
                     .is_none_or(|value| value.as_str().is_some())
