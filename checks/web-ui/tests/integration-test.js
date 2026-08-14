@@ -6174,6 +6174,12 @@ const steps = [
     description: "Policies new modal persists two real requirement mappings and reloads them",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+      await page.waitForFunction(async (base) => {
+        const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include" });
+        if (!response.ok) return false;
+        const auth = await response.json();
+        return auth.is_authenticated === true;
+      }, apiBaseUrl, { timeout: 5000 });
       const fixture = await page.evaluate(async (base) => {
         const frameworksResponse = await fetch(`${base}/api/v1/compliance/frameworks`);
         if (!frameworksResponse.ok) throw new Error(`framework list failed: ${frameworksResponse.status}`);
