@@ -2100,6 +2100,12 @@ const steps = [
       if (page.url().includes("/login")) {
         throw new Error("Expected login to navigate away from /login");
       }
+      await page.waitForFunction(async (base) => {
+        const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include" });
+        if (!response.ok) return false;
+        const auth = await response.json();
+        return auth.is_authenticated === true;
+      }, apiBaseUrl, { timeout: 5000 });
     },
   },
 
