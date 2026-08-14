@@ -22,7 +22,7 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::compliance::digest::refresh_policy_version_digest;
+use crate::compliance::digest::{refresh_bundle_version_digest, refresh_policy_version_digest};
 use crate::compliance::framework_model::{
     FrameworkVersionCanonical, write_framework_version_digest,
 };
@@ -1360,6 +1360,8 @@ pub async fn insert_bundle_version_requirement(
     .execute(&mut **tx)
     .await
     .context("failed to insert bundle version requirement")?;
+
+    refresh_bundle_version_digest(tx, bundle_version_id).await?;
 
     Ok(())
 }

@@ -177,6 +177,31 @@ impl BundleVersionCanonical {
     pub fn compute_digest(&self) -> String {
         semantic_digest(&self.to_digest_value())
     }
+
+    pub fn compute_digest_with_requirement_digest(&self, requirement_digest: &str) -> String {
+        let mut value = self.to_digest_value();
+        value["requirement_digest"] = Value::String(requirement_digest.to_owned());
+        semantic_digest(&value)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BundleRequirementCanonical {
+    requirement_version_id: Uuid,
+    selected: bool,
+}
+
+fn compute_requirement_membership_digest(memberships: &mut [BundleRequirementCanonical]) -> String {
+    memberships.sort_by_key(|membership| membership.requirement_version_id);
+    semantic_digest(&json!(
+        memberships
+            .iter()
+            .map(|membership| json!({
+                "requirement_version_id": membership.requirement_version_id.to_string(),
+                "selected": membership.selected,
+            }))
+            .collect::<Vec<_>>()
+    ))
 }
 
 /// All semantic fields for an assignment effective-set digest.
@@ -501,8 +526,6 @@ pub async fn write_bundle_version_digest(
     bundle_id: Uuid,
     canonical: &BundleVersionCanonical,
 ) -> Result<()> {
-    let digest = canonical.compute_digest();
-
     // Resolve and lock the current draft version pointer.
     let version_id: Option<Uuid> = sqlx::query_scalar(
         r#"
@@ -519,6 +542,7 @@ pub async fn write_bundle_version_digest(
 
     let version_id = version_id
         .ok_or_else(|| anyhow::anyhow!("Bundle {bundle_id} has no current draft version"))?;
+    let digest = bundle_version_digest(tx, version_id, canonical).await?;
 
     let rows_affected = sqlx::query(
         r#"
@@ -552,6 +576,77 @@ pub async fn write_bundle_version_digest(
         anyhow::bail!("Bundle version {version_id} is not in draft state and cannot be updated");
     }
     Ok(())
+}
+
+pub async fn refresh_bundle_version_digest(
+    tx: &mut Transaction<'_, Postgres>,
+    bundle_version_id: Uuid,
+) -> Result<()> {
+    #[derive(sqlx::FromRow)]
+    struct BundleRow {
+        name: String,
+        framework: String,
+        framework_version: Option<String>,
+        description: Option<String>,
+        layer: String,
+        owner: String,
+        publication_state: String,
+    }
+    let row: BundleRow = sqlx::query_as(
+        "SELECT bundle_id, name, framework, framework_version, description, layer, owner, publication_state FROM compliance_bundle_versions WHERE id = $1 FOR UPDATE",
+    )
+    .bind(bundle_version_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if matches!(row.publication_state.as_str(), "accepted" | "deprecated") {
+        anyhow::bail!("BUNDLE_VERSION_IMMUTABLE: bundle version {bundle_version_id} is immutable");
+    }
+    let canonical = BundleVersionCanonical {
+        name: row.name,
+        framework: row.framework,
+        framework_version: row.framework_version,
+        description: row.description,
+        layer: row.layer,
+        owner: row.owner,
+        members: load_bundle_membership(tx, bundle_version_id).await?,
+    };
+    let digest = bundle_version_digest(tx, bundle_version_id, &canonical).await?;
+    sqlx::query("UPDATE compliance_bundle_versions SET semantic_digest = $1, digest_algorithm = 'sha-256', canonicalization_version = 'cf-model-json-1' WHERE id = $2")
+        .bind(digest)
+        .bind(bundle_version_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn bundle_version_digest(
+    tx: &mut Transaction<'_, Postgres>,
+    bundle_version_id: Uuid,
+    canonical: &BundleVersionCanonical,
+) -> Result<String> {
+    let mut memberships: Vec<BundleRequirementCanonical> = sqlx::query_as::<_, BundleRequirementRow>(
+        "SELECT requirement_version_id, selected FROM compliance_bundle_version_requirements WHERE bundle_version_id = $1",
+    )
+    .bind(bundle_version_id)
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .map(|row| BundleRequirementCanonical {
+        requirement_version_id: row.requirement_version_id,
+        selected: row.selected,
+    })
+    .collect();
+    Ok(
+        canonical.compute_digest_with_requirement_digest(&compute_requirement_membership_digest(
+            &mut memberships,
+        )),
+    )
+}
+
+#[derive(sqlx::FromRow)]
+struct BundleRequirementRow {
+    requirement_version_id: Uuid,
+    selected: bool,
 }
 
 /// Build and write the assignment overlay digest for a single assignment.
@@ -730,53 +825,9 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
     .await?;
 
     for row in &pending_bundles {
-        #[derive(sqlx::FromRow)]
-        struct MembershipRow {
-            policy_version_id: Uuid,
-            selected: bool,
-        }
-        let mem_rows: Vec<MembershipRow> = sqlx::query_as(
-            r#"
-            SELECT policy_version_id, selected
-            FROM compliance_bundle_version_policies
-            WHERE bundle_version_id = $1
-            ORDER BY policy_order ASC
-            "#,
-        )
-        .bind(row.id)
-        .fetch_all(pool)
-        .await?;
-
-        let members: Vec<BundleMembershipEntry> = mem_rows
-            .into_iter()
-            .map(|r| BundleMembershipEntry {
-                policy_version_id: r.policy_version_id,
-                selected: r.selected,
-            })
-            .collect();
-
-        let canonical = BundleVersionCanonical {
-            name: row.name.clone(),
-            framework: row.framework.clone(),
-            framework_version: row.framework_version.clone(),
-            description: row.description.clone(),
-            layer: row.layer.clone(),
-            owner: row.owner.clone(),
-            members,
-        };
-        let digest = canonical.compute_digest();
-        sqlx::query(
-            r#"
-            UPDATE compliance_bundle_versions
-            SET semantic_digest = $1, digest_algorithm = 'sha-256',
-                canonicalization_version = 'cf-model-json-1'
-            WHERE id = $2
-            "#,
-        )
-        .bind(&digest)
-        .bind(row.id)
-        .execute(pool)
-        .await?;
+        let mut tx = pool.begin().await?;
+        refresh_bundle_version_digest(&mut tx, row.id).await?;
+        tx.commit().await?;
     }
 
     // ── Assignment effective-set digests ──────────────────────────────────────

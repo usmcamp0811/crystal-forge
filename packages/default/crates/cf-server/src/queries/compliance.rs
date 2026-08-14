@@ -273,6 +273,20 @@ pub async fn ensure_bundle_draft(
     .execute(&mut **tx)
     .await?;
 
+    sqlx::query(
+        r#"
+        INSERT INTO compliance_bundle_version_requirements
+            (bundle_version_id, requirement_version_id, selected, requirement_order)
+        SELECT $1, requirement_version_id, selected, requirement_order
+        FROM compliance_bundle_version_requirements
+        WHERE bundle_version_id = $2
+        "#,
+    )
+    .bind(new_draft_id)
+    .bind(published_id)
+    .execute(&mut **tx)
+    .await?;
+
     // Assignments are independent lineages scoped to a bundle lineage and target.
     // A draft bundle version must not duplicate or reactivate an assignment lineage;
     // active assignments remain bound to their accepted bundle version until an
