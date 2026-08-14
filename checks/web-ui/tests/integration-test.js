@@ -6224,10 +6224,10 @@ const steps = [
       const policyName = `UI mapping round-trip ${Date.now()}`;
 
       await page.getByRole("button", { name: /New custom policy/i }).first().click();
-      await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
-      await page.getByTestId("policy-editor-tab-enforcement").click();
-      await page.getByTitle("Remove rule").first().click();
-      await page.getByTitle("Remove rule").first().click();
+       await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
+       await page.getByTestId("policy-editor-tab-enforcement").click();
+       await page.getByTitle("Remove rule").first().click();
+       await page.getByTitle("Remove rule").first().click();
       const addRule = page
         .locator("select")
         .filter({ hasText: "Add assertion / rule" })
@@ -6237,10 +6237,11 @@ const steps = [
       // duplicate-content rejection from the server's config deduplication check.
       await page.getByPlaceholder("config.networking.firewall.enable == true").last().fill(`config.networking.hostName == "${policyName}"`);
       await page.getByTestId("policy-editor-tab-details").click();
-      await page.getByPlaceholder("e.g. canary-25").fill(policyName);
-      await page.getByTestId("policy-editor-tab-mappings").click();
+       await page.getByPlaceholder("e.g. canary-25").fill(policyName);
+       await page.getByTestId("policy-editor-tab-mappings").click();
+       await page.getByRole("button", { name: "+ Add mapping", exact: true }).click();
 
-      const frameworkSelect = page.getByLabel("Framework").last();
+       const frameworkSelect = page.getByLabel("Framework").last();
       await frameworkSelect.locator(`option[value="${fixture.framework.id}"]`).waitFor({ state: "attached", timeout: 5000 });
       await frameworkSelect.selectOption(fixture.framework.id);
       const versionSelect = page.getByLabel("Version").last();
@@ -6251,17 +6252,21 @@ const steps = [
         name: new RegExp(`${requirement.external_id}.*${requirement.kind}.*${requirement.title || ""}`, "i"),
       });
 
-      await search.fill(requirementA.external_id);
-      await resultButton(requirementA).click();
-      await page.getByLabel("Relationship").last().selectOption("supports");
-      await page.getByLabel("Coverage").last().selectOption("partial");
-      await page.getByLabel("Rationale (optional)").last().fill("test rationale");
+       await search.fill(requirementA.external_id);
+       await resultButton(requirementA).click();
+       await page.getByText("Supports", { exact: true }).last().click();
+       await page.getByRole("button", { name: "Partial", exact: true }).last().click();
+       await page.getByPlaceholder("Why this policy satisfies the requirement").fill("test rationale");
       await page.getByRole("button", { name: "Add mapping", exact: true }).last().click();
 
-      await search.fill(requirementB.external_id);
-      await resultButton(requirementB).click();
-      await page.getByLabel("Relationship").last().selectOption("implements");
-      await page.getByLabel("Coverage").last().selectOption("full");
+       await page.getByRole("button", { name: "+ Add mapping", exact: true }).click();
+       await frameworkSelect.selectOption(fixture.framework.id);
+       await versionSelect.locator(`option[value="${fixture.version.id}"]`).waitFor({ state: "attached", timeout: 5000 });
+       await versionSelect.selectOption(fixture.version.id);
+       await search.fill(requirementB.external_id);
+       await resultButton(requirementB).click();
+       await page.getByText("Implements", { exact: true }).last().click();
+       await page.getByRole("button", { name: "Full", exact: true }).last().click();
       await page.getByRole("button", { name: "Add mapping", exact: true }).last().click();
       await assertVisible(page.getByText("Mappings · 2", { exact: true }), "Expected two queued real mappings");
 
