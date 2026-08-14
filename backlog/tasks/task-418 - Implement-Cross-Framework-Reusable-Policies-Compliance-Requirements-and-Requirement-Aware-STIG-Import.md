@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-14 21:07'
+updated_date: '2026-08-14 21:31'
 labels: []
 milestone: m-22
 dependencies:
@@ -467,6 +467,8 @@ Implemented and pushed immutable STIG policy reuse: `MapExisting` is revalidated
 Starting the derived policy draft mapping inheritance slice from clean 192a150d in the dedicated TASK-418 worktree. Production scope is ensure_policy_draft only; all callsites continue using the shared helper.
 
 2026-08-14 derived mapping inheritance verified and pushed as 06b1392e. `cargo fmt --all --check`, `git diff --check`, `SQLX_OFFLINE=true cargo check -p cf-server`, and ignored DB test `queries::deployment_policies::tests::derived_policy_draft_inherits_mappings_and_digests` on PostgreSQL 127.0.0.1:3042 passed. No UI/API/bundle files changed.
+
+2026-08-14 manual bundle requirement baseline server slice implemented in the dedicated worktree from 06b1392e. Added serde-default requirement_version_ids to create/update requests; requirement-only baselines are accepted while completely empty requests retain PolicyRequired validation; exact duplicate/missing requirement IDs are rejected transactionally; requirement membership is written in request order and refreshed via requirement_digest without changing semantic_digest; derived bundle drafts copy and refresh requirement membership; added version-scoped requirement membership query/API; preserved policy membership tables. Added unit validation and ignored DB lifecycle coverage. Verified isolated DB 3042: exact_technical_match_end_to_end 3/3, phase_22 8/8, reviewed_related_stig 2/2, requirement_baseline_lifecycle 1/1. cargo fmt check, git diff check, SQLX_OFFLINE cargo check, and focused validation unit test passed. nix build .#server --no-link was attempted twice and exceeded tool timeouts; no commit or push made. Worktree remains modified and HEAD remains 06b1392e.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
