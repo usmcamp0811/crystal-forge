@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 02:33'
+updated_date: '2026-08-15 02:49'
 labels: []
 milestone: m-22
 dependencies:
@@ -377,6 +377,14 @@ Next slice: persist create-mode queued requirement mappings atomically with new 
 2026-08-14 derived policy draft mapping inheritance: in ensure_policy_draft, copy all policy_requirement_mappings immediately after inserting the new draft, then compute the draft digest with copied mappings present. Add one ignored DB lifecycle test covering three mappings, semantic/mapping digest parity, distinct mapping IDs, draft-only mutation, and accepted-source mutation rejection. Verify fmt, diff check, SQLX_OFFLINE cargo check, and targeted DB test on port 3042.
 
 Next checkpoint — bundle requirement-baseline UI: extend create/edit bundle request models with requirement_version_ids; add a framework/version-scoped requirement selector using existing framework/version/search APIs; allow zero-policy requirement-only bundles while preserving existing policy selection; submit exact requirement IDs and display selected baseline count. Verify web-ui cargo check, server cargo check, focused browser coverage if available, then authoritative web-ui build.
+
+## Next checkpoint — authoritative requirement coverage presentation (2026-08-15)
+
+1. Extend the existing bundle coverage read model only as needed to return per-requirement mapping evidence (policy/version identity, relationship, coverage, provenance, rationale) while retaining authoritative full/partial/unmapped classification.
+2. Keep coverage semantics server-side: full requires trusted `implements` + `full`; partial is any other trusted mapping; unmapped has no trusted mapping. Count only selected bundle requirement membership and selected bundle policy versions.
+3. Update the Compliance view card to match the design hierarchy: framework/release context, full/partial/unmapped counts, expandable requirement-family grouping, and per-row policy mapping evidence. Keep this checkpoint read-only; do not add mapping mutation controls.
+4. Add focused backend coverage assertions for requirement-only, mixed, multi-policy, partial/evidence-only, and out-of-bundle mapping cases; add focused browser assertions for counts, expanded rows, and unmapped presentation.
+5. Verify with targeted DB tests, web-ui/server cargo checks, `nix build .#web-ui` when practical, formatting, diff check, then commit and push the checkpoint.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -481,6 +489,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15 checkpoint committed and pushed as 14f8d962 (feat(web-ui): add bundle requirement baseline editing). Includes 20ab browser coverage, v2 release fixture, Nix-compatible Playwright executable override, and load-time override. Static checks, web-ui cargo check, and nix build .#web-ui pass. Focused local browser execution reached the new test but remains blocked at the cross-origin bundle POST in the local Dioxus/API setup; the authoritative VM check was previously timeout-limited. Branch is pushed for review.
 
 2026-08-15 follow-up committed/pushed as e8c0765c (test(web-ui): harden bundle baseline browser coverage). Added Nix Chromium executable support, configurable load timeout, cross-origin local forwarding, and request-context cookie handling to the focused browser harness. Static checks pass. Local focused browser now reaches the real create API but receives HTTP 403 because the standalone Playwright request context does not inherit the authenticated session; authoritative VM execution remains the required browser proof.
+
+2026-08-15: User confirmed the bundle baseline checkpoint at db520f61 is complete and requested continuation. Existing coverage endpoint/card already exists but currently returns only mapped policy IDs and renders flat rows; the next slice will add read-only mapping evidence and design-aligned hierarchy/details without changing mapping CRUD.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
