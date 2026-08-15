@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 04:02'
+updated_date: '2026-08-15 04:41'
 labels: []
 milestone: m-22
 dependencies:
@@ -525,6 +525,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15 STIG reconciliation presentation checkpoint committed/pushed as e31ceeba. The existing reconciliation stage now presents requirements rather than controls, distinguishes authoritative/inherited/exact candidate counts, calls out inferred enforcement, shows candidate policy names/confidence/reasons, and keeps proof separate from Refine mapping semantics. Deterministic candidates remain auto-resolved; attention cases and Refine all still use RefinePolicyStep. Verification: web UI cargo check, SQLX_OFFLINE server cargo check, `nix build .#web-ui -L` (171 passed, 1 ignored), and git diff check passed. No dedicated browser import fixture exists in the current manifest, so focused STIG-import browser proof was not runnable in this checkpoint; existing mapping/bundle browser suites remain green from prior checkpoints.
 
 2026-08-15: Manifest registration for 20ac is committed as ba2f39bf. Full NixOS web-ui check reached the Playwright launch but exceeded the execution window before a final result; focused runtime proof remains required.
+
+2026-08-15 focused runtime attempts: direct Playwright execution is available via CF_UI_TEST_STEPS=20ac-stig-import-reconciliation-fixture. Initial attempt exposed a fixture selector defect: the STIG action is inside the Import / Export menu; fixed and pushed as cb756c45. Local run-ui-dev execution then remained blocked by local-auth/bootstrap setup and did not produce screenshots. The authoritative NixOS check was not rerun to completion; focused Playwright PASS and dark/light screenshots remain outstanding.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
