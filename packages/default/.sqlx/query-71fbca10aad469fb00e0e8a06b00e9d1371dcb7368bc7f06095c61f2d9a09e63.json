@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            fv.id,\n            fv.framework_id,\n            fv.version,\n            fv.canonical_release_key,\n            fv.title,\n            fv.published_at,\n            fv.semantic_digest,\n            COUNT(rv.id) AS \"requirement_count!\"\n        FROM compliance_framework_versions fv\n        LEFT JOIN compliance_requirement_versions rv ON rv.framework_version_id = fv.id\n        WHERE fv.framework_id = $1\n        GROUP BY fv.id\n        ORDER BY fv.created_at DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "framework_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "version",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "canonical_release_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "published_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "semantic_digest",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "requirement_count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      null
+    ]
+  },
+  "hash": "71fbca10aad469fb00e0e8a06b00e9d1371dcb7368bc7f06095c61f2d9a09e63"
+}

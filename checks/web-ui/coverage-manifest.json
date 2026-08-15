@@ -1478,6 +1478,48 @@
       "baseline": "advisory"
     },
     {
+      "name": "20a-policies-new-modal-pending-mappings",
+      "description": "Policies new modal Mappings tab with two queued requirement mappings",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "20aa-policies-new-modal-mappings-roundtrip",
+      "description": "Policies new modal persists two real requirement mappings and reloads them",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "20ac-stig-import-reconciliation-fixture",
+      "description": "STIG import fixture renders server-authoritative reconciliation proof",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
       "name": "20b-policies-cve-gate-create-roundtrip",
       "description": "API: create require_cve_check policy and verify it round-trips correctly",
       "route": "/deployment-policies",
@@ -1488,6 +1530,20 @@
       ],
       "semanticAssertions": true,
       "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "20ab-compliance-bundle-requirement-baseline-roundtrip",
+      "description": "Compliance bundle requirement and policy memberships remain independent across create, edit, reload, and release changes",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
       "mockedData": false,
       "baseline": "advisory"
     },

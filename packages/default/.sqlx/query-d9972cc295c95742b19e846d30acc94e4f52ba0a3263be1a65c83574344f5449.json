@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE derivations SET\n            build_elapsed_seconds = NULL,\n            build_current_target = NULL,\n            build_last_activity_seconds = NULL,\n            build_last_heartbeat = NULL\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d9972cc295c95742b19e846d30acc94e4f52ba0a3263be1a65c83574344f5449"
+}

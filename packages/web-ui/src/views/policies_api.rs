@@ -49,6 +49,16 @@ pub async fn load_policies() -> PolicyLoadResult {
     }
 }
 
+/// Convert a freshly-created or freshly-fetched backend record to a
+/// `PolicyDefinition` with a system count of 0.
+///
+/// Used after a successful policy create so the new policy is immediately
+/// inserted into the local `policy_library` state without needing to
+/// re-fetch the paginated first-100 list.
+pub(crate) fn policy_record_to_definition(record: DeploymentPolicyRecord) -> PolicyDefinition {
+    policy_record_to_definition_with_count(record, 0)
+}
+
 /// Convert a backend DeploymentPolicyRecord to a frontend PolicyDefinition.
 fn policy_record_to_definition_with_count(
     record: DeploymentPolicyRecord,

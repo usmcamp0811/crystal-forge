@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            WITH inserted AS (\n                INSERT INTO derivations (\n                    commit_id,\n                    derivation_type, \n                    derivation_name, \n                    derivation_path, \n                    pname, \n                    version, \n                    status_id, \n                    attempt_count\n                )\n                VALUES ($1, $2, $3, $4, $5, $6, $7, 0)\n                ON CONFLICT (derivation_path) DO UPDATE SET\n                    derivation_name = EXCLUDED.derivation_name,\n                    pname = EXCLUDED.pname,\n                    version = EXCLUDED.version\n                RETURNING id\n            )\n            INSERT INTO derivation_dependencies (derivation_id, depends_on_id)\n            SELECT $8, id FROM inserted\n            ON CONFLICT (derivation_id, depends_on_id) DO NOTHING\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text",
+        "Text",
+        "Text",
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "90ddef2960aec0f65f07d95739807f0170713d23d91cfa493ef970c3284700a5"
+}

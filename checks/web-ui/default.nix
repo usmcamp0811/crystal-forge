@@ -17,7 +17,15 @@
 #
 # Note: OIDC tests remain in the separate integration check.
 #
-{ lib, pkgs, inputs, ... }:
+{ lib
+, pkgs
+, inputs
+, testProfile ? "ci_fast"
+, testSteps ? null
+, runExportValidation ? true
+, playwrightResultTimeout ? 1800
+, ...
+}:
 let
   testDir = ./tests;
   coverageManifest = ./coverage-manifest.json;
@@ -320,6 +328,7 @@ in pkgs.testers.runNixOSTest {
 
   testScript = ''
     import json
+    import base64
     import os
     import pytest
 
@@ -344,6 +353,44 @@ in pkgs.testers.runNixOSTest {
     machine.wait_for_unit("crystal-forge-builder.service")
     machine.wait_for_open_port(${toString CF_TEST_SERVER_PORT})
     machine.wait_for_open_port(5432)
+
+    # Deterministic normalized compliance fixtures used by the real mapping
+    # round-trip browser step. These are test-only rows, created after the
+    # server has applied migrations and before Playwright starts.
+    mapping_fixture_sql = """
+      INSERT INTO compliance_frameworks (name, canonical_source_key)
+      VALUES ('Test Mapping Framework', 'web-ui-mapping-roundtrip')
+      ON CONFLICT (canonical_source_key) DO NOTHING;
+      INSERT INTO compliance_framework_versions (framework_id, version, canonical_release_key, semantic_digest)
+      SELECT id, '1', 'web-ui-mapping-roundtrip-v1', 'web-ui-mapping-roundtrip-digest'
+      FROM compliance_frameworks WHERE canonical_source_key = 'web-ui-mapping-roundtrip'
+      ON CONFLICT (framework_id, canonical_release_key) DO NOTHING;
+      INSERT INTO compliance_requirements (framework_id, canonical_requirement_key)
+      SELECT id, 'MAP-1' FROM compliance_frameworks WHERE canonical_source_key = 'web-ui-mapping-roundtrip'
+      ON CONFLICT (framework_id, canonical_requirement_key) DO NOTHING;
+      INSERT INTO compliance_requirements (framework_id, canonical_requirement_key)
+      SELECT id, 'MAP-2' FROM compliance_frameworks WHERE canonical_source_key = 'web-ui-mapping-roundtrip'
+      ON CONFLICT (framework_id, canonical_requirement_key) DO NOTHING;
+      INSERT INTO compliance_requirement_versions (requirement_id, framework_version_id, external_id, title, kind, semantic_digest)
+      SELECT r.id, v.id, 'MAP-1', 'Mapping round-trip requirement one', 'control', 'web-ui-map-1'
+      FROM compliance_requirements r JOIN compliance_frameworks f ON f.id = r.framework_id
+      JOIN compliance_framework_versions v ON v.framework_id = f.id
+      WHERE f.canonical_source_key = 'web-ui-mapping-roundtrip' AND r.canonical_requirement_key = 'MAP-1'
+      ON CONFLICT (requirement_id, framework_version_id) DO NOTHING;
+      INSERT INTO compliance_requirement_versions (requirement_id, framework_version_id, external_id, title, kind, semantic_digest)
+      SELECT r.id, v.id, 'MAP-2', 'Mapping round-trip requirement two', 'control', 'web-ui-map-2'
+      FROM compliance_requirements r JOIN compliance_frameworks f ON f.id = r.framework_id
+      JOIN compliance_framework_versions v ON v.framework_id = f.id
+      WHERE f.canonical_source_key = 'web-ui-mapping-roundtrip' AND r.canonical_requirement_key = 'MAP-2'
+      ON CONFLICT (requirement_id, framework_version_id) DO NOTHING;
+    """
+    encoded_mapping_fixture_sql = base64.b64encode(
+      mapping_fixture_sql.encode("utf-8")
+    ).decode("ascii")
+    machine.succeed(
+      "printf %s " + encoded_mapping_fixture_sql
+      + " | base64 -d | sudo -u postgres psql -d crystal_forge -v ON_ERROR_STOP=1"
+    )
 
     from cf_test.vm_helpers import wait_for_git_server_ready
     wait_for_git_server_ready(gitserver, timeout=120)
@@ -462,17 +509,21 @@ in pkgs.testers.runNixOSTest {
     machine.succeed("cp -r ${designParityDir}/. /tmp/web-ui-tests/design-parity/")
     machine.succeed("mkdir -p /tmp/design-example && cp -r ${designExampleOffline}/. /tmp/design-example/")
 
-    test_profile = "ci_fast"
+    test_profile = "${testProfile}"
+    test_steps = ${if testSteps == null then "None" else "\"${testSteps}\""}
+    test_steps_env = f" CF_UI_TEST_STEPS={test_steps}" if test_steps else ""
+    result_timeout = ${toString playwrightResultTimeout}
 
     # Run the integration test script
+    machine.succeed("rm -f /tmp/web-ui-tests/integration.exit /tmp/screenshots/results.json /tmp/screenshots/fatal.json")
     machine.succeed(
-        f"nohup env CF_UI_TEST_PROFILE={test_profile} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
+        f"nohup sh -c 'env CF_UI_TEST_PROFILE={test_profile}{test_steps_env} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
           toString CF_TEST_SERVER_PORT
-        } /tmp/screenshots > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
+        } /tmp/screenshots; status=$?; printf \"%s\\n\" \"$status\" > /tmp/web-ui-tests/integration.exit' > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
     )
     machine.wait_until_succeeds(
-        "test -f /tmp/screenshots/results.json -o -f /tmp/screenshots/fatal.json",
-        timeout=1800,
+        "test -f /tmp/screenshots/results.json -o -f /tmp/screenshots/fatal.json -o -f /tmp/web-ui-tests/integration.exit",
+        timeout=result_timeout,
     )
     output = machine.succeed("cat /tmp/web-ui-tests/integration.log")
     print(output)
@@ -481,6 +532,13 @@ in pkgs.testers.runNixOSTest {
     if machine.execute("test -f /tmp/screenshots/fatal.json")[0] == 0:
         fatal_json = machine.succeed("cat /tmp/screenshots/fatal.json")
         raise Exception(f"Web UI check aborted: {json.loads(fatal_json)['error']}")
+
+    if machine.execute("test -f /tmp/screenshots/results.json")[0] != 0:
+        exit_code = machine.succeed("cat /tmp/web-ui-tests/integration.exit").strip()
+        raise Exception(
+            "integration process exited before producing results.json "
+            f"(exit code {exit_code})"
+        )
 
     # Read results
     results_json = machine.succeed("cat /tmp/screenshots/results.json")
@@ -595,6 +653,10 @@ in pkgs.testers.runNixOSTest {
         raise Exception(
             f"Strict visual baseline failures: {[f['name'] for f in visual_failures]}"
         )
+
+    if not ${if runExportValidation then "True" else "False"}:
+        print("=== Focused web UI check complete; export validation skipped ===")
+        raise SystemExit(0)
 
     # === Phase 5: OSCAL Export Validation (end-to-end via web UI) ===
     print("=== Phase 5: OSCAL Export Validation ===")

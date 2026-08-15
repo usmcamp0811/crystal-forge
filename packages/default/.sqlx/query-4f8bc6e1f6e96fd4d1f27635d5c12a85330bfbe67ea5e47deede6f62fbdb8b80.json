@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE derivations \n        SET status_id = $1, scheduled_at = NOW()\n        WHERE derivation_path IS NOT NULL \n        AND attempt_count < 5\n        AND status_id NOT IN ($2, $3) -- success states that should never be reset\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4f8bc6e1f6e96fd4d1f27635d5c12a85330bfbe67ea5e47deede6f62fbdb8b80"
+}

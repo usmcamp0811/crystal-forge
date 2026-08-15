@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COUNT(*)::int as \"count!\"\n        FROM commits\n        WHERE flake_id = $1\n        AND commit_timestamp > $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ad15b991d96de5061d45eea1d4ef8aab2437bb3bf361dbcf50841a2d5459870d"
+}

@@ -96,6 +96,34 @@ impl PolicyVersionCanonical {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PolicyMappingCanonical {
+    requirement_version_id: Uuid,
+    relationship: String,
+    coverage: String,
+    rationale: Option<String>,
+    provenance: String,
+    trust_state: String,
+}
+
+fn compute_mapping_digest(mappings: &mut [PolicyMappingCanonical]) -> String {
+    mappings.sort_by_key(|mapping| mapping.requirement_version_id);
+    let entries: Vec<Value> = mappings
+        .iter()
+        .map(|mapping| {
+            json!({
+                "coverage": mapping.coverage,
+                "provenance": mapping.provenance,
+                "rationale": mapping.rationale,
+                "relationship": mapping.relationship,
+                "requirement_version_id": mapping.requirement_version_id.to_string(),
+                "trust_state": mapping.trust_state,
+            })
+        })
+        .collect();
+    semantic_digest(&json!(entries))
+}
+
 /// A single exact membership entry with both version identity and selection state.
 #[derive(Debug, Clone)]
 pub struct BundleMembershipEntry {
@@ -143,6 +171,25 @@ impl BundleVersionCanonical {
     pub fn compute_digest(&self) -> String {
         semantic_digest(&self.to_digest_value())
     }
+}
+
+#[derive(Debug, Clone)]
+struct BundleRequirementCanonical {
+    requirement_version_id: Uuid,
+    selected: bool,
+}
+
+fn compute_requirement_membership_digest(memberships: &mut [BundleRequirementCanonical]) -> String {
+    memberships.sort_by_key(|membership| membership.requirement_version_id);
+    semantic_digest(&json!(
+        memberships
+            .iter()
+            .map(|membership| json!({
+                "requirement_version_id": membership.requirement_version_id.to_string(),
+                "selected": membership.selected,
+            }))
+            .collect::<Vec<_>>()
+    ))
 }
 
 /// All semantic fields for an assignment effective-set digest.
@@ -282,27 +329,30 @@ pub async fn write_policy_version_digest(
     let version_id = version_id
         .ok_or_else(|| anyhow::anyhow!("Policy {policy_id} has no current draft version"))?;
 
-    let digest = canonical.compute_digest();
+    let digest = policy_version_digest(tx, version_id, canonical).await?;
+    let mapping_digest = policy_mapping_digest(tx, version_id).await?;
     let rows_affected = sqlx::query(
         r#"
         UPDATE deployment_policy_versions
         SET semantic_digest          = $1,
+            mapping_digest            = $2,
             digest_algorithm         = 'sha-256',
             canonicalization_version = 'cf-model-json-1',
-            name                     = $3,
-            description              = $4,
-            policy_type              = $5,
-            implementation_state     = $6,
-            execution_phase          = $7,
-            config                   = $8::jsonb,
-            compliance_metadata      = $9::jsonb,
-            dependencies             = $10::jsonb,
-            enabled_by_default       = $11
-        WHERE id = $2
+            name                     = $4,
+            description              = $5,
+            policy_type              = $6,
+            implementation_state     = $7,
+            execution_phase          = $8,
+            config                   = $9::jsonb,
+            compliance_metadata      = $10::jsonb,
+            dependencies             = $11::jsonb,
+            enabled_by_default       = $12
+        WHERE id = $3
           AND publication_state IN ('incomplete', 'draft', 'interim')
         "#,
     )
     .bind(&digest)
+    .bind(&mapping_digest)
     .bind(version_id)
     .bind(&canonical.name)
     .bind(&canonical.description)
@@ -321,6 +371,135 @@ pub async fn write_policy_version_digest(
         anyhow::bail!("Policy version {version_id} is not in draft state and cannot be updated");
     }
     Ok(())
+}
+
+/// Recompute a policy version's modeled semantic digest in the same transaction.
+/// Mapping mutations refresh the separate mapping component; this helper keeps
+/// the legacy semantic digest contract independent of normalized mappings.
+pub async fn refresh_policy_version_digest(
+    tx: &mut Transaction<'_, Postgres>,
+    policy_version_id: Uuid,
+) -> Result<()> {
+    let row = sqlx::query_as::<_, PolicyDigestRow>(
+        r#"
+        SELECT name, description, policy_type, implementation_state,
+               execution_phase, config, compliance_metadata, dependencies,
+               opaque_xml, enabled_by_default, publication_state
+        FROM deployment_policy_versions
+        WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(policy_version_id)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    if matches!(row.publication_state.as_str(), "accepted" | "deprecated") {
+        anyhow::bail!("POLICY_MAPPING_IMMUTABLE: policy version {policy_version_id} is immutable");
+    }
+
+    let canonical = PolicyVersionCanonical {
+        name: row.name,
+        description: row.description,
+        policy_type: row.policy_type,
+        implementation_state: row.implementation_state,
+        execution_phase: row.execution_phase,
+        config: row.config,
+        compliance_metadata: row.compliance_metadata,
+        dependencies: row.dependencies,
+        opaque_xml_digest: PolicyVersionCanonical::digest_opaque_xml(row.opaque_xml.as_deref()),
+        enabled_by_default: row.enabled_by_default,
+    };
+    let digest = policy_version_digest(tx, policy_version_id, &canonical).await?;
+    sqlx::query(
+        "UPDATE deployment_policy_versions SET semantic_digest = $1, digest_algorithm = 'sha-256', canonicalization_version = 'cf-model-json-1' WHERE id = $2",
+    )
+    .bind(digest)
+    .bind(policy_version_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn policy_version_digest(
+    tx: &mut Transaction<'_, Postgres>,
+    policy_version_id: Uuid,
+    canonical: &PolicyVersionCanonical,
+) -> Result<String> {
+    let _ = (tx, policy_version_id);
+    Ok(canonical.compute_digest())
+}
+
+async fn policy_mapping_digest(
+    tx: &mut Transaction<'_, Postgres>,
+    policy_version_id: Uuid,
+) -> Result<String> {
+    let rows = sqlx::query_as::<_, PolicyMappingCanonicalRow>(
+        "SELECT requirement_version_id, relationship, coverage, rationale, provenance, trust_state FROM policy_requirement_mappings WHERE policy_version_id = $1",
+    )
+    .bind(policy_version_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut mappings = rows
+        .into_iter()
+        .map(|row| PolicyMappingCanonical {
+            requirement_version_id: row.requirement_version_id,
+            relationship: row.relationship,
+            coverage: row.coverage,
+            rationale: row.rationale,
+            provenance: row.provenance,
+            trust_state: row.trust_state,
+        })
+        .collect::<Vec<_>>();
+    Ok(compute_mapping_digest(&mut mappings))
+}
+
+/// Refresh only the normalized mapping component for a mutable policy version.
+pub async fn refresh_policy_mapping_digest(
+    tx: &mut Transaction<'_, Postgres>,
+    policy_version_id: Uuid,
+) -> Result<()> {
+    let state: String = sqlx::query_scalar(
+        "SELECT publication_state FROM deployment_policy_versions WHERE id = $1 FOR UPDATE",
+    )
+    .bind(policy_version_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if matches!(state.as_str(), "accepted" | "deprecated") {
+        anyhow::bail!("POLICY_MAPPING_IMMUTABLE: policy version {policy_version_id} is immutable");
+    }
+    let digest = policy_mapping_digest(tx, policy_version_id).await?;
+    sqlx::query("UPDATE deployment_policy_versions SET mapping_digest = $1 WHERE id = $2")
+        .bind(digest)
+        .bind(policy_version_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct PolicyDigestRow {
+    name: String,
+    description: Option<String>,
+    policy_type: String,
+    implementation_state: String,
+    execution_phase: String,
+    config: Value,
+    compliance_metadata: Value,
+    dependencies: Value,
+    opaque_xml: Option<String>,
+    enabled_by_default: Option<bool>,
+    publication_state: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct PolicyMappingCanonicalRow {
+    requirement_version_id: Uuid,
+    relationship: String,
+    coverage: String,
+    rationale: Option<String>,
+    provenance: String,
+    trust_state: String,
 }
 
 /// Load the ordered membership entries including `selected`.
@@ -363,8 +542,6 @@ pub async fn write_bundle_version_digest(
     bundle_id: Uuid,
     canonical: &BundleVersionCanonical,
 ) -> Result<()> {
-    let digest = canonical.compute_digest();
-
     // Resolve and lock the current draft version pointer.
     let version_id: Option<Uuid> = sqlx::query_scalar(
         r#"
@@ -381,24 +558,28 @@ pub async fn write_bundle_version_digest(
 
     let version_id = version_id
         .ok_or_else(|| anyhow::anyhow!("Bundle {bundle_id} has no current draft version"))?;
+    let digest = bundle_version_digest(tx, version_id, canonical).await?;
+    let requirement_digest = bundle_requirement_digest(tx, version_id).await?;
 
     let rows_affected = sqlx::query(
         r#"
         UPDATE compliance_bundle_versions
         SET semantic_digest          = $1,
+            requirement_digest       = $2,
             digest_algorithm         = 'sha-256',
             canonicalization_version = 'cf-model-json-1',
-            name                     = $3,
-            framework                = $4,
-            framework_version        = $5,
-            description              = $6,
-            layer                    = $7,
-            owner                    = $8
-        WHERE id = $2
+            name                     = $4,
+            framework                = $5,
+            framework_version        = $6,
+            description              = $7,
+            layer                    = $8,
+            owner                    = $9
+        WHERE id = $3
           AND publication_state IN ('incomplete', 'draft', 'interim')
         "#,
     )
     .bind(&digest)
+    .bind(&requirement_digest)
     .bind(version_id)
     .bind(&canonical.name)
     .bind(&canonical.framework)
@@ -414,6 +595,104 @@ pub async fn write_bundle_version_digest(
         anyhow::bail!("Bundle version {version_id} is not in draft state and cannot be updated");
     }
     Ok(())
+}
+
+pub async fn refresh_bundle_version_digest(
+    tx: &mut Transaction<'_, Postgres>,
+    bundle_version_id: Uuid,
+) -> Result<()> {
+    #[derive(sqlx::FromRow)]
+    struct BundleRow {
+        name: String,
+        framework: String,
+        framework_version: Option<String>,
+        description: Option<String>,
+        layer: String,
+        owner: String,
+        publication_state: String,
+    }
+    let row: BundleRow = sqlx::query_as(
+        "SELECT bundle_id, name, framework, framework_version, description, layer, owner, publication_state FROM compliance_bundle_versions WHERE id = $1 FOR UPDATE",
+    )
+    .bind(bundle_version_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if matches!(row.publication_state.as_str(), "accepted" | "deprecated") {
+        anyhow::bail!("BUNDLE_VERSION_IMMUTABLE: bundle version {bundle_version_id} is immutable");
+    }
+    let canonical = BundleVersionCanonical {
+        name: row.name,
+        framework: row.framework,
+        framework_version: row.framework_version,
+        description: row.description,
+        layer: row.layer,
+        owner: row.owner,
+        members: load_bundle_membership(tx, bundle_version_id).await?,
+    };
+    let digest = bundle_version_digest(tx, bundle_version_id, &canonical).await?;
+    sqlx::query("UPDATE compliance_bundle_versions SET semantic_digest = $1, digest_algorithm = 'sha-256', canonicalization_version = 'cf-model-json-1' WHERE id = $2")
+        .bind(digest)
+        .bind(bundle_version_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn bundle_version_digest(
+    tx: &mut Transaction<'_, Postgres>,
+    bundle_version_id: Uuid,
+    canonical: &BundleVersionCanonical,
+) -> Result<String> {
+    let _ = (tx, bundle_version_id);
+    Ok(canonical.compute_digest())
+}
+
+async fn bundle_requirement_digest(
+    tx: &mut Transaction<'_, Postgres>,
+    bundle_version_id: Uuid,
+) -> Result<String> {
+    let mut memberships: Vec<BundleRequirementCanonical> = sqlx::query_as::<_, BundleRequirementRow>(
+        "SELECT requirement_version_id, selected FROM compliance_bundle_version_requirements WHERE bundle_version_id = $1",
+    )
+    .bind(bundle_version_id)
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .map(|row| BundleRequirementCanonical {
+        requirement_version_id: row.requirement_version_id,
+        selected: row.selected,
+    })
+    .collect();
+    Ok(compute_requirement_membership_digest(&mut memberships))
+}
+
+/// Refresh only the normalized requirement-baseline component for a mutable bundle version.
+pub async fn refresh_bundle_requirement_digest(
+    tx: &mut Transaction<'_, Postgres>,
+    bundle_version_id: Uuid,
+) -> Result<()> {
+    let state: String = sqlx::query_scalar(
+        "SELECT publication_state FROM compliance_bundle_versions WHERE id = $1 FOR UPDATE",
+    )
+    .bind(bundle_version_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if matches!(state.as_str(), "accepted" | "deprecated") {
+        anyhow::bail!("BUNDLE_VERSION_IMMUTABLE: bundle version {bundle_version_id} is immutable");
+    }
+    let digest = bundle_requirement_digest(tx, bundle_version_id).await?;
+    sqlx::query("UPDATE compliance_bundle_versions SET requirement_digest = $1 WHERE id = $2")
+        .bind(digest)
+        .bind(bundle_version_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct BundleRequirementRow {
+    requirement_version_id: Uuid,
+    selected: bool,
 }
 
 /// Build and write the assignment overlay digest for a single assignment.
@@ -555,57 +834,17 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
     #[derive(sqlx::FromRow)]
     struct PolicyVersionRow {
         id: Uuid,
-        policy_id: Uuid,
-        name: String,
-        description: Option<String>,
-        policy_type: String,
-        implementation_state: String,
-        execution_phase: String,
-        config: Value,
-        compliance_metadata: Value,
-        dependencies: Value,
-        opaque_xml: Option<String>,
-        enabled: Option<bool>,
     }
     let pending_policies: Vec<PolicyVersionRow> = sqlx::query_as(
-        r#"
-        SELECT dpv.id, dpv.policy_id, dpv.name, dpv.description, dpv.policy_type,
-               dpv.implementation_state, dpv.execution_phase, dpv.config,
-               dpv.compliance_metadata, dpv.dependencies, dpv.opaque_xml,
-               dpv.enabled_by_default AS enabled
-        FROM deployment_policy_versions dpv
-        WHERE dpv.semantic_digest = 'pending'
-        "#,
+        "SELECT id FROM deployment_policy_versions WHERE semantic_digest = 'pending'",
     )
     .fetch_all(pool)
     .await?;
 
     for row in &pending_policies {
-        let canonical = PolicyVersionCanonical {
-            name: row.name.clone(),
-            description: row.description.clone(),
-            policy_type: row.policy_type.clone(),
-            implementation_state: row.implementation_state.clone(),
-            execution_phase: row.execution_phase.clone(),
-            config: row.config.clone(),
-            compliance_metadata: row.compliance_metadata.clone(),
-            dependencies: row.dependencies.clone(),
-            opaque_xml_digest: PolicyVersionCanonical::digest_opaque_xml(row.opaque_xml.as_deref()),
-            enabled_by_default: row.enabled,
-        };
-        let digest = canonical.compute_digest();
-        sqlx::query(
-            r#"
-            UPDATE deployment_policy_versions
-            SET semantic_digest = $1, digest_algorithm = 'sha-256',
-                canonicalization_version = 'cf-model-json-1'
-            WHERE id = $2
-            "#,
-        )
-        .bind(&digest)
-        .bind(row.id)
-        .execute(pool)
-        .await?;
+        let mut tx = pool.begin().await?;
+        refresh_policy_version_digest(&mut tx, row.id).await?;
+        tx.commit().await?;
     }
 
     // ── Bundle versions ───────────────────────────────────────────────────────
@@ -632,53 +871,48 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
     .await?;
 
     for row in &pending_bundles {
-        #[derive(sqlx::FromRow)]
-        struct MembershipRow {
-            policy_version_id: Uuid,
-            selected: bool,
-        }
-        let mem_rows: Vec<MembershipRow> = sqlx::query_as(
-            r#"
-            SELECT policy_version_id, selected
-            FROM compliance_bundle_version_policies
-            WHERE bundle_version_id = $1
-            ORDER BY policy_order ASC
-            "#,
-        )
-        .bind(row.id)
-        .fetch_all(pool)
-        .await?;
+        let mut tx = pool.begin().await?;
+        refresh_bundle_version_digest(&mut tx, row.id).await?;
+        tx.commit().await?;
+    }
 
-        let members: Vec<BundleMembershipEntry> = mem_rows
-            .into_iter()
-            .map(|r| BundleMembershipEntry {
-                policy_version_id: r.policy_version_id,
-                selected: r.selected,
-            })
-            .collect();
-
-        let canonical = BundleVersionCanonical {
-            name: row.name.clone(),
-            framework: row.framework.clone(),
-            framework_version: row.framework_version.clone(),
-            description: row.description.clone(),
-            layer: row.layer.clone(),
-            owner: row.owner.clone(),
-            members,
-        };
-        let digest = canonical.compute_digest();
+    // Component backfills intentionally bypass the mutable-version guards: the
+    // migration adds these columns to already accepted/deprecated rows. They
+    // update only a pending component column and never change semantic content.
+    let pending_mapping_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM deployment_policy_versions WHERE mapping_digest = 'pending'",
+    )
+    .fetch_all(pool)
+    .await?;
+    for version_id in &pending_mapping_ids {
+        let mut tx = pool.begin().await?;
+        let digest = policy_mapping_digest(&mut tx, *version_id).await?;
         sqlx::query(
-            r#"
-            UPDATE compliance_bundle_versions
-            SET semantic_digest = $1, digest_algorithm = 'sha-256',
-                canonicalization_version = 'cf-model-json-1'
-            WHERE id = $2
-            "#,
+            "UPDATE deployment_policy_versions SET mapping_digest = $1 WHERE id = $2 AND mapping_digest = 'pending'",
         )
-        .bind(&digest)
-        .bind(row.id)
-        .execute(pool)
+        .bind(digest)
+        .bind(version_id)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
+    }
+
+    let pending_requirement_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM compliance_bundle_versions WHERE requirement_digest = 'pending'",
+    )
+    .fetch_all(pool)
+    .await?;
+    for version_id in &pending_requirement_ids {
+        let mut tx = pool.begin().await?;
+        let digest = bundle_requirement_digest(&mut tx, *version_id).await?;
+        sqlx::query(
+            "UPDATE compliance_bundle_versions SET requirement_digest = $1 WHERE id = $2 AND requirement_digest = 'pending'",
+        )
+        .bind(digest)
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
     }
 
     // ── Assignment effective-set digests ──────────────────────────────────────
@@ -707,22 +941,41 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
     .fetch_one(pool)
     .await?;
 
+    let remaining_mapping: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM deployment_policy_versions WHERE mapping_digest = 'pending'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let remaining_requirement: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM compliance_bundle_versions WHERE requirement_digest = 'pending'",
+    )
+    .fetch_one(pool)
+    .await?;
+
     let remaining_assignment: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM compliance_bundle_assignments WHERE assignment_overlay_digest = 'pending'",
     )
     .fetch_one(pool)
     .await?;
 
-    if remaining_policy > 0 || remaining_bundle > 0 || remaining_assignment > 0 {
+    if remaining_policy > 0
+        || remaining_bundle > 0
+        || remaining_assignment > 0
+        || remaining_mapping > 0
+        || remaining_requirement > 0
+    {
         anyhow::bail!(
-            "compliance: {remaining_policy} policy version(s), {remaining_bundle} bundle version(s), \
-             and {remaining_assignment} assignment(s) still have pending digests after backfill"
+            "compliance: {remaining_policy} policy semantic, {remaining_mapping} policy mapping, \
+             {remaining_bundle} bundle semantic, {remaining_requirement} bundle requirement, and \
+             {remaining_assignment} assignment digest(s) still pending after backfill"
         );
     }
 
     tracing::info!(
         policies = pending_policies.len(),
         bundles = pending_bundles.len(),
+        mapping_components = pending_mapping_ids.len(),
+        requirement_components = pending_requirement_ids.len(),
         assignments = pending_assignments.len(),
         "compliance: digest backfill complete"
     );
@@ -765,6 +1018,17 @@ mod tests {
                     selected: true,
                 })
                 .collect(),
+        }
+    }
+
+    fn mapping(requirement_version_id: Uuid) -> PolicyMappingCanonical {
+        PolicyMappingCanonical {
+            requirement_version_id,
+            relationship: "supports".into(),
+            coverage: "partial".into(),
+            rationale: Some("rationale".into()),
+            provenance: "manual".into(),
+            trust_state: "trusted".into(),
         }
     }
 
@@ -920,6 +1184,83 @@ mod tests {
             effective_policy_version_ids: vec![],
         };
         assert_ne!(a.compute_digest(), b.compute_digest());
+    }
+
+    #[test]
+    fn policy_mapping_digest_changes_for_each_semantic_field() {
+        let requirement_id = Uuid::from_u128(1);
+        let base = {
+            let mut mappings = vec![mapping(requirement_id)];
+            compute_mapping_digest(&mut mappings)
+        };
+
+        for (field, value) in [
+            ("relationship", "implements"),
+            ("coverage", "full"),
+            ("provenance", "inherited"),
+            ("trust_state", "suggested"),
+        ] {
+            let mut changed = mapping(requirement_id);
+            match field {
+                "relationship" => changed.relationship = value.into(),
+                "coverage" => changed.coverage = value.into(),
+                "provenance" => changed.provenance = value.into(),
+                "trust_state" => changed.trust_state = value.into(),
+                _ => unreachable!(),
+            }
+            assert_ne!(base, compute_mapping_digest(&mut vec![changed]));
+        }
+
+        let mut changed = mapping(requirement_id);
+        changed.rationale = Some("different rationale".into());
+        assert_ne!(base, compute_mapping_digest(&mut vec![changed]));
+    }
+
+    #[test]
+    fn policy_mapping_digest_is_stable_across_insertion_order() {
+        let first = Uuid::from_u128(1);
+        let second = Uuid::from_u128(2);
+        let mut left = vec![mapping(first), mapping(second)];
+        let mut right = vec![mapping(second), mapping(first)];
+        assert_eq!(
+            compute_mapping_digest(&mut left),
+            compute_mapping_digest(&mut right)
+        );
+    }
+
+    #[test]
+    fn semantic_digest_remains_independent_of_policy_mappings() {
+        let semantic = base_policy().compute_digest();
+        let mut changed = mapping(Uuid::from_u128(2));
+        changed.coverage = "full".into();
+        assert_eq!(semantic, base_policy().compute_digest());
+        assert_ne!(
+            compute_mapping_digest(&mut vec![mapping(Uuid::from_u128(1))]),
+            compute_mapping_digest(&mut vec![changed])
+        );
+    }
+
+    #[test]
+    fn bundle_requirement_digest_is_order_independent_and_membership_sensitive() {
+        let first = BundleRequirementCanonical {
+            requirement_version_id: Uuid::from_u128(1),
+            selected: true,
+        };
+        let second = BundleRequirementCanonical {
+            requirement_version_id: Uuid::from_u128(2),
+            selected: false,
+        };
+        let mut left = vec![first.clone(), second.clone()];
+        let mut right = vec![second, first];
+        assert_eq!(
+            compute_requirement_membership_digest(&mut left),
+            compute_requirement_membership_digest(&mut right)
+        );
+        right[0].selected = !right[0].selected;
+        assert_ne!(
+            compute_requirement_membership_digest(&mut left),
+            compute_requirement_membership_digest(&mut right)
+        );
     }
 
     #[test]

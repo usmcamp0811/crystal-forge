@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT DISTINCT\n            dp.id  AS \"policy_id!\",\n            pv.id  AS \"policy_version_id!\",\n            pv.name AS \"policy_name!\"\n        FROM policy_requirement_mappings m\n        JOIN compliance_requirement_versions rv ON rv.id = m.requirement_version_id\n        JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id\n        JOIN deployment_policies dp ON dp.id = pv.policy_id\n        WHERE rv.requirement_id = $1\n          AND m.trust_state = 'trusted'\n          AND pv.publication_state IN ('accepted', 'deprecated')\n        ORDER BY pv.name\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "policy_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "policy_version_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "policy_name!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2abc023efcdb551b2c475b46b195aa05477d047fb58730a17d1f4e4ccf45fccf"
+}

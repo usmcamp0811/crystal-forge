@@ -2,6 +2,7 @@
 with lib;
 with lib.crystal-forge;
 let
+  dioxus-cli-0_7_3 = inputs.nixpkgs-dioxus-cli.legacyPackages.${system}.dioxus-cli;
   # TODO: do something to configure these from here.. for now they are in `packages/devScripts/default.nix`
   # namespace = "crystal-forge";
   # db_port = 3042;
@@ -123,7 +124,7 @@ in mkShell {
     pkgs.crystal-forge.devScripts.startBuilderApi
 
     # UI development tooling (Dioxus web target)
-    dioxus-cli # dx CLI for Dioxus 0.7 (dev server, hot reload, bundling)
+    dioxus-cli-0_7_3 # dx CLI matching the resolved Dioxus 0.7.3 stack
     trunk # WASM bundler (fallback / standalone builds)
     wasm-bindgen-cli # WASM JS binding generator
     binaryen # wasm-opt for WASM optimization

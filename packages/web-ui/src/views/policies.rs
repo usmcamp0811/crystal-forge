@@ -6,8 +6,9 @@ use uuid::Uuid;
 
 use crate::api::client::{
     delete_deployment_policy, export_policy_versions, fetch_compliance_grouping_schemes,
+    fetch_policy_requirement_mappings,
 };
-use crate::api::models::ComplianceGroupingScheme;
+use crate::api::models::{ComplianceGroupingScheme, PolicyMappingRow};
 use crate::components::io_menu::{IOMenu, IOMenuItem};
 use crate::components::layout::Card;
 use crate::components::policy::{
@@ -822,6 +823,48 @@ fn PolicyDrawer(
     let policy_for_edit = displayed_policy.clone();
     let mut busy = use_signal(|| false);
     let mut action_status = use_signal(|| None::<String>);
+    let mut mappings: Signal<Vec<PolicyMappingRow>> = use_signal(Vec::new);
+    let mut mappings_loading = use_signal(|| false);
+    let mut mappings_error: Signal<Option<String>> = use_signal(|| None);
+    let mut loaded_mapping_version: Signal<Option<Uuid>> = use_signal(|| None);
+    let mut mapping_request_generation = use_signal(|| 0_u64);
+
+    use_effect(move || {
+        let requested_version = selected_version_id();
+        let generation = *mapping_request_generation.peek() + 1;
+        mapping_request_generation.set(generation);
+        loaded_mapping_version.set(None);
+        mappings_error.set(None);
+
+        let Some(requested_version) = requested_version else {
+            mappings.set(Vec::new());
+            mappings_loading.set(false);
+            return;
+        };
+
+        mappings.set(Vec::new());
+        mappings_loading.set(true);
+        spawn(async move {
+            let result = fetch_policy_requirement_mappings(&requested_version).await;
+            if mapping_request_generation() != generation
+                || selected_version_id() != Some(requested_version)
+            {
+                return;
+            }
+            mappings_loading.set(false);
+            match result {
+                Ok(value) => {
+                    mappings.set(value);
+                    loaded_mapping_version.set(Some(requested_version));
+                }
+                Err(error) => {
+                    mappings_error.set(Some(format!("Failed to load normalized mappings: {error}")))
+                }
+            }
+        });
+    });
+
+    let mapping_groups = grouped_policy_mappings(&mappings.read());
 
     let version_id = displayed_policy.version_id;
     let revision_count = policy.revisions.len();
@@ -1005,18 +1048,57 @@ fn PolicyDrawer(
                         }
                     }
                 } else {
+                    if let Some(rationale) = displayed_policy.rationale.as_deref().filter(|value| !value.trim().is_empty()) {
+                        section {
+                            h3 { class: "policy-drawer-section-title", "Rationale" }
+                            div { style: "font-size:13px;color:var(--cf-text-primary);line-height:1.5;", "{rationale}" }
+                        }
+                    }
+                    section {
+                        h3 { class: "policy-drawer-section-title", "Mapped Requirements · {mappings.read().len()}" }
+                        if mappings_loading() {
+                            div { style: "font-size:12px;color:var(--cf-text-muted);", "Loading normalized requirement mappings…" }
+                        } else if let Some(error) = mappings_error.read().clone() {
+                            div { class: "sd-callout sd-callout-danger", style: "font-size:12px;", "{error}" }
+                        } else if loaded_mapping_version() != displayed_policy.version_id {
+                            div { style: "font-size:12px;color:var(--cf-text-muted);", "Loading normalized requirement mappings…" }
+                        } else if mapping_groups.is_empty() {
+                            div { class: "sd-callout sd-callout-info", style: "margin-bottom:10px;", "This policy is not currently mapped to an external compliance requirement. It can still be used as an operational or custom policy." }
+                        } else {
+                            div { style: "display:flex;flex-direction:column;gap:12px;",
+                                for (framework_name, framework_version, group) in mapping_groups.iter() {
+                                    div {
+                                        div { style: "font-size:11.5px;font-weight:700;color:var(--cf-text-primary);margin-bottom:6px;", "{framework_name}" span { style: "color:var(--cf-text-muted);font-weight:400;", " · {framework_version}" } }
+                                        div { style: "display:flex;flex-direction:column;gap:6px;",
+                                            for row in group.iter() {
+                                                div { key: "{row.id}", style: "padding:9px 11px;background:var(--cf-subtle-bg);border-radius:8px;border:1px solid var(--cf-divider);",
+                                                    div { style: "display:flex;justify-content:space-between;gap:8px;",
+                                                        span { class: "mono", style: "font-size:12px;font-weight:600;", "{row.requirement_external_id}" }
+                                                        span { style: "font-size:9.5px;color:var(--cf-text-muted);", "{mapping_provenance_label(&row.provenance)}" }
+                                                    }
+                                                    if let Some(title) = row.requirement_title.as_deref() { div { style: "font-size:11.5px;color:var(--cf-text-secondary);margin:2px 0 5px;", "{title}" } }
+                                                    div { style: "font-size:11px;display:flex;gap:6px;align-items:center;",
+                                                        span { style: "font-weight:600;color:var(--cf-text-primary);", "{mapping_relationship_label(&row.relationship)}" }
+                                                        span { style: "color:var(--cf-text-muted);", if row.coverage == "full" { "· Full coverage" } else { "· Partial coverage" } }
+                                                    }
+                                                    if let Some(rationale) = row.rationale.as_deref().filter(|value| !value.trim().is_empty()) { div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:5px;line-height:1.4;", "{rationale}" } }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if displayed_policy.category.as_deref().is_some_and(|category| category.eq_ignore_ascii_case("security")) {
                         div {
-                            h3 { class: "policy-drawer-section-title", "Classification" }
+                            h3 { class: "policy-drawer-section-title", "Source / imported metadata" }
                             div { style: "display: flex; flex-wrap: wrap; gap: 5px;",
                                 if let Some(framework) = displayed_policy.framework.as_deref().filter(|value| !value.trim().is_empty()) { span { class: "chip chip-info", "{framework}" } }
                                 if let Some(severity) = displayed_policy.severity.as_deref().filter(|value| !value.trim().is_empty()) { span { class: "chip chip-unknown", "{severity}" } }
                                 if let Some(family) = displayed_policy.control_family.as_deref().filter(|value| !value.trim().is_empty()) { span { class: "chip mono", "{family}" } }
                                 if let Some(level) = displayed_policy.cmmc_level { span { class: "chip", "CMMC Level {level}" } }
                                 if let Some(section) = displayed_policy.cis_section.as_deref().filter(|value| !value.trim().is_empty()) { span { class: "chip mono", "CIS {section}" } }
-                            }
-                            if let Some(rationale) = displayed_policy.rationale.as_deref().filter(|value| !value.trim().is_empty()) {
-                                p { style: "margin:8px 0 0;font-size:12px;color:var(--cf-text-secondary);line-height:1.5;", "{rationale}" }
                             }
                         }
                     }
@@ -1056,6 +1138,46 @@ fn PolicyDrawer(
             }
         }
     }
+}
+
+fn mapping_relationship_label(relationship: &str) -> &str {
+    match relationship {
+        "implements" => "Implements",
+        "supports" => "Supports",
+        "provides_evidence_for" => "Provides evidence for",
+        other => other,
+    }
+}
+
+fn mapping_provenance_label(provenance: &str) -> &str {
+    match provenance {
+        "manual" => "Manual mapping",
+        "imported" => "Imported",
+        "inherited" => "Inherited",
+        "inferred" => "Inferred",
+        "suggested" => "Suggested",
+        other => other,
+    }
+}
+
+fn grouped_policy_mappings(
+    rows: &[PolicyMappingRow],
+) -> Vec<(String, String, Vec<PolicyMappingRow>)> {
+    let mut groups: Vec<(String, String, Vec<PolicyMappingRow>)> = Vec::new();
+    for row in rows {
+        if let Some((_, _, group)) = groups.iter_mut().find(|(framework, version, _)| {
+            *framework == row.framework_name && *version == row.framework_version
+        }) {
+            group.push(row.clone());
+        } else {
+            groups.push((
+                row.framework_name.clone(),
+                row.framework_version.clone(),
+                vec![row.clone()],
+            ));
+        }
+    }
+    groups
 }
 
 fn policy_matches_filters(

@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH bundle_reqs AS (\n            -- All selected requirements in the bundle version\n            SELECT bvr.requirement_version_id\n            FROM compliance_bundle_version_requirements bvr\n            WHERE bvr.bundle_version_id = $1\n              AND bvr.selected = true\n        ),\n        bundle_policies AS (\n            -- All policy version IDs in the bundle\n            SELECT bvp.policy_version_id\n            FROM compliance_bundle_version_policies bvp\n            WHERE bvp.bundle_version_id = $1\n              AND bvp.selected = true\n        ),\n        applicable_mappings AS (\n            -- Trusted mappings where both the policy and requirement are in this bundle\n            SELECT\n                m.requirement_version_id,\n                m.policy_version_id,\n                m.relationship,\n                m.coverage\n            FROM policy_requirement_mappings m\n            WHERE m.trust_state = 'trusted'\n              AND m.requirement_version_id IN (SELECT requirement_version_id FROM bundle_reqs)\n              AND m.policy_version_id      IN (SELECT policy_version_id       FROM bundle_policies)\n        )\n        SELECT\n            rv.id              AS \"requirement_version_id!\",\n            rv.external_id     AS \"external_id!\",\n            rv.title,\n            rv.kind            AS \"kind!\",\n            rv.parent_requirement_version_id,\n            COALESCE(\n                BOOL_OR(\n                    am.relationship = 'implements' AND am.coverage = 'full'\n                ), false\n            )                  AS \"has_full_coverage!: bool\",\n            COALESCE(\n                BOOL_OR(am.requirement_version_id IS NOT NULL),\n                false\n            )                  AS \"has_partial_coverage!: bool\",\n            COALESCE(\n                ARRAY_AGG(am.policy_version_id) FILTER (WHERE am.policy_version_id IS NOT NULL),\n                ARRAY[]::uuid[]\n            )                  AS \"mapped_policy_version_ids!: Vec<Uuid>\"\n        FROM bundle_reqs br\n        JOIN compliance_requirement_versions rv ON rv.id = br.requirement_version_id\n        LEFT JOIN applicable_mappings am ON am.requirement_version_id = br.requirement_version_id\n        GROUP BY rv.id, rv.external_id, rv.title, rv.kind, rv.parent_requirement_version_id\n        ORDER BY rv.external_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "requirement_version_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "external_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "kind!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "parent_requirement_version_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "has_full_coverage!: bool",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "has_partial_coverage!: bool",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "mapped_policy_version_ids!: Vec<Uuid>",
+        "type_info": "UuidArray"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "ea401b324f1c0d6e6bf2507098481e68c0095bf394d710bb9051b592f98caa3f"
+}

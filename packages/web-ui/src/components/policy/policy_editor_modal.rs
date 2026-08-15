@@ -13,15 +13,116 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use crate::api::client::{
-    create_deployment_policy, delete_deployment_policy, update_deployment_policy,
+    create_deployment_policy, delete_deployment_policy,
+    fetch_compliance_frameworks, fetch_compliance_framework_versions,
+    fetch_policy_requirement_mappings, create_policy_mapping, delete_policy_mapping,
+    update_policy_mapping,
+    search_requirements, update_deployment_policy,
 };
-use crate::api::models::{CreateDeploymentPolicyRequest, UpdateDeploymentPolicyRequest};
+use crate::api::models::{
+    ComplianceFrameworkSummary, ComplianceFrameworkVersionSummary,
+    CreateDeploymentPolicyRequest, CreatePolicyMappingRequest,
+    PolicyMappingRow, RequirementVersionSummary, UpdateDeploymentPolicyRequest,
+    UpdatePolicyMappingRequest,
+};
 use crate::views::policies_api;
 
-use super::types::{PolicyCategory, PolicyDefinition, PolicyFormat};
+use super::types::{is_policy_version_editable, PolicyCategory, PolicyDefinition, PolicyFormat};
+
+#[derive(Clone, Debug, PartialEq)]
+struct PendingPolicyMapping {
+    requirement_version_id: Uuid,
+    framework_name: String,
+    framework_version: String,
+    requirement_external_id: String,
+    requirement_kind: String,
+    requirement_title: Option<String>,
+    relationship: String,
+    coverage: String,
+    rationale: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MappingEditorTarget {
+    Pending,
+    Persisted(Uuid),
+    Unavailable,
+}
+
+fn mapping_editor_target(
+    is_editing: bool,
+    editing_policy_version_id: Option<Uuid>,
+    mappings_editable: bool,
+) -> MappingEditorTarget {
+    if !is_editing {
+        MappingEditorTarget::Pending
+    } else if mappings_editable {
+        editing_policy_version_id
+            .map(MappingEditorTarget::Persisted)
+            .unwrap_or(MappingEditorTarget::Unavailable)
+    } else {
+        MappingEditorTarget::Unavailable
+    }
+}
+
+fn pending_mapping_from_selection(
+    framework: &ComplianceFrameworkSummary,
+    framework_version: &ComplianceFrameworkVersionSummary,
+    requirement: &RequirementVersionSummary,
+    relationship: String,
+    coverage: String,
+    rationale: Option<String>,
+) -> PendingPolicyMapping {
+    PendingPolicyMapping {
+        requirement_version_id: requirement.id,
+        framework_name: framework.name.clone(),
+        framework_version: framework_version.version.clone(),
+        requirement_external_id: requirement.external_id.clone(),
+        requirement_kind: requirement.kind.clone(),
+        requirement_title: requirement.title.clone(),
+        relationship,
+        coverage,
+        rationale,
+    }
+}
+
+impl PendingPolicyMapping {
+    fn mapping_request(&self) -> CreatePolicyMappingRequest {
+        CreatePolicyMappingRequest {
+            requirement_version_id: self.requirement_version_id,
+            relationship: self.relationship.clone(),
+            coverage: self.coverage.clone(),
+            rationale: self.rationale.clone(),
+            provenance: "manual".to_string(),
+        }
+    }
+}
+
+fn add_pending_mapping(
+    mappings: &mut Vec<PendingPolicyMapping>,
+    mapping: PendingPolicyMapping,
+) -> Result<(), &'static str> {
+    if mappings
+        .iter()
+        .any(|existing| existing.requirement_version_id == mapping.requirement_version_id)
+    {
+        return Err("This requirement is already mapped.");
+    }
+    mappings.push(mapping);
+    Ok(())
+}
+
+fn remove_pending_mapping(mappings: &mut Vec<PendingPolicyMapping>, requirement_version_id: Uuid) {
+    mappings.retain(|mapping| mapping.requirement_version_id != requirement_version_id);
+}
 
 const STANDARD_FRAMEWORKS: [&str; 4] = ["DISA STIG", "NIST 800-53", "CMMC 2.0", "CIS Benchmark"];
 const NIST_CONTROL_FAMILIES: [&str; 7] = ["AC", "AU", "CM", "IA", "SC", "SI", "MP"];
+const MAPPING_RELATIONSHIPS: [(&str, &str, &str); 3] = [
+    ("implements", "Implements", "The policy directly satisfies this requirement."),
+    ("supports", "Supports", "The policy contributes to satisfying the requirement but does not satisfy it alone."),
+    ("provides_evidence_for", "Provides evidence for", "The policy gathers or produces evidence relevant to determining compliance."),
+];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Rule + evidence model (mirrors the design example)
@@ -150,6 +251,7 @@ const EVIDENCE_OPTIONS: [(&str, &str); 6] = [
 #[derive(Clone, Copy, PartialEq)]
 enum PolicyEditorTab {
     Details,
+    Mappings,
     Enforcement,
     Evidence,
 }
@@ -204,8 +306,8 @@ fn build_persisted_payload(rules: &[PolicyRule]) -> Option<(String, serde_json::
 
     // Otherwise → custom_check with rules[]
     let mut json_rules = Vec::new();
-    for rule in persistable {
-        if let Some(value) = rule_to_custom_check_entry(rule) {
+    for (index, rule) in persistable.into_iter().enumerate() {
+        if let Some(value) = rule_to_custom_check_entry(rule, index) {
             json_rules.push(value);
         }
     }
@@ -218,11 +320,14 @@ fn build_persisted_payload(rules: &[PolicyRule]) -> Option<(String, serde_json::
     ))
 }
 
-fn rule_to_custom_check_entry(rule: &PolicyRule) -> Option<serde_json::Value> {
+fn rule_to_custom_check_entry(rule: &PolicyRule, index: usize) -> Option<serde_json::Value> {
+    let field_name = format!("policy_rule_{}", index + 1);
+
     match rule.kind.as_str() {
         "custom_eval" => Some(serde_json::json!({
             "expression": rule.expr.trim(),
             "description": if rule.message.trim().is_empty() { "Custom rule failed" } else { rule.message.trim() },
+            "field_name": field_name,
             "strict": true,
         })),
         "nixos_option" => {
@@ -235,6 +340,7 @@ fn rule_to_custom_check_entry(rule: &PolicyRule) -> Option<serde_json::Value> {
             Some(serde_json::json!({
                 "expression": expression,
                 "description": format!("config.{} must be {} {}", rule.path.trim(), rule.op.trim(), rule.value.trim()),
+                "field_name": field_name,
                 "strict": true,
             }))
         }
@@ -248,6 +354,7 @@ fn rule_to_custom_check_entry(rule: &PolicyRule) -> Option<serde_json::Value> {
             Some(serde_json::json!({
                 "expression": if checks.is_empty() { "true".to_string() } else { checks },
                 "description": format!("Packages installed: {}", packages.join(", ")),
+                "field_name": field_name,
                 "strict": true,
             }))
         }
@@ -328,7 +435,7 @@ fn custom_check_config_is_representable(config: &serde_json::Value) -> bool {
 
     if let Some(entries) = config.get("rules").and_then(|value| value.as_array()) {
         return entries.iter().all(|entry| {
-            object_keys_are_subset(entry, &["expression", "description", "strict"])
+            object_keys_are_subset(entry, &["expression", "description", "field_name", "strict"])
                 && entry
                     .get("description")
                     .is_none_or(|value| value.as_str().is_some())
@@ -527,6 +634,273 @@ fn parse_existing(body: &str, format: PolicyFormat) -> (String, serde_json::Valu
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+#[component]
+fn PolicyMappingsTab(
+    is_editing: bool,
+    editing_policy_version_id: Option<Uuid>,
+    mappings_editable: bool,
+    mut mappings: Signal<Vec<PolicyMappingRow>>,
+    mut pending_mappings: Signal<Vec<PendingPolicyMapping>>,
+) -> Element {
+    let mapping_target = mapping_editor_target(
+        is_editing,
+        editing_policy_version_id,
+        mappings_editable,
+    );
+    let mut loaded = use_signal(|| false);
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+    let mut frameworks: Signal<Vec<ComplianceFrameworkSummary>> = use_signal(Vec::new);
+    let mut versions: Signal<Vec<ComplianceFrameworkVersionSummary>> = use_signal(Vec::new);
+    let mut results: Signal<Vec<RequirementVersionSummary>> = use_signal(Vec::new);
+    let mut framework_id: Signal<Option<Uuid>> = use_signal(|| None);
+    let mut version_id: Signal<Option<Uuid>> = use_signal(|| None);
+    let mut requirement_id: Signal<Option<Uuid>> = use_signal(|| None);
+    let mut requirement: Signal<Option<RequirementVersionSummary>> = use_signal(|| None);
+    let mut search = use_signal(String::new);
+    let mut relationship = use_signal(|| "implements".to_string());
+    let mut coverage = use_signal(|| "full".to_string());
+    let mut rationale = use_signal(String::new);
+    let mut saving = use_signal(|| false);
+    let mut show_mapping_editor = use_signal(|| false);
+    let mut editing_mapping_id: Signal<Option<Uuid>> = use_signal(|| None);
+
+    if !*loaded.read() {
+        loaded.set(true);
+        spawn(async move {
+            match fetch_compliance_frameworks().await {
+                Ok(value) => frameworks.set(value),
+                Err(e) => error.set(Some(format!("Failed to load frameworks: {e}"))),
+            }
+            if let Some(id) = editing_policy_version_id {
+                match fetch_policy_requirement_mappings(&id).await {
+                    Ok(value) => mappings.set(value),
+                    Err(e) => error.set(Some(format!("Failed to load mappings: {e}"))),
+                }
+            }
+        });
+    }
+
+    let rows = mappings.read().clone();
+    let pending_rows = pending_mappings.read().clone();
+    let mut pending_grouped: Vec<(String, Vec<PendingPolicyMapping>)> = Vec::new();
+    for row in pending_rows {
+        let name = format!("{} · {}", row.framework_name, row.framework_version);
+        if let Some(group) = pending_grouped.iter_mut().find(|(key, _)| *key == name) {
+            group.1.push(row);
+        } else {
+            pending_grouped.push((name, vec![row]));
+        }
+    }
+    let mut grouped: Vec<(String, Vec<PolicyMappingRow>)> = Vec::new();
+    for row in rows {
+        let name = format!("{} · {}", row.framework_name, row.framework_version);
+        if let Some(group) = grouped.iter_mut().find(|(key, _)| *key == name) {
+            group.1.push(row);
+        } else {
+            grouped.push((name, vec![row]));
+        }
+    }
+
+    rsx! {
+        div { style: "margin-top:6px;display:flex;flex-direction:column;gap:14px;",
+            div { style: "font-size:12px;color:var(--cf-text-secondary);margin-bottom:2px;line-height:1.5;",
+                "Map this policy to the compliance requirements it implements, supports, or provides evidence for. Policies can map to requirements from multiple frameworks."
+            }
+            if grouped.is_empty() && pending_grouped.is_empty() {
+                div { class: "sd-callout sd-callout-info", style: "margin-bottom:10px;",
+                    div { style: "font-size:12px;",
+                        {match mapping_target {
+                            MappingEditorTarget::Pending => "No compliance mappings yet. This policy can still be used as an operational/custom policy with zero mappings. Add mappings below; they will be saved when this policy is created.",
+                            MappingEditorTarget::Persisted(_) => "No compliance mappings yet. This policy can still be used as an operational/custom policy with zero mappings.",
+                            MappingEditorTarget::Unavailable => "No compliance mappings yet. This policy can still be be used as an operational/custom policy with zero mappings.",
+                        }}
+                    }
+                }
+            } else {
+                div { style: "display:flex;flex-direction:column;gap:10px;",
+                    for (name, group) in pending_grouped {
+                        div { key: "pending-{name}",
+                            div { style: "font-size:11.5px;font-weight:700;color:var(--cf-text-primary);margin-bottom:6px;", "{name}" }
+                            for row in group {
+                                {
+                                    let requirement_version_id = row.requirement_version_id;
+                                    rsx! { div { style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:start;padding:9px 11px;background:var(--cf-subtle-bg);border:1px solid var(--cf-divider);border-radius:8px;font-size:12px;margin-bottom:6px;",
+                                        div { style: "display:flex;flex-direction:column;gap:2px;",
+                                            div { style: "font-size:11px;font-weight:700;color:var(--cf-text-muted);text-transform:uppercase;letter-spacing:0.04em;", "{row.framework_name} {row.framework_version}" }
+                                            div { class: "mono", style: "font-size:12.5px;font-weight:600;margin-top:2px;", span { "{row.requirement_external_id}" } span { style: "font-family:inherit;font-weight:400;color:var(--cf-text-secondary);", " · {row.requirement_title.clone().unwrap_or_default()}" } }
+                                            div { style: "display:flex;gap:6px;margin-top:2px;", span { class: "chip chip-neutral", style: "font-size:10px;", {match row.relationship.as_str() { "implements" => "Implements", "supports" => "Supports", _ => "Evidence for" }} }, span { class: if row.coverage == "full" { "chip chip-success" } else { "chip chip-warn" }, style: "font-size:10px;", {if row.coverage == "full" { "Full" } else { "Partial" }} }, span { class: "chip chip-neutral", style: "font-size:10px;", "Pending" } }
+                                            if let Some(text) = &row.rationale { if !text.is_empty() { div { style: "color:var(--cf-text-muted);font-size:11px;margin-top:2px;", "{text}" } } }
+                                        }
+                                        button { class: "btn btn-ghost xs focus-ring", style: "color:var(--cf-text-muted);padding:4px 6px;", title: "Remove mapping", onclick: move |_| { let mut next = pending_mappings.read().clone(); remove_pending_mapping(&mut next, requirement_version_id); pending_mappings.set(next); }, "×" }
+                                    } }
+                                }
+                            }
+                        }
+                    }
+                }
+                div { style: "display:flex;flex-direction:column;gap:10px;",
+                    for (name, group) in grouped {
+                        div { key: "{name}",
+                            div { style: "font-size:11.5px;font-weight:700;color:var(--cf-text-primary);margin-bottom:6px;", "{name}" }
+                             for row in group {
+                                 {
+                                     let row_read_only = !mappings_editable || row.provenance == "imported" || row.trust_state == "suggested";
+                                     let edit_row = row.clone();
+                                     rsx! { div { key: "{row.id}", "data-testid": "policy-mapping-row", style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:start;padding:9px 11px;background:var(--cf-subtle-bg);border:1px solid var(--cf-divider);border-radius:8px;font-size:12px;margin-bottom:6px;",
+                                    div { style: "display:flex;flex-direction:column;gap:2px;",
+                                        div { style: "font-size:11px;font-weight:700;color:var(--cf-text-muted);text-transform:uppercase;letter-spacing:0.04em;", "{row.framework_name} {row.framework_version}" }
+                                        div { class: "mono", style: "font-size:12.5px;font-weight:600;margin-top:2px;", span { "{row.requirement_external_id}" } if let Some(title) = &row.requirement_title { span { style: "font-family:inherit;font-weight:400;color:var(--cf-text-secondary);", " · {title}" } } }
+                                        div { style: "display:flex;gap:6px;margin-top:2px;",
+                                            span { class: "chip chip-neutral", style: "font-size:10px;", {match row.relationship.as_str() { "implements" => "Implements", "supports" => "Supports", _ => "Evidence for" }} }
+                                            span { class: if row.coverage == "full" { "chip chip-success" } else { "chip chip-warn" }, style: "font-size:10px;", {if row.coverage == "full" { "Full" } else { "Partial" }} }
+                                            span { style: "font-size:10px;color:var(--cf-text-muted);", {if row.provenance == "imported" { "Imported from benchmark" } else { "Manual mapping" }} }
+                                        }
+                                        if let Some(text) = &row.rationale { if !text.is_empty() { div { style: "color:var(--cf-text-muted);font-size:11px;margin-top:2px;", "{text}" } } }
+                                    }
+                                    if let Some(policy_id) = editing_policy_version_id {
+                                         if !row_read_only {
+                                             div { style: "display:flex;gap:4px;",
+                                                 button { class: "btn btn-ghost xs focus-ring", style: "color:var(--cf-text-muted);padding:4px 6px;", onclick: move |_| {
+                                                     editing_mapping_id.set(Some(edit_row.id));
+                                                     framework_id.set(Some(edit_row.framework_id));
+                                                     version_id.set(Some(edit_row.framework_version_id));
+                                                     requirement_id.set(Some(edit_row.requirement_version_id));
+                                                     requirement.set(Some(RequirementVersionSummary {
+                                                         id: edit_row.requirement_version_id,
+                                                         requirement_id: edit_row.requirement_version_id,
+                                                         framework_version_id: edit_row.framework_version_id,
+                                                         external_id: edit_row.requirement_external_id.clone(),
+                                                         title: edit_row.requirement_title.clone(),
+                                                         kind: "rule".to_string(),
+                                                         severity: None,
+                                                         parent_requirement_version_id: None,
+                                                         semantic_digest: String::new(),
+                                                     }));
+                                                     relationship.set(edit_row.relationship.clone());
+                                                     coverage.set(edit_row.coverage.clone());
+                                                     rationale.set(edit_row.rationale.clone().unwrap_or_default());
+                                                     show_mapping_editor.set(true);
+                                                 }, "Edit" }
+                                                 button { class: "btn btn-ghost xs focus-ring", style: "color:var(--cf-text-muted);padding:4px 6px;", title: "Remove mapping", onclick: move |_| { let row_id = row.id; spawn(async move { if let Err(e) = delete_policy_mapping(&policy_id, &row_id).await { error.set(Some(format!("Failed to remove mapping: {e}"))); } if let Ok(value) = fetch_policy_requirement_mappings(&policy_id).await { mappings.set(value); } }); }, "×" }
+                                             }
+                                         } else { span { class: "chip chip-neutral", style: "font-size:10px;", "Read-only" } }
+                                    }
+                                } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if mapping_target != MappingEditorTarget::Unavailable && !show_mapping_editor() {
+                button { class: "btn btn-ghost focus-ring", style: "align-self:flex-start;", onclick: move |_| show_mapping_editor.set(true), "+ Add mapping" }
+            }
+            if mapping_target != MappingEditorTarget::Unavailable && show_mapping_editor() {
+                div { style: "border:1px solid var(--cf-brand-purple);border-radius:10px;padding:14px;background:color-mix(in oklab, var(--cf-brand-purple) 5%, var(--cf-card-bg));display:flex;flex-direction:column;gap:14px;margin-top:8px;",
+                     div { style: "font-size:12.5px;font-weight:600;", if editing_mapping_id.read().is_some() { "Edit mapping" } else { "Add mapping" } }
+                    div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:-4px;line-height:1.4;", "Map this policy to a compliance requirement it implements, supports, or provides evidence for." }
+                    div { class: "field", label { r#for: "policy-mapping-framework", style: "font-size:11px;", "Framework" }, select { id: "policy-mapping-framework", class: "input focus-ring", onchange: move |event| { let value = event.value(); if let Ok(id) = value.parse() { framework_id.set(Some(id)); spawn(async move { if let Ok(value) = fetch_compliance_framework_versions(&id).await { versions.set(value); } }); } }, option { value: "", "— Select framework —" }, for item in frameworks.read().iter() { option { value: "{item.id}", "{item.name}" } } } }
+                    if !versions.read().is_empty() { div { class: "field", label { r#for: "policy-mapping-version", style: "font-size:11px;", "Version" }, select { id: "policy-mapping-version", class: "input focus-ring", onchange: move |event| { version_id.set(event.value().parse().ok()); }, option { value: "", "— Select version —" }, for item in versions.read().iter() { option { value: "{item.id}", "{item.version}" } } } } }
+                    if version_id.read().is_some() && requirement.read().is_none() {
+                        div { class: "field",
+                            label { r#for: "policy-mapping-requirement", style: "font-size:11px;", "Requirement" }
+                            input { id: "policy-mapping-requirement", class: "input focus-ring", placeholder: "Search by ID, title, CCI, SRG…", value: "{search}", oninput: move |event| { let value = event.value(); search.set(value.clone()); if let Some(id) = *version_id.read() { spawn(async move { if let Ok(value) = search_requirements(&id, Some(&value), None, 25, 0).await { results.set(value); } }); } } }
+                            if requirement_id.read().is_none() {
+                                for item in results.read().iter() {
+                                    {
+                                        let item = item.clone();
+                                        let display_label = format!("{} · {} · {}", item.external_id, item.kind, item.title.as_deref().unwrap_or(""));
+                                        rsx! { button {
+                                            class: "btn btn-ghost focus-ring",
+                                            style: "width:100%;text-align:left;padding:6px 10px;font-size:11px;",
+                                             onclick: move |_| { requirement_id.set(Some(item.id)); requirement.set(Some(item.clone())); search.set(display_label.clone()); results.set(Vec::new()); },
+                                            span { "{display_label}" }
+                                        } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(selected) = requirement.read().clone() {
+                        div { style: "display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--cf-subtle-bg);border-radius:8px;border:1px solid var(--cf-divider);",
+                            div {
+                                div { class: "mono", style: "font-size:12.5px;font-weight:600;", "{selected.external_id}" span { style: "font-family:inherit;font-weight:400;color:var(--cf-text-secondary);", " · {selected.title.clone().unwrap_or_default()}" } }
+                                if let Some(parent_id) = selected.parent_requirement_version_id { div { style: "font-size:10.5px;color:var(--cf-text-muted);margin-top:2px;", "Parent requirement · {parent_id}" } }
+                                if selected.parent_requirement_version_id.is_none() { div { style: "font-size:10.5px;color:var(--cf-text-muted);margin-top:2px;", "Root requirement" } }
+                            }
+                            button { class: "btn btn-ghost focus-ring xs", onclick: move |_| { requirement_id.set(None); requirement.set(None); search.set(String::new()); results.set(Vec::new()); }, "Change" }
+                        }
+                    }
+                    if requirement_id.read().is_some() {
+                        div { class: "field", label { style: "font-size:11px;", "Relationship" },
+                            div { style: "display:flex;flex-direction:column;gap:6px;",
+                                for (value, label, blurb) in MAPPING_RELATIONSHIPS {
+                                    button { r#type: "button", class: "focus-ring", onclick: move |_| relationship.set(value.to_string()), style: if relationship() == value { "all:unset;cursor:pointer;display:flex;flex-direction:column;gap:2px;padding:8px 10px;border-radius:8px;background:color-mix(in oklab, var(--cf-brand-purple) 12%, transparent);border:1px solid var(--cf-brand-purple);" } else { "all:unset;cursor:pointer;display:flex;flex-direction:column;gap:2px;padding:8px 10px;border-radius:8px;background:var(--cf-subtle-bg);border:1px solid var(--cf-divider);" },
+                                        span { style: "font-size:12px;font-weight:600;", "{label}" }
+                                        span { style: "font-size:10.5px;color:var(--cf-text-muted);", "{blurb}" }
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "field", label { style: "font-size:11px;", "Coverage" },
+                            div { class: "seg", style: "width:fit-content;",
+                                button { class: if coverage() == "full" { "active" } else { "" }, onclick: move |_| coverage.set("full".to_string()), "Full" }
+                                button { class: if coverage() == "partial" { "active" } else { "" }, onclick: move |_| coverage.set("partial".to_string()), "Partial" }
+                            }
+                        }
+                        div { class: "field", label { r#for: "policy-mapping-rationale", style: "font-size:11px;", "Mapping rationale " span { style: "color:var(--cf-text-muted);font-weight:400;", "· optional" } }, textarea { id: "policy-mapping-rationale", class: "input focus-ring", rows: "2", value: "{rationale}", placeholder: "Why this policy satisfies the requirement", style: "resize:vertical;", oninput: move |event| rationale.set(event.value()) } }
+                        if let Some(text) = &*error.read() { div { class: "sd-callout sd-callout-error", style: "font-size:11px;", "{text}" } }
+                        div { style: "display:flex;justify-content:flex-end;gap:8px;",
+                         button { class: "btn btn-ghost focus-ring", r#type: "button", onclick: move |_| { editing_mapping_id.set(None); show_mapping_editor.set(false); }, "Cancel" }
+                         button { class: "btn btn-primary focus-ring", disabled: *saving.read(), onclick: move |_| {
+                            error.set(None);
+                            let Some(rv_id) = *requirement_id.read() else { error.set(Some("Select a requirement.".into())); return; };
+                            let relationship_value = relationship.read().clone();
+                            let coverage_value = coverage.read().clone();
+                            let rationale_value = non_empty(rationale.read().clone());
+                            match mapping_target {
+                                MappingEditorTarget::Pending => {
+                                    let Some(item) = requirement.read().clone() else { error.set(Some("Select a requirement.".into())); return; };
+                                    let Some(fw_id) = *framework_id.read() else { error.set(Some("Select a framework.".into())); return; };
+                                    let Some(fv_id) = *version_id.read() else { error.set(Some("Select a framework version.".into())); return; };
+                                    let Some(fw) = frameworks.read().iter().find(|item| item.id == fw_id).cloned() else { error.set(Some("Selected framework is unavailable.".into())); return; };
+                                    let Some(fv) = versions.read().iter().find(|item| item.id == fv_id).cloned() else { error.set(Some("Selected framework version is unavailable.".into())); return; };
+                                    let mut next = pending_mappings.read().clone();
+                                    match add_pending_mapping(&mut next, pending_mapping_from_selection(&fw, &fv, &item, relationship_value, coverage_value, rationale_value)) {
+                                         Ok(()) => { pending_mappings.set(next); requirement_id.set(None); requirement.set(None); search.set(String::new()); results.set(Vec::new()); relationship.set("implements".into()); coverage.set("full".into()); rationale.set(String::new()); show_mapping_editor.set(false); }
+                                        Err(e) => error.set(Some(e.to_string())),
+                                    }
+                                }
+                                 MappingEditorTarget::Persisted(policy_id) => {
+                                     saving.set(true);
+                                     spawn(async move {
+                                         let result = if let Some(mapping_id) = *editing_mapping_id.read() {
+                                             let request = UpdatePolicyMappingRequest { relationship: relationship_value, coverage: coverage_value, rationale: rationale_value };
+                                             update_policy_mapping(&policy_id, &mapping_id, &request).await
+                                         } else {
+                                             let request = CreatePolicyMappingRequest { requirement_version_id: rv_id, relationship: relationship_value, coverage: coverage_value, rationale: rationale_value, provenance: "manual".into() };
+                                             create_policy_mapping(&policy_id, &request).await
+                                         };
+                                         match result {
+                                              Ok(_) => { if let Ok(value) = fetch_policy_requirement_mappings(&policy_id).await { mappings.set(value); } editing_mapping_id.set(None); requirement_id.set(None); requirement.set(None); version_id.set(None); framework_id.set(None); search.set(String::new()); rationale.set(String::new()); results.set(Vec::new()); versions.set(Vec::new()); show_mapping_editor.set(false); }
+                                            Err(e) => error.set(Some(format!("Failed to add mapping: {e}"))),
+                                        }
+                                        saving.set(false);
+                                    });
+                                }
+                                MappingEditorTarget::Unavailable => {}
+                            }
+                        }, if *saving.read() { "Saving..." } else if editing_mapping_id.read().is_some() { "Save mapping" } else { "Add mapping" } }
+                        }
+                    }
+                }
+            } else if editing_policy_version_id.is_some() {
+                div { class: "sd-callout sd-callout-info", style: "font-size:11px;", "This policy version is immutable. Create or edit a draft revision to change its requirement mappings." }
+            }
+        }
+    }
+}
+
 // Modal component
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -662,6 +1036,18 @@ pub fn PolicyEditorModal(
     let mut add_evidence_kind = use_signal(String::new);
     let mut active_tab = use_signal(|| PolicyEditorTab::Details);
 
+    // ── Mappings tab state ────────────────────────────────────────────────────
+    let mut mappings: Signal<Vec<PolicyMappingRow>> = use_signal(Vec::new);
+    let mut pending_mappings: Signal<Vec<PendingPolicyMapping>> = use_signal(Vec::new);
+
+    // Capture the editing policy version ID for mapping API calls.
+    let editing_policy_version_id: Option<Uuid> = existing_policy
+        .as_ref()
+        .and_then(|p| p.version_id);
+    let mappings_editable = existing_policy
+        .as_ref()
+        .is_some_and(is_policy_version_editable);
+
     let mut save_error = use_signal(String::new);
     let mut is_saving = use_signal(|| false);
     let mut confirm_delete = use_signal(|| false);
@@ -784,6 +1170,7 @@ pub fn PolicyEditorModal(
                     div { class: "modal-body cf-policy-modal-body", style: "overflow-y:auto;",
                         div { class: "cf-modal-tabs", role: "tablist", aria_label: "Policy editor sections",
                             PolicyEditorTabButton { tab: PolicyEditorTab::Details, active: *active_tab.read(), label: "Details", test_id: "policy-editor-tab-details", on_select: move |_| active_tab.set(PolicyEditorTab::Details) }
+                             PolicyEditorTabButton { tab: PolicyEditorTab::Mappings, active: *active_tab.read(), label: format!("Mappings · {}", mappings.read().len() + pending_mappings.read().len()), test_id: "policy-editor-tab-mappings", on_select: move |_| active_tab.set(PolicyEditorTab::Mappings) }
                             PolicyEditorTabButton { tab: PolicyEditorTab::Enforcement, active: *active_tab.read(), label: format!("Enforcement · {rule_count}"), test_id: "policy-editor-tab-enforcement", on_select: move |_| active_tab.set(PolicyEditorTab::Enforcement) }
                             PolicyEditorTabButton { tab: PolicyEditorTab::Evidence, active: *active_tab.read(), label: format!("Evidence · {evidence_count}"), test_id: "policy-editor-tab-evidence", on_select: move |_| active_tab.set(PolicyEditorTab::Evidence) }
                         }
@@ -975,7 +1362,16 @@ pub fn PolicyEditorModal(
                         }
                         }
 
-                        // Assertions & gate rules builder
+                          if *active_tab.read() == PolicyEditorTab::Mappings {
+                              PolicyMappingsTab {
+                                  is_editing,
+                                  editing_policy_version_id,
+                                  mappings_editable,
+                                  mappings,
+                                  pending_mappings,
+                              }
+                          }
+                         // Assertions & gate rules builder
                         if *active_tab.read() == PolicyEditorTab::Enforcement {
                         div { style: "margin-top:6px;",
                             div { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;",
@@ -1221,7 +1617,7 @@ pub fn PolicyEditorModal(
                                             cis_section: selected_cis_section,
                                             rationale: selected_rationale,
                                         };
-                                        update_deployment_policy(&policy_id, &request).await.map(|_| ())
+                                        update_deployment_policy(&policy_id, &request).await.map(|_| None)
                                     } else {
                                         let request = CreateDeploymentPolicyRequest {
                                             name: name.clone(),
@@ -1238,18 +1634,59 @@ pub fn PolicyEditorModal(
                                             cmmc_level: selected_cmmc_level,
                                             cis_section: selected_cis_section,
                                             rationale: selected_rationale,
+                                            requirement_mappings: pending_mappings
+                                                .read()
+                                                .iter()
+                                                .map(PendingPolicyMapping::mapping_request)
+                                                .collect(),
                                         };
-                                        create_deployment_policy(&request).await.map(|_| ())
+                                        create_deployment_policy(&request).await.map(Some)
                                     };
 
                                     match result {
-                                        Ok(()) => {
-                                             match policies_api::load_policies().await {
-                                                 policies_api::PolicyLoadResult::Ok(latest) => policy_library.set(latest),
-                                                 policies_api::PolicyLoadResult::Err(error) => {
-                                                     save_error.set(format!("Policy saved, but refresh failed: {error}"));
-                                                 }
-                                             }
+                                        Ok(created_opt) => {
+                                            // Fetch the updated list so edits (name changes, etc.) are
+                                            // reflected globally. The list response includes the
+                                            // current_version_id join that the create endpoint omits,
+                                            // so for a new policy we prefer the entry from the refreshed
+                                            // list over the raw create response. If the refresh fails we
+                                            // fall back to the create response so the card is still shown.
+                                            let created_id = created_opt.as_ref().map(|c| c.id);
+                                            match policies_api::load_policies().await {
+                                                policies_api::PolicyLoadResult::Ok(mut latest) => {
+                                                    // For new policies, ensure the entry is at the front.
+                                                    // The list response carries the full current_version_id,
+                                                    // so prefer it over the raw create response.
+                                                    if let Some(id) = created_id {
+                                                        if !latest.iter().any(|p| p.id == id) {
+                                                            // Not on first page — fall back to create response.
+                                                            if let Some(created) = created_opt {
+                                                                let def = policies_api::policy_record_to_definition(created);
+                                                                latest.insert(0, def);
+                                                            }
+                                                        } else {
+                                                            // Reorder so newly created policy is first.
+                                                            if let Some(pos) = latest.iter().position(|p| p.id == id) {
+                                                                let item = latest.remove(pos);
+                                                                latest.insert(0, item);
+                                                            }
+                                                        }
+                                                    }
+                                                    policy_library.set(latest);
+                                                }
+                                                policies_api::PolicyLoadResult::Err(error) => {
+                                                    // Best-effort: if a new policy was created, still
+                                                    // insert it so the UI is not broken.
+                                                    if let Some(created) = created_opt {
+                                                        let def = policies_api::policy_record_to_definition(created);
+                                                        let mut current = policy_library.read().clone();
+                                                        current.retain(|p| p.id != def.id);
+                                                        current.insert(0, def);
+                                                        policy_library.set(current);
+                                                    }
+                                                    save_error.set(format!("Policy saved, but list refresh failed: {error}"));
+                                                }
+                                            }
                                             is_saving.set(false);
                                             on_close.call(());
                                         }
@@ -1287,6 +1724,7 @@ fn PolicyEditorTabButton(
     let selected = tab == active;
     let class = match tab {
         PolicyEditorTab::Details => "source",
+        PolicyEditorTab::Mappings => "mappings",
         PolicyEditorTab::Enforcement => "enforcement",
         PolicyEditorTab::Evidence => "evidence",
     };
@@ -1532,6 +1970,54 @@ fn EvidenceEditorRow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pending(id: u128) -> PendingPolicyMapping {
+        PendingPolicyMapping {
+            requirement_version_id: Uuid::from_u128(id), framework_name: "NIST 800-53".into(), framework_version: "Rev 5".into(), requirement_external_id: "SC-45".into(), requirement_kind: "control".into(), requirement_title: Some("System time synchronization".into()), relationship: "supports".into(), coverage: "partial".into(), rationale: Some("reviewed mapping".into()),
+        }
+    }
+
+    #[test]
+    fn pending_mapping_helpers_preserve_convert_and_reject_duplicates() {
+        let mut mappings = Vec::new();
+        let mapping = pending(1);
+        assert!(add_pending_mapping(&mut mappings, mapping.clone()).is_ok());
+        let request = mappings[0].mapping_request();
+        assert_eq!(request.requirement_version_id, Uuid::from_u128(1));
+        assert_eq!(request.relationship, "supports");
+        assert_eq!(request.coverage, "partial");
+        assert_eq!(request.rationale.as_deref(), Some("reviewed mapping"));
+        assert_eq!(request.provenance, "manual");
+        assert!(add_pending_mapping(&mut mappings, mapping).is_err());
+        remove_pending_mapping(&mut mappings, Uuid::from_u128(1));
+        assert!(mappings.is_empty());
+    }
+
+    #[test]
+    fn mapping_editor_target_distinguishes_create_edit_and_immutable_modes() {
+        let version = Uuid::from_u128(7);
+        assert_eq!(mapping_editor_target(false, None, false), MappingEditorTarget::Pending);
+        assert_eq!(mapping_editor_target(true, Some(version), true), MappingEditorTarget::Persisted(version));
+        assert_eq!(mapping_editor_target(true, Some(version), false), MappingEditorTarget::Unavailable);
+        assert_eq!(mapping_editor_target(true, None, true), MappingEditorTarget::Unavailable);
+    }
+
+    #[test]
+    fn pending_mapping_builder_captures_selection_metadata() {
+        let framework = ComplianceFrameworkSummary { id: Uuid::from_u128(1), name: "NIST 800-53".into(), publisher: None, canonical_source_key: "nist".into(), description: None, version_count: 1 };
+        let version = ComplianceFrameworkVersionSummary { id: Uuid::from_u128(2), framework_id: framework.id, version: "Rev 5".into(), canonical_release_key: "rev5".into(), title: None, published_at: None, semantic_digest: "digest".into(), migration_recovery_status: "finalized".into(), migration_recovery_reason: None, requirement_count: 1 };
+        let requirement = RequirementVersionSummary { id: Uuid::from_u128(3), requirement_id: Uuid::from_u128(4), framework_version_id: version.id, external_id: "SC-45".into(), title: Some("System time synchronization".into()), kind: "control".into(), severity: None, parent_requirement_version_id: None, semantic_digest: "req".into() };
+        let mapping = pending_mapping_from_selection(&framework, &version, &requirement, "supports".into(), "partial".into(), Some("reviewed".into()));
+        assert_eq!(mapping.requirement_version_id, requirement.id);
+        assert_eq!(mapping.framework_name, "NIST 800-53");
+        assert_eq!(mapping.framework_version, "Rev 5");
+        assert_eq!(mapping.requirement_external_id, "SC-45");
+        assert_eq!(mapping.requirement_kind, "control");
+        assert_eq!(mapping.requirement_title.as_deref(), Some("System time synchronization"));
+        assert_eq!(mapping.relationship, "supports");
+        assert_eq!(mapping.coverage, "partial");
+        assert_eq!(mapping.rationale.as_deref(), Some("reviewed"));
+    }
 
     #[test]
     fn cve_rule_is_not_serialized_as_always_true_custom_check() {

@@ -9,6 +9,10 @@ use uuid::Uuid;
 
 use crate::compliance::xccdf::models::{CheckContent, FixContent, ParsedRule};
 
+// Make serde derive available for all local structs
+#[allow(unused_imports)]
+use serde::{self};
+
 // ── Import plan (inbound from caller) ─────────────────────────────────────────
 
 /// The JSON import plan submitted alongside the XCCDF file.
@@ -29,6 +33,12 @@ pub struct XccdfImportPlan {
     pub selected_rule_ids: Vec<String>,
     /// One action per selected rule.
     pub rule_actions: Vec<XccdfRuleImportAction>,
+    /// Optional per-rule reviewed mapping semantics keyed by rule ID.
+    #[serde(default)]
+    pub mapping_semantics: std::collections::HashMap<String, ImportedMappingSemantics>,
+    /// Optional shared-implementation group decisions from the preview/refine flow.
+    #[serde(default)]
+    pub shared_group_decisions: Vec<SharedGroupDecision>,
     /// Metadata for the draft bundle to create.
     pub bundle: ImportedBundlePlan,
 }
@@ -100,8 +110,114 @@ pub struct ImportedBundlePlan {
     pub description: Option<String>,
 }
 
+/// Proof/justification for reusing an existing policy via MapExisting.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MapExistingProof {
+    /// The requirement unchanged from prior release; there is a trusted mapping.
+    InheritedMapping,
+    /// Exact normalized technical enforcement match discovered at preview time.
+    ExactTechnicalMatch,
+}
+
+/// Per-requirement reviewed mapping semantics supplied with the import plan.
+///
+/// Carries the human-reviewed relationship/coverage/rationale for a single
+/// rule's mapping to its resolved policy. Kept per requirement so that a
+/// shared policy can carry different mapping semantics for each requirement
+/// it satisfies.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ImportedMappingSemantics {
+    /// `implements`, `supports`, or `provides_evidence_for`.
+    #[serde(default)]
+    pub relationship: Option<String>,
+    /// `full` or `partial`.
+    #[serde(default)]
+    pub coverage: Option<String>,
+    #[serde(default)]
+    pub rationale: Option<String>,
+    /// A human-reviewed related-control candidate selection. This is review
+    /// provenance only and is deliberately not a `MapExistingProof`.
+    #[serde(default)]
+    pub reviewed_related_candidate: Option<ReviewedRelatedCandidate>,
+}
+
+/// Evidence retained when a reviewer selects a cross-framework candidate.
+///
+/// Shared CCI/SRG identifiers establish a review lead, not exact technical
+/// equivalence. The selected policy version is therefore recorded separately
+/// from deterministic `MapExistingProof` values and persisted as suggested
+/// mapping provenance.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReviewedRelatedCandidate {
+    pub policy_version_id: Uuid,
+    pub related_requirement_version_id: Uuid,
+    #[serde(default)]
+    pub shared_cci_ids: Vec<String>,
+    #[serde(default)]
+    pub shared_srg_ids: Vec<String>,
+}
+
+#[cfg(test)]
+mod reviewed_related_candidate_tests {
+    use super::*;
+
+    #[test]
+    fn related_review_is_distinct_from_deterministic_proof() {
+        let semantics = ImportedMappingSemantics {
+            relationship: Some("supports".into()),
+            coverage: Some("partial".into()),
+            rationale: Some("same control family".into()),
+            reviewed_related_candidate: Some(ReviewedRelatedCandidate {
+                policy_version_id: Uuid::nil(),
+                related_requirement_version_id: Uuid::nil(),
+                shared_cci_ids: vec!["CCI-000770".into()],
+                shared_srg_ids: vec![],
+            }),
+        };
+
+        assert!(semantics.reviewed_related_candidate.is_some());
+        assert_eq!(
+            semantics
+                .reviewed_related_candidate
+                .as_ref()
+                .unwrap()
+                .policy_version_id,
+            Uuid::nil()
+        );
+    }
+}
+
+/// User decision about whether a set of requirements should share one policy.
+///
+/// Carried from preview to commit so the commit path can validate that the
+/// effective shared group is still consistent with the authoritative source.
+/// The commit path never trusts the preview-provided `group_id`; it re-derives
+/// identities from the reparsed source and revalidates membership.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SharedGroupDecision {
+    /// Preview-provided group technical hash (informational only).
+    pub group_id: String,
+    /// Rule IDs the user intends to share under one policy.
+    pub rule_ids: Vec<String>,
+    /// What the user decided for this group.
+    pub action: SharedGroupAction,
+}
+
+/// Action chosen by the user for a shared implementation group.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedGroupAction {
+    /// Create one new policy for all listed requirements.
+    CreateShared,
+    /// Reuse an existing policy version selected via per-rule MapExisting actions.
+    ReuseExisting,
+    /// Review each listed requirement individually (breakout).
+    ReviewIndividually,
+}
+
 /// Action for one selected rule.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum XccdfRuleImportAction {
     CreateNativeCustom {
@@ -135,6 +251,9 @@ pub enum XccdfRuleImportAction {
     MapExisting {
         rule_id: String,
         policy_version_id: Uuid,
+        /// Explicit proof/justification for this reuse decision.
+        #[serde(default)]
+        proof: Option<MapExistingProof>,
     },
     /// Exclude the rule — create no policy or membership row.
     Exclude { rule_id: String },
@@ -192,6 +311,10 @@ pub struct ValidatedImportPlan {
     pub is_disa_stig: bool,
     /// Non-excluded rules in document order, each paired with its action.
     pub rules_to_import: Vec<(ParsedRule, XccdfRuleImportAction)>,
+    /// Per-rule reviewed mapping semantics keyed by rule ID.
+    pub mapping_semantics: std::collections::HashMap<String, ImportedMappingSemantics>,
+    /// Shared-implementation group decisions supplied with the plan.
+    pub shared_group_decisions: Vec<SharedGroupDecision>,
 }
 
 // ── Validation errors ─────────────────────────────────────────────────────────
@@ -410,6 +533,11 @@ pub struct ImportedPolicyRecord {
     pub opaque_xml: Option<String>,
     /// Set for MapExisting actions. No new local policy lineage is created.
     pub mapped_policy_version_id: Option<Uuid>,
+    /// Explicit proof/justification for a MapExisting reuse decision.
+    /// Never inferred from database state at commit time.
+    pub mapped_policy_proof: Option<MapExistingProof>,
+    /// Reviewed per-requirement mapping semantics (relationship/coverage/rationale).
+    pub mapping_semantics: Option<ImportedMappingSemantics>,
     pub evidence_requirements: Vec<ImportedEvidenceRequirement>,
 }
 

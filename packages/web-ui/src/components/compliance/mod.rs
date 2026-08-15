@@ -10,7 +10,7 @@ pub mod refine_policy;
 pub use refine_policy::{
     EvidenceRequirementDraft, ImportReview, PolicyAssertionDraft, RefinePolicyStep,
     RefinedPolicyDraft, RefinedRuleAction, RefinedStigRule, SourceCheck, SourceCheckBodyPart,
-    SourceStigRule, action_to_import,
+    SourceStigRule, action_to_import, mapping_semantics_for,
 };
 
 // ─── Bundle catalog left rail ────────────────────────────────────────────────

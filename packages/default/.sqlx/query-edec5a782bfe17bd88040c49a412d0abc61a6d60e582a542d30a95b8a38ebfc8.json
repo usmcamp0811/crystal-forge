@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO builder_environment_assignments (builder_id, environment_id)\n        VALUES ($1, $2)\n        ON CONFLICT (builder_id, environment_id) DO NOTHING\n        RETURNING id, builder_id, environment_id, created_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "builder_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "environment_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "edec5a782bfe17bd88040c49a412d0abc61a6d60e582a542d30a95b8a38ebfc8"
+}

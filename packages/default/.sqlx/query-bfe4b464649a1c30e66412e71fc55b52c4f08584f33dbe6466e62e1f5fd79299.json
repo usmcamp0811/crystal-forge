@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n       INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash)\n       VALUES ($1, $2, $3, $4)\n       ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Timestamptz",
+        "Varchar",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bfe4b464649a1c30e66412e71fc55b52c4f08584f33dbe6466e62e1f5fd79299"
+}

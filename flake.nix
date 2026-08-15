@@ -16,6 +16,9 @@
     };
     # Stable nixpkgs for pre-built browser binaries (screenshots in web-ui check)
     nixpkgs-stable.url = "github:NixOS/nixpkgs/nixos-25.05";
+    # Dioxus CLI pinned to the application-compatible 0.7.3 release for the
+    # incremental local UI development harness.
+    nixpkgs-dioxus-cli.url = "github:NixOS/nixpkgs/09061f748ee21f68a089cd5d91ec1859cd93d0be";
   };
 
   outputs = inputs:
