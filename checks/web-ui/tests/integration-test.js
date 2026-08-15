@@ -6232,7 +6232,8 @@ const steps = [
       });
       try {
         await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
-        await page.getByRole("button", { name: /Import STIG or XCCDF/i }).click();
+        await page.getByRole("button", { name: /Import \/ Export/i }).click();
+        await page.getByText("Import STIG or XCCDF (.xml/.zip)", { exact: true }).click();
         await page.getByRole("heading", { name: "Import STIG / XCCDF" }).waitFor({ timeout: 5000 });
         await page.locator('input[type="file"]').setInputFiles({ name: "fixture-stig.xml", mimeType: "application/xml", buffer: Buffer.from("<Benchmark id=\"fixture-stig-benchmark\"/>", "utf8") });
         await page.getByTestId("xccdf-reconciliation-stage").waitFor({ timeout: 10000 });
