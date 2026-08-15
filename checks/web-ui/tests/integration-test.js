@@ -6643,7 +6643,7 @@ const steps = [
       await assertVisible(page.getByText("0 selected", { exact: true }), "Switching framework releases retained incompatible requirement IDs");
       await page.getByPlaceholder("Search requirement ID or title…").fill("MAP-1");
       await assertVisible(requirementButton("MAP-1-V2"), "Requirement search did not return the selected release's requirement");
-      if (await page.getByText("MAP-1", { exact: true }).count() !== 0) throw new Error("Requirement search leaked the previous framework release");
+       if (await page.getByRole("button", { name: "MAP-1", exact: true }).count() !== 0) throw new Error("Requirement search leaked the previous framework release");
       await requirementButton("MAP-1-V2").click();
 
       // Requirement-only edit: remove the second requirement while retaining
