@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 19:10'
+updated_date: '2026-08-15 19:25'
 labels: []
 milestone: m-22
 dependencies:
@@ -102,6 +102,8 @@ Final review remediation (2026-08-15):
 14. Persist production DISA Group→Rule hierarchy using pending requirement construction before digest finalization; include a deterministic hierarchy projection in framework release identity or document and test the chosen semantics.
 
 v4 upgrade hardening (2026-08-15): classify legacy DISA rows from persisted publisher rather than source-key spelling; fail closed for missing, corrupt, or mismatched artifacts before reconstruction. Rebuild every parsed group/rule requirement and verify persisted node/edge topology before finalizing the framework digest. Add a follow-up migration (do not edit already-applied 0220) to narrow its pending-framework trigger exception to the payload fields required for reconstruction. Replace the synthetic pending-row test with a real cf-model-json-3-to-v4 transition using identify_framework(), add negative DB coverage, seed the isolated database, then run all framework DB tests and required Nix builds/checks.
+
+v4 metadata authority remediation (2026-08-15): make parsed DISA identity authoritative for every framework digest field during legacy reconstruction; reconcile persisted framework metadata through a new narrowly scoped migration path and keep digest state consistent with stored rows. Ensure framework lineage publisher classification is updated by authoritative adapter imports so missing artifacts cannot bypass fail-closed recovery. Add a real v3-to-v4-to-identical-reimport DB test plus negative artifact/classification cases, then restore a seeded isolated DB suite and complete feasible Nix verification.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
