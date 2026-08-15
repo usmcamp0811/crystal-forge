@@ -186,7 +186,16 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
     .context("failed to list pending framework version digests")?;
 
     for id in ids {
-        let recovery: Result<()> = async {
+        recover_framework_version(pool, id).await?;
+    }
+    Ok(())
+}
+
+/// Attempt recovery of a single pending framework version. On failure the row
+/// is marked `unresolved` and the function returns `Ok(())` so sibling releases
+/// are not blocked.
+pub async fn recover_framework_version(pool: &PgPool, id: Uuid) -> Result<()> {
+    let recovery: Result<()> = async {
         let mut tx = pool.begin().await?;
         let row: Option<(
             String,
@@ -413,30 +422,37 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
         .await?;
         tx.commit().await?;
         Ok(())
-        }
-        .await;
+    }
+    .await;
 
-        if let Err(error) = recovery {
-            tracing::warn!(framework_version_id = %id, error = ?error,
-                "framework release recovery failed; marking release unresolved");
-            sqlx::query(
-                "UPDATE compliance_framework_versions
-                 SET migration_recovery_status = 'unresolved',
-                     migration_recovery_reason = $1
-                 WHERE id = $2 AND semantic_digest = 'pending'",
-            )
-            .bind(error.to_string())
-            .bind(id)
-            .execute(pool)
-            .await
-            .with_context(|| format!("failed to mark framework version {id} unresolved"))?;
-        }
+    if let Err(error) = recovery {
+        tracing::warn!(framework_version_id = %id, error = ?error,
+            "framework release recovery failed; marking release unresolved");
+        sqlx::query(
+            "UPDATE compliance_framework_versions
+             SET migration_recovery_status = 'unresolved',
+                 migration_recovery_reason = $1
+             WHERE id = $2 AND semantic_digest = 'pending'",
+        )
+        .bind(error.to_string())
+        .bind(id)
+        .execute(pool)
+        .await
+        .with_context(|| format!("failed to mark framework version {id} unresolved"))?;
     }
     Ok(())
 }
 
 /// Attach a verified DISA source artifact to an unresolved release, then retry
-/// recovery. The artifact must parse to the persisted framework/release keys.
+/// recovery for that release only.
+///
+/// Supports two cases:
+/// - `unresolved + no artifact`: attach the provided artifact and recover.
+/// - `unresolved + existing artifact`: ignore the new artifact and retry recovery
+///   with the already-attached artifact (idempotent retry path).
+///
+/// If a new `source_artifact_id` is supplied it must parse to the stored
+/// framework/release keys before anything is written.
 pub async fn attach_artifact_and_retry_framework_recovery(
     pool: &PgPool,
     framework_version_id: Uuid,
@@ -444,44 +460,77 @@ pub async fn attach_artifact_and_retry_framework_recovery(
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
     let release: (String, String, String, Option<Uuid>) = sqlx::query_as(
-        "SELECT f.canonical_source_key, fv.canonical_release_key, fv.migration_recovery_status, fv.source_artifact_id
-         FROM compliance_framework_versions fv JOIN compliance_frameworks f ON f.id = fv.framework_id
-         WHERE fv.id = $1 AND fv.semantic_digest = 'pending' FOR UPDATE",
+        "SELECT f.canonical_source_key, fv.canonical_release_key,
+                fv.migration_recovery_status, fv.source_artifact_id
+         FROM compliance_framework_versions fv
+         JOIN compliance_frameworks f ON f.id = fv.framework_id
+         WHERE fv.id = $1 AND fv.semantic_digest = 'pending'
+         FOR UPDATE",
     )
     .bind(framework_version_id)
     .fetch_one(&mut *tx)
     .await
     .context("framework release is not pending recovery")?;
-    if release.2 != "unresolved" || release.3.is_some() {
-        bail!("framework release is not eligible for source-artifact attachment");
+
+    let (source_key, release_key, recovery_status, existing_artifact) =
+        (release.0, release.1, release.2, release.3);
+
+    if recovery_status != "unresolved" {
+        bail!("framework release is not in unresolved state");
     }
-    let artifact: (Vec<u8>, String) =
-        sqlx::query_as("SELECT content, filename FROM compliance_source_artifacts WHERE id = $1")
+
+    match existing_artifact {
+        Some(_) => {
+            // Already has an artifact attached from a previous failed attempt.
+            // Reset status to pending so recover_framework_version will retry.
+            sqlx::query(
+                "UPDATE compliance_framework_versions
+                 SET migration_recovery_status = 'pending', migration_recovery_reason = NULL
+                 WHERE id = $1 AND semantic_digest = 'pending'",
+            )
+            .bind(framework_version_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        None => {
+            // Validate and attach the new artifact before committing.
+            let artifact: (Vec<u8>, String) = sqlx::query_as(
+                "SELECT content, filename FROM compliance_source_artifacts WHERE id = $1",
+            )
             .bind(source_artifact_id)
             .fetch_one(&mut *tx)
             .await
             .context("source artifact does not exist")?;
-    let package = process_xccdf_bytes(artifact.0, Some(artifact.1), &InterchangeLimits::default())
-        .map_err(|error| anyhow::anyhow!("source artifact cannot be parsed: {error:?}"))?;
-    if !is_disa_stig(&package.parsed) {
-        bail!("source artifact is not a DISA STIG");
+            let package =
+                process_xccdf_bytes(artifact.0, Some(artifact.1), &InterchangeLimits::default())
+                    .map_err(|e| anyhow::anyhow!("source artifact cannot be parsed: {e:?}"))?;
+            if !is_disa_stig(&package.parsed) {
+                bail!("source artifact is not a DISA STIG");
+            }
+            let identity = identify_framework(&package.parsed)
+                .context("source artifact does not identify a DISA framework")?;
+            if identity.canonical_source_key != source_key
+                || identity.canonical_release_key != release_key
+            {
+                bail!("source artifact identity does not match the unresolved framework release");
+            }
+            // The 0225 trigger permits exactly: pending+unresolved+NULL → pending+pending+non-NULL.
+            sqlx::query(
+                "UPDATE compliance_framework_versions
+                 SET source_artifact_id = $1,
+                     migration_recovery_status = 'pending',
+                     migration_recovery_reason = NULL
+                 WHERE id = $2 AND semantic_digest = 'pending'",
+            )
+            .bind(source_artifact_id)
+            .bind(framework_version_id)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
-    let identity = identify_framework(&package.parsed)
-        .context("source artifact does not identify a DISA framework")?;
-    if identity.canonical_source_key != release.0 || identity.canonical_release_key != release.1 {
-        bail!("source artifact identity does not match the unresolved framework release");
-    }
-    sqlx::query(
-        "UPDATE compliance_framework_versions
-         SET source_artifact_id = $1, migration_recovery_status = 'pending', migration_recovery_reason = NULL
-         WHERE id = $2 AND semantic_digest = 'pending'",
-    )
-    .bind(source_artifact_id)
-    .bind(framework_version_id)
-    .execute(&mut *tx)
-    .await?;
     tx.commit().await?;
-    backfill_pending_framework_version_digests(pool).await
+    // Retry only this one release, not the global backfill.
+    recover_framework_version(pool, framework_version_id).await
 }
 
 async fn persist_legacy_stig_topology(

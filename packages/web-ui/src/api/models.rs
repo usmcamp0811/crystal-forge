@@ -3846,7 +3846,14 @@ pub struct ComplianceFrameworkVersionSummary {
     pub title: Option<String>,
     pub published_at: Option<String>,
     pub semantic_digest: String,
+    #[serde(default = "default_finalized")]
+    pub migration_recovery_status: String,
+    pub migration_recovery_reason: Option<String>,
     pub requirement_count: i64,
+}
+
+fn default_finalized() -> String {
+    "finalized".to_string()
 }
 
 /// Compact projection used to split a bundle picker into mapped policies and
@@ -3913,6 +3920,9 @@ pub enum RequirementCoverage {
     Full,
     Partial,
     Unmapped,
+    /// The requirement's framework release is pending migration recovery and
+    /// cannot supply authoritative evidence, but is still counted in the total.
+    RecoveryRequired,
 }
 
 /// One row in the bundle requirement coverage report.
@@ -3946,6 +3956,8 @@ pub struct BundleCoverageReport {
     pub full: i64,
     pub partial: i64,
     pub unmapped: i64,
+    #[serde(default)]
+    pub recovery_required: i64,
     pub rows: Vec<BundleCoverageRow>,
 }
 

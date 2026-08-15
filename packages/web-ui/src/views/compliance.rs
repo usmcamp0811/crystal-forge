@@ -4862,6 +4862,7 @@ fn RequirementCoverageCard(
     let full = report.full;
     let partial = report.partial;
     let unmapped = report.unmapped;
+    let recovery_required = report.recovery_required;
 
     rsx! {
          div { class: "card", "data-testid": "requirement-coverage-card", style: "display:flex;flex-direction:column;gap:10px;",
@@ -4881,16 +4882,22 @@ fn RequirementCoverageCard(
             // Summary chips.
             div { style: "display:flex;gap:8px;flex-wrap:wrap;",
                 div { style: "display:flex;align-items:center;gap:4px;",
-                                     span { class: "chip chip-success", "{full}" }
-                                     span { style: "font-size:11px;color:var(--cf-text-muted);", "Fully covered" }
+                    span { class: "chip chip-success", "{full}" }
+                    span { style: "font-size:11px;color:var(--cf-text-muted);", "Fully covered" }
                 }
                 div { style: "display:flex;align-items:center;gap:4px;",
                     span { class: "chip chip-warn", "{partial}" }
-                                     span { style: "font-size:11px;color:var(--cf-text-muted);", "Partially covered" }
+                    span { style: "font-size:11px;color:var(--cf-text-muted);", "Partially covered" }
                 }
                 div { style: "display:flex;align-items:center;gap:4px;",
                     span { class: "chip chip-neutral", "{unmapped}" }
-                                     span { style: "font-size:11px;color:var(--cf-text-muted);", "Unmapped" }
+                    span { style: "font-size:11px;color:var(--cf-text-muted);", "Unmapped" }
+                }
+                if recovery_required > 0 {
+                    div { style: "display:flex;align-items:center;gap:4px;",
+                        span { class: "chip chip-error", "data-testid": "recovery-required-count", "{recovery_required}" }
+                        span { style: "font-size:11px;color:var(--cf-text-muted);", "Recovery required" }
+                    }
                 }
                 div { style: "display:flex;align-items:center;gap:4px;margin-left:auto;",
                     span { style: "font-size:11px;color:var(--cf-text-muted);", "{total} total" }
@@ -4906,11 +4913,13 @@ fn RequirementCoverageCard(
                                 RequirementCoverage::Full => "var(--cf-success)",
                                 RequirementCoverage::Partial => "var(--cf-warn)",
                                 RequirementCoverage::Unmapped => "var(--cf-text-muted)",
+                                RequirementCoverage::RecoveryRequired => "var(--cf-error)",
                             };
                             let coverage_label = match row.coverage {
                                 RequirementCoverage::Full => "Full",
                                 RequirementCoverage::Partial => "Partial",
                                 RequirementCoverage::Unmapped => "Unmapped",
+                                RequirementCoverage::RecoveryRequired => "Recovery required",
                             };
                             rsx! {
                                  div { key: "{row_id}", "data-testid": "requirement-coverage-row",

@@ -47,7 +47,7 @@ pub struct FrameworkSummary {
     pub version_count: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct FrameworkVersionSummary {
     pub id: Uuid,
     pub framework_id: Uuid,
@@ -56,6 +56,8 @@ pub struct FrameworkVersionSummary {
     pub title: Option<String>,
     pub published_at: Option<chrono::DateTime<chrono::Utc>>,
     pub semantic_digest: String,
+    pub migration_recovery_status: String,
+    pub migration_recovery_reason: Option<String>,
     pub requirement_count: i64,
 }
 
@@ -97,6 +99,9 @@ pub enum RequirementCoverage {
     Full,
     Partial,
     Unmapped,
+    /// The requirement's framework release is pending migration recovery.
+    /// It is counted in the total but cannot provide authoritative evidence.
+    RecoveryRequired,
 }
 
 /// Aggregated coverage counts for a bundle version.
@@ -107,6 +112,9 @@ pub struct BundleCoverageReport {
     pub full: i64,
     pub partial: i64,
     pub unmapped: i64,
+    /// Requirements whose framework release is pending migration recovery.
+    /// Included in `total_requirements`; cannot provide authoritative evidence.
+    pub recovery_required: i64,
     pub rows: Vec<BundleCoverageRow>,
 }
 
@@ -163,8 +171,7 @@ pub async fn list_framework_versions(
     pool: &PgPool,
     framework_id: Uuid,
 ) -> Result<Vec<FrameworkVersionSummary>> {
-    sqlx::query_as!(
-        FrameworkVersionSummary,
+    sqlx::query_as::<_, FrameworkVersionSummary>(
         r#"
         SELECT
             fv.id,
@@ -174,15 +181,17 @@ pub async fn list_framework_versions(
             fv.title,
             fv.published_at,
             fv.semantic_digest,
-            COUNT(rv.id) AS "requirement_count!"
+            fv.migration_recovery_status,
+            fv.migration_recovery_reason,
+            COUNT(rv.id) AS requirement_count
         FROM compliance_framework_versions fv
         LEFT JOIN compliance_requirement_versions rv ON rv.framework_version_id = fv.id
         WHERE fv.framework_id = $1
         GROUP BY fv.id
         ORDER BY fv.created_at DESC
         "#,
-        framework_id
     )
+    .bind(framework_id)
     .fetch_all(pool)
     .await
     .context("failed to list framework versions")
@@ -549,19 +558,22 @@ pub async fn delete_policy_mapping(
 /// Compute authoritative requirement coverage for a bundle version.
 ///
 /// Coverage rules:
-/// - `full`:    at least one mapping with `relationship='implements'` AND
-///              `coverage='full'` AND `trust_state='trusted'`.
-/// - `partial`: at least one trusted mapping without `full`+`implements`.
-/// - `unmapped`: no trusted mapping.
+/// - `full`:             at least one mapping with `relationship='implements'` AND
+///                       `coverage='full'` AND `trust_state='trusted'`
+///                       from a finalized release.
+/// - `partial`:          at least one such trusted mapping without `full`+`implements`.
+/// - `unmapped`:         no trusted mapping, but release is finalized.
+/// - `recovery_required`: requirement's framework release is pending migration
+///                       recovery; cannot supply authoritative evidence.
 ///
-/// Only requirements with `selected=true` in the bundle's requirement baseline
-/// are included.  Coverage is computed from:
-///   bundle requirement membership × bundle policy membership × policy mappings.
+/// **All** selected baseline requirements are included in the denominator
+/// regardless of recovery status — unresolved releases do not disappear from
+/// coverage totals.
 pub async fn compute_bundle_requirement_coverage(
     pool: &PgPool,
     bundle_version_id: Uuid,
 ) -> Result<BundleCoverageReport> {
-    // Single query: join bundle requirements → bundle policies → mappings.
+    // Fetch all selected baseline requirements with their framework release status.
     #[derive(sqlx::FromRow)]
     struct RawRow {
         requirement_version_id: Uuid,
@@ -569,18 +581,21 @@ pub async fn compute_bundle_requirement_coverage(
         title: Option<String>,
         kind: String,
         parent_requirement_version_id: Option<Uuid>,
-        has_full_coverage: bool,
-        has_partial_coverage: bool,
+        /// NULL when the requirement's release is unresolved/pending.
+        has_full_coverage: Option<bool>,
+        /// NULL when the requirement's release is unresolved/pending.
+        has_partial_coverage: Option<bool>,
         mapped_policy_version_ids: Vec<Uuid>,
+        release_finalized: bool,
     }
 
     let rows = sqlx::query_as::<_, RawRow>(
         r#"
-        WITH bundle_reqs AS (
-            -- Selected requirements from finalized framework releases only.
-            -- Historical unresolved rows remain visible elsewhere, but cannot
-            -- act as authoritative bundle-baseline evidence.
-            SELECT bvr.requirement_version_id
+        WITH all_bundle_reqs AS (
+            -- ALL selected requirements, regardless of framework recovery status.
+            SELECT bvr.requirement_version_id,
+                   (fv.semantic_digest <> 'pending'
+                    AND fv.migration_recovery_status = 'finalized') AS release_finalized
             FROM compliance_bundle_version_requirements bvr
             JOIN compliance_requirement_versions rv
               ON rv.id = bvr.requirement_version_id
@@ -588,26 +603,32 @@ pub async fn compute_bundle_requirement_coverage(
               ON fv.id = rv.framework_version_id
             WHERE bvr.bundle_version_id = $1
               AND bvr.selected = true
-              AND fv.semantic_digest <> 'pending'
-              AND fv.migration_recovery_status = 'finalized'
+        ),
+        finalized_reqs AS (
+            SELECT requirement_version_id
+            FROM all_bundle_reqs
+            WHERE release_finalized
         ),
         bundle_policies AS (
-            -- All policy version IDs in the bundle
             SELECT bvp.policy_version_id
             FROM compliance_bundle_version_policies bvp
             WHERE bvp.bundle_version_id = $1
               AND bvp.selected = true
         ),
         applicable_mappings AS (
-            -- Trusted mappings where both the policy and requirement are in this bundle
+            -- Trusted mappings only from finalized releases.
             SELECT
                 m.requirement_version_id,
                 m.policy_version_id,
                 m.relationship,
                 m.coverage
             FROM policy_requirement_mappings m
+            JOIN compliance_requirement_versions mrv ON mrv.id = m.requirement_version_id
+            JOIN compliance_framework_versions mfv ON mfv.id = mrv.framework_version_id
             WHERE m.trust_state = 'trusted'
-              AND m.requirement_version_id IN (SELECT requirement_version_id FROM bundle_reqs)
+              AND mfv.semantic_digest <> 'pending'
+              AND mfv.migration_recovery_status = 'finalized'
+              AND m.requirement_version_id IN (SELECT requirement_version_id FROM finalized_reqs)
               AND m.policy_version_id      IN (SELECT policy_version_id       FROM bundle_policies)
         )
         SELECT
@@ -616,23 +637,23 @@ pub async fn compute_bundle_requirement_coverage(
             rv.title,
             rv.kind            AS kind,
             rv.parent_requirement_version_id,
-            COALESCE(
-                BOOL_OR(
-                    am.relationship = 'implements' AND am.coverage = 'full'
-                ), false
-            )                  AS has_full_coverage,
-            COALESCE(
-                BOOL_OR(am.requirement_version_id IS NOT NULL),
-                false
-            )                  AS has_partial_coverage,
+            -- NULL for unresolved requirements (no mapping evidence possible).
+            CASE WHEN abr.release_finalized THEN
+                COALESCE(BOOL_OR(am.relationship = 'implements' AND am.coverage = 'full'), false)
+            END                AS has_full_coverage,
+            CASE WHEN abr.release_finalized THEN
+                COALESCE(BOOL_OR(am.requirement_version_id IS NOT NULL), false)
+            END                AS has_partial_coverage,
             COALESCE(
                 ARRAY_AGG(am.policy_version_id) FILTER (WHERE am.policy_version_id IS NOT NULL),
                 ARRAY[]::uuid[]
-            )                  AS mapped_policy_version_ids
-        FROM bundle_reqs br
-        JOIN compliance_requirement_versions rv ON rv.id = br.requirement_version_id
-        LEFT JOIN applicable_mappings am ON am.requirement_version_id = br.requirement_version_id
-        GROUP BY rv.id, rv.external_id, rv.title, rv.kind, rv.parent_requirement_version_id
+            )                  AS mapped_policy_version_ids,
+            abr.release_finalized AS release_finalized
+        FROM all_bundle_reqs abr
+        JOIN compliance_requirement_versions rv ON rv.id = abr.requirement_version_id
+        LEFT JOIN applicable_mappings am ON am.requirement_version_id = abr.requirement_version_id
+        GROUP BY rv.id, rv.external_id, rv.title, rv.kind,
+                 rv.parent_requirement_version_id, abr.release_finalized
         ORDER BY rv.external_id
         "#,
     )
@@ -644,15 +665,19 @@ pub async fn compute_bundle_requirement_coverage(
     let mut full_count = 0i64;
     let mut partial_count = 0i64;
     let mut unmapped_count = 0i64;
+    let mut recovery_required_count = 0i64;
     let total = rows.len() as i64;
 
     let mut coverage_rows: Vec<BundleCoverageRow> = rows
         .into_iter()
         .map(|r| {
-            let coverage = if r.has_full_coverage {
+            let coverage = if !r.release_finalized {
+                recovery_required_count += 1;
+                RequirementCoverage::RecoveryRequired
+            } else if r.has_full_coverage == Some(true) {
                 full_count += 1;
                 RequirementCoverage::Full
-            } else if r.has_partial_coverage {
+            } else if r.has_partial_coverage == Some(true) {
                 partial_count += 1;
                 RequirementCoverage::Partial
             } else {
@@ -745,6 +770,7 @@ pub async fn compute_bundle_requirement_coverage(
         full: full_count,
         partial: partial_count,
         unmapped: unmapped_count,
+        recovery_required: recovery_required_count,
         rows: coverage_rows,
     })
 }
@@ -1424,8 +1450,8 @@ where
         .await
         .context("failed to acquire framework version lock")?;
 
-    let existing: Option<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, semantic_digest FROM compliance_framework_versions \
+    let existing: Option<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT id, semantic_digest, migration_recovery_status FROM compliance_framework_versions \
          WHERE framework_id = $1 AND canonical_release_key = $2",
     )
     .bind(framework_id)
@@ -1434,7 +1460,19 @@ where
     .await
     .context("failed to check for existing framework version")?;
 
-    if let Some((existing_id, existing_digest)) = existing {
+    if let Some((existing_id, existing_digest, recovery_status)) = existing {
+        // An unresolved or still-pending release cannot be treated as a content
+        // conflict — the stored digest is not authoritative yet.
+        if existing_digest == "pending" || recovery_status != "finalized" {
+            bail!(
+                "FRAMEWORK_RELEASE_RECOVERY_REQUIRED: framework version with release key '{}' \
+                 for framework {} is pending migration recovery (existing ID: {}, status: {}).",
+                canonical.canonical_release_key,
+                framework_id,
+                existing_id,
+                recovery_status,
+            );
+        }
         if existing_digest
             == canonical.compute_digest_with_requirement_digests_and_hierarchy(
                 &requirement_digests,
