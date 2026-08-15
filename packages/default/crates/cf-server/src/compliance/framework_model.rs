@@ -163,7 +163,9 @@ where
     sqlx::query(
         "UPDATE compliance_framework_versions \
          SET semantic_digest = $1, digest_algorithm = 'sha-256', \
-             canonicalization_version = $3 \
+             canonicalization_version = $3, \
+             migration_recovery_status = 'finalized', \
+             migration_recovery_reason = NULL \
          WHERE id = $2",
     )
     .bind(&digest)

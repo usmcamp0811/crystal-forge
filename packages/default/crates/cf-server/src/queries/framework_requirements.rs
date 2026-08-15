@@ -755,7 +755,9 @@ pub async fn preview_framework_reconciliation_with_hierarchy(
         // Check if this exact artifact was already used for a framework version.
         let fv_id: Option<Uuid> = sqlx::query_scalar(
             "SELECT id FROM compliance_framework_versions WHERE source_artifact_id = \
-             (SELECT id FROM compliance_source_artifacts WHERE sha256 = $1 LIMIT 1)",
+              (SELECT id FROM compliance_source_artifacts WHERE sha256 = $1 LIMIT 1) \
+              AND semantic_digest <> 'pending' \
+              AND migration_recovery_status = 'finalized'",
         )
         .bind(source_sha256)
         .fetch_optional(pool)
