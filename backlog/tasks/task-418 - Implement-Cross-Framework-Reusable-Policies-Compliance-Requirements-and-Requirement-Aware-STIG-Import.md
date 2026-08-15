@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 17:10'
+updated_date: '2026-08-15 17:29'
 labels: []
 milestone: m-22
 dependencies:
@@ -222,6 +222,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15 review remediation pushed as 9e90de5e. Narrowed migration 0215 backfill exceptions to only pending requirement_digest or mapping_digest. Added migration 0216 DB guards for immutable framework and requirement versions, with pending digest finalization and one-time null-to-parent hierarchy construction exception. Framework release digest now includes deterministic requirement semantic digests and DISA import/fixture paths precompute them before release insertion, so same-release requirement content changes conflict without mutating existing releases. Mapping CRUD now scopes nested policy-version routes, forces manual provenance for external creation, permits operator/admin roles, and bundle mapped-policy projection filters trusted mappings. Isolated PostgreSQL 3042 applied migrations 215/216; framework-requirements ignored suite passed 9/9. cargo fmt check, SQLX_OFFLINE cargo check, and git diff check passed. MR !315 restored to Draft.
 
 2026-08-15 follow-up review found framework preview/commit digest mismatch, commit digest derived from policy_records instead of authoritative parsed requirements, permanent finalized requirement reparent escape hatch, and legacy framework digest upgrade compatibility gap. These are now the active remediation scope.
+
+2026-08-15 follow-up remediation pushed as aca32444. Added shared authoritative parsed DISA requirement collector; preview and commit now hash the complete parsed requirement set, independent of policy_records or user selections. Framework digest canonicalization is versioned as cf-model-json-2. Added migration 0217 to reopen/recanonicalize pre-9e90 framework rows and startup backfill, verified on isolated PostgreSQL 3042 with pending count reduced to zero. Added migration 0218 removing finalized requirement reparenting; fixture hierarchy now links while digests are pending and finalizes afterward. Added regression coverage for same-release same-requirement reuse with different artifact SHA, changed requirement conflict, finalized reparent rejection, and digest backfill. Verification: migrations 217/218 applied; framework digest backfill test passed; framework preview and requirement immutability DB tests passed; cargo fmt, SQLX_OFFLINE cargo check, and git diff check passed. MR remains Draft at aca32444.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
@@ -274,5 +276,10 @@ Verification: framework query suite 9 passed; Phase 22 8/8 passed; Phase 21 exac
 created: 2026-08-15 16:57
 ---
 Review remediation checkpoint: addressed findings #1-#6 and the framework release digest blocker in commit 9e90de5e. MR remains Draft pending broader review and verification.
+---
+
+created: 2026-08-15 17:29
+---
+Follow-up review remediation pushed as aca32444: framework preview/commit now share the complete parsed requirement identity, policy selection cannot alter framework release identity, finalized requirement versions cannot be reparented, and pre-9e90 framework digests are recanonicalized through an upgrade migration plus startup backfill.
 ---
 <!-- COMMENTS:END -->
