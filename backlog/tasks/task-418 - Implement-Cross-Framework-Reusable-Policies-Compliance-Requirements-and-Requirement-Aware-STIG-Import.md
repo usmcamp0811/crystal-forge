@@ -3,15 +3,17 @@ id: TASK-418
 title: >-
   Implement Cross-Framework Reusable Policies, Compliance Requirements, and
   Requirement-Aware STIG Import
-status: In Progress
+status: Review
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 14:39'
+updated_date: '2026-08-15 15:59'
 labels: []
 milestone: m-22
 dependencies:
   - TASK-412
+references:
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/315'
 priority: high
 type: enhancement
 ordinal: 412000
@@ -552,5 +554,11 @@ created: 2026-08-14 03:19
 created: 2026-08-14 03:37
 ---
 2026-08-14 final Mappings-tab parity slice: Add Mapping is now collapsed by default and expands on click; Cancel closes without mutation; successful pending/persisted adds close the editor and refresh mapping count. Empty state uses the informational zero-mapping callout. Editor now matches the purple shell/gap, selected requirement card with Change/root-parent context, descriptive Implements/Supports/Provides evidence for cards, Full/Partial segmented control, rationale label/placeholder, and explicit Cancel/Add mapping footer. Focused 20aa was updated for the interaction and passed 1/1 with dark/light captures. Verification: cargo check --manifest-path packages/web-ui/Cargo.toml, cargo fmt --all --check, node --check, git diff --check. Pushed commit 2fb9c08e. Full nix web-ui build not run. Policy Add/Edit Mappings UI is complete; next area is Policy Details/Drawer.
+---
+
+author: opencode
+created: 2026-08-15 15:59
+---
+Opened Draft MR !315: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/315. Focused `20ac-stig-import-reconciliation-fixture` NixOS check passes 1/1 with dark and light screenshots. TASK-418 remains open; remaining reconciliation UX and acceptance work is listed in the MR.
 ---
 <!-- COMMENTS:END -->
