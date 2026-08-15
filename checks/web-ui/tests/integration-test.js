@@ -6565,9 +6565,8 @@ const steps = [
       // submit through the Playwright request context to avoid making CORS
       // preflight the behavior under test. The page still drives and validates
       // the complete requirement selection form before this real API write.
-      const apiCookies = await page.context().cookies(apiBaseUrl);
-      const csrfCookie = apiCookies.find((cookie) => cookie.name === "__Host-cf-csrf");
-      const createResponse = await page.request.post(`${apiBaseUrl}/api/v1/compliance/bundles`, {
+      const csrfCookie = (await page.context().cookies(apiBaseUrl)).find((cookie) => cookie.name === "__Host-cf-csrf");
+      const createResponse = await page.context().request.post(`${apiBaseUrl}/api/v1/compliance/bundles`, {
         data: {
           name: requirementOnlyName,
           framework: "DISA STIG",
@@ -6578,10 +6577,7 @@ const steps = [
           policy_ids: [],
           requirement_version_ids: [requirementA.id, requirementB.id],
         },
-        headers: {
-          ...(csrfCookie ? { "X-CSRF-Token": csrfCookie.value } : {}),
-          Cookie: apiCookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; "),
-        },
+        headers: csrfCookie ? { "X-CSRF-Token": csrfCookie.value } : undefined,
       });
       if (createResponse.status() !== 201) throw new Error(`Expected requirement-only create 201, got ${createResponse.status()}: ${await createResponse.text()}`);
       const createdBundle = await createResponse.json();
