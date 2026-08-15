@@ -4,13 +4,13 @@ This file governs work performed by automated agents in this repository. Follow 
 
 ## Start by classifying the request
 
-| Request | Backlog task | Dedicated worktree | Repository writes |
-| --- | --- | --- | --- |
-| Explain, answer, or explore | Not required | Not required | No |
-| Review or diagnose | Not required | Not required | No, unless the user also asks for a fix |
-| Maintain or groom the backlog | No implementation task required | Not required | Backlog-related files only |
-| Implement a change | Required and `To Do` | Required | Active-task scope only |
-| Work on the next available task | Select the highest-priority eligible `To Do` task | Required | Active-task scope only |
+| Request                         | Backlog task                                      | Dedicated worktree | Repository writes                       |
+| ------------------------------- | ------------------------------------------------- | ------------------ | --------------------------------------- |
+| Explain, answer, or explore     | Not required                                      | Not required       | No                                      |
+| Review or diagnose              | Not required                                      | Not required       | No, unless the user also asks for a fix |
+| Maintain or groom the backlog   | No implementation task required                   | Not required       | Backlog-related files only              |
+| Implement a change              | Required and `To Do`                              | Required           | Active-task scope only                  |
+| Work on the next available task | Select the highest-priority eligible `To Do` task | Required           | Active-task scope only                  |
 
 Do not change files, backlog state, branches, or merge requests for a read-only request. If a request changes from analysis to implementation, perform the implementation preflight before writing.
 
@@ -59,7 +59,7 @@ Backlog -> To Do -> In Progress -> Review -> Done
 - New discoveries default to `Backlog`.
 - Only a human selects work for a sprint by moving `Backlog` to `To Do`, unless the user explicitly delegates that decision.
 - `In Progress` requires a task lock and dedicated worktree.
-- `Review` requires an open MR and completed verification.
+- `Review` requires an open MR and completed verification. During this time the MR will be deployed to a test server and any changes requested must be done and will result in new database migrations NOT! edits to existing mirations.
 - `Done` requires the MR to be merged and the task worktree to be removed.
 
 ## Implementation preflight

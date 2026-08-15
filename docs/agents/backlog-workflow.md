@@ -78,6 +78,7 @@ Move the task to `Review` only after:
 - Required verification passed.
 - An MR is open.
 - The MR link or identifier is in the task notes.
+- During this phase a human will review the code and deploy it to a dev/test server. You must never edit existing migrations during review.
 
 ### Completion
 
