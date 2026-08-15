@@ -1,18 +1,25 @@
 // Compliance view — bundle catalog + per-system control evidence + export
 
-function ComplianceView({ onOpenSystem, selectedBundleId, onClearBundle }) {
-  const [bundleId, setBundleId] = React.useState(selectedBundleId || COMPLIANCE_BUNDLES.find(b => b.publicationState === "current")?.id || COMPLIANCE_BUNDLES[0]?.id || null);
+function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selectedBundleView, onClearBundle, onClearBundleView }) {
+  const [bundleId, setBundleId] = React.useState(null);
+  const [drawerOpen, setDrawerOpen] = React.useState(false);
+  const [drawerView, setDrawerView] = React.useState("overview");
+  const [policyDrawerId, setPolicyDrawerId] = React.useState(null);
 
   React.useEffect(() => {
-    if (selectedBundleId) { setBundleId(selectedBundleId); onClearBundle?.(); }
+    if (selectedBundleId) { setBundleId(selectedBundleId); setDrawerOpen(true); setDrawerView(selectedBundleView || "overview"); onClearBundle?.(); onClearBundleView?.(); }
   }, [selectedBundleId]);
   const [selectedSysId, setSelectedSysId] = React.useState(null);
+  const [query, setQuery] = React.useState("");
+  const [activeFw, setActiveFw] = React.useState("all");
   const [exportOpen, setExportOpen] = React.useState(false);
   const [newBundleOpen, setNewBundleOpen] = React.useState(false);
   const [importOpen, setImportOpen] = React.useState(false);
   const [importBundleOpen, setImportBundleOpen] = React.useState(false);
   const [editBundleOpen, setEditBundleOpen] = React.useState(false);
   const [filter, setFilter] = React.useState("all");
+  const [importDraft, setImportDraft] = React.useState(() => { try { return JSON.parse(localStorage.getItem("cf-stig-import-draft") || "null"); } catch { return null; } });
+  const checkImportDraft = () => setImportDraft(() => { try { return JSON.parse(localStorage.getItem("cf-stig-import-draft") || "null"); } catch { return null; } });
 
   const bundle = COMPLIANCE_BUNDLES.find(b => b.id === bundleId);
 
@@ -62,7 +69,7 @@ function ComplianceView({ onOpenSystem, selectedBundleId, onClearBundle }) {
         </div>
         <div style={{ display:"flex", gap:8 }}>
           <IOMenu items={[
-            { label:"Import STIG (.xml)", icon:"shield", onClick:() => setImportOpen(true) },
+            { label: importDraft ? "Resume STIG import…" : "Import STIG (.xml)", icon:"shield", onClick:() => setImportOpen(true) },
             { label:"Import bundle (.xml / DISA .zip)", icon:"upload", onClick:() => setImportBundleOpen(true) },
             "divider",
             { label:"Export this bundle (XCCDF .xml)", icon:"download", onClick:() => bundle && exportBundle(bundle) },
@@ -74,49 +81,40 @@ function ComplianceView({ onOpenSystem, selectedBundleId, onClearBundle }) {
         </div>
       </div>
 
-      {/* Bundle selector */}
-      <div style={{ display:"grid", gridTemplateColumns:"320px 1fr", gap:16, alignItems:"start" }}>
-        <BundleCatalog bundles={COMPLIANCE_BUNDLES} selectedId={bundleId} onSelect={(id) => { setBundleId(id); setSelectedSysId(null); }}/>
-
-        {bundle && (
-          <div style={{ display:"flex", flexDirection:"column", gap:14, minWidth:0 }}>
-            <BundleHeader bundle={bundle} stats={stats} onEdit={() => setEditBundleOpen(true)}/>
-
-            {/* Score strip */}
-            <div className="stat-strip">
-              <div className="stat">
-                <span className="stat-accent" style={{ "--stat-color": stats.overallScore >= 90 ? "#34d399" : stats.overallScore >= 70 ? "#fbbf24" : "#f87171" }}/>
-                <div className="stat-label">Overall score</div>
-                <div className="stat-value" style={{ color: stats.overallScore >= 90 ? "#34d399" : stats.overallScore >= 70 ? "#fbbf24" : "#f87171" }}>{stats.overallScore}%</div>
-                <div className="stat-meta">{stats.compliantHosts} of {stats.totalHosts} hosts fully compliant</div>
-              </div>
-              {[
-                { label:"Pass",   val:stats.pass,   color:"#34d399" },
-                { label:"Warn",   val:stats.warn,   color:"#fbbf24" },
-                { label:"Fail",   val:stats.fail,   color:"#f87171" },
-                { label:"Waiver", val:stats.waiver, color:"#a78bfa" },
-              ].map(s => (
-                <div key={s.label} className="stat">
-                  <span className="stat-accent" style={{ "--stat-color": s.color }}/>
-                  <div className="stat-label">{s.label}</div>
-                  <div className="stat-value" style={{ color: s.color }}>{s.val}</div>
-                </div>
-              ))}
-            </div>
-
-            <RequirementCoverageCard bundle={bundle}/>
-
-            {/* Bundle nav: controls list + systems matrix */}
-            <BundleDrilldown
-              bundle={bundle}
-              filter={filter}
-              setFilter={setFilter}
-              applicableSystems={filteredSystems}
-              onOpenSystem={(s) => setSelectedSysId(s.id)}
-            />
+      {importDraft && !importOpen && (
+        <div className="sd-callout sd-callout-warn" style={{ justifyContent:"space-between" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+            <Icon name="shield" size={14}/>
+            <div style={{ fontSize:12.5 }}>Paused STIG import — <strong>{importDraft.parsed?.title || importDraft.bundleName || "unnamed benchmark"}</strong>, {importDraft.parsed ? `${importDraft.parsed.rules.filter(r=>r.selected).length} of ${importDraft.parsed.rules.length} controls selected` : "in progress"}.</div>
           </div>
-        )}
-      </div>
+          <div style={{ display:"flex", gap:6, flexShrink:0 }}>
+            <button className="btn btn-ghost focus-ring xs" onClick={() => { localStorage.removeItem("cf-stig-import-draft"); setImportDraft(null); }}>Discard</button>
+            <button className="btn btn-primary focus-ring xs" onClick={() => setImportOpen(true)}>Resume</button>
+          </div>
+        </div>
+      )}
+
+      {/* Dense bundle catalog — every bundle as one scannable row; click to open the detail drawer */}
+      <BundleListTable bundles={COMPLIANCE_BUNDLES} query={query} setQuery={setQuery} activeFw={activeFw} setActiveFw={setActiveFw}
+        selectedId={bundleId}
+        onSelect={(id) => { setBundleId(id); setDrawerOpen(true); setDrawerView("overview"); setSelectedSysId(null); }}/>
+
+      {bundle && drawerOpen && !policyDrawerId && (
+        <BundleDetailDrawer
+          bundle={bundle}
+          stats={stats}
+          filter={filter}
+          setFilter={setFilter}
+          applicableSystems={filteredSystems}
+          onClose={() => setDrawerOpen(false)}
+          onEdit={() => setEditBundleOpen(true)}
+          onSelectRevision={(id) => { setBundleId(id); setSelectedSysId(null); }}
+          onOpenSystem={(s) => setSelectedSysId(s.id)}
+          onOpenPolicy={setPolicyDrawerId}
+          view={drawerView}
+          setView={setDrawerView}
+        />
+      )}
 
       {drillSys && bundle && (
         <ControlsEvidenceDrawer
@@ -126,6 +124,14 @@ function ComplianceView({ onOpenSystem, selectedBundleId, onClearBundle }) {
           onOpenSystem={onOpenSystem}
         />
       )}
+      {policyDrawerId && (() => { const pol = POLICIES.find(p => p.id === policyDrawerId); return pol && (
+        <PolicyDrawer
+          policy={pol}
+          onClose={() => setPolicyDrawerId(null)}
+          onOpenSystem={onOpenSystem}
+          onSwitchPolicy={setPolicyDrawerId}
+        />
+      ); })()}
       {exportOpen && bundle && (
         <ExportEvidenceModal bundle={bundle} stats={stats} onClose={() => setExportOpen(false)}/>
       )}
@@ -134,14 +140,14 @@ function ComplianceView({ onOpenSystem, selectedBundleId, onClearBundle }) {
       )}
       {importOpen && (
         <ImportStigModal
-          onClose={() => setImportOpen(false)}
-          onComplete={(id) => { setImportOpen(false); setBundleId(id); setSelectedSysId(null); }}
+          onClose={() => { setImportOpen(false); checkImportDraft(); }}
+          onComplete={(id) => { setImportOpen(false); checkImportDraft(); setBundleId(id); setDrawerOpen(true); setSelectedSysId(null); }}
         />
       )}
       {importBundleOpen && (
         <ImportBundleModal
           onClose={() => setImportBundleOpen(false)}
-          onComplete={(id) => { setImportBundleOpen(false); setBundleId(id); setSelectedSysId(null); }}
+          onComplete={(id) => { setImportBundleOpen(false); setBundleId(id); setDrawerOpen(true); setSelectedSysId(null); }}
         />
       )}
       {editBundleOpen && bundle && (
@@ -151,8 +157,8 @@ function ComplianceView({ onOpenSystem, selectedBundleId, onClearBundle }) {
           onDelete={() => {
             const idx = COMPLIANCE_BUNDLES.findIndex(b => b.id === bundle.id);
             if (idx >= 0) COMPLIANCE_BUNDLES.splice(idx, 1);
-            const next = COMPLIANCE_BUNDLES.find(b => b.publicationState === "current")?.id || COMPLIANCE_BUNDLES[0]?.id || null;
-            setBundleId(next);
+            setDrawerOpen(false);
+            setBundleId(null);
             setSelectedSysId(null);
           }}
         />
@@ -168,84 +174,100 @@ function PubStateChip({ state }) {
   return <span className="chip" style={{ fontSize:9, padding:"1px 6px", color:c, background:`color-mix(in oklab, ${c} 16%, transparent)` }}>{state}</span>;
 }
 
-function BundleCatalog({ bundles, selectedId, onSelect }) {
-  const groups = React.useMemo(() => groupBundlesByLineage(bundles), [bundles]);
-  const [expanded, setExpanded] = React.useState(() => new Set(groups.filter(g => g.revisions.some(r => r.id === selectedId)).map(g => g.lineageId)));
+function scoreDotColor(score) {
+  if (score == null) return "var(--cf-text-muted)";
+  if (score >= 90) return "#34d399";
+  if (score >= 70) return "#fbbf24";
+  return "#f87171";
+}
+
+function BundleListTable({ bundles, query, setQuery, activeFw, setActiveFw, selectedId, onSelect }) {
   const [pickerFor, setPickerFor] = React.useState(null);
 
-  React.useEffect(() => {
-    const g = groups.find(g => g.revisions.some(r => r.id === selectedId));
-    if (g) setExpanded(prev => new Set(prev).add(g.lineageId));
-  }, [selectedId]);
+  const frameworks = React.useMemo(() => {
+    const counts = new Map();
+    bundles.forEach(b => counts.set(b.framework, (counts.get(b.framework) || 0) + 1));
+    return Array.from(counts.entries()).sort((a,b) => b[1]-a[1]);
+  }, [bundles]);
 
-  const toggle = (lineageId) => setExpanded(prev => { const n = new Set(prev); n.has(lineageId) ? n.delete(lineageId) : n.add(lineageId); return n; });
+  const allGroups = React.useMemo(() => groupBundlesByLineage(bundles), [bundles]);
+  const q = query.trim().toLowerCase();
+  const groups = allGroups.filter(g => {
+    if (activeFw !== "all" && g.current.framework !== activeFw) return false;
+    if (!q) return true;
+    return g.lineageName.toLowerCase().includes(q) || g.current.framework.toLowerCase().includes(q) || g.current.version.toLowerCase().includes(q);
+  });
 
   return (
-    <div className="card" style={{ padding:0, position:"sticky", top:16, maxHeight:"calc(100vh - 160px)", overflow:"auto" }}>
-      <div style={{ padding:"12px 14px", borderBottom:"1px solid var(--cf-divider)", fontSize:11, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", fontWeight:600 }}>
-        Compliance bundles
+    <div className="card" style={{ overflow:"hidden" }}>
+      <div style={{ padding:"10px 16px", borderBottom:"1px solid var(--cf-card-border)", display:"flex", flexDirection:"column", gap:10 }}>
+        <div style={{ display:"flex", gap:6, flexWrap:"nowrap", overflowX:"auto" }}>
+          <button className={`cf-fw-chip${activeFw === "all" ? " active" : ""}`} onClick={() => setActiveFw("all")}>All <span>{bundles.length}</span></button>
+          {frameworks.map(([fw, count]) => (
+            <button key={fw} className={`cf-fw-chip${activeFw === fw ? " active" : ""}`} onClick={() => setActiveFw(fw)}>{fw} <span>{count}</span></button>
+          ))}
+        </div>
+        <div className="q-search" style={{ marginLeft:0, width:"100%", boxSizing:"border-box" }}>
+          <Icon name="search" size={13}/>
+          <input className="q-search-input" placeholder="Search bundles…" value={query} onChange={e => setQuery(e.target.value)} style={{ flex:1, width:"auto" }}/>
+          {query && <span className="q-search-count">{groups.length} of {bundles.length}</span>}
+          {query && <button className="btn-icon xs focus-ring" title="Clear search" onClick={()=>setQuery("")}><Icon name="x" size={13}/></button>}
+        </div>
       </div>
-      {groups.map(g => {
-        const isOpen = expanded.has(g.lineageId);
-        const selRev = g.revisions.find(r => r.id === selectedId);
-        const shown = selRev || g.current;
-        const multi = g.revisions.length > 1;
-        const manyRevisions = g.revisions.length > 3;
-        return (
-          <div key={g.lineageId} style={{ borderBottom:"1px solid var(--cf-divider)" }}>
-            <button
-              onClick={() => multi ? (manyRevisions ? setPickerFor(g) : toggle(g.lineageId)) : onSelect(shown.id)}
-              className="focus-ring"
-              style={{
-                all:"unset", cursor:"pointer", display:"block",
-                padding:"12px 14px", width:"100%", boxSizing:"border-box",
-                borderLeft: `3px solid ${!isOpen && !!selRev ? "var(--cf-brand-purple)" : "transparent"}`,
-                background: !isOpen && !!selRev ? "color-mix(in oklab,var(--cf-brand-purple) 8%, transparent)" : "transparent",
-              }}>
-              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, marginBottom:4 }}>
-                <span style={{ fontSize:12, fontWeight:600, color:"var(--cf-text-primary)" }}>{g.lineageName}</span>
-                <span style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
-                  <span className="chip chip-unknown" style={{ fontSize:9, padding:"1px 6px" }}>{shown.layer}</span>
-                  {multi && <Icon name={manyRevisions ? "search" : (isOpen ? "chevron-up" : "chevron-down")} size={12} style={{ color:"var(--cf-text-muted)" }}/>}
-                </span>
-              </div>
-              <div style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{shown.framework} · {shown.version}</div>
-              <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:5, flexWrap:"wrap" }}>
-                <PubStateChip state={shown.publicationState}/>
-                {selRev && selRev.id !== g.current.id && <span className="chip chip-info" style={{ fontSize:9 }}>selected</span>}
-                <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{shown.policyIds.length} controls</span>
-                {multi && <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>· {g.revisions.length} revisions{manyRevisions ? " · browse & select" : ""}</span>}
-              </div>
-            </button>
-            {isOpen && multi && !manyRevisions && (
-              <div style={{ padding:"2px 10px 8px" }}>
-                {g.revisions.map(r => {
-                  const isSel = r.id === selectedId;
-                  return (
-                    <button key={r.id} onClick={() => onSelect(r.id)} className="focus-ring"
-                      style={{
-                        all:"unset", cursor:"pointer", display:"flex", flexDirection:"column", gap:3,
-                        padding:"8px 10px", borderRadius:8, width:"100%", boxSizing:"border-box", marginTop:4,
-                        background: isSel ? "color-mix(in oklab,var(--cf-brand-purple) 12%, transparent)" : "var(--cf-subtle-bg)",
-                        border: `1px solid ${isSel ? "var(--cf-brand-purple)" : "transparent"}`,
-                      }}>
-                      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
-                        <span className="mono" style={{ fontSize:11.5, fontWeight:600 }}>Revision {r.revision} <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· {r.version}</span></span>
-                        {r.id === g.current.id && <span className="chip" style={{ fontSize:8.5, color:"#34d399", background:"color-mix(in oklab, #34d399 16%, transparent)" }}>Current</span>}
-                      </div>
-                      <div style={{ display:"flex", alignItems:"center", gap:6, flexWrap:"wrap" }}>
-                        <PubStateChip state={r.publicationState}/>
-                        <span style={{ fontSize:10.5, color:"var(--cf-text-muted)" }}>{r.publishedDate}</span>
-                        {r.digest && <span className="mono" style={{ fontSize:10, color:"var(--cf-text-muted)" }}>{r.digest.slice(0,14)}</span>}
-                      </div>
+      {groups.length === 0 ? (
+        <div className="q-empty"><Icon name="search" size={20}/><div>No bundles match “{query}”.</div></div>
+      ) : (
+      <table className="sys-table sys-table-fixed">
+        <colgroup>
+          <col style={{ width:"38%" }}/><col style={{ width:"16%" }}/><col style={{ width:"18%" }}/>
+          <col style={{ width:"18%" }}/><col style={{ width:"10%" }}/>
+        </colgroup>
+        <thead>
+          <tr>
+            <th>Bundle</th>
+            <th>Framework</th>
+            <th>Version</th>
+            <th>Score</th>
+            <th style={{ textAlign:"right" }}> </th>
+          </tr>
+        </thead>
+        <tbody>
+          {groups.map(g => {
+            const shown = g.current;
+            const multi = g.revisions.length > 1;
+            const quick = bundleQuickStats(shown);
+            const isSelected = g.revisions.some(r => r.id === selectedId);
+            return (
+              <tr key={g.lineageId} className={isSelected ? "selected" : ""} onClick={() => onSelect(shown.id)}>
+                <td>
+                  <div style={{ display:"flex", alignItems:"center", gap:8, minWidth:0 }}>
+                    <span style={{ width:7, height:7, borderRadius:"50%", flexShrink:0, background:scoreDotColor(quick.score) }}/>
+                    <span style={{ fontWeight:600, fontSize:13, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", minWidth:0 }}>{g.lineageName}</span>
+                  </div>
+                  <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>{shown.policyIds.length} controls{multi ? ` · ${g.revisions.length} revisions` : ""}</div>
+                </td>
+                <td><span className="chip chip-info">{shown.framework}</span></td>
+                <td>
+                  <div className="mono" style={{ fontSize:12 }}>{shown.version}</div>
+                  <div style={{ marginTop:3 }}><PubStateChip state={shown.publicationState}/></div>
+                </td>
+                <td>
+                  <span className="mono" style={{ fontSize:13, fontWeight:600, color:scoreDotColor(quick.score) }}>{quick.score != null ? `${quick.score}%` : "—"}</span>
+                  <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>{quick.systemCount} system{quick.systemCount === 1 ? "" : "s"}</div>
+                </td>
+                <td onClick={e=>e.stopPropagation()} style={{ textAlign:"right" }}>
+                  <div className="row-actions" style={{ opacity:1, justifyContent:"flex-end" }}>
+                    <button className="btn-icon focus-ring" title="View bundle" onClick={() => onSelect(shown.id)}>
+                      <Icon name="arrow-right" size={14}/>
                     </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        );
-      })}
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      )}
       {pickerFor && (
         <RevisionPickerModal
           title={pickerFor.lineageName}
@@ -260,57 +282,224 @@ function BundleCatalog({ bundles, selectedId, onSelect }) {
   );
 }
 
-function RequirementCoverageCard({ bundle }) {
-  const [open, setOpen] = React.useState(false);
+function BundleDetailDrawer({ bundle, stats, filter, setFilter, applicableSystems, onClose, onEdit, onSelectRevision, onOpenSystem, onOpenPolicy, view, setView }) {
+  const lineage = React.useMemo(() => groupBundlesByLineage(COMPLIANCE_BUNDLES).find(g => g.revisions.some(r => r.id === bundle.id)), [bundle.id]);
+  const [revisionsOpen, setRevisionsOpen] = React.useState(false);
   const coverage = typeof bundleRequirementCoverage === "function" ? bundleRequirementCoverage(bundle) : null;
+
+  return (
+    <>
+      <div className="fl-tray-backdrop" onClick={onClose}/>
+      <aside className="fl-tray" style={{ width:"min(900px, 96vw)" }}>
+        <header className="fl-tray-head">
+          {view === "coverage" ? (
+            <div style={{ display:"flex", alignItems:"center", gap:10, minWidth:0, flex:1 }}>
+              <button className="btn-icon focus-ring" onClick={()=>setView("overview")}><Icon name="arrow-left" size={16}/></button>
+              <div style={{ minWidth:0 }}>
+                <span style={{ fontWeight:700, fontSize:15 }}>Requirement coverage</span>
+                <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>{bundle.name}</div>
+              </div>
+            </div>
+          ) : (
+            <div style={{ display:"flex", alignItems:"center", gap:12, minWidth:0, flex:1 }}>
+              <Icon name="shield" size={18} style={{ color:"var(--cf-brand-purple)", flexShrink:0 }}/>
+              <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>Compliance bundle</span>
+            </div>
+          )}
+          <div style={{ display:"flex", gap:6 }}>
+            {view === "overview" && <button className="btn btn-ghost focus-ring xs" onClick={onEdit}><Icon name="edit" size={12}/> Edit bundle</button>}
+            <button className="btn-icon focus-ring" onClick={onClose}><Icon name="x" size={16}/></button>
+          </div>
+        </header>
+
+        {view === "coverage" ? (
+          <RequirementCoverageBody coverage={coverage} onOpenPolicy={onOpenPolicy}/>
+        ) : (
+        <div style={{ overflow:"auto", flex:1 }}>
+          <div style={{ padding:"14px 18px" }}>
+            <BundleHeader bundle={bundle} stats={stats} onEdit={onEdit}/>
+          </div>
+
+          <div className="stat-strip stat-strip-flush" style={{ borderTop:"1px solid var(--cf-divider)" }}>
+            <div className="stat">
+              <div className="stat-label">Overall score</div>
+              <div className="stat-value" style={{ color: stats.overallScore >= 90 ? "#34d399" : stats.overallScore >= 70 ? "#fbbf24" : "#f87171" }}>{stats.overallScore}%</div>
+            </div>
+            {[
+              { label:"Pass",   val:stats.pass,   color:"#34d399" },
+              { label:"Warn",   val:stats.warn,   color:"#fbbf24" },
+              { label:"Fail",   val:stats.fail,   color:"#f87171" },
+              { label:"Waiver", val:stats.waiver, color:"#a78bfa" },
+            ].map(s => (
+              <div key={s.label} className="stat">
+                <div className="stat-label">{s.label}</div>
+                <div className="stat-value" style={{ color: s.color }}>{s.val}</div>
+              </div>
+            ))}
+          </div>
+
+          {lineage && lineage.revisions.length > 1 && (
+            <div style={{ borderTop:"1px solid var(--cf-divider)", padding:"12px 18px" }}>
+              <button className="focus-ring" onClick={()=>setRevisionsOpen(o=>!o)} style={{ all:"unset", cursor:"pointer", display:"flex", alignItems:"center", gap:8, width:"100%" }}>
+                <Icon name={revisionsOpen?"chevron-down":"chevron-right"} size={13}/>
+                <span style={{ fontSize:13, fontWeight:600 }}>Revisions</span>
+                <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{lineage.revisions.length} total</span>
+              </button>
+              {revisionsOpen && (
+              <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginTop:12 }}>
+                {lineage.revisions.map(r => {
+                  const isSel = r.id === bundle.id;
+                  return (
+                    <button key={r.id} onClick={() => onSelectRevision(r.id)} className="focus-ring"
+                      style={{
+                        all:"unset", cursor:"pointer", display:"flex", flexDirection:"column", gap:3,
+                        padding:"7px 10px", borderRadius:8,
+                        background: isSel ? "color-mix(in oklab,var(--cf-brand-purple) 12%, transparent)" : "var(--cf-subtle-bg)",
+                        border: `1px solid ${isSel ? "var(--cf-brand-purple)" : "transparent"}`,
+                      }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                        <span className="mono" style={{ fontSize:11.5, fontWeight:600 }}>Rev {r.revision} · {r.version}</span>
+                        {r.id === lineage.current.id && <span className="chip" style={{ fontSize:8.5, color:"#34d399", background:"color-mix(in oklab, #34d399 16%, transparent)" }}>Current</span>}
+                      </div>
+                      <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                        <PubStateChip state={r.publicationState}/>
+                        <span style={{ fontSize:10, color:"var(--cf-text-muted)" }}>{r.publishedDate}</span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+              )}
+            </div>
+          )}
+
+          <div style={{ borderTop:"1px solid var(--cf-divider)" }}>
+            <RequirementCoverageCard coverage={coverage} onOpenCoverage={()=>setView("coverage")}/>
+          </div>
+
+          <div style={{ borderTop:"1px solid var(--cf-divider)" }}>
+            <BundleDrilldown
+              bundle={bundle}
+              filter={filter}
+              setFilter={setFilter}
+              applicableSystems={applicableSystems}
+              onOpenSystem={onOpenSystem}
+            />
+          </div>
+        </div>
+        )}
+      </aside>
+    </>
+  );
+}
+
+function RequirementCoverageCard({ coverage, onOpenCoverage }) {
   if (!coverage) return null;
-  const { framework, total, full, partial, unmapped, rows } = coverage;
+  const { framework, total, full, partial, unmapped } = coverage;
+  if (total === 0) {
+    return (
+      <div style={{ padding:16, fontSize:12, color:"var(--cf-text-muted)" }}>
+        <strong style={{ color:"var(--cf-text-primary)", fontWeight:600, fontSize:13 }}>Requirement coverage</strong>
+        <div style={{ marginTop:6 }}>No requirement catalog modeled for {framework.name} yet.</div>
+      </div>
+    );
+  }
+  return (
+    <div style={{ padding:16 }}>
+      <button className="focus-ring" onClick={onOpenCoverage} style={{ all:"unset", cursor:"pointer", display:"flex", width:"100%", alignItems:"center", justifyContent:"space-between", gap:10 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+          <span style={{ fontSize:13, fontWeight:600 }}>Requirement coverage</span>
+          <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{framework.name} · {total} requirements · derived from mapped policies, not policy tags</span>
+        </div>
+        <div style={{ display:"flex", gap:6, flexShrink:0, alignItems:"center" }}>
+          <span className="chip" style={{ fontSize:9.5, color:"#34d399", background:"color-mix(in oklab, #34d399 16%, transparent)" }}>{full} full</span>
+          <span className="chip" style={{ fontSize:9.5, color:"#fbbf24", background:"color-mix(in oklab, #fbbf24 16%, transparent)" }}>{partial} partial</span>
+          <span className="chip chip-unknown" style={{ fontSize:9.5 }}>{unmapped} unmapped</span>
+          <Icon name="chevron-right" size={13} style={{ color:"var(--cf-text-muted)" }}/>
+        </div>
+      </button>
+    </div>
+  );
+}
+
+function RequirementCoverageBody({ coverage, onOpenPolicy }) {
+  const { total, full, partial, unmapped, rows } = coverage;
+  const [query, setQuery] = React.useState("");
+  const [statusFilter, setStatusFilter] = React.useState("all");
+  const q = query.trim().toLowerCase();
+  const filteredRows = rows.filter(r => {
+    if (statusFilter !== "all" && r.status !== statusFilter) return false;
+    if (!q) return true;
+    return r.requirement.externalId.toLowerCase().includes(q) || r.requirement.title.toLowerCase().includes(q);
+  });
   const byParent = new Map();
-  rows.forEach(r => {
+  filteredRows.forEach(r => {
     const top = reqBreadcrumb(r.requirement.id)[0];
     const key = top?.id || "other";
     if (!byParent.has(key)) byParent.set(key, { top, items: [] });
     byParent.get(key).items.push(r);
   });
   const statusColor = { full:"#34d399", partial:"#fbbf24", unmapped:"#6b7280" };
+
   return (
-    <div className="card" style={{ padding:16 }}>
-      <button className="focus-ring" onClick={()=>setOpen(o=>!o)} style={{ all:"unset", cursor:"pointer", display:"flex", width:"100%", alignItems:"center", justifyContent:"space-between", gap:10 }}>
-        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-          <Icon name={open?"chevron-down":"chevron-right"} size={13}/>
-          <span style={{ fontSize:13, fontWeight:600 }}>Requirement coverage</span>
-          <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{framework.name} · derived from mapped policies, not policy tags</span>
-        </div>
-        <div style={{ display:"flex", gap:6, flexShrink:0 }}>
-          <span className="chip" style={{ fontSize:9.5, color:"#34d399", background:"color-mix(in oklab, #34d399 16%, transparent)" }}>{full} full</span>
-          <span className="chip" style={{ fontSize:9.5, color:"#fbbf24", background:"color-mix(in oklab, #fbbf24 16%, transparent)" }}>{partial} partial</span>
-          <span className="chip chip-unknown" style={{ fontSize:9.5 }}>{unmapped} unmapped</span>
-        </div>
-      </button>
-      {open && (
-        <div style={{ marginTop:14, display:"flex", flexDirection:"column", gap:14 }}>
-          {Array.from(byParent.values()).map(grp => (
-            <div key={grp.top?.id || "other"}>
-              <div style={{ fontSize:11.5, fontWeight:700, marginBottom:6 }}>{grp.top ? `${grp.top.externalId} — ${grp.top.title}` : "Other"}</div>
-              <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
-                {grp.items.map(({ requirement, mappings, status }) => (
-                  <div key={requirement.id} style={{ display:"flex", justifyContent:"space-between", gap:10, padding:"6px 9px", background:"var(--cf-subtle-bg)", borderRadius:7 }}>
-                    <div style={{ minWidth:0 }}>
-                      <span className="mono" style={{ fontSize:11.5, fontWeight:600 }}>{requirement.externalId}</span>
-                      <span style={{ fontSize:11, color:"var(--cf-text-secondary)", marginLeft:6 }}>{requirement.title}</span>
-                      {mappings.length > 0 && <div style={{ fontSize:10, color:"var(--cf-text-muted)", marginTop:2 }}>{mappings.map(m => POLICIES.find(p=>p.id===m.policyId)?.name).filter(Boolean).join(", ")}</div>}
-                    </div>
-                    <span className="chip" style={{ fontSize:9, flexShrink:0, height:"fit-content", color:statusColor[status], background:`color-mix(in oklab, ${statusColor[status]} 16%, transparent)` }}>
-                      {status === "full" ? "Fully covered" : status === "partial" ? "Partially covered" : "Unmapped"}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
+    <div style={{ display:"flex", flexDirection:"column", flex:1, minHeight:0 }}>
+      <div style={{ padding:"12px 18px", borderBottom:"1px solid var(--cf-divider)", display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+        <div className="seg">
+          {[
+            { v:"all",      l:`All ${total}` },
+            { v:"full",     l:`Full ${full}` },
+            { v:"partial",  l:`Partial ${partial}` },
+            { v:"unmapped", l:`Unmapped ${unmapped}` },
+          ].map(o => (
+            <button key={o.v} className={statusFilter === o.v ? "active" : ""} onClick={() => setStatusFilter(o.v)}>{o.l}</button>
           ))}
-          {total === 0 && <div style={{ fontSize:12, color:"var(--cf-text-muted)" }}>No requirement catalog modeled for this framework yet.</div>}
         </div>
-      )}
+        <div className="q-search" style={{ marginLeft:"auto" }}>
+          <Icon name="search" size={13}/>
+          <input className="q-search-input" placeholder="Filter requirements…" value={query} onChange={e=>setQuery(e.target.value)}/>
+          {query && <button className="btn-icon xs focus-ring" title="Clear" onClick={()=>setQuery("")}><Icon name="x" size={13}/></button>}
+        </div>
+      </div>
+
+      <div style={{ overflow:"auto", flex:1, padding:"14px 18px", display:"flex", flexDirection:"column", gap:16 }}>
+        {Array.from(byParent.values()).map(grp => (
+          <div key={grp.top?.id || "other"}>
+            {!(grp.items.length === 1 && grp.top?.id === grp.items[0].requirement.id) && (
+              <div style={{ fontSize:11.5, fontWeight:700, marginBottom:6 }}>{grp.top ? `${grp.top.externalId} — ${grp.top.title}` : "Other"}</div>
+            )}
+            <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+              {grp.items.map(({ requirement, mappings, status }) => (
+                <div key={requirement.id} style={{ display:"flex", justifyContent:"space-between", gap:10, padding:"6px 9px", background:"var(--cf-subtle-bg)", borderRadius:7 }}>
+                  <div style={{ minWidth:0 }}>
+                    <span className="mono" style={{ fontSize:11.5, fontWeight:600, whiteSpace:"nowrap", flexShrink:0 }}>{requirement.externalId}</span>
+                    <span style={{ fontSize:11, color:"var(--cf-text-secondary)", marginLeft:6 }}>{requirement.title}</span>
+                    {mappings.length > 0 && (
+                      <div style={{ marginTop:4, display:"flex", gap:6, alignItems:"center", flexWrap:"wrap" }}>
+                        <span style={{ fontSize:9.5, fontWeight:600, color:"var(--cf-text-muted)", textTransform:"uppercase", letterSpacing:".03em" }}>Enforced by</span>
+                        {mappings.map(m => {
+                          const pol = POLICIES.find(p=>p.id===m.policyId);
+                          if (!pol) return null;
+                          return (
+                            <button key={m.policyId} className="focus-ring cf-policy-link" onClick={()=>onOpenPolicy?.(pol.id)}>
+                              <Icon name="file" size={10}/>
+                              {pol.name}
+                              <Icon name="arrow-right" size={10}/>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                  <span className="chip" style={{ fontSize:9, flexShrink:0, height:"fit-content", color:statusColor[status], background:`color-mix(in oklab, ${statusColor[status]} 16%, transparent)` }}>
+                    {status === "full" ? "Fully covered" : status === "partial" ? "Partially covered" : "Unmapped"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+        {filteredRows.length === 0 && <div style={{ fontSize:12, color:"var(--cf-text-muted)", textAlign:"center", padding:"24px 0" }}>No requirements match.</div>}
+      </div>
     </div>
   );
 }
@@ -318,7 +507,7 @@ function RequirementCoverageCard({ bundle }) {
 /* ── Bundle header ── */
 function BundleHeader({ bundle, stats, onEdit }) {
   return (
-    <div className="card" style={{ padding:18, display:"flex", flexDirection:"column", gap:10 }}>
+    <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:14, flexWrap:"wrap" }}>
         <div>
           <h2 style={{ margin:0, fontSize:18, fontWeight:700 }}>{bundle.name}</h2>
@@ -344,7 +533,7 @@ function BundleHeader({ bundle, stats, onEdit }) {
 /* ── Controls list + systems matrix ── */
 function BundleDrilldown({ bundle, filter, setFilter, applicableSystems, onOpenSystem }) {
   return (
-    <div className="card" style={{ overflow:"hidden" }}>
+    <div>
       <div style={{ padding:"12px 16px", borderBottom:"1px solid var(--cf-divider)", display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
         <h3 style={{ margin:0, fontSize:13, fontWeight:600 }}>Systems</h3>
         <div className="seg">
@@ -369,17 +558,21 @@ function BundleDrilldown({ bundle, filter, setFilter, applicableSystems, onOpenS
           <div style={{ fontSize:12 }}>These {applicableSystems.length} host{applicableSystems.length===1?"":"s"} are explicitly pinned to this <strong>{bundle.publicationState}</strong> revision rather than tracking current — see each host's assignment reason below.</div>
         </div>
       )}
-      <table className="sys-table">
+      <table className="sys-table compact sys-table-dense">
+        <colgroup>
+          <col style={{ width:"22%" }}/><col style={{ width:90 }}/><col style={{ width:120 }}/><col style={{ width:110 }}/>
+          <col style={{ width:60 }}/><col style={{ width:70 }}/><col style={{ width:60 }}/><col style={{ width:76 }}/><col style={{ width:52 }}/>
+        </colgroup>
         <thead>
           <tr>
             <th>Host</th>
             <th>Env</th>
             <th>Assignment</th>
             <th>Score</th>
-            <th>Pass</th>
-            <th>Warn</th>
-            <th>Fail</th>
-            <th>Waiver</th>
+            <th style={{ textAlign:"right" }}>Pass</th>
+            <th style={{ textAlign:"right" }}>Warn</th>
+            <th style={{ textAlign:"right" }}>Fail</th>
+            <th style={{ textAlign:"right" }}>Waiver</th>
             <th style={{ textAlign:"right" }}> </th>
           </tr>
         </thead>
@@ -402,19 +595,19 @@ function BundleDrilldown({ bundle, filter, setFilter, applicableSystems, onOpenS
               </td>
               <td>
                 <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                  <div style={{ width:48, height:5, background:"var(--cf-subtle-bg)", borderRadius:99, overflow:"hidden" }}>
+                  <div style={{ width:40, height:5, background:"var(--cf-subtle-bg)", borderRadius:99, overflow:"hidden", flexShrink:0 }}>
                     <div style={{ width:`${rollup.score}%`, height:"100%", background: rollup.score >= 90 ? "#34d399" : rollup.score >= 70 ? "#fbbf24" : "#f87171" }}/>
                   </div>
                   <span className="mono" style={{ fontSize:12, fontWeight:600, color: rollup.score >= 90 ? "#34d399" : rollup.score >= 70 ? "#fbbf24" : "#f87171" }}>{rollup.score}%</span>
                 </div>
               </td>
-              <td className="mono" style={{ color:"#34d399", fontWeight:600 }}>{rollup.pass}</td>
-              <td className="mono" style={{ color: rollup.warn > 0 ? "#fbbf24" : "var(--cf-text-muted)", fontWeight: rollup.warn > 0 ? 600 : 400 }}>{rollup.warn}</td>
-              <td className="mono" style={{ color: rollup.fail > 0 ? "#f87171" : "var(--cf-text-muted)", fontWeight: rollup.fail > 0 ? 700 : 400 }}>{rollup.fail}</td>
-              <td className="mono" style={{ color: rollup.waiver > 0 ? "#a78bfa" : "var(--cf-text-muted)" }}>{rollup.waiver}</td>
-              <td style={{ textAlign:"right" }}>
-                <button className="btn btn-ghost focus-ring xs" onClick={(e) => { e.stopPropagation(); onOpenSystem(sys); }}>
-                  View evidence <Icon name="arrow-right" size={11}/>
+              <td className="mono" style={{ textAlign:"right", color:"#34d399", fontWeight:600 }}>{rollup.pass}</td>
+              <td className="mono" style={{ textAlign:"right", color: rollup.warn > 0 ? "#fbbf24" : "var(--cf-text-muted)", fontWeight: rollup.warn > 0 ? 600 : 400 }}>{rollup.warn}</td>
+              <td className="mono" style={{ textAlign:"right", color: rollup.fail > 0 ? "#f87171" : "var(--cf-text-muted)", fontWeight: rollup.fail > 0 ? 700 : 400 }}>{rollup.fail}</td>
+              <td className="mono" style={{ textAlign:"right", color: rollup.waiver > 0 ? "#a78bfa" : "var(--cf-text-muted)" }}>{rollup.waiver}</td>
+              <td onClick={e=>e.stopPropagation()} style={{ textAlign:"right" }}>
+                <button className="btn-icon focus-ring" title="View evidence" onClick={() => onOpenSystem(sys)}>
+                  <Icon name="arrow-right" size={14}/>
                 </button>
               </td>
             </tr>

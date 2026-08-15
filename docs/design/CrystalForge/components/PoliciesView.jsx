@@ -1,6 +1,6 @@
 // Policies view — deployment policies + rule builder
 
-function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
+function PoliciesView({ onOpenSystem, focus, onClearFocus, backTo, onBack, onClearBack }) {
   const [query, setQuery] = React.useState("");
   const [domain, setDomain] = React.useState("platform"); // platform | security
   const [catFilter, setCatFilter] = React.useState("all");
@@ -234,7 +234,7 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
           <div className="cards-grid">
             {g.items.map(grp => (
               <PolicyCard key={grp.lineageId} group={grp}
-                onOpen={(p, tab) => selectMode ? toggleSelected(p.id) : (setDrawerPolicy(p), setDrawerTab(tab || null))}
+                onOpen={(p, tab) => selectMode ? toggleSelected(p.id) : (setDrawerPolicy(p), setDrawerTab(tab || null), onClearBack?.())}
                 onEdit={!selectMode ? (p) => setEditPolicy(p) : null}
                 selectMode={selectMode}
                 selected={selectedIds}
@@ -248,10 +248,12 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
         <PolicyDrawer
           policy={drawerPolicy}
           initialTab={drawerTab}
-          onClose={() => setDrawerPolicy(null)}
+          onClose={() => { setDrawerPolicy(null); onClearBack?.(); }}
           onEdit={drawerPolicy.type === "custom" ? () => { setEditPolicy(drawerPolicy); setDrawerPolicy(null); } : null}
           onOpenSystem={onOpenSystem}
           onSwitchPolicy={setDrawerPolicy}
+          backTo={backTo}
+          onBack={onBack}
         />
       )}
       {(editPolicy || addOpen) && (
@@ -877,7 +879,7 @@ function evidenceSummary(ev) {
   }
 }
 
-function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem, onSwitchPolicy, initialTab }) {
+function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem, onSwitchPolicy, initialTab, backTo, onBack }) {
   const [tab, setTab] = React.useState(initialTab || "details");
   React.useEffect(() => { setTab(initialTab || "details"); }, [policy.lineageId || policy.id]);
   React.useEffect(() => {
@@ -899,6 +901,7 @@ function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem, onSwitchPolicy, i
       <aside className="fl-tray">
         <header className="fl-tray-head">
           <div style={{ display:"flex", alignItems:"center", gap:12, minWidth:0, flex:1 }}>
+            {backTo && <button className="btn-icon focus-ring" title={backTo.label || "Back"} onClick={onBack}><Icon name="arrow-left" size={16}/></button>}
             <Icon name="file" size={18} style={{ color:"var(--cf-brand-purple)", flexShrink:0 }}/>
             <div style={{ minWidth:0 }}>
               <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
@@ -987,7 +990,7 @@ function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem, onSwitchPolicy, i
                       {grp.rows.map(({ mapping, requirement }) => (
                         <div key={mapping.id} style={{ padding:"9px 11px", background:"var(--cf-subtle-bg)", borderRadius:8, border:"1px solid var(--cf-divider)" }}>
                           <div style={{ display:"flex", justifyContent:"space-between", gap:8 }}>
-                            <span className="mono" style={{ fontSize:12, fontWeight:600 }}>{requirement.externalId}</span>
+                            <span className="mono" style={{ fontSize:12, fontWeight:600, whiteSpace:"nowrap", flexShrink:0 }}>{requirement.externalId}</span>
                             <span style={{ fontSize:9.5, color:"var(--cf-text-muted)" }}>{mapping.provenance === "imported" ? `Imported from ${mapping.importedFrom||"benchmark"}` : "Manual mapping"}</span>
                           </div>
                           <div style={{ fontSize:11.5, color:"var(--cf-text-secondary)", margin:"2px 0 5px" }}>{requirement.title}</div>
@@ -1894,4 +1897,4 @@ function DeletePolicyConfirm({ policy, onCancel, onConfirm }) {
   );
 }
 
-Object.assign(window, { PoliciesView, RuleEditor, policyToExternal, externalToPolicy, slugify, downloadFile, exportPolicies, parsePolicyFile, ruleDescription, ImportPoliciesModal, RevisionPickerModal, AdminGroupingsModal, InlineMappingEditor });
+Object.assign(window, { PoliciesView, PolicyDrawer, RuleEditor, policyToExternal, externalToPolicy, slugify, downloadFile, exportPolicies, parsePolicyFile, ruleDescription, ImportPoliciesModal, RevisionPickerModal, AdminGroupingsModal, InlineMappingEditor });

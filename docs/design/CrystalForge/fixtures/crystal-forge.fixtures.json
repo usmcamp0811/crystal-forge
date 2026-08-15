@@ -13159,7 +13159,7 @@
       "publicationState": "current",
       "publishedDate": "2026-01-01",
       "srgIds": [
-        "SRG-OS-0184669"
+        "SRG-OS-184669"
       ],
       "cciIds": [
         "CCI-005673"
@@ -13198,7 +13198,7 @@
       "publicationState": "current",
       "publishedDate": "2026-02-02",
       "srgIds": [
-        "SRG-OS-0971192"
+        "SRG-OS-971192"
       ],
       "cciIds": [
         "CCI-008757"
@@ -13237,7 +13237,7 @@
       "publicationState": "current",
       "publishedDate": "2026-03-03",
       "srgIds": [
-        "SRG-OS-0318831"
+        "SRG-OS-318831"
       ],
       "cciIds": [
         "CCI-009798"
@@ -13276,7 +13276,7 @@
       "publicationState": "current",
       "publishedDate": "2026-04-04",
       "srgIds": [
-        "SRG-OS-0431189"
+        "SRG-OS-431189"
       ],
       "cciIds": [
         "CCI-006779"
@@ -13315,7 +13315,7 @@
       "publicationState": "current",
       "publishedDate": "2026-05-05",
       "srgIds": [
-        "SRG-OS-0591259"
+        "SRG-OS-591259"
       ],
       "cciIds": [
         "CCI-002454"
@@ -13354,7 +13354,7 @@
       "publicationState": "current",
       "publishedDate": "2026-06-06",
       "srgIds": [
-        "SRG-OS-0173048"
+        "SRG-OS-173048"
       ],
       "cciIds": [
         "CCI-008838"
@@ -13393,7 +13393,7 @@
       "publicationState": "current",
       "publishedDate": "2026-07-07",
       "srgIds": [
-        "SRG-OS-0886350"
+        "SRG-OS-886350"
       ],
       "cciIds": [
         "CCI-007329"
@@ -13432,7 +13432,7 @@
       "publicationState": "current",
       "publishedDate": "2026-08-08",
       "srgIds": [
-        "SRG-OS-0580155"
+        "SRG-OS-580155"
       ],
       "cciIds": [
         "CCI-008186"
@@ -13471,7 +13471,7 @@
       "publicationState": "current",
       "publishedDate": "2026-09-09",
       "srgIds": [
-        "SRG-OS-0601200"
+        "SRG-OS-601200"
       ],
       "cciIds": [
         "CCI-001993"
@@ -13510,7 +13510,7 @@
       "publicationState": "current",
       "publishedDate": "2026-01-10",
       "srgIds": [
-        "SRG-OS-0307171"
+        "SRG-OS-307171"
       ],
       "cciIds": [
         "CCI-001529"
@@ -13549,7 +13549,7 @@
       "publicationState": "current",
       "publishedDate": "2026-02-11",
       "srgIds": [
-        "SRG-OS-0412917"
+        "SRG-OS-412917"
       ],
       "cciIds": [
         "CCI-006851"
@@ -13588,7 +13588,7 @@
       "publicationState": "current",
       "publishedDate": "2026-03-12",
       "srgIds": [
-        "SRG-OS-0896313"
+        "SRG-OS-896313"
       ],
       "cciIds": [
         "CCI-008622"
@@ -13627,7 +13627,7 @@
       "publicationState": "current",
       "publishedDate": "2026-04-13",
       "srgIds": [
-        "SRG-OS-0452093"
+        "SRG-OS-452093"
       ],
       "cciIds": [
         "CCI-005328"
@@ -13666,7 +13666,7 @@
       "publicationState": "current",
       "publishedDate": "2026-05-14",
       "srgIds": [
-        "SRG-OS-0550585"
+        "SRG-OS-550585"
       ],
       "cciIds": [
         "CCI-004434"
@@ -13705,7 +13705,7 @@
       "publicationState": "current",
       "publishedDate": "2026-06-15",
       "srgIds": [
-        "SRG-OS-0577733"
+        "SRG-OS-577733"
       ],
       "cciIds": [
         "CCI-008133"
@@ -13744,7 +13744,7 @@
       "publicationState": "current",
       "publishedDate": "2026-07-16",
       "srgIds": [
-        "SRG-OS-0196745"
+        "SRG-OS-196745"
       ],
       "cciIds": [
         "CCI-003624"
@@ -13783,7 +13783,7 @@
       "publicationState": "current",
       "publishedDate": "2026-08-17",
       "srgIds": [
-        "SRG-OS-0123967"
+        "SRG-OS-123967"
       ],
       "cciIds": [
         "CCI-005270"
@@ -13822,7 +13822,7 @@
       "publicationState": "current",
       "publishedDate": "2026-09-18",
       "srgIds": [
-        "SRG-OS-0645834"
+        "SRG-OS-645834"
       ],
       "cciIds": [
         "CCI-003861"
@@ -13861,7 +13861,7 @@
       "publicationState": "current",
       "publishedDate": "2026-01-19",
       "srgIds": [
-        "SRG-OS-0563849"
+        "SRG-OS-563849"
       ],
       "cciIds": [
         "CCI-006172"
@@ -13900,7 +13900,7 @@
       "publicationState": "current",
       "publishedDate": "2026-02-20",
       "srgIds": [
-        "SRG-OS-0934076"
+        "SRG-OS-934076"
       ],
       "cciIds": [
         "CCI-005250"
@@ -13939,7 +13939,7 @@
       "publicationState": "current",
       "publishedDate": "2026-03-21",
       "srgIds": [
-        "SRG-OS-0810562"
+        "SRG-OS-810562"
       ],
       "cciIds": [
         "CCI-006108"
@@ -13978,7 +13978,7 @@
       "publicationState": "current",
       "publishedDate": "2026-04-22",
       "srgIds": [
-        "SRG-OS-0501960"
+        "SRG-OS-501960"
       ],
       "cciIds": [
         "CCI-005877"
@@ -14017,7 +14017,7 @@
       "publicationState": "current",
       "publishedDate": "2026-05-23",
       "srgIds": [
-        "SRG-OS-0751332"
+        "SRG-OS-751332"
       ],
       "cciIds": [
         "CCI-002744"
@@ -14056,7 +14056,7 @@
       "publicationState": "current",
       "publishedDate": "2026-06-24",
       "srgIds": [
-        "SRG-OS-0444321"
+        "SRG-OS-444321"
       ],
       "cciIds": [
         "CCI-006238"
@@ -14095,7 +14095,7 @@
       "publicationState": "current",
       "publishedDate": "2026-07-25",
       "srgIds": [
-        "SRG-OS-0484374"
+        "SRG-OS-484374"
       ],
       "cciIds": [
         "CCI-004507"
@@ -14134,7 +14134,7 @@
       "publicationState": "current",
       "publishedDate": "2026-08-26",
       "srgIds": [
-        "SRG-OS-0639228"
+        "SRG-OS-639228"
       ],
       "cciIds": [
         "CCI-008070"
@@ -14174,7 +14174,7 @@
       "publicationState": "current",
       "publishedDate": "2026-09-27",
       "srgIds": [
-        "SRG-OS-0504178"
+        "SRG-OS-504178"
       ],
       "cciIds": [
         "CCI-006139"
@@ -14214,7 +14214,7 @@
       "publicationState": "current",
       "publishedDate": "2026-01-01",
       "srgIds": [
-        "SRG-OS-0138491"
+        "SRG-OS-138491"
       ],
       "cciIds": [
         "CCI-008850"
@@ -14254,7 +14254,7 @@
       "publicationState": "current",
       "publishedDate": "2026-02-02",
       "srgIds": [
-        "SRG-OS-0655442"
+        "SRG-OS-655442"
       ],
       "cciIds": [
         "CCI-003583"
@@ -14294,7 +14294,7 @@
       "publicationState": "current",
       "publishedDate": "2026-03-03",
       "srgIds": [
-        "SRG-OS-0777606"
+        "SRG-OS-777606"
       ],
       "cciIds": [
         "CCI-008978"
@@ -14334,7 +14334,7 @@
       "publicationState": "current",
       "publishedDate": "2026-04-04",
       "srgIds": [
-        "SRG-OS-0850977"
+        "SRG-OS-850977"
       ],
       "cciIds": [
         "CCI-001086"
@@ -14374,7 +14374,7 @@
       "publicationState": "current",
       "publishedDate": "2026-05-05",
       "srgIds": [
-        "SRG-OS-0237942"
+        "SRG-OS-237942"
       ],
       "cciIds": [
         "CCI-001405"
@@ -14414,7 +14414,7 @@
       "publicationState": "current",
       "publishedDate": "2026-06-06",
       "srgIds": [
-        "SRG-OS-0923885"
+        "SRG-OS-923885"
       ],
       "cciIds": [
         "CCI-006172"
@@ -14454,7 +14454,7 @@
       "publicationState": "current",
       "publishedDate": "2026-07-07",
       "srgIds": [
-        "SRG-OS-0168988"
+        "SRG-OS-168988"
       ],
       "cciIds": [
         "CCI-001226"
@@ -14494,7 +14494,7 @@
       "publicationState": "current",
       "publishedDate": "2026-08-08",
       "srgIds": [
-        "SRG-OS-0359327"
+        "SRG-OS-359327"
       ],
       "cciIds": [
         "CCI-005862"
@@ -14534,7 +14534,7 @@
       "publicationState": "current",
       "publishedDate": "2026-09-09",
       "srgIds": [
-        "SRG-OS-0753475"
+        "SRG-OS-753475"
       ],
       "cciIds": [
         "CCI-008501"
@@ -14574,7 +14574,7 @@
       "publicationState": "current",
       "publishedDate": "2026-01-10",
       "srgIds": [
-        "SRG-OS-0226194"
+        "SRG-OS-226194"
       ],
       "cciIds": [
         "CCI-005288"
@@ -14614,7 +14614,7 @@
       "publicationState": "current",
       "publishedDate": "2026-02-11",
       "srgIds": [
-        "SRG-OS-0573173"
+        "SRG-OS-573173"
       ],
       "cciIds": [
         "CCI-002331"
@@ -14654,7 +14654,7 @@
       "publicationState": "current",
       "publishedDate": "2026-03-12",
       "srgIds": [
-        "SRG-OS-0403996"
+        "SRG-OS-403996"
       ],
       "cciIds": [
         "CCI-009594"
@@ -14694,7 +14694,7 @@
       "publicationState": "current",
       "publishedDate": "2026-04-13",
       "srgIds": [
-        "SRG-OS-0608193"
+        "SRG-OS-608193"
       ],
       "cciIds": [
         "CCI-007923"
@@ -14734,7 +14734,7 @@
       "publicationState": "current",
       "publishedDate": "2026-05-14",
       "srgIds": [
-        "SRG-OS-0275270"
+        "SRG-OS-275270"
       ],
       "cciIds": [
         "CCI-007760"
@@ -14774,7 +14774,7 @@
       "publicationState": "current",
       "publishedDate": "2026-06-15",
       "srgIds": [
-        "SRG-OS-0177591"
+        "SRG-OS-177591"
       ],
       "cciIds": [
         "CCI-006211"
@@ -14814,7 +14814,7 @@
       "publicationState": "current",
       "publishedDate": "2026-07-16",
       "srgIds": [
-        "SRG-OS-0928839"
+        "SRG-OS-928839"
       ],
       "cciIds": [
         "CCI-005743"
@@ -14854,7 +14854,7 @@
       "publicationState": "current",
       "publishedDate": "2026-08-17",
       "srgIds": [
-        "SRG-OS-0304097"
+        "SRG-OS-304097"
       ],
       "cciIds": [
         "CCI-002240"
@@ -14894,7 +14894,7 @@
       "publicationState": "current",
       "publishedDate": "2026-09-18",
       "srgIds": [
-        "SRG-OS-0394213"
+        "SRG-OS-394213"
       ],
       "cciIds": [
         "CCI-001069"
@@ -14934,7 +14934,7 @@
       "publicationState": "current",
       "publishedDate": "2026-01-19",
       "srgIds": [
-        "SRG-OS-0960777"
+        "SRG-OS-960777"
       ],
       "cciIds": [
         "CCI-008374"
@@ -14974,7 +14974,7 @@
       "publicationState": "current",
       "publishedDate": "2026-02-20",
       "srgIds": [
-        "SRG-OS-0202461"
+        "SRG-OS-202461"
       ],
       "cciIds": [
         "CCI-004777"
@@ -15014,7 +15014,7 @@
       "publicationState": "current",
       "publishedDate": "2026-03-21",
       "srgIds": [
-        "SRG-OS-0932439"
+        "SRG-OS-932439"
       ],
       "cciIds": [
         "CCI-002082"
@@ -15054,7 +15054,7 @@
       "publicationState": "current",
       "publishedDate": "2026-04-22",
       "srgIds": [
-        "SRG-OS-0843859"
+        "SRG-OS-843859"
       ],
       "cciIds": [
         "CCI-007354"
@@ -15094,7 +15094,7 @@
       "publicationState": "current",
       "publishedDate": "2026-05-23",
       "srgIds": [
-        "SRG-OS-0699601"
+        "SRG-OS-699601"
       ],
       "cciIds": [
         "CCI-005791"
@@ -15134,7 +15134,7 @@
       "publicationState": "current",
       "publishedDate": "2026-06-24",
       "srgIds": [
-        "SRG-OS-0367629"
+        "SRG-OS-367629"
       ],
       "cciIds": [
         "CCI-008036"
@@ -15173,7 +15173,7 @@
       "publicationState": "current",
       "publishedDate": "2026-07-25",
       "srgIds": [
-        "SRG-OS-0427827"
+        "SRG-OS-427827"
       ],
       "cciIds": [
         "CCI-002120"
@@ -15212,7 +15212,7 @@
       "publicationState": "current",
       "publishedDate": "2026-08-26",
       "srgIds": [
-        "SRG-OS-0244075"
+        "SRG-OS-244075"
       ],
       "cciIds": [
         "CCI-008635"
@@ -15251,7 +15251,7 @@
       "publicationState": "current",
       "publishedDate": "2026-09-27",
       "srgIds": [
-        "SRG-OS-0220245"
+        "SRG-OS-220245"
       ],
       "cciIds": [
         "CCI-007461"
@@ -15290,7 +15290,7 @@
       "publicationState": "current",
       "publishedDate": "2026-01-01",
       "srgIds": [
-        "SRG-OS-0784441"
+        "SRG-OS-784441"
       ],
       "cciIds": [
         "CCI-005778"
@@ -15329,7 +15329,7 @@
       "publicationState": "current",
       "publishedDate": "2026-02-02",
       "srgIds": [
-        "SRG-OS-0566070"
+        "SRG-OS-566070"
       ],
       "cciIds": [
         "CCI-003716"
@@ -15368,7 +15368,7 @@
       "publicationState": "current",
       "publishedDate": "2026-03-03",
       "srgIds": [
-        "SRG-OS-0588791"
+        "SRG-OS-588791"
       ],
       "cciIds": [
         "CCI-004189"
@@ -15407,7 +15407,7 @@
       "publicationState": "current",
       "publishedDate": "2026-04-04",
       "srgIds": [
-        "SRG-OS-0692925"
+        "SRG-OS-692925"
       ],
       "cciIds": [
         "CCI-001668"
@@ -15446,7 +15446,7 @@
       "publicationState": "current",
       "publishedDate": "2026-05-05",
       "srgIds": [
-        "SRG-OS-0767234"
+        "SRG-OS-767234"
       ],
       "cciIds": [
         "CCI-008415"
@@ -15485,7 +15485,7 @@
       "publicationState": "current",
       "publishedDate": "2026-06-06",
       "srgIds": [
-        "SRG-OS-0405788"
+        "SRG-OS-405788"
       ],
       "cciIds": [
         "CCI-003276"
@@ -15524,7 +15524,7 @@
       "publicationState": "current",
       "publishedDate": "2026-07-07",
       "srgIds": [
-        "SRG-OS-0954794"
+        "SRG-OS-954794"
       ],
       "cciIds": [
         "CCI-002137"
@@ -15563,7 +15563,7 @@
       "publicationState": "current",
       "publishedDate": "2026-08-08",
       "srgIds": [
-        "SRG-OS-0870373"
+        "SRG-OS-870373"
       ],
       "cciIds": [
         "CCI-005912"
@@ -15602,7 +15602,7 @@
       "publicationState": "current",
       "publishedDate": "2026-09-09",
       "srgIds": [
-        "SRG-OS-0915252"
+        "SRG-OS-915252"
       ],
       "cciIds": [
         "CCI-002940"
@@ -15641,7 +15641,7 @@
       "publicationState": "current",
       "publishedDate": "2026-01-10",
       "srgIds": [
-        "SRG-OS-0473756"
+        "SRG-OS-473756"
       ],
       "cciIds": [
         "CCI-009276"
@@ -15680,7 +15680,7 @@
       "publicationState": "current",
       "publishedDate": "2026-02-11",
       "srgIds": [
-        "SRG-OS-0604263"
+        "SRG-OS-604263"
       ],
       "cciIds": [
         "CCI-008211"
@@ -15719,7 +15719,7 @@
       "publicationState": "current",
       "publishedDate": "2026-03-12",
       "srgIds": [
-        "SRG-OS-0570059"
+        "SRG-OS-570059"
       ],
       "cciIds": [
         "CCI-001546"
@@ -15758,7 +15758,7 @@
       "publicationState": "current",
       "publishedDate": "2026-04-13",
       "srgIds": [
-        "SRG-OS-0337060"
+        "SRG-OS-337060"
       ],
       "cciIds": [
         "CCI-005532"
@@ -15797,7 +15797,7 @@
       "publicationState": "current",
       "publishedDate": "2026-05-14",
       "srgIds": [
-        "SRG-OS-0594008"
+        "SRG-OS-594008"
       ],
       "cciIds": [
         "CCI-006988"
@@ -15836,7 +15836,7 @@
       "publicationState": "current",
       "publishedDate": "2026-06-15",
       "srgIds": [
-        "SRG-OS-0681063"
+        "SRG-OS-681063"
       ],
       "cciIds": [
         "CCI-002712"
@@ -15875,7 +15875,7 @@
       "publicationState": "current",
       "publishedDate": "2026-07-16",
       "srgIds": [
-        "SRG-OS-0500170"
+        "SRG-OS-500170"
       ],
       "cciIds": [
         "CCI-005082"
@@ -15914,7 +15914,7 @@
       "publicationState": "current",
       "publishedDate": "2026-08-17",
       "srgIds": [
-        "SRG-OS-0568706"
+        "SRG-OS-568706"
       ],
       "cciIds": [
         "CCI-003364"
@@ -15953,7 +15953,7 @@
       "publicationState": "current",
       "publishedDate": "2026-09-18",
       "srgIds": [
-        "SRG-OS-0360690"
+        "SRG-OS-360690"
       ],
       "cciIds": [
         "CCI-005886"
@@ -15992,7 +15992,7 @@
       "publicationState": "current",
       "publishedDate": "2026-01-19",
       "srgIds": [
-        "SRG-OS-0900781"
+        "SRG-OS-900781"
       ],
       "cciIds": [
         "CCI-004647"
@@ -16031,7 +16031,7 @@
       "publicationState": "current",
       "publishedDate": "2026-02-20",
       "srgIds": [
-        "SRG-OS-0229336"
+        "SRG-OS-229336"
       ],
       "cciIds": [
         "CCI-006198"
@@ -16070,7 +16070,7 @@
       "publicationState": "current",
       "publishedDate": "2026-03-21",
       "srgIds": [
-        "SRG-OS-0885635"
+        "SRG-OS-885635"
       ],
       "cciIds": [
         "CCI-001581"
@@ -16109,7 +16109,7 @@
       "publicationState": "current",
       "publishedDate": "2026-04-22",
       "srgIds": [
-        "SRG-OS-0454662"
+        "SRG-OS-454662"
       ],
       "cciIds": [
         "CCI-007742"
@@ -16148,7 +16148,7 @@
       "publicationState": "current",
       "publishedDate": "2026-05-23",
       "srgIds": [
-        "SRG-OS-0234513"
+        "SRG-OS-234513"
       ],
       "cciIds": [
         "CCI-007061"
@@ -16187,7 +16187,7 @@
       "publicationState": "current",
       "publishedDate": "2026-06-24",
       "srgIds": [
-        "SRG-OS-0600109"
+        "SRG-OS-600109"
       ],
       "cciIds": [
         "CCI-006424"
@@ -16226,7 +16226,7 @@
       "publicationState": "current",
       "publishedDate": "2026-07-25",
       "srgIds": [
-        "SRG-OS-0308358"
+        "SRG-OS-308358"
       ],
       "cciIds": [
         "CCI-004477"
@@ -16265,7 +16265,7 @@
       "publicationState": "current",
       "publishedDate": "2026-08-26",
       "srgIds": [
-        "SRG-OS-0303847"
+        "SRG-OS-303847"
       ],
       "cciIds": [
         "CCI-003408"
@@ -16304,7 +16304,7 @@
       "publicationState": "current",
       "publishedDate": "2026-09-27",
       "srgIds": [
-        "SRG-OS-0686408"
+        "SRG-OS-686408"
       ],
       "cciIds": [
         "CCI-008558"
@@ -16343,7 +16343,7 @@
       "publicationState": "current",
       "publishedDate": "2026-01-01",
       "srgIds": [
-        "SRG-OS-0686183"
+        "SRG-OS-686183"
       ],
       "cciIds": [
         "CCI-005523"
@@ -16382,7 +16382,7 @@
       "publicationState": "current",
       "publishedDate": "2026-02-02",
       "srgIds": [
-        "SRG-OS-0901860"
+        "SRG-OS-901860"
       ],
       "cciIds": [
         "CCI-002859"
@@ -16421,7 +16421,7 @@
       "publicationState": "current",
       "publishedDate": "2026-03-03",
       "srgIds": [
-        "SRG-OS-0187333"
+        "SRG-OS-187333"
       ],
       "cciIds": [
         "CCI-007289"
@@ -16460,7 +16460,7 @@
       "publicationState": "current",
       "publishedDate": "2026-04-04",
       "srgIds": [
-        "SRG-OS-0664954"
+        "SRG-OS-664954"
       ],
       "cciIds": [
         "CCI-006003"
@@ -16499,7 +16499,7 @@
       "publicationState": "current",
       "publishedDate": "2026-05-05",
       "srgIds": [
-        "SRG-OS-0993379"
+        "SRG-OS-993379"
       ],
       "cciIds": [
         "CCI-007551"
@@ -16538,7 +16538,7 @@
       "publicationState": "current",
       "publishedDate": "2026-06-06",
       "srgIds": [
-        "SRG-OS-0668764"
+        "SRG-OS-668764"
       ],
       "cciIds": [
         "CCI-003591"
@@ -16577,7 +16577,7 @@
       "publicationState": "current",
       "publishedDate": "2026-07-07",
       "srgIds": [
-        "SRG-OS-0583227"
+        "SRG-OS-583227"
       ],
       "cciIds": [
         "CCI-003502"
@@ -16616,7 +16616,7 @@
       "publicationState": "current",
       "publishedDate": "2026-08-08",
       "srgIds": [
-        "SRG-OS-0448017"
+        "SRG-OS-448017"
       ],
       "cciIds": [
         "CCI-002412"
@@ -16655,7 +16655,7 @@
       "publicationState": "current",
       "publishedDate": "2026-09-09",
       "srgIds": [
-        "SRG-OS-0304365"
+        "SRG-OS-304365"
       ],
       "cciIds": [
         "CCI-001612"
@@ -16694,7 +16694,7 @@
       "publicationState": "current",
       "publishedDate": "2026-01-10",
       "srgIds": [
-        "SRG-OS-0336253"
+        "SRG-OS-336253"
       ],
       "cciIds": [
         "CCI-002334"
@@ -16733,7 +16733,7 @@
       "publicationState": "current",
       "publishedDate": "2026-02-11",
       "srgIds": [
-        "SRG-OS-0560252"
+        "SRG-OS-560252"
       ],
       "cciIds": [
         "CCI-001716"
@@ -16772,7 +16772,7 @@
       "publicationState": "current",
       "publishedDate": "2026-03-12",
       "srgIds": [
-        "SRG-OS-0841633"
+        "SRG-OS-841633"
       ],
       "cciIds": [
         "CCI-003038"
@@ -16811,7 +16811,7 @@
       "publicationState": "current",
       "publishedDate": "2026-04-13",
       "srgIds": [
-        "SRG-OS-0567135"
+        "SRG-OS-567135"
       ],
       "cciIds": [
         "CCI-007295"
@@ -16850,7 +16850,7 @@
       "publicationState": "current",
       "publishedDate": "2026-05-14",
       "srgIds": [
-        "SRG-OS-0636723"
+        "SRG-OS-636723"
       ],
       "cciIds": [
         "CCI-007466"
@@ -16889,7 +16889,7 @@
       "publicationState": "current",
       "publishedDate": "2026-06-15",
       "srgIds": [
-        "SRG-OS-0613106"
+        "SRG-OS-613106"
       ],
       "cciIds": [
         "CCI-004692"
@@ -16928,7 +16928,7 @@
       "publicationState": "current",
       "publishedDate": "2026-07-16",
       "srgIds": [
-        "SRG-OS-0432541"
+        "SRG-OS-432541"
       ],
       "cciIds": [
         "CCI-008635"
@@ -16967,7 +16967,7 @@
       "publicationState": "current",
       "publishedDate": "2026-08-17",
       "srgIds": [
-        "SRG-OS-0927235"
+        "SRG-OS-927235"
       ],
       "cciIds": [
         "CCI-004805"
@@ -17006,7 +17006,7 @@
       "publicationState": "current",
       "publishedDate": "2026-09-18",
       "srgIds": [
-        "SRG-OS-0882206"
+        "SRG-OS-882206"
       ],
       "cciIds": [
         "CCI-007199"
@@ -17045,7 +17045,7 @@
       "publicationState": "current",
       "publishedDate": "2026-01-19",
       "srgIds": [
-        "SRG-OS-0941556"
+        "SRG-OS-941556"
       ],
       "cciIds": [
         "CCI-004500"
@@ -17084,7 +17084,7 @@
       "publicationState": "current",
       "publishedDate": "2026-02-20",
       "srgIds": [
-        "SRG-OS-0434480"
+        "SRG-OS-434480"
       ],
       "cciIds": [
         "CCI-005913"
@@ -17123,7 +17123,7 @@
       "publicationState": "current",
       "publishedDate": "2026-03-21",
       "srgIds": [
-        "SRG-OS-0703743"
+        "SRG-OS-703743"
       ],
       "cciIds": [
         "CCI-001774"
@@ -17162,7 +17162,7 @@
       "publicationState": "current",
       "publishedDate": "2026-04-22",
       "srgIds": [
-        "SRG-OS-0632530"
+        "SRG-OS-632530"
       ],
       "cciIds": [
         "CCI-005873"
@@ -17192,6 +17192,1966 @@
       "createdBy": "security-team",
       "createdAt": "7w ago",
       "lastModified": "13d ago",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-ssh-daemon-54",
+      "name": "stig-ssh-daemon",
+      "category": "security",
+      "description": "Anduril NixOS STIG: SSH daemon configuration hardened per DISA baseline (key exchange, MACs, ciphers restricted to FIPS-approved sets).",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.ssh_daemon.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680054 — SSH daemon configuration hardened per DISA baseline (key exchange, MACs, ciphers restricted to FIPS-approved sets).",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show ssh_daemon 2>/dev/null || nixos-option services.ssh_daemon.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "12w ago",
+      "lastModified": "3w ago",
+      "lineageId": "stig-mock-ssh-daemon-54",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680054"
+      ],
+      "cciIds": [
+        "CCI-900054"
+      ],
+      "controlFamily": "AC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-firewall-rules-55",
+      "name": "stig-firewall-rules",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Host firewall enforces default-deny inbound with explicit allow rules for required services.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.firewall_rules.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680055 — Host firewall enforces default-deny inbound with explicit allow rules for required services.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show firewall_rules 2>/dev/null || nixos-option services.firewall_rules.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "13w ago",
+      "lastModified": "4w ago",
+      "lineageId": "stig-mock-firewall-rules-55",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680055"
+      ],
+      "cciIds": [
+        "CCI-900055"
+      ],
+      "controlFamily": "SC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-audit-logging-56",
+      "name": "stig-audit-logging",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Audit subsystem captures privileged command execution, auth events, and file-access denials.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.audit_logging.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680056 — Audit subsystem captures privileged command execution, auth events, and file-access denials.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show audit_logging 2>/dev/null || nixos-option services.audit_logging.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "14w ago",
+      "lastModified": "1w ago",
+      "lineageId": "stig-mock-audit-logging-56",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680056"
+      ],
+      "cciIds": [
+        "CCI-900056"
+      ],
+      "controlFamily": "AU",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-account-lockout-57",
+      "name": "stig-account-lockout",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Account lockout enforced after repeated failed authentication attempts.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.account_lockout.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680057 — Account lockout enforced after repeated failed authentication attempts.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show account_lockout 2>/dev/null || nixos-option services.account_lockout.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "15w ago",
+      "lastModified": "2w ago",
+      "lineageId": "stig-mock-account-lockout-57",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680057"
+      ],
+      "cciIds": [
+        "CCI-900057"
+      ],
+      "controlFamily": "IA",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-password-complexity-58",
+      "name": "stig-password-complexity",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Password complexity policy requires mixed case, digits, and special characters.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.password_complexity.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680058 — Password complexity policy requires mixed case, digits, and special characters.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show password_complexity 2>/dev/null || nixos-option services.password_complexity.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "16w ago",
+      "lastModified": "3w ago",
+      "lineageId": "stig-mock-password-complexity-58",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680058"
+      ],
+      "cciIds": [
+        "CCI-900058"
+      ],
+      "controlFamily": "IA",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-kernel-hardening-59",
+      "name": "stig-kernel-hardening",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Kernel sysctl parameters hardened against common memory-corruption and network attack classes.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.kernel_hardening.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680059 — Kernel sysctl parameters hardened against common memory-corruption and network attack classes.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show kernel_hardening 2>/dev/null || nixos-option services.kernel_hardening.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "17w ago",
+      "lastModified": "4w ago",
+      "lineageId": "stig-mock-kernel-hardening-59",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680059"
+      ],
+      "cciIds": [
+        "CCI-900059"
+      ],
+      "controlFamily": "SC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-filesystem-permissions-60",
+      "name": "stig-filesystem-permissions",
+      "category": "security",
+      "description": "Anduril NixOS STIG: World-writable and unowned files are disallowed; sensitive paths use restrictive permissions.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.filesystem_permissions.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680060 — World-writable and unowned files are disallowed; sensitive paths use restrictive permissions.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show filesystem_permissions 2>/dev/null || nixos-option services.filesystem_permissions.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "8w ago",
+      "lastModified": "1w ago",
+      "lineageId": "stig-mock-filesystem-permissions-60",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680060"
+      ],
+      "cciIds": [
+        "CCI-900060"
+      ],
+      "controlFamily": "CM",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-usb-device-control-61",
+      "name": "stig-usb-device-control",
+      "category": "security",
+      "description": "Anduril NixOS STIG: USB mass-storage and peripheral devices are blocked unless explicitly allow-listed.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.usb_device_control.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680061 — USB mass-storage and peripheral devices are blocked unless explicitly allow-listed.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show usb_device_control 2>/dev/null || nixos-option services.usb_device_control.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "9w ago",
+      "lastModified": "2w ago",
+      "lineageId": "stig-mock-usb-device-control-61",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680061"
+      ],
+      "cciIds": [
+        "CCI-900061"
+      ],
+      "controlFamily": "MP",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-tls-cipher-suite-62",
+      "name": "stig-tls-cipher-suite",
+      "category": "security",
+      "description": "Anduril NixOS STIG: TLS services restricted to FIPS-validated cipher suites and TLS 1.2+.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.tls_cipher_suite.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680062 — TLS services restricted to FIPS-validated cipher suites and TLS 1.2+.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show tls_cipher_suite 2>/dev/null || nixos-option services.tls_cipher_suite.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "10w ago",
+      "lastModified": "3w ago",
+      "lineageId": "stig-mock-tls-cipher-suite-62",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680062"
+      ],
+      "cciIds": [
+        "CCI-900062"
+      ],
+      "controlFamily": "SC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-dns-resolver-63",
+      "name": "stig-dns-resolver",
+      "category": "security",
+      "description": "Anduril NixOS STIG: DNS resolution is pinned to approved resolvers with DNSSEC validation enabled.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.dns_resolver.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680063 — DNS resolution is pinned to approved resolvers with DNSSEC validation enabled.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show dns_resolver 2>/dev/null || nixos-option services.dns_resolver.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "11w ago",
+      "lastModified": "4w ago",
+      "lineageId": "stig-mock-dns-resolver-63",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680063"
+      ],
+      "cciIds": [
+        "CCI-900063"
+      ],
+      "controlFamily": "SC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-ntp-sync-64",
+      "name": "stig-ntp-sync",
+      "category": "security",
+      "description": "Anduril NixOS STIG: System clock is synchronized to an approved time source for reliable audit timestamps.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.ntp_sync.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680064 — System clock is synchronized to an approved time source for reliable audit timestamps.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show ntp_sync 2>/dev/null || nixos-option services.ntp_sync.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "12w ago",
+      "lastModified": "1w ago",
+      "lineageId": "stig-mock-ntp-sync-64",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680064"
+      ],
+      "cciIds": [
+        "CCI-900064"
+      ],
+      "controlFamily": "AU",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-syslog-forwarding-65",
+      "name": "stig-syslog-forwarding",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Audit and system logs are forwarded to a central log collector over an encrypted channel.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.syslog_forwarding.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680065 — Audit and system logs are forwarded to a central log collector over an encrypted channel.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show syslog_forwarding 2>/dev/null || nixos-option services.syslog_forwarding.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "13w ago",
+      "lastModified": "2w ago",
+      "lineageId": "stig-mock-syslog-forwarding-65",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680065"
+      ],
+      "cciIds": [
+        "CCI-900065"
+      ],
+      "controlFamily": "AU",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-sudo-policy-66",
+      "name": "stig-sudo-policy",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Sudo access is restricted to named users/groups with command logging enabled.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.sudo_policy.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680066 — Sudo access is restricted to named users/groups with command logging enabled.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show sudo_policy 2>/dev/null || nixos-option services.sudo_policy.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "14w ago",
+      "lastModified": "3w ago",
+      "lineageId": "stig-mock-sudo-policy-66",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680066"
+      ],
+      "cciIds": [
+        "CCI-900066"
+      ],
+      "controlFamily": "AC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-pam-stack-67",
+      "name": "stig-pam-stack",
+      "category": "security",
+      "description": "Anduril NixOS STIG: PAM stack enforces password quality, lockout, and session controls consistently across services.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.pam_stack.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680067 — PAM stack enforces password quality, lockout, and session controls consistently across services.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show pam_stack 2>/dev/null || nixos-option services.pam_stack.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "15w ago",
+      "lastModified": "4w ago",
+      "lineageId": "stig-mock-pam-stack-67",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680067"
+      ],
+      "cciIds": [
+        "CCI-900067"
+      ],
+      "controlFamily": "IA",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-selinux-apparmor-profile-68",
+      "name": "stig-selinux-apparmor-profile",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Mandatory access control profile is enforcing (not permissive) for system services.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.selinux_apparmor_profile.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680068 — Mandatory access control profile is enforcing (not permissive) for system services.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show selinux_apparmor_profile 2>/dev/null || nixos-option services.selinux_apparmor_profile.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "16w ago",
+      "lastModified": "1w ago",
+      "lineageId": "stig-mock-selinux-apparmor-profile-68",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680068"
+      ],
+      "cciIds": [
+        "CCI-900068"
+      ],
+      "controlFamily": "CM",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-boot-loader-integrity-69",
+      "name": "stig-boot-loader-integrity",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Boot loader requires a password for interactive edits and verifies kernel signatures.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.boot_loader_integrity.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680069 — Boot loader requires a password for interactive edits and verifies kernel signatures.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show boot_loader_integrity 2>/dev/null || nixos-option services.boot_loader_integrity.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "17w ago",
+      "lastModified": "2w ago",
+      "lineageId": "stig-mock-boot-loader-integrity-69",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680069"
+      ],
+      "cciIds": [
+        "CCI-900069"
+      ],
+      "controlFamily": "CM",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-disk-encryption-70",
+      "name": "stig-disk-encryption",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Data-at-rest is protected with full-disk encryption using an approved cipher.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.disk_encryption.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680070 — Data-at-rest is protected with full-disk encryption using an approved cipher.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show disk_encryption 2>/dev/null || nixos-option services.disk_encryption.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "8w ago",
+      "lastModified": "3w ago",
+      "lineageId": "stig-mock-disk-encryption-70",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680070"
+      ],
+      "cciIds": [
+        "CCI-900070"
+      ],
+      "controlFamily": "SC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-service-isolation-71",
+      "name": "stig-service-isolation",
+      "category": "security",
+      "description": "Anduril NixOS STIG: System services run under dedicated unprivileged accounts with restricted capabilities.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.service_isolation.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680071 — System services run under dedicated unprivileged accounts with restricted capabilities.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show service_isolation 2>/dev/null || nixos-option services.service_isolation.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "9w ago",
+      "lastModified": "4w ago",
+      "lineageId": "stig-mock-service-isolation-71",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680071"
+      ],
+      "cciIds": [
+        "CCI-900071"
+      ],
+      "controlFamily": "CM",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-network-segmentation-72",
+      "name": "stig-network-segmentation",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Host network interfaces are segmented per zone; inter-zone routing is explicitly denied by default.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.network_segmentation.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680072 — Host network interfaces are segmented per zone; inter-zone routing is explicitly denied by default.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show network_segmentation 2>/dev/null || nixos-option services.network_segmentation.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "10w ago",
+      "lastModified": "1w ago",
+      "lineageId": "stig-mock-network-segmentation-72",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680072"
+      ],
+      "cciIds": [
+        "CCI-900072"
+      ],
+      "controlFamily": "SC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-container-runtime-73",
+      "name": "stig-container-runtime",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Container runtime is configured to drop unnecessary capabilities and run rootless where supported.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.container_runtime.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680073 — Container runtime is configured to drop unnecessary capabilities and run rootless where supported.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show container_runtime 2>/dev/null || nixos-option services.container_runtime.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "11w ago",
+      "lastModified": "2w ago",
+      "lineageId": "stig-mock-container-runtime-73",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680073"
+      ],
+      "cciIds": [
+        "CCI-900073"
+      ],
+      "controlFamily": "CM",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-package-signing-74",
+      "name": "stig-package-signing",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Package manager only installs packages signed by a trusted, pinned key set.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.package_signing.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680074 — Package manager only installs packages signed by a trusted, pinned key set.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show package_signing 2>/dev/null || nixos-option services.package_signing.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "12w ago",
+      "lastModified": "3w ago",
+      "lineageId": "stig-mock-package-signing-74",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680074"
+      ],
+      "cciIds": [
+        "CCI-900074"
+      ],
+      "controlFamily": "CM",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-update-cadence-75",
+      "name": "stig-update-cadence",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Security updates are applied within the required patch window and tracked.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.update_cadence.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680075 — Security updates are applied within the required patch window and tracked.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show update_cadence 2>/dev/null || nixos-option services.update_cadence.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "13w ago",
+      "lastModified": "4w ago",
+      "lineageId": "stig-mock-update-cadence-75",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680075"
+      ],
+      "cciIds": [
+        "CCI-900075"
+      ],
+      "controlFamily": "CM",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-session-timeout-76",
+      "name": "stig-session-timeout",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Interactive sessions are terminated automatically after a defined idle period.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.session_timeout.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680076 — Interactive sessions are terminated automatically after a defined idle period.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show session_timeout 2>/dev/null || nixos-option services.session_timeout.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "14w ago",
+      "lastModified": "1w ago",
+      "lineageId": "stig-mock-session-timeout-76",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680076"
+      ],
+      "cciIds": [
+        "CCI-900076"
+      ],
+      "controlFamily": "AC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-banner-text-77",
+      "name": "stig-banner-text",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Login banners display the required consent-to-monitoring notice before authentication.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.banner_text.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680077 — Login banners display the required consent-to-monitoring notice before authentication.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show banner_text 2>/dev/null || nixos-option services.banner_text.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "15w ago",
+      "lastModified": "2w ago",
+      "lineageId": "stig-mock-banner-text-77",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680077"
+      ],
+      "cciIds": [
+        "CCI-900077"
+      ],
+      "controlFamily": "AC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-log-rotation-78",
+      "name": "stig-log-rotation",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Audit logs are rotated and retained to prevent loss of accountability data from disk exhaustion.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.log_rotation.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680078 — Audit logs are rotated and retained to prevent loss of accountability data from disk exhaustion.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show log_rotation 2>/dev/null || nixos-option services.log_rotation.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "16w ago",
+      "lastModified": "3w ago",
+      "lineageId": "stig-mock-log-rotation-78",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680078"
+      ],
+      "cciIds": [
+        "CCI-900078"
+      ],
+      "controlFamily": "AU",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-core-dump-handling-79",
+      "name": "stig-core-dump-handling",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Core dumps are disabled or restricted to prevent leakage of sensitive process memory.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.core_dump_handling.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680079 — Core dumps are disabled or restricted to prevent leakage of sensitive process memory.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show core_dump_handling 2>/dev/null || nixos-option services.core_dump_handling.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "17w ago",
+      "lastModified": "4w ago",
+      "lineageId": "stig-mock-core-dump-handling-79",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680079"
+      ],
+      "cciIds": [
+        "CCI-900079"
+      ],
+      "controlFamily": "SI",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-ipv6-stack-80",
+      "name": "stig-ipv6-stack",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Unused IPv6 stack is disabled where not required, reducing network attack surface.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.ipv6_stack.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680080 — Unused IPv6 stack is disabled where not required, reducing network attack surface.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show ipv6_stack 2>/dev/null || nixos-option services.ipv6_stack.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "8w ago",
+      "lastModified": "1w ago",
+      "lineageId": "stig-mock-ipv6-stack-80",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680080"
+      ],
+      "cciIds": [
+        "CCI-900080"
+      ],
+      "controlFamily": "SC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-usb-storage-81",
+      "name": "stig-usb-storage",
+      "category": "security",
+      "description": "Anduril NixOS STIG: USB mass storage class drivers are blocked at the kernel level.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.usb_storage.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680081 — USB mass storage class drivers are blocked at the kernel level.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show usb_storage 2>/dev/null || nixos-option services.usb_storage.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "9w ago",
+      "lastModified": "2w ago",
+      "lineageId": "stig-mock-usb-storage-81",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680081"
+      ],
+      "cciIds": [
+        "CCI-900081"
+      ],
+      "controlFamily": "MP",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-bluetooth-radio-82",
+      "name": "stig-bluetooth-radio",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Bluetooth radio is disabled on systems with no approved use case.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.bluetooth_radio.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680082 — Bluetooth radio is disabled on systems with no approved use case.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show bluetooth_radio 2>/dev/null || nixos-option services.bluetooth_radio.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "10w ago",
+      "lastModified": "3w ago",
+      "lineageId": "stig-mock-bluetooth-radio-82",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680082"
+      ],
+      "cciIds": [
+        "CCI-900082"
+      ],
+      "controlFamily": "SC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-wireless-interface-83",
+      "name": "stig-wireless-interface",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Wireless network interfaces are disabled unless explicitly required and approved.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.wireless_interface.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680083 — Wireless network interfaces are disabled unless explicitly required and approved.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show wireless_interface 2>/dev/null || nixos-option services.wireless_interface.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "11w ago",
+      "lastModified": "4w ago",
+      "lineageId": "stig-mock-wireless-interface-83",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680083"
+      ],
+      "cciIds": [
+        "CCI-900083"
+      ],
+      "controlFamily": "SC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-snmp-daemon-84",
+      "name": "stig-snmp-daemon",
+      "category": "security",
+      "description": "Anduril NixOS STIG: SNMP service is disabled, or restricted to v3 with authentication and encryption.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.snmp_daemon.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680084 — SNMP service is disabled, or restricted to v3 with authentication and encryption.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show snmp_daemon 2>/dev/null || nixos-option services.snmp_daemon.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "12w ago",
+      "lastModified": "1w ago",
+      "lineageId": "stig-mock-snmp-daemon-84",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680084"
+      ],
+      "cciIds": [
+        "CCI-900084"
+      ],
+      "controlFamily": "SC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-nfs-export-85",
+      "name": "stig-nfs-export",
+      "category": "security",
+      "description": "Anduril NixOS STIG: NFS exports restrict access to approved subnets and disallow root squash bypass.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.nfs_export.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680085 — NFS exports restrict access to approved subnets and disallow root squash bypass.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show nfs_export 2>/dev/null || nixos-option services.nfs_export.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "13w ago",
+      "lastModified": "2w ago",
+      "lineageId": "stig-mock-nfs-export-85",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680085"
+      ],
+      "cciIds": [
+        "CCI-900085"
+      ],
+      "controlFamily": "SC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-samba-share-86",
+      "name": "stig-samba-share",
+      "category": "security",
+      "description": "Anduril NixOS STIG: SMB/Samba shares require authentication and disallow guest access.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.samba_share.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680086 — SMB/Samba shares require authentication and disallow guest access.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show samba_share 2>/dev/null || nixos-option services.samba_share.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "14w ago",
+      "lastModified": "3w ago",
+      "lineageId": "stig-mock-samba-share-86",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680086"
+      ],
+      "cciIds": [
+        "CCI-900086"
+      ],
+      "controlFamily": "SC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-cron-daemon-87",
+      "name": "stig-cron-daemon",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Cron job definitions are restricted to authorized users and reviewed for integrity.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.cron_daemon.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680087 — Cron job definitions are restricted to authorized users and reviewed for integrity.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show cron_daemon 2>/dev/null || nixos-option services.cron_daemon.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "15w ago",
+      "lastModified": "4w ago",
+      "lineageId": "stig-mock-cron-daemon-87",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680087"
+      ],
+      "cciIds": [
+        "CCI-900087"
+      ],
+      "controlFamily": "CM",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-mail-relay-88",
+      "name": "stig-mail-relay",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Local mail transfer agent does not relay mail for untrusted networks.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.mail_relay.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680088 — Local mail transfer agent does not relay mail for untrusted networks.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show mail_relay 2>/dev/null || nixos-option services.mail_relay.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "16w ago",
+      "lastModified": "1w ago",
+      "lineageId": "stig-mock-mail-relay-88",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680088"
+      ],
+      "cciIds": [
+        "CCI-900088"
+      ],
+      "controlFamily": "SC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-x11-forwarding-89",
+      "name": "stig-x11-forwarding",
+      "category": "security",
+      "description": "Anduril NixOS STIG: X11 forwarding over SSH is disabled unless explicitly required.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.x11_forwarding.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680089 — X11 forwarding over SSH is disabled unless explicitly required.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show x11_forwarding 2>/dev/null || nixos-option services.x11_forwarding.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "17w ago",
+      "lastModified": "2w ago",
+      "lineageId": "stig-mock-x11-forwarding-89",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680089"
+      ],
+      "cciIds": [
+        "CCI-900089"
+      ],
+      "controlFamily": "AC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-vnc-service-90",
+      "name": "stig-vnc-service",
+      "category": "security",
+      "description": "Anduril NixOS STIG: VNC remote-desktop service is disabled or tunneled over an authenticated, encrypted channel.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.vnc_service.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680090 — VNC remote-desktop service is disabled or tunneled over an authenticated, encrypted channel.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show vnc_service 2>/dev/null || nixos-option services.vnc_service.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "8w ago",
+      "lastModified": "3w ago",
+      "lineageId": "stig-mock-vnc-service-90",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680090"
+      ],
+      "cciIds": [
+        "CCI-900090"
+      ],
+      "controlFamily": "AC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-container-image-scanning-91",
+      "name": "stig-container-image-scanning",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Container images are scanned for known vulnerabilities before deployment.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.container_image_scanning.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680091 — Container images are scanned for known vulnerabilities before deployment.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show container_image_scanning 2>/dev/null || nixos-option services.container_image_scanning.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "9w ago",
+      "lastModified": "4w ago",
+      "lineageId": "stig-mock-container-image-scanning-91",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680091"
+      ],
+      "cciIds": [
+        "CCI-900091"
+      ],
+      "controlFamily": "SI",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-secrets-storage-92",
+      "name": "stig-secrets-storage",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Application secrets are stored in an encrypted secrets manager, not plaintext config.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.secrets_storage.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680092 — Application secrets are stored in an encrypted secrets manager, not plaintext config.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show secrets_storage 2>/dev/null || nixos-option services.secrets_storage.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "10w ago",
+      "lastModified": "1w ago",
+      "lineageId": "stig-mock-secrets-storage-92",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680092"
+      ],
+      "cciIds": [
+        "CCI-900092"
+      ],
+      "controlFamily": "IA",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-key-rotation-93",
+      "name": "stig-key-rotation",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Cryptographic keys are rotated on a defined schedule and revoked keys are removed from trust stores.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.key_rotation.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680093 — Cryptographic keys are rotated on a defined schedule and revoked keys are removed from trust stores.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show key_rotation 2>/dev/null || nixos-option services.key_rotation.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "11w ago",
+      "lastModified": "2w ago",
+      "lineageId": "stig-mock-key-rotation-93",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680093"
+      ],
+      "cciIds": [
+        "CCI-900093"
+      ],
+      "controlFamily": "IA",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-certificate-validation-94",
+      "name": "stig-certificate-validation",
+      "category": "security",
+      "description": "Anduril NixOS STIG: TLS clients validate certificate chains and reject expired or self-signed certificates in production.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.certificate_validation.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680094 — TLS clients validate certificate chains and reject expired or self-signed certificates in production.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show certificate_validation 2>/dev/null || nixos-option services.certificate_validation.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "12w ago",
+      "lastModified": "3w ago",
+      "lineageId": "stig-mock-certificate-validation-94",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680094"
+      ],
+      "cciIds": [
+        "CCI-900094"
+      ],
+      "controlFamily": "SC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-kernel-module-loading-95",
+      "name": "stig-kernel-module-loading",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Loading of unused or unsigned kernel modules is disabled.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.kernel_module_loading.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680095 — Loading of unused or unsigned kernel modules is disabled.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show kernel_module_loading 2>/dev/null || nixos-option services.kernel_module_loading.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "13w ago",
+      "lastModified": "4w ago",
+      "lineageId": "stig-mock-kernel-module-loading-95",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680095"
+      ],
+      "cciIds": [
+        "CCI-900095"
+      ],
+      "controlFamily": "CM",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-aslr-enforcement-96",
+      "name": "stig-aslr-enforcement",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Address space layout randomization is enabled fleet-wide to mitigate memory-corruption exploits.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.aslr_enforcement.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680096 — Address space layout randomization is enabled fleet-wide to mitigate memory-corruption exploits.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show aslr_enforcement 2>/dev/null || nixos-option services.aslr_enforcement.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "14w ago",
+      "lastModified": "1w ago",
+      "lineageId": "stig-mock-aslr-enforcement-96",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680096"
+      ],
+      "cciIds": [
+        "CCI-900096"
+      ],
+      "controlFamily": "SI",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-stack-protector-97",
+      "name": "stig-stack-protector",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Binaries are compiled with stack-protector and related exploit-mitigation flags.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.stack_protector.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680097 — Binaries are compiled with stack-protector and related exploit-mitigation flags.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show stack_protector 2>/dev/null || nixos-option services.stack_protector.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "15w ago",
+      "lastModified": "2w ago",
+      "lineageId": "stig-mock-stack-protector-97",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680097"
+      ],
+      "cciIds": [
+        "CCI-900097"
+      ],
+      "controlFamily": "SI",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-ptrace-scope-98",
+      "name": "stig-ptrace-scope",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Kernel ptrace scope is restricted to prevent unprivileged process inspection.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.ptrace_scope.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680098 — Kernel ptrace scope is restricted to prevent unprivileged process inspection.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show ptrace_scope 2>/dev/null || nixos-option services.ptrace_scope.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "16w ago",
+      "lastModified": "3w ago",
+      "lineageId": "stig-mock-ptrace-scope-98",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680098"
+      ],
+      "cciIds": [
+        "CCI-900098"
+      ],
+      "controlFamily": "SI",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-coredump-storage-99",
+      "name": "stig-coredump-storage",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Core dump storage location is restricted and cleared on a schedule.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.coredump_storage.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680099 — Core dump storage location is restricted and cleared on a schedule.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show coredump_storage 2>/dev/null || nixos-option services.coredump_storage.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "17w ago",
+      "lastModified": "4w ago",
+      "lineageId": "stig-mock-coredump-storage-99",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680099"
+      ],
+      "cciIds": [
+        "CCI-900099"
+      ],
+      "controlFamily": "SI",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-swap-encryption-100",
+      "name": "stig-swap-encryption",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Swap space is encrypted to prevent recovery of sensitive data written to disk.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.swap_encryption.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680100 — Swap space is encrypted to prevent recovery of sensitive data written to disk.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show swap_encryption 2>/dev/null || nixos-option services.swap_encryption.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "8w ago",
+      "lastModified": "1w ago",
+      "lineageId": "stig-mock-swap-encryption-100",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680100"
+      ],
+      "cciIds": [
+        "CCI-900100"
+      ],
+      "controlFamily": "SC",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-tmp-mount-options-101",
+      "name": "stig-tmp-mount-options",
+      "category": "security",
+      "description": "Anduril NixOS STIG: Temporary filesystems are mounted with noexec, nosuid, and nodev options.",
+      "type": "custom",
+      "severity": "low",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.tmp_mount_options.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680101 — Temporary filesystems are mounted with noexec, nosuid, and nodev options.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show tmp_mount_options 2>/dev/null || nixos-option services.tmp_mount_options.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "9w ago",
+      "lastModified": "2w ago",
+      "lineageId": "stig-mock-tmp-mount-options-101",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680101"
+      ],
+      "cciIds": [
+        "CCI-900101"
+      ],
+      "controlFamily": "CM",
+      "framework": "DISA STIG"
+    },
+    {
+      "id": "stig-mock-home-directory-perms-102",
+      "name": "stig-home-directory-perms",
+      "category": "security",
+      "description": "Anduril NixOS STIG: User home directories default to owner-only permissions.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.home_directory_perms.enable",
+          "op": "==",
+          "value": "true"
+        }
+      ],
+      "rationale": "SRG-OS-680102 — User home directories default to owner-only permissions.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "systemctl show home_directory_perms 2>/dev/null || nixos-option services.home_directory_perms.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "10w ago",
+      "lastModified": "3w ago",
+      "lineageId": "stig-mock-home-directory-perms-102",
+      "revision": 1,
+      "publicationState": "current",
+      "publishedDate": "2026-04-12",
+      "srgIds": [
+        "SRG-OS-680102"
+      ],
+      "cciIds": [
+        "CCI-900102"
+      ],
+      "controlFamily": "MP",
       "framework": "DISA STIG"
     }
   ],
@@ -17307,10 +19267,6 @@
         "stig-fips",
         "stig-usbguard",
         "stig-pwquality",
-        "stig-pwquality-r1",
-        "stig-pwquality-r2",
-        "stig-pwquality-r3",
-        "stig-pwquality-r4",
         "stig-mock-ssh-daemon-0",
         "stig-mock-firewall-rules-1",
         "stig-mock-audit-logging-2",
@@ -17442,10 +19398,6 @@
         "stig-fips",
         "stig-usbguard",
         "stig-pwquality",
-        "stig-pwquality-r1",
-        "stig-pwquality-r2",
-        "stig-pwquality-r3",
-        "stig-pwquality-r4",
         "stig-mock-ssh-daemon-0",
         "stig-mock-firewall-rules-1",
         "stig-mock-audit-logging-2",
@@ -17523,9 +19475,6 @@
         "stig-mock-syslog-forwarding-11",
         "stig-mock-service-isolation-17",
         "stig-pwquality",
-        "stig-pwquality-r1",
-        "stig-pwquality-r2",
-        "stig-pwquality-r3",
         "stig-mock-dns-resolver-9",
         "stig-mock-aslr-enforcement-42",
         "stig-mock-stack-protector-43",
@@ -17587,10 +19536,6 @@
         "stig-fips",
         "stig-usbguard",
         "stig-pwquality",
-        "stig-pwquality-r1",
-        "stig-pwquality-r2",
-        "stig-pwquality-r3",
-        "stig-pwquality-r4",
         "stig-mock-ssh-daemon-0",
         "stig-mock-firewall-rules-1",
         "stig-mock-audit-logging-2",

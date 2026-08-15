@@ -195,21 +195,36 @@ const ASSERT_DEFAULTS = {
 };
 
 function ImportStigModal({ onClose, onComplete }) {
-  const [step, setStep] = React.useState("upload"); // upload | review | done
-  const [parsed, setParsed] = React.useState(null);
+  const DRAFT_KEY = "cf-stig-import-draft";
+  const draft = (() => { try { return JSON.parse(localStorage.getItem(DRAFT_KEY) || "null"); } catch { return null; } })();
+
+  const [step, setStep] = React.useState(draft?.step || "upload"); // upload | review | reconcile | refine | done
+  const [parsed, setParsed] = React.useState(draft?.parsed || null);
   const [error, setError] = React.useState("");
   const [dragOver, setDragOver] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
-  const [fileName, setFileName] = React.useState("");
+  const [fileName, setFileName] = React.useState(draft?.fileName || "");
 
   // review-step state
-  const [bundleName, setBundleName] = React.useState("");
-  const [envs, setEnvs] = React.useState(["production"]);
+  const [bundleName, setBundleName] = React.useState(draft?.bundleName || "");
+  const [envs, setEnvs] = React.useState(draft?.envs || ["production"]);
   const [created, setCreated] = React.useState(null);
-  const [cursor, setCursor] = React.useState(0);
+  const [cursor, setCursor] = React.useState(draft?.cursor || 0);
   const [refineTab, setRefineTab] = React.useState("source");
-  const [refineRuleIds, setRefineRuleIds] = React.useState([]);
+  const [refineRuleIds, setRefineRuleIds] = React.useState(draft?.refineRuleIds || []);
   const fileRef = React.useRef(null);
+  const hadDraft = React.useRef(!!draft);
+
+  React.useEffect(() => {
+    if (step === "upload" && !parsed) { localStorage.removeItem(DRAFT_KEY); return; }
+    if (step === "done") { localStorage.removeItem(DRAFT_KEY); return; }
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({ step, parsed, fileName, bundleName, envs, cursor, refineRuleIds }));
+  }, [step, parsed, fileName, bundleName, envs, cursor, refineRuleIds]);
+
+  const discardDraft = () => {
+    localStorage.removeItem(DRAFT_KEY);
+    setStep("upload"); setParsed(null); setFileName(""); setBundleName(""); setEnvs(["production"]); setCursor(0); setRefineRuleIds([]); setError("");
+  };
 
   const allEnvs = (typeof ENVIRONMENTS !== "undefined" ? ENVIRONMENTS : []);
 
@@ -289,7 +304,7 @@ function ImportStigModal({ onClose, onComplete }) {
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={e=>e.stopPropagation()}>
       <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(720px,97vw)", maxHeight:"92vh", display:"flex", flexDirection:"column" }}>
 
         {/* ---------- Upload ---------- */}
@@ -341,7 +356,13 @@ function ImportStigModal({ onClose, onComplete }) {
         {step === "review" && parsed && (
           <>
             <div className="modal-head">
-              <h2><Icon name="shield" size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/>Review imported controls</h2>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:10 }}>
+                <h2><Icon name="shield" size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/>Review imported controls</h2>
+                <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                  <button className="focus-ring" style={{ all:"unset", cursor:"pointer", fontSize:11, color:"var(--cf-text-muted)", textDecoration:"underline" }} onClick={discardDraft}>Discard draft</button>
+                  <button className="btn-icon focus-ring" title="Pause — your progress is saved" onClick={onClose}><Icon name="x" size={16}/></button>
+                </div>
+              </div>
               <p><span className="mono">{fileName}</span> · {parsed.title} · <strong>{parsed.version}</strong></p>
             </div>
             <div className="modal-body" style={{ overflowY:"auto" }}>
@@ -439,7 +460,13 @@ function ImportStigModal({ onClose, onComplete }) {
         {step === "reconcile" && parsed && (
           <>
             <div className="modal-head">
-              <h2><Icon name="link" size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/>Reconciling {selectedRules.length} controls</h2>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:10 }}>
+                <h2><Icon name="link" size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/>Reconciling {selectedRules.length} controls</h2>
+                <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                  <button className="focus-ring" style={{ all:"unset", cursor:"pointer", fontSize:11, color:"var(--cf-text-muted)", textDecoration:"underline" }} onClick={discardDraft}>Discard draft</button>
+                  <button className="btn-icon focus-ring" title="Pause — your progress is saved" onClick={onClose}><Icon name="x" size={16}/></button>
+                </div>
+              </div>
               <p>Checked each control against policies and mappings already on file before asking you to do anything.</p>
             </div>
             <div className="modal-body" style={{ overflowY:"auto" }}>
@@ -544,7 +571,11 @@ function ImportStigModal({ onClose, onComplete }) {
               <div className="modal-head">
                 <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:10 }}>
                   <h2><Icon name="shield" size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/>Refine policy {cursor + 1} of {total}</h2>
-                  <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{rule.stigId}</span>
+                  <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                    <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{rule.stigId}</span>
+                    <button className="focus-ring" style={{ all:"unset", cursor:"pointer", fontSize:11, color:"var(--cf-text-muted)", textDecoration:"underline" }} onClick={discardDraft}>Discard draft</button>
+                    <button className="btn-icon focus-ring" title="Pause — your progress is saved" onClick={onClose}><Icon name="x" size={16}/></button>
+                  </div>
                 </div>
                 <div style={{ height:4, borderRadius:99, background:"var(--cf-divider)", marginTop:8, overflow:"hidden" }}>
                   <div style={{ height:"100%", width:`${((cursor + 1) / total) * 100}%`, background:"var(--cf-brand-purple)", transition:"width .2s" }}/>
@@ -596,7 +627,7 @@ function ImportStigModal({ onClose, onComplete }) {
                     <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6 }}>
                       <span style={{ fontSize:10, fontWeight:700, padding:"2px 7px", borderRadius:4, color:CAT[rule.severity].color, background:`color-mix(in oklab, ${CAT[rule.severity].color} 14%, transparent)` }}>{CAT[rule.severity].cat}</span>
                       <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{rule.stigId}</span>
-                      {rule.srg && <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{rule.srg}</span>}
+                      {rule.srg && <span className="chip chip-unknown mono" style={{ fontSize:9 }}>{rule.srg}</span>}
                       {(rule.ccis||[]).map(c => <span key={c} className="chip chip-unknown mono" style={{ fontSize:9 }}>{c}</span>)}
                     </div>
                     <div style={{ fontSize:14, fontWeight:600, lineHeight:1.4 }}>{rule.title}</div>

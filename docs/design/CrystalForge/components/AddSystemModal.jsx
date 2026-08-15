@@ -57,7 +57,7 @@ function AddSystemModal({ onClose, coach }) {
                   <label>Hostname <span style={{ color: "#f87171" }}>*</span></label>
                   <input className="input focus-ring mono" value={form.hostname} onChange={e => set("hostname", e.target.value)} placeholder="web-server-1" autoFocus />
                 </div>
-                <div className="field">
+                <div className="field" style={{ marginTop: 0 }}>
                   <label>Environment</label>
                   <select className="input focus-ring" value={form.environment} onChange={e => set("environment", e.target.value)}>
                     {envList.map(e => <option key={e}>{e}</option>)}
@@ -113,7 +113,7 @@ function AddSystemModal({ onClose, coach }) {
                       {flakeList.map(f => <option key={f}>{f}</option>)}
                     </select>
                   </div>
-                  <div className="field">
+                  <div className="field" style={{ marginTop: 0 }}>
                     <label>Branch</label>
                     <input className="input focus-ring mono" value={form.branch} onChange={e => set("branch", e.target.value)} />
                   </div>
