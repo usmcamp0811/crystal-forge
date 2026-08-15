@@ -448,16 +448,16 @@ pub async fn recover_framework_version(
         return forbidden();
     }
 
-    let source_artifact_id = match body
+    // source_artifact_id is optional: required when the release has no artifact
+    // attached, omitted for retry when an artifact is already present.
+    let source_artifact_id: Option<Uuid> = match body
         .get("source_artifact_id")
         .and_then(|v| v.as_str())
         .map(|s| s.parse::<Uuid>())
     {
-        Some(Ok(id)) => id,
+        Some(Ok(id)) => Some(id),
         Some(Err(_)) => return bad_request("source_artifact_id must be a valid UUID"),
-        None => {
-            return bad_request("source_artifact_id is required");
-        }
+        None => None,
     };
 
     match attach_artifact_and_retry_framework_recovery(
@@ -467,16 +467,20 @@ pub async fn recover_framework_version(
     )
     .await
     {
-        Ok(()) => (
+        Ok(outcome) => (
             StatusCode::OK,
-            Json(serde_json::json!({"status": "ok", "framework_version_id": framework_version_id})),
+            Json(serde_json::json!({
+                "framework_version_id": framework_version_id,
+                "recovery_status": outcome.status,
+                "recovery_reason": outcome.reason,
+            })),
         )
             .into_response(),
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("not pending recovery")
                 || msg.contains("not in unresolved state")
-                || msg.contains("not eligible")
+                || msg.contains("source_artifact_id is required")
             {
                 bad_request(&msg)
             } else if msg.contains("does not exist")

@@ -443,21 +443,29 @@ pub async fn recover_framework_version(pool: &PgPool, id: Uuid) -> Result<()> {
     Ok(())
 }
 
-/// Attach a verified DISA source artifact to an unresolved release, then retry
-/// recovery for that release only.
+/// The outcome of a recovery attempt.
+#[derive(Debug)]
+pub struct RecoveryOutcome {
+    pub status: String,
+    pub reason: Option<String>,
+}
+
+/// Retry recovery for an unresolved framework release.
 ///
-/// Supports two cases:
-/// - `unresolved + no artifact`: attach the provided artifact and recover.
-/// - `unresolved + existing artifact`: ignore the new artifact and retry recovery
-///   with the already-attached artifact (idempotent retry path).
+/// `source_artifact_id` is optional:
+/// - When the release **already has an artifact** attached, omit it to retry
+///   using the existing artifact.
+/// - When the release has **no artifact**, `source_artifact_id` is required.
+///   The artifact is validated against the stored framework/release keys before
+///   being attached.
 ///
-/// If a new `source_artifact_id` is supplied it must parse to the stored
-/// framework/release keys before anything is written.
+/// Returns the post-recovery status and reason so callers can surface whether
+/// recovery actually succeeded (finalized) or failed again (unresolved).
 pub async fn attach_artifact_and_retry_framework_recovery(
     pool: &PgPool,
     framework_version_id: Uuid,
-    source_artifact_id: Uuid,
-) -> Result<()> {
+    source_artifact_id: Option<Uuid>,
+) -> Result<RecoveryOutcome> {
     let mut tx = pool.begin().await?;
     let release: (String, String, String, Option<Uuid>) = sqlx::query_as(
         "SELECT f.canonical_source_key, fv.canonical_release_key,
@@ -481,8 +489,9 @@ pub async fn attach_artifact_and_retry_framework_recovery(
 
     match existing_artifact {
         Some(_) => {
-            // Already has an artifact attached from a previous failed attempt.
-            // Reset status to pending so recover_framework_version will retry.
+            // Already has an artifact. Reset to pending so recovery retries it.
+            // Caller may supply a source_artifact_id but we ignore it here because
+            // the 0225 trigger only permits NULL→value transitions.
             sqlx::query(
                 "UPDATE compliance_framework_versions
                  SET migration_recovery_status = 'pending', migration_recovery_reason = NULL
@@ -493,11 +502,18 @@ pub async fn attach_artifact_and_retry_framework_recovery(
             .await?;
         }
         None => {
+            // No artifact attached. source_artifact_id is required.
+            let artifact_id = source_artifact_id.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "source_artifact_id is required when no artifact is attached to the release"
+                )
+            })?;
+
             // Validate and attach the new artifact before committing.
             let artifact: (Vec<u8>, String) = sqlx::query_as(
                 "SELECT content, filename FROM compliance_source_artifacts WHERE id = $1",
             )
-            .bind(source_artifact_id)
+            .bind(artifact_id)
             .fetch_one(&mut *tx)
             .await
             .context("source artifact does not exist")?;
@@ -522,7 +538,7 @@ pub async fn attach_artifact_and_retry_framework_recovery(
                      migration_recovery_reason = NULL
                  WHERE id = $2 AND semantic_digest = 'pending'",
             )
-            .bind(source_artifact_id)
+            .bind(artifact_id)
             .bind(framework_version_id)
             .execute(&mut *tx)
             .await?;
@@ -530,7 +546,17 @@ pub async fn attach_artifact_and_retry_framework_recovery(
     }
     tx.commit().await?;
     // Retry only this one release, not the global backfill.
-    recover_framework_version(pool, framework_version_id).await
+    recover_framework_version(pool, framework_version_id).await?;
+    // Read back the actual result so callers know whether recovery succeeded.
+    let (status, reason): (String, Option<String>) = sqlx::query_as(
+        "SELECT migration_recovery_status, migration_recovery_reason
+         FROM compliance_framework_versions WHERE id = $1",
+    )
+    .bind(framework_version_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to read recovery outcome")?;
+    Ok(RecoveryOutcome { status, reason })
 }
 
 async fn persist_legacy_stig_topology(
@@ -822,5 +848,202 @@ mod tests {
             .unwrap();
         assert_eq!(parent, Some(group_version_id));
         assert_eq!(external_id, "xccdf_mil.disa.stig_rule_SV-1r1_rule");
+    }
+
+    // ── Recovery endpoint edge-case tests ─────────────────────────────────────
+
+    /// Helper: insert a minimal pending unresolved framework version row.
+    async fn insert_unresolved_row(
+        pool: &PgPool,
+        canonical_source_key: &str,
+        canonical_release_key: &str,
+        artifact_id: Option<Uuid>,
+    ) -> Uuid {
+        let mut tx = pool.begin().await.unwrap();
+        let framework_id = upsert_framework_lineage(
+            &mut tx,
+            "Recovery test FW",
+            Some("DISA"),
+            canonical_source_key,
+            None,
+        )
+        .await
+        .unwrap();
+        let version_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_framework_versions
+                (framework_id, version, canonical_release_key, title,
+                 source_artifact_id, semantic_digest, migration_recovery_status,
+                 migration_recovery_reason)
+             VALUES ($1, 'V1R1', $2, 'Test', $3, 'pending', 'unresolved',
+                     'artifact unavailable')
+             RETURNING id",
+        )
+        .bind(framework_id)
+        .bind(canonical_release_key)
+        .bind(artifact_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        version_id
+    }
+
+    /// Helper: build a minimal DISA STIG XML that produce a known identity.
+    fn minimal_stig_xml(key: &str) -> String {
+        format!(
+            r#"<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="xccdf_mil.disa.stig_benchmark_{key}"><title>Recovery STIG {key}</title><version>V1R1</version><Group id="V-1"><title>G</title><Rule id="xccdf_mil.disa.stig_rule_SV-1r1_rule" severity="medium"><title>R</title><ident system="http://cyber.mil/stigs/stig">V-1</ident></Rule></Group></Benchmark>"#
+        )
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a database"]
+    async fn recovery_no_artifact_no_request_artifact_returns_required_error() {
+        let pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        let key = format!("rec-no-art-{}", Uuid::new_v4());
+        let fv_id = insert_unresolved_row(&pool, &key, "V1R1", None).await;
+        // No artifact attached, no artifact supplied → should fail with clear message.
+        let err = attach_artifact_and_retry_framework_recovery(&pool, fv_id, None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("source_artifact_id is required"),
+            "unexpected error: {err}"
+        );
+        // Row must remain unresolved.
+        let (status,): (String,) = sqlx::query_as(
+            "SELECT migration_recovery_status FROM compliance_framework_versions WHERE id = $1",
+        )
+        .bind(fv_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "unresolved");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a database"]
+    async fn recovery_existing_artifact_no_request_artifact_retries_and_succeeds() {
+        let pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        let key = format!("rec-existing-art-{}", Uuid::new_v4());
+        let xml = minimal_stig_xml(&key);
+        let identity = identify_framework(
+            &process_xccdf_bytes(
+                xml.as_bytes().to_vec(),
+                Some("x.xml".into()),
+                &InterchangeLimits::default(),
+            )
+            .unwrap()
+            .parsed,
+        )
+        .unwrap();
+        // Insert artifact into DB.
+        let artifact_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_source_artifacts
+                (content, filename, media_type, sha256, parser_version)
+             VALUES ($1, 'x.xml', 'application/xml', encode(digest($1, 'sha256'), 'hex'), 'test')
+             RETURNING id",
+        )
+        .bind(xml.as_bytes())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let fv_id = insert_unresolved_row(
+            &pool,
+            &identity.canonical_source_key,
+            &identity.canonical_release_key,
+            Some(artifact_id),
+        )
+        .await;
+        // Retry without passing an artifact_id — uses the existing attachment.
+        let outcome = attach_artifact_and_retry_framework_recovery(&pool, fv_id, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome.status, "finalized",
+            "expected finalized, got {} ({:?})",
+            outcome.status, outcome.reason
+        );
+        assert!(outcome.reason.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a database"]
+    async fn recovery_success_returns_finalized_status() {
+        let pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        let key = format!("rec-success-{}", Uuid::new_v4());
+        let xml = minimal_stig_xml(&key);
+        let identity = identify_framework(
+            &process_xccdf_bytes(
+                xml.as_bytes().to_vec(),
+                Some("x.xml".into()),
+                &InterchangeLimits::default(),
+            )
+            .unwrap()
+            .parsed,
+        )
+        .unwrap();
+        let artifact_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_source_artifacts
+                (content, filename, media_type, sha256, parser_version)
+             VALUES ($1, 'x.xml', 'application/xml', encode(digest($1, 'sha256'), 'hex'), 'test')
+             RETURNING id",
+        )
+        .bind(xml.as_bytes())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // No artifact on the row — supply it via the call.
+        let fv_id = insert_unresolved_row(
+            &pool,
+            &identity.canonical_source_key,
+            &identity.canonical_release_key,
+            None,
+        )
+        .await;
+        let outcome = attach_artifact_and_retry_framework_recovery(&pool, fv_id, Some(artifact_id))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome.status, "finalized",
+            "expected finalized: {:?}",
+            outcome.reason
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a database"]
+    async fn recovery_failure_returns_unresolved_status_not_error() {
+        let pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        let key = format!("rec-fail-{}", Uuid::new_v4());
+        // Insert an artifact whose identity intentionally mismatches the row.
+        let mismatched_xml = minimal_stig_xml(&format!("different-{key}"));
+        let artifact_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_source_artifacts
+                (content, filename, media_type, sha256, parser_version)
+             VALUES ($1, 'x.xml', 'application/xml', encode(digest($1, 'sha256'), 'hex'), 'test')
+             RETURNING id",
+        )
+        .bind(mismatched_xml.as_bytes())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // Row uses a different canonical_source_key from the artifact.
+        let fv_id = insert_unresolved_row(&pool, &key, "V1R1", None).await;
+        // attach_artifact_and_retry should fail with a clear message, not panic.
+        let err = attach_artifact_and_retry_framework_recovery(&pool, fv_id, Some(artifact_id))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("identity does not match"),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -2005,7 +2005,7 @@ mod tests {
     #[test]
     fn pending_mapping_builder_captures_selection_metadata() {
         let framework = ComplianceFrameworkSummary { id: Uuid::from_u128(1), name: "NIST 800-53".into(), publisher: None, canonical_source_key: "nist".into(), description: None, version_count: 1 };
-        let version = ComplianceFrameworkVersionSummary { id: Uuid::from_u128(2), framework_id: framework.id, version: "Rev 5".into(), canonical_release_key: "rev5".into(), title: None, published_at: None, semantic_digest: "digest".into(), requirement_count: 1 };
+        let version = ComplianceFrameworkVersionSummary { id: Uuid::from_u128(2), framework_id: framework.id, version: "Rev 5".into(), canonical_release_key: "rev5".into(), title: None, published_at: None, semantic_digest: "digest".into(), migration_recovery_status: "finalized".into(), migration_recovery_reason: None, requirement_count: 1 };
         let requirement = RequirementVersionSummary { id: Uuid::from_u128(3), requirement_id: Uuid::from_u128(4), framework_version_id: version.id, external_id: "SC-45".into(), title: Some("System time synchronization".into()), kind: "control".into(), severity: None, parent_requirement_version_id: None, semantic_digest: "req".into() };
         let mapping = pending_mapping_from_selection(&framework, &version, &requirement, "supports".into(), "partial".into(), Some("reviewed".into()));
         assert_eq!(mapping.requirement_version_id, requirement.id);
