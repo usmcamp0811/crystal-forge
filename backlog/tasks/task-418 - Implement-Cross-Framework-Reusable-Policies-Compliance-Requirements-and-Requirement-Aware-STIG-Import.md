@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 17:36'
+updated_date: '2026-08-15 18:37'
 labels: []
 milestone: m-22
 dependencies:
@@ -232,6 +232,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15 follow-up remediation pushed as aca32444. Added shared authoritative parsed DISA requirement collector; preview and commit now hash the complete parsed requirement set, independent of policy_records or user selections. Framework digest canonicalization is versioned as cf-model-json-2. Added migration 0217 to reopen/recanonicalize pre-9e90 framework rows and startup backfill, verified on isolated PostgreSQL 3042 with pending count reduced to zero. Added migration 0218 removing finalized requirement reparenting; fixture hierarchy now links while digests are pending and finalizes afterward. Added regression coverage for same-release same-requirement reuse with different artifact SHA, changed requirement conflict, finalized reparent rejection, and digest backfill. Verification: migrations 217/218 applied; framework digest backfill test passed; framework preview and requirement immutability DB tests passed; cargo fmt, SQLX_OFFLINE cargo check, and git diff check passed. MR remains Draft at aca32444.
 
 2026-08-15 review found concurrent startup backfill race, vacuous legacy-backfill test, DISA external_id incorrectly using canonical V-ID, and production STIG hierarchy not persisted. These are now the active remediation scope.
+
+2026-08-15 v4 checkpoint committed/pushed as 8b7e445e. Framework canonicalization now includes complete group/rule content plus hierarchy edges; migration 0220 reopens cf-model-json-3 rows and permits pending requirement content reconstruction while the parent framework remains pending. Startup backfill reconstructs legacy DISA topology from persisted source artifacts, preserves XCCDF Rule external IDs, and uses the same complete requirement set for framework identity. Verification: cargo fmt --all --check, SQLX_OFFLINE=true cargo check -p cf-server, and git diff --check passed. Isolated DB legacy topology test passed after correcting the fixture to use XCCDF <version> element. The broader framework_requirements DB filter had 8/11 passing; 3 failures were RowNotFound because the isolated database lacked seeded users after an attempted reset. Untracked packages/web-ui/assets/tailwind.css was intentionally not staged.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
