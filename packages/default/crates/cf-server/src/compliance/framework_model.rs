@@ -435,6 +435,55 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
     Ok(())
 }
 
+/// Attach a verified DISA source artifact to an unresolved release, then retry
+/// recovery. The artifact must parse to the persisted framework/release keys.
+pub async fn attach_artifact_and_retry_framework_recovery(
+    pool: &PgPool,
+    framework_version_id: Uuid,
+    source_artifact_id: Uuid,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let release: (String, String, String, Option<Uuid>) = sqlx::query_as(
+        "SELECT f.canonical_source_key, fv.canonical_release_key, fv.migration_recovery_status, fv.source_artifact_id
+         FROM compliance_framework_versions fv JOIN compliance_frameworks f ON f.id = fv.framework_id
+         WHERE fv.id = $1 AND fv.semantic_digest = 'pending' FOR UPDATE",
+    )
+    .bind(framework_version_id)
+    .fetch_one(&mut *tx)
+    .await
+    .context("framework release is not pending recovery")?;
+    if release.2 != "unresolved" || release.3.is_some() {
+        bail!("framework release is not eligible for source-artifact attachment");
+    }
+    let artifact: (Vec<u8>, String) =
+        sqlx::query_as("SELECT content, filename FROM compliance_source_artifacts WHERE id = $1")
+            .bind(source_artifact_id)
+            .fetch_one(&mut *tx)
+            .await
+            .context("source artifact does not exist")?;
+    let package = process_xccdf_bytes(artifact.0, Some(artifact.1), &InterchangeLimits::default())
+        .map_err(|error| anyhow::anyhow!("source artifact cannot be parsed: {error:?}"))?;
+    if !is_disa_stig(&package.parsed) {
+        bail!("source artifact is not a DISA STIG");
+    }
+    let identity = identify_framework(&package.parsed)
+        .context("source artifact does not identify a DISA framework")?;
+    if identity.canonical_source_key != release.0 || identity.canonical_release_key != release.1 {
+        bail!("source artifact identity does not match the unresolved framework release");
+    }
+    sqlx::query(
+        "UPDATE compliance_framework_versions
+         SET source_artifact_id = $1, migration_recovery_status = 'pending', migration_recovery_reason = NULL
+         WHERE id = $2 AND semantic_digest = 'pending'",
+    )
+    .bind(source_artifact_id)
+    .bind(framework_version_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    backfill_pending_framework_version_digests(pool).await
+}
+
 async fn persist_legacy_stig_topology(
     tx: &mut Transaction<'_, Postgres>,
     framework_version_id: Uuid,
