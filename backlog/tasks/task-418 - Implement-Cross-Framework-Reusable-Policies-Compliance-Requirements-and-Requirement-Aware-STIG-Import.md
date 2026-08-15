@@ -3,11 +3,11 @@ id: TASK-418
 title: >-
   Implement Cross-Framework Reusable Policies, Compliance Requirements, and
   Requirement-Aware STIG Import
-status: In Progress
+status: Review
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 16:05'
+updated_date: '2026-08-15 16:14'
 labels: []
 milestone: m-22
 dependencies:
@@ -566,5 +566,17 @@ author: opencode
 created: 2026-08-15 16:05
 ---
 Starting the post-deployment semantic-integrity checkpoint on MR !315. Scope is limited to immutable same-release framework handling, immutable requirement-version reuse/conflict behavior, and published bundle requirement-count fallback. Existing migrations will not be edited; schema changes, if required, will use a new migration.
+---
+
+author: opencode
+created: 2026-08-15 16:14
+---
+Pushed semantic-integrity checkpoint `dca95480` to MR !315. Same-release preview/commit now compare framework semantic digests and reuse identical releases; conflicting release content returns `ReleaseConflict`/`FRAMEWORK_RELEASE_CONFLICT`. Requirement-version insertion now reuses identical digests, rejects changed content with `REQUIREMENT_VERSION_CONFLICT`, and never updates immutable fields. Published-only bundle summaries now fall back to `current_published_version_id`. No migration files were edited or added.
+---
+
+author: opencode
+created: 2026-08-15 16:14
+---
+Verification: framework query suite 9 passed; Phase 22 8/8 passed; Phase 21 exact technical suite 3 passed; Phase 23 reviewed-related suite 2 passed; bundle baseline lifecycle passed; SQLX_OFFLINE cargo check passed; cargo fmt and git diff check passed. XCCDF filter remains blocked by the pre-existing missing `CF_TEST_ANDURIL_STIG_ZIP` environment variable.
 ---
 <!-- COMMENTS:END -->
