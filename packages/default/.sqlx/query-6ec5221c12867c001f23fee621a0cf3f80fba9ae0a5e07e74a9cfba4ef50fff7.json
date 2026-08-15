@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        DELETE FROM build_reservations\n        WHERE heartbeat_at < NOW() - make_interval(secs => $1)\n        RETURNING derivation_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "derivation_id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6ec5221c12867c001f23fee621a0cf3f80fba9ae0a5e07e74a9cfba4ef50fff7"
+}

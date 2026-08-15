@@ -381,6 +381,14 @@ pub async fn create_deployment_policy(
     pool: &PgPool,
     request: &CreateDeploymentPolicyRequest,
 ) -> Result<DeploymentPolicyRecord> {
+    create_deployment_policy_with_mappings(pool, request, None).await
+}
+
+pub async fn create_deployment_policy_with_mappings(
+    pool: &PgPool,
+    request: &CreateDeploymentPolicyRequest,
+    actor_id: Option<Uuid>,
+) -> Result<DeploymentPolicyRecord> {
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
     let policy = sqlx::query_as::<_, DeploymentPolicyRecord>(
@@ -441,6 +449,31 @@ pub async fn create_deployment_policy(
     write_policy_version_digest(&mut tx, policy.id, &canonical)
         .await
         .context("Failed to write policy version digest")?;
+
+    if !request.requirement_mappings.is_empty() {
+        let version_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(policy.id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("Failed to resolve created policy draft")?;
+        for mapping in &request.requirement_mappings {
+            crate::queries::framework_requirements::insert_policy_mapping_in_tx(
+                &mut tx,
+                version_id,
+                mapping.requirement_version_id,
+                &mapping.relationship,
+                &mapping.coverage,
+                mapping.rationale.as_deref(),
+                &mapping.provenance,
+                None,
+                actor_id.unwrap_or_else(Uuid::nil),
+            )
+            .await
+            .context("Failed to persist initial policy requirement mapping")?;
+        }
+    }
 
     tx.commit()
         .await
@@ -976,6 +1009,7 @@ pub async fn check_policy_in_use(pool: &PgPool, policy_id: &Uuid) -> Result<bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::deployment_policies::CreatePolicyRequirementMapping;
     use sqlx::Executor;
     use sqlx::migrate::Migrator;
     use std::fs;
@@ -1054,6 +1088,439 @@ mod tests {
         let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", db_name))
             .execute(admin_pool)
             .await;
+    }
+
+    fn mapping_request(
+        requirement_version_id: Uuid,
+        rationale: Option<&str>,
+    ) -> CreatePolicyRequirementMapping {
+        CreatePolicyRequirementMapping {
+            requirement_version_id,
+            relationship: "implements".to_string(),
+            coverage: "full".to_string(),
+            rationale: rationale.map(str::to_string),
+            provenance: "manual".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn derived_policy_draft_inherits_mappings_and_digests() {
+        let pool = get_test_pool().await;
+        let (user_id, requirement_a, framework_version_id) = mapping_fixture(&pool).await;
+        let requirement_ids = [requirement_a, Uuid::new_v4(), Uuid::new_v4()];
+
+        for (index, requirement_version_id) in requirement_ids.iter().enumerate().skip(1) {
+            let requirement_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO compliance_requirements (id, framework_id, canonical_requirement_key) \
+                 SELECT $1, framework_id, $2 FROM compliance_framework_versions WHERE id = $3",
+            )
+            .bind(requirement_id)
+            .bind(format!("DERIVED-REQ-{index}-{}", user_id.simple()))
+            .bind(framework_version_id)
+            .execute(&pool)
+            .await
+            .expect("insert derived requirement lineage");
+            sqlx::query(
+                "INSERT INTO compliance_requirement_versions \
+                 (id, requirement_id, framework_version_id, external_id, kind, semantic_digest) \
+                 VALUES ($1, $2, $3, $4, 'control', 'mapping-test')",
+            )
+            .bind(*requirement_version_id)
+            .bind(requirement_id)
+            .bind(framework_version_id)
+            .bind(format!("DERIVED-REQ-{index}"))
+            .execute(&pool)
+            .await
+            .expect("insert derived requirement version");
+        }
+
+        let policy = create_deployment_policy_with_mappings(
+            &pool,
+            &CreateDeploymentPolicyRequest {
+                name: format!("derived policy {}", user_id.simple()),
+                policy_type: "custom_check".to_string(),
+                config: serde_json::json!({"expression":"true"}),
+                requirement_mappings: requirement_ids
+                    .iter()
+                    .enumerate()
+                    .map(
+                        |(index, requirement_version_id)| CreatePolicyRequirementMapping {
+                            requirement_version_id: *requirement_version_id,
+                            relationship: ["implements", "supports", "provides_evidence_for"]
+                                [index]
+                                .to_string(),
+                            coverage: if index == 0 { "full" } else { "partial" }.to_string(),
+                            rationale: Some(format!("rationale-{index}")),
+                            provenance: "manual".to_string(),
+                        },
+                    )
+                    .collect(),
+                ..Default::default()
+            },
+            Some(user_id),
+        )
+        .await
+        .expect("create mapped policy");
+        let published_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(policy.id)
+        .fetch_one(&pool)
+        .await
+        .expect("read source policy version");
+
+        let source_digests: (String, String) = sqlx::query_as(
+            "SELECT semantic_digest, mapping_digest FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(published_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read source digests");
+        let mut tx = pool.begin().await.expect("begin publish transaction");
+        sqlx::query(
+            "UPDATE deployment_policies SET current_draft_version_id = NULL \
+             WHERE id = $1 AND current_draft_version_id = $2",
+        )
+        .bind(policy.id)
+        .bind(published_id)
+        .execute(&mut *tx)
+        .await
+        .expect("clear source draft pointer");
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET trust_state = 'trusted', trusted_by = $2, \
+             trusted_at = CURRENT_TIMESTAMP, publication_state = 'accepted', published_at = CURRENT_TIMESTAMP \
+             WHERE id = $1",
+        )
+        .bind(published_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .expect("accept source policy");
+        sqlx::query(
+            "UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(published_id)
+        .bind(policy.id)
+        .execute(&mut *tx)
+        .await
+        .expect("set published pointer");
+        tx.commit().await.expect("commit source policy");
+
+        let mut tx = pool.begin().await.expect("begin derivation transaction");
+        let draft_id = ensure_policy_draft(
+            &mut tx,
+            policy.id,
+            Some(user_id),
+            Some("2.0"),
+            crate::queries::compliance::PolicyDraftIntent::CreateExplicit,
+        )
+        .await
+        .expect("derive policy draft");
+        tx.commit().await.expect("commit derived draft");
+
+        let source_mappings: Vec<(Uuid, Uuid, String, String, Option<String>, String, Option<Uuid>, String, Option<Uuid>)> = sqlx::query_as(
+            "SELECT id, requirement_version_id, relationship, coverage, rationale, provenance, source_artifact_id, trust_state, created_by \
+             FROM policy_requirement_mappings WHERE policy_version_id = $1 ORDER BY requirement_version_id",
+        )
+        .bind(published_id)
+        .fetch_all(&pool)
+        .await
+        .expect("read source mappings");
+        let draft_mappings: Vec<(Uuid, Uuid, String, String, Option<String>, String, Option<Uuid>, String, Option<Uuid>)> = sqlx::query_as(
+            "SELECT id, requirement_version_id, relationship, coverage, rationale, provenance, source_artifact_id, trust_state, created_by \
+             FROM policy_requirement_mappings WHERE policy_version_id = $1 ORDER BY requirement_version_id",
+        )
+        .bind(draft_id)
+        .fetch_all(&pool)
+        .await
+        .expect("read draft mappings");
+        assert_eq!(source_mappings.len(), 3);
+        assert_eq!(draft_mappings.len(), 3);
+        for (source, draft) in source_mappings.iter().zip(&draft_mappings) {
+            assert_ne!(source.0, draft.0);
+            assert_eq!(source.1, draft.1);
+            assert_eq!(source.2, draft.2);
+            assert_eq!(source.3, draft.3);
+            assert_eq!(source.4, draft.4);
+            assert_eq!(source.5, draft.5);
+            assert_eq!(source.6, draft.6);
+            assert_eq!(source.7, draft.7);
+            assert_eq!(source.8, draft.8);
+        }
+
+        let draft_digests: (String, String) = sqlx::query_as(
+            "SELECT semantic_digest, mapping_digest FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(draft_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read draft digests");
+        assert_eq!(draft_digests, source_digests);
+
+        let mut tx = pool.begin().await.expect("begin draft edit transaction");
+        sqlx::query(
+            "UPDATE policy_requirement_mappings SET rationale = 'draft-only edit' \
+             WHERE policy_version_id = $1 AND requirement_version_id = $2",
+        )
+        .bind(draft_id)
+        .bind(requirement_a)
+        .execute(&mut *tx)
+        .await
+        .expect("edit draft mapping");
+        crate::compliance::digest::refresh_policy_mapping_digest(&mut tx, draft_id)
+            .await
+            .expect("refresh draft mapping digest");
+        tx.commit().await.expect("commit draft edit");
+
+        let edited_digests: (String, String) = sqlx::query_as(
+            "SELECT semantic_digest, mapping_digest FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(draft_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read edited draft digests");
+        assert_eq!(edited_digests.0, draft_digests.0);
+        assert_ne!(edited_digests.1, draft_digests.1);
+        let source_after_edit: (String, String) = sqlx::query_as(
+            "SELECT semantic_digest, mapping_digest FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(published_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read source after draft edit");
+        assert_eq!(source_after_edit, source_digests);
+
+        let rejected = sqlx::query(
+            "UPDATE policy_requirement_mappings SET rationale = 'must reject' WHERE policy_version_id = $1",
+        )
+        .bind(published_id)
+        .execute(&pool)
+        .await
+        .expect_err("accepted mapping mutation must reject");
+        assert!(
+            rejected
+                .to_string()
+                .contains("Cannot modify requirement mappings")
+        );
+    }
+
+    async fn mapping_fixture(pool: &sqlx::PgPool) -> (Uuid, Uuid, Uuid) {
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, username, first_name, last_name, email, user_type) VALUES ($1, $2, 'Test', 'User', $3, 'human')",
+        )
+        .bind(user_id)
+        .bind(format!("mapping-test-{}", user_id.simple()))
+        .bind(format!("{}@example.test", user_id.simple()))
+        .execute(pool)
+        .await
+        .expect("insert mapping test user");
+
+        let framework_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_frameworks (name, canonical_source_key) VALUES ('Test Framework', $1) RETURNING id",
+        )
+        .bind(format!("mapping-test-framework-{}", user_id.simple()))
+        .fetch_one(pool)
+        .await
+        .expect("insert mapping test framework");
+        let framework_version_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_framework_versions (framework_id, version, canonical_release_key, semantic_digest) VALUES ($1, '1', $2, 'mapping-test') RETURNING id",
+        )
+        .bind(framework_id)
+        .bind(format!("release-{}", user_id.simple()))
+        .fetch_one(pool)
+        .await
+        .expect("insert mapping test framework version");
+        let requirement_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_requirements (framework_id, canonical_requirement_key) VALUES ($1, $2) RETURNING id",
+        )
+        .bind(framework_id)
+        .bind(format!("REQ-{}", user_id.simple()))
+        .fetch_one(pool)
+        .await
+        .expect("insert mapping test requirement");
+        let requirement_version_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_requirement_versions (requirement_id, framework_version_id, external_id, kind, semantic_digest) VALUES ($1, $2, 'REQ-1', 'control', 'mapping-test') RETURNING id",
+        )
+        .bind(requirement_id)
+        .bind(framework_version_id)
+        .fetch_one(pool)
+        .await
+        .expect("insert mapping test requirement version");
+        (user_id, requirement_version_id, framework_version_id)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn create_policy_with_mappings_persists_atomically() {
+        let pool = get_test_pool().await;
+        let (user_id, requirement_a, framework_version_id) = mapping_fixture(&pool).await;
+        let requirement_b = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO compliance_requirements (id, framework_id, canonical_requirement_key) SELECT $1, framework_id, 'REQ-2' FROM compliance_framework_versions WHERE id = $2",
+        )
+        .bind(requirement_b)
+        .bind(framework_version_id)
+        .execute(&pool)
+        .await
+        .expect("insert second mapping requirement");
+        let requirement_b_version: Uuid = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO compliance_requirement_versions (id, requirement_id, framework_version_id, external_id, kind, semantic_digest) VALUES ($1, $2, $3, 'REQ-2', 'control', 'mapping-test-2')",
+        )
+        .bind(requirement_b_version)
+        .bind(requirement_b)
+        .bind(framework_version_id)
+        .execute(&pool)
+        .await
+        .expect("insert second mapping requirement version");
+        let request = CreateDeploymentPolicyRequest {
+            name: format!("atomic mapping policy {}", user_id.simple()),
+            policy_type: "custom_check".to_string(),
+            config: serde_json::json!({"expression":"true"}),
+            requirement_mappings: vec![
+                mapping_request(requirement_a, Some("first")),
+                mapping_request(requirement_b_version, None),
+            ],
+            ..Default::default()
+        };
+        let policy = create_deployment_policy_with_mappings(&pool, &request, Some(user_id))
+            .await
+            .expect("create policy with mappings");
+        let draft_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(policy.id)
+        .fetch_one(&pool)
+        .await
+        .expect("read draft");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM policy_requirement_mappings WHERE policy_version_id = $1",
+        )
+        .bind(draft_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count mappings");
+        assert_eq!(count, 2);
+        sqlx::query("DELETE FROM policy_requirement_mappings WHERE policy_version_id = $1")
+            .bind(draft_id)
+            .execute(&pool)
+            .await
+            .expect("clean mappings");
+        sqlx::query("UPDATE deployment_policies SET current_draft_version_id = NULL WHERE id = $1")
+            .bind(policy.id)
+            .execute(&pool)
+            .await
+            .expect("clear current draft");
+        sqlx::query("DELETE FROM deployment_policy_versions WHERE id = $1")
+            .bind(draft_id)
+            .execute(&pool)
+            .await
+            .expect("clean draft");
+        sqlx::query("DELETE FROM deployment_policies WHERE id = $1")
+            .bind(policy.id)
+            .execute(&pool)
+            .await
+            .expect("clean policy");
+        sqlx::query("DELETE FROM compliance_requirement_versions v USING compliance_requirements r WHERE v.requirement_id = r.id AND r.canonical_requirement_key = $1")
+            .bind("REQ-2")
+            .execute(&pool)
+            .await
+            .expect("clean second requirement version");
+        sqlx::query("DELETE FROM compliance_requirements WHERE canonical_requirement_key = $1")
+            .bind(format!("REQ-2"))
+            .execute(&pool)
+            .await
+            .expect("clean second requirement");
+        sqlx::query("DELETE FROM compliance_requirement_versions v USING compliance_requirements r WHERE v.requirement_id = r.id AND r.canonical_requirement_key = $1")
+            .bind(format!("REQ-{}", user_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("clean first requirement version");
+        sqlx::query("DELETE FROM compliance_requirements WHERE canonical_requirement_key = $1")
+            .bind(format!("REQ-{}", user_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("clean first requirement");
+        sqlx::query("DELETE FROM compliance_framework_versions WHERE id = $1")
+            .bind(framework_version_id)
+            .execute(&pool)
+            .await
+            .expect("clean framework version");
+        sqlx::query("DELETE FROM compliance_frameworks WHERE canonical_source_key = $1")
+            .bind(format!("mapping-test-framework-{}", user_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("clean framework");
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("clean user");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn create_policy_with_invalid_mapping_rolls_back_policy_and_draft() {
+        let pool = get_test_pool().await;
+        let (user_id, requirement_id, _) = mapping_fixture(&pool).await;
+        let policy_name = format!("rollback mapping policy {}", user_id.simple());
+        let request = CreateDeploymentPolicyRequest {
+            name: policy_name.clone(),
+            policy_type: "custom_check".to_string(),
+            config: serde_json::json!({"expression":"true"}),
+            requirement_mappings: vec![
+                mapping_request(requirement_id, None),
+                mapping_request(Uuid::new_v4(), None),
+            ],
+            ..Default::default()
+        };
+        assert!(
+            create_deployment_policy_with_mappings(&pool, &request, Some(user_id))
+                .await
+                .is_err()
+        );
+        let policy_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies WHERE name = $1")
+                .bind(policy_name)
+                .fetch_one(&pool)
+                .await
+                .expect("count policies");
+        assert_eq!(policy_count, 0);
+        sqlx::query("DELETE FROM compliance_requirement_versions WHERE id = $1")
+            .bind(requirement_id)
+            .execute(&pool)
+            .await
+            .expect("clean requirement version");
+        sqlx::query("DELETE FROM compliance_requirements WHERE canonical_requirement_key = $1")
+            .bind(format!("REQ-{}", user_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("clean requirement");
+        let framework_version_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM compliance_framework_versions WHERE canonical_release_key = $1",
+        )
+        .bind(format!("release-{}", user_id.simple()))
+        .fetch_one(&pool)
+        .await
+        .expect("find framework version");
+        sqlx::query("DELETE FROM compliance_framework_versions WHERE id = $1")
+            .bind(framework_version_id)
+            .execute(&pool)
+            .await
+            .expect("clean framework version");
+        sqlx::query("DELETE FROM compliance_frameworks WHERE canonical_source_key = $1")
+            .bind(format!("mapping-test-framework-{}", user_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("clean framework");
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("clean user");
     }
 
     fn migrations_dir() -> PathBuf {

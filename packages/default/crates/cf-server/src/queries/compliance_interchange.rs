@@ -7,12 +7,16 @@
 //!   upsert source artifact
 //!   insert bundle lineage
 //!   insert bundle version (semantic_digest = 'pending')
-//!   for each non-excluded rule:
-//!     insert policy lineage
-//!     insert policy version (semantic_digest = 'pending')
-//!   insert ordered membership
+//!   normalize requirements (STIG framework/version lineages)
+//!   detect shared implementation groups
+//!   validate shared groups at commit time
+//!   build policy resolution plan
+//!   create/reuse policy versions per resolution plan
+//!   build central rule_to_policy_version map
+//!   insert deduplicated bundle membership
+//!   insert per-requirement policy mappings
 //!   insert source-object mappings
-//!   compute and persist policy digests
+//!   compute and persist policy digests (only new/created policies)
 //!   compute and persist bundle digest
 //!   update bundle current_draft_version_id pointer
 //!   write audit event
@@ -20,6 +24,7 @@
 //! ```
 //!
 //! Any failure rolls back every write in this list.
+//! Shared policy creation ensures exactly one policy lineage/version per group.
 
 use anyhow::{Context, Result};
 use sqlx::PgPool;
@@ -27,16 +32,127 @@ use uuid::Uuid;
 
 use crate::compliance::digest::{
     BundleVersionCanonical, PolicyVersionCanonical, load_bundle_membership,
-    write_bundle_version_digest, write_policy_version_digest,
+    refresh_bundle_requirement_digest, write_bundle_version_digest, write_policy_version_digest,
+};
+use crate::compliance::framework_model::{FrameworkVersionCanonical, requirement_semantic_digests};
+use crate::compliance::requirement_model::write_requirement_version_digest;
+use crate::compliance::shared_implementation::{
+    SharedImplementationId, SharedValidationError, ValidatedSharedCreation,
+    build_import_policy_resolution_plan,
+};
+use crate::compliance::xccdf::disa_stig_adapter::{
+    canonical_for_group, canonical_for_rule, canonical_framework_requirements_for_framework,
+    canonical_key_for_rule, hierarchy_edges_for_framework, identify_framework, is_disa_stig,
+};
+use crate::compliance::xccdf::exact_technical_match::RequirementTechnicalIdentity;
+use crate::compliance::xccdf::exact_technical_match::{
+    ExactTechnicalMatchValidation, revalidate_exact_technical_match,
 };
 use crate::compliance::xccdf::import_models::ImportedPolicyRecord;
-use crate::compliance::xccdf::import_models::{ValidatedImportPlan, XccdfCommittedImportResult};
+use crate::compliance::xccdf::import_models::{
+    MapExistingProof, ReviewedRelatedCandidate, ValidatedImportPlan, XccdfCommittedImportResult,
+};
 use crate::compliance::xccdf::importer::build_policy_records;
 use crate::compliance::xccdf::package::{ProcessedXccdfPackage, build_package_context};
 use crate::compliance::xccdf::reconciliation::{
     ExistingPolicyIdentity, NativePolicyIdentity, NativeReconcileFailure, ReconcileConflict,
     ReconcileDecision, plan_policy_reconciliation,
 };
+use crate::queries::compliance::{PolicyDraftIntent, ensure_policy_draft};
+use crate::queries::framework_requirements::{
+    insert_bundle_version_requirement, insert_framework_version,
+    insert_framework_version_with_requirement_digests_and_hierarchy, insert_policy_mapping_in_tx,
+    insert_requirement_version, insert_requirement_version_pending, upsert_framework_lineage,
+    upsert_requirement_lineage,
+};
+
+async fn revalidate_reviewed_related_candidate(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    selected_policy_version_id: Uuid,
+    incoming_requirement_version_id: Uuid,
+    reviewed: &ReviewedRelatedCandidate,
+) -> Result<()> {
+    if reviewed.policy_version_id != selected_policy_version_id {
+        anyhow::bail!(
+            "IMPORT_RELATED_REUSE_INELIGIBLE: reviewed candidate policy version does not match MapExisting selection"
+        );
+    }
+
+    let incoming_metadata: serde_json::Value =
+        sqlx::query_scalar("SELECT metadata FROM compliance_requirement_versions WHERE id = $1")
+            .bind(incoming_requirement_version_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .context("failed to load authoritative incoming requirement metadata")?
+            .context("IMPORT_RELATED_REUSE_INELIGIBLE: incoming requirement version not found")?;
+    let incoming_ids =
+        crate::compliance::requirement_model::RelatedRequirementIdentifiers::from_metadata(
+            &incoming_metadata,
+        );
+    let claimed_cci: std::collections::BTreeSet<_> = reviewed
+        .shared_cci_ids
+        .iter()
+        .map(|id| id.trim().to_ascii_uppercase())
+        .collect();
+    let claimed_srg: std::collections::BTreeSet<_> = reviewed
+        .shared_srg_ids
+        .iter()
+        .map(|id| id.trim().to_ascii_uppercase())
+        .collect();
+    if !claimed_cci.is_subset(&incoming_ids.cci_ids)
+        || !claimed_srg.is_subset(&incoming_ids.srg_ids)
+    {
+        anyhow::bail!(
+            "IMPORT_RELATED_REUSE_INELIGIBLE: reviewed identifiers are not present in the authoritative requirement metadata"
+        );
+    }
+
+    let valid: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT m.requirement_version_id
+         FROM policy_requirement_mappings m
+         JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id
+         JOIN deployment_policies dp ON dp.id = pv.policy_id
+         JOIN compliance_requirement_versions rv ON rv.id = m.requirement_version_id
+         JOIN compliance_requirements r ON r.id = rv.requirement_id
+         WHERE m.policy_version_id = $1
+           AND m.trust_state = 'trusted'
+           AND pv.publication_state = 'accepted'
+           AND dp.current_published_version_id = pv.id
+           AND rv.id = $3
+           AND r.framework_id <> (
+               SELECT r_in.framework_id
+               FROM compliance_requirement_versions rv_in
+               JOIN compliance_requirements r_in ON r_in.id = rv_in.requirement_id
+               WHERE rv_in.id = $2
+           )
+           AND (
+               EXISTS (
+                   SELECT 1 FROM jsonb_array_elements_text(COALESCE(rv.metadata->'cci_ids', '[]'::jsonb)) candidate(id)
+                   WHERE upper(trim(candidate.id)) = ANY($4)
+               )
+               OR EXISTS (
+                   SELECT 1 FROM jsonb_array_elements_text(COALESCE(rv.metadata->'srg_ids', '[]'::jsonb)) candidate(id)
+                   WHERE upper(trim(candidate.id)) = ANY($5)
+               )
+           )
+         LIMIT 1",
+    )
+    .bind(selected_policy_version_id)
+    .bind(incoming_requirement_version_id)
+    .bind(reviewed.related_requirement_version_id)
+    .bind(&claimed_cci.iter().cloned().collect::<Vec<_>>())
+    .bind(&claimed_srg.iter().cloned().collect::<Vec<_>>())
+    .fetch_optional(&mut **tx)
+    .await
+    .context("failed to revalidate reviewed related candidate")?;
+
+    if valid.is_none() {
+        anyhow::bail!(
+            "IMPORT_RELATED_REUSE_INELIGIBLE: selected policy no longer has trusted current related evidence"
+        );
+    }
+    Ok(())
+}
 
 // ── Parser version identifier ─────────────────────────────────────────────────
 
@@ -44,6 +160,279 @@ use crate::compliance::xccdf::reconciliation::{
 /// Stored on the source artifact so future schema migrations can re-classify
 /// artifacts parsed by earlier versions.
 pub const CF_PARSER_VERSION: &str = "cf-xccdf-parser-0.1";
+
+// ValidatedSharedCreation is defined in shared_implementation.rs as the
+// authoritative domain type. Import it here for use in the validator.
+
+/// Validate shared creation decisions against authoritative technical identities.
+///
+/// This is the sole entry point for converting untrusted SharedGroupDecision
+/// client input into trusted ValidatedSharedCreation objects.
+///
+/// All 8 hardening checks are enforced here:
+/// 1. reject empty enforced_options
+/// 2. reject duplicate rule IDs within a decision
+/// 3. reject single-member CreateShared (stale error)
+/// 4. reject overlapping groups (rule in multiple groups)
+/// 5. reject multiple CreateShared for same technical identity
+/// 6. reject non-native policy types
+/// 7. reject MapExisting reuse in shared decisions
+/// 8. validate client group_id matches server-derived hash
+///
+/// Returns a vector of validated, trusted creations or SharedValidationError with STALE code.
+fn validate_shared_creation_decisions(
+    decisions: &[crate::compliance::xccdf::import_models::SharedGroupDecision],
+    authoritative_identities: &std::collections::HashMap<String, RequirementTechnicalIdentity>,
+    policy_records: &[ImportedPolicyRecord],
+) -> Result<Vec<ValidatedSharedCreation>, SharedValidationError> {
+    use crate::compliance::xccdf::import_models::SharedGroupAction;
+
+    let mut validated_shared_creations: Vec<ValidatedSharedCreation> = Vec::new();
+    let mut claimed_shared_rules = std::collections::HashSet::new();
+    let mut validated_group_ids = std::collections::HashSet::new();
+
+    for decision in decisions {
+        if decision.action == SharedGroupAction::ReuseExisting {
+            if decision.rule_ids.len() < 2 {
+                return Err(SharedValidationError {
+                    code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                    message: "ReuseExisting requires at least 2 rules".to_string(),
+                });
+            }
+            let unique_rules: std::collections::HashSet<&String> =
+                decision.rule_ids.iter().collect();
+            if unique_rules.len() != decision.rule_ids.len() {
+                return Err(SharedValidationError {
+                    code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                    message: "ReuseExisting contains duplicate rule IDs".to_string(),
+                });
+            }
+            let first_identity = authoritative_identities
+                .get(&decision.rule_ids[0])
+                .ok_or_else(|| SharedValidationError {
+                    code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                    message: "ReuseExisting lists a rule not in import".to_string(),
+                })?;
+            let expected_group_id = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(first_identity);
+            if first_identity.enforced_options.is_empty()
+                || decision.group_id != expected_group_id.technical_hash
+            {
+                return Err(SharedValidationError {
+                    code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                    message: "ReuseExisting technical identity or group hash is stale".to_string(),
+                });
+            }
+            let mut selected_version = None;
+            for rule_id in &decision.rule_ids {
+                let identity =
+                    authoritative_identities
+                        .get(rule_id)
+                        .ok_or_else(|| SharedValidationError {
+                            code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                            message: format!("ReuseExisting lists rule {} not in import", rule_id),
+                        })?;
+                if SharedImplementationId::from_technical_identity(identity) != expected_group_id {
+                    return Err(SharedValidationError {
+                        code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                        message: format!(
+                            "ReuseExisting rule {} has different technical enforcement",
+                            rule_id
+                        ),
+                    });
+                }
+                let record = policy_records
+                    .iter()
+                    .find(|record| record.source_rule_id == *rule_id)
+                    .ok_or_else(|| SharedValidationError {
+                        code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                        message: format!(
+                            "ReuseExisting rule {} disappeared before commit",
+                            rule_id
+                        ),
+                    })?;
+                let version =
+                    record
+                        .mapped_policy_version_id
+                        .ok_or_else(|| SharedValidationError {
+                            code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                            message: format!("ReuseExisting rule {} must use MapExisting", rule_id),
+                        })?;
+                if selected_version.is_some_and(|selected| selected != version) {
+                    return Err(SharedValidationError {
+                        code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                        message: "ReuseExisting members must select the same policy version"
+                            .to_string(),
+                    });
+                }
+                selected_version = Some(version);
+            }
+            continue;
+        }
+        if decision.action != SharedGroupAction::CreateShared {
+            continue;
+        }
+
+        // 1. Require at least 2 rules
+        if decision.rule_ids.len() < 2 {
+            return Err(SharedValidationError {
+                code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                message: format!(
+                    "CreateShared requires at least 2 rules, got {}",
+                    decision.rule_ids.len()
+                ),
+            });
+        }
+
+        // 2. Require 2 DISTINCT rule IDs (no duplicates)
+        let unique_rules: std::collections::HashSet<&String> = decision.rule_ids.iter().collect();
+        if unique_rules.len() != decision.rule_ids.len() {
+            return Err(SharedValidationError {
+                code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                message: "CreateShared contains duplicate rule IDs".to_string(),
+            });
+        }
+
+        // 3. Validate every listed rule exists and is eligible for shared creation
+        for rule_id in &decision.rule_ids {
+            if !authoritative_identities.contains_key(rule_id) {
+                return Err(SharedValidationError {
+                    code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                    message: format!("decision lists rule {} not in import", rule_id),
+                });
+            }
+
+            // 4. Reject overlapping shared decisions (rule in multiple groups)
+            if claimed_shared_rules.contains(rule_id) {
+                return Err(SharedValidationError {
+                    code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                    message: format!("rule {} participates in multiple shared groups", rule_id),
+                });
+            }
+            claimed_shared_rules.insert(rule_id.clone());
+
+            let rec = policy_records
+                .iter()
+                .find(|r| r.source_rule_id == *rule_id)
+                .ok_or_else(|| SharedValidationError {
+                    code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                    message: format!("rule {} disappeared before commit", rule_id),
+                })?;
+
+            // Action-type validation: only native technical implementations can be shared
+            // Reject MapExisting, manual, unbound, opaque, etc.
+            if rec.mapped_policy_version_id.is_some() {
+                return Err(SharedValidationError {
+                    code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                    message: format!(
+                        "rule {} is MapExisting reuse, cannot be in shared group",
+                        rule_id
+                    ),
+                });
+            }
+
+            // Only native implementation state is eligible for shared creation.
+            // Native custom-check policies intentionally have policy_type
+            // "custom_check"; policy_type describes representation, while
+            // implementation_state describes whether the rule is executable.
+            if rec.implementation_state != "native" {
+                return Err(SharedValidationError {
+                    code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                    message: format!(
+                        "rule {} has implementation_state {}, only 'native' is eligible for shared groups",
+                        rule_id, rec.implementation_state
+                    ),
+                });
+            }
+        }
+
+        // Verify all rules in the decision have the exact same technical identity
+        let first_identity = authoritative_identities
+            .get(&decision.rule_ids[0])
+            .ok_or_else(|| SharedValidationError {
+                code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                message: "first rule missing identity".to_string(),
+            })?
+            .clone();
+
+        // 1. Reject empty technical identities
+        if first_identity.enforced_options.is_empty() {
+            return Err(SharedValidationError {
+                code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                message: "shared group has empty technical enforcement".to_string(),
+            });
+        }
+
+        let expected_group_id =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(
+                &first_identity,
+            );
+
+        for rule_id in &decision.rule_ids[1..] {
+            let identity =
+                authoritative_identities
+                    .get(rule_id)
+                    .ok_or_else(|| SharedValidationError {
+                        code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                        message: format!("rule {} missing identity", rule_id),
+                    })?;
+
+            // Reject empty technical identities
+            if identity.enforced_options.is_empty() {
+                return Err(SharedValidationError {
+                    code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                    message: format!(
+                        "rule {} has empty technical enforcement, cannot share",
+                        rule_id
+                    ),
+                });
+            }
+
+            let group_id = crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(identity);
+            if group_id != expected_group_id {
+                return Err(SharedValidationError {
+                    code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                    message: format!(
+                        "rule {} has different technical enforcement than group",
+                        rule_id
+                    ),
+                });
+            }
+        }
+
+        // 5. Reject multiple CreateShared decisions for the same technical identity
+        if validated_group_ids.contains(&expected_group_id.technical_hash) {
+            return Err(SharedValidationError {
+                code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                message: "multiple CreateShared decisions for same technical identity".to_string(),
+            });
+        }
+        validated_group_ids.insert(expected_group_id.technical_hash.clone());
+
+        // Validate client group_id matches server-derived hash (stale-decision check)
+        if decision.group_id != expected_group_id.technical_hash {
+            return Err(SharedValidationError {
+                code: "IMPORT_SHARED_IMPLEMENTATION_STALE",
+                message: "client group hash mismatch".to_string(),
+            });
+        }
+
+        // Build ValidatedSharedCreation: the trust boundary.
+        // All fields are server-derived or authoritatively validated:
+        // - policy_id, policy_version_id: server-generated UUIDs
+        // - group_id: derived from authoritative technical identity
+        // - requirement_keys: client-selected but passed authoritative validation
+        // - technical_identity: authoritative enforcement from parsed rules
+        validated_shared_creations.push(ValidatedSharedCreation {
+            policy_id: Uuid::new_v4(),
+            policy_version_id: Uuid::new_v4(),
+            group_id: expected_group_id,
+            requirement_keys: decision.rule_ids.clone(),
+            technical_identity: first_identity,
+        });
+    }
+
+    Ok(validated_shared_creations)
+}
 
 // ── Main entry point ──────────────────────────────────────────────────────────
 
@@ -58,6 +447,12 @@ pub async fn commit_foreign_import(
     validated: ValidatedImportPlan,
     policy_records: Vec<ImportedPolicyRecord>,
 ) -> Result<XccdfCommittedImportResult> {
+    #[derive(Debug, Clone, Copy)]
+    struct NormalizedRequirementImport {
+        requirement_version_id: Uuid,
+        previous_requirement_version_id: Option<Uuid>,
+        unchanged_from_previous_release: bool,
+    }
     let mut tx = pool
         .begin()
         .await
@@ -107,6 +502,56 @@ pub async fn commit_foreign_import(
             .fetch_one(&mut *tx)
             .await
             .context("failed to load source artifact")?;
+
+    // An artifact is its own immutable import identity.  Returning the original
+    // result before creating any bundle or policy rows makes an exact re-import
+    // idempotent across all imported objects, including normalized requirements
+    // and mappings added below.
+    if let Some(existing_bundle_version_id) = sqlx::query_scalar::<_, Uuid>(
+        "SELECT bundle_version_id FROM compliance_source_object_mappings \
+         WHERE source_artifact_id = $1 AND object_kind = 'benchmark' \
+         AND bundle_version_id IS NOT NULL LIMIT 1",
+    )
+    .bind(source_artifact_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("failed to check exact artifact import")?
+    {
+        let (existing_bundle_id, bundle_semantic_digest): (Uuid, String) = sqlx::query_as(
+            "SELECT bundle_id, semantic_digest FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(existing_bundle_version_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("failed to load exact artifact bundle version")?;
+        let reused_policy_versions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_bundle_version_policies WHERE bundle_version_id = $1",
+        )
+        .bind(existing_bundle_version_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("failed to count exact artifact policy membership")?;
+
+        tx.commit()
+            .await
+            .context("failed to commit exact artifact import")?;
+        return Ok(XccdfCommittedImportResult {
+            source_artifact_id,
+            bundle_id: existing_bundle_id,
+            bundle_version_id: existing_bundle_version_id,
+            created_policy_count: 0,
+            created_policy_lineages: 0,
+            created_policy_versions: 0,
+            reused_policy_versions: reused_policy_versions as u32,
+            bundle_lineage_created: false,
+            bundle_version_created: false,
+            excluded_rule_count: 0,
+            created_policy_version_ids: vec![],
+            source_sha256,
+            bundle_semantic_digest,
+            warnings: vec![],
+        });
+    }
 
     // ── 2. Bundle lineage ─────────────────────────────────────────────────────
     let bundle_name = validated.bundle.name.trim().to_owned();
@@ -173,28 +618,466 @@ pub async fn commit_foreign_import(
     .await
     .context("failed to set source_artifact_id on bundle version")?;
 
-    // ── 3. Policy lineages and versions ───────────────────────────────────────
+    // DISA STIGs have a stable framework/release identity and requirement
+    // lineages.  Persist those authoritative objects before choosing policy
+    // implementations; the legacy policy metadata remains source provenance.
+    let normalized_requirements = if is_disa_stig(&pkg.parsed)
+        && let Some(identity) = identify_framework(&pkg.parsed)
+    {
+        let framework_name = identity
+            .title
+            .as_deref()
+            .unwrap_or("DISA Security Technical Implementation Guide");
+        let framework_id = upsert_framework_lineage(
+            &mut tx,
+            framework_name,
+            Some(&identity.publisher),
+            &identity.canonical_source_key,
+            identity.title.as_deref(),
+        )
+        .await?;
+        let previous_framework_version_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM compliance_framework_versions \
+             WHERE framework_id = $1 \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(framework_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("failed to load prior framework release for STIG reconciliation")?;
+        let authoritative_requirements =
+            canonical_framework_requirements_for_framework(&pkg.parsed);
+        let incoming_requirement_digests =
+            requirement_semantic_digests(&authoritative_requirements);
+        let hierarchy_edges = hierarchy_edges_for_framework(&pkg.parsed);
+        let framework_version_id = insert_framework_version_with_requirement_digests_and_hierarchy(
+            &mut tx,
+            framework_id,
+            &FrameworkVersionCanonical {
+                canonical_source_key: identity.canonical_source_key,
+                canonical_release_key: identity.canonical_release_key,
+                version: identity.version,
+                publisher: Some(identity.publisher),
+                title: identity.title,
+            },
+            Some(source_artifact_id),
+            None,
+            &incoming_requirement_digests,
+            &hierarchy_edges,
+        )
+        .await?;
+
+        let mut group_versions = std::collections::HashMap::new();
+        for group in &pkg.parsed.groups {
+            let group_key = format!("group:{}", group.id);
+            let requirement_id =
+                upsert_requirement_lineage(&mut tx, framework_id, &group_key).await?;
+            let group_version = insert_requirement_version(
+                &mut tx,
+                requirement_id,
+                framework_version_id,
+                &canonical_for_group(group),
+                None,
+            )
+            .await?;
+            group_versions.insert(group.id.clone(), group_version);
+        }
+
+        let mut requirement_versions = std::collections::HashMap::new();
+        let mut pending_rule_digests = Vec::new();
+        for rule in &pkg.parsed.rules {
+            let canonical_key = canonical_key_for_rule(rule);
+            let requirement_id =
+                upsert_requirement_lineage(&mut tx, framework_id, &canonical_key).await?;
+            let canonical = canonical_for_rule(rule, &canonical_key);
+            let previous_requirement_version: Option<(Uuid, String)> =
+                if let Some(previous_framework_version_id) = previous_framework_version_id {
+                    sqlx::query_as(
+                        "SELECT id, semantic_digest FROM compliance_requirement_versions \
+                         WHERE requirement_id = $1 AND framework_version_id = $2",
+                    )
+                    .bind(requirement_id)
+                    .bind(previous_framework_version_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .context("failed to load prior requirement version for STIG reconciliation")?
+                } else {
+                    None
+                };
+            let parent_requirement_version_id = rule
+                .group_id
+                .as_ref()
+                .and_then(|group_id| group_versions.get(group_id).copied());
+            let requirement_version_id = insert_requirement_version_pending(
+                &mut tx,
+                requirement_id,
+                framework_version_id,
+                &canonical,
+                parent_requirement_version_id,
+            )
+            .await?;
+            pending_rule_digests.push((requirement_version_id, canonical.clone()));
+            let (previous_requirement_version_id, unchanged_from_previous_release) =
+                previous_requirement_version
+                    .map(|(id, digest)| (Some(id), digest == canonical.compute_digest()))
+                    .unwrap_or((None, false));
+            requirement_versions.insert(
+                rule.id.clone(),
+                NormalizedRequirementImport {
+                    requirement_version_id,
+                    previous_requirement_version_id,
+                    unchanged_from_previous_release,
+                },
+            );
+        }
+        for (requirement_version_id, canonical) in pending_rule_digests {
+            let pending: bool = sqlx::query_scalar(
+                "SELECT semantic_digest = 'pending' FROM compliance_requirement_versions WHERE id = $1",
+            )
+            .bind(requirement_version_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if pending {
+                write_requirement_version_digest(&mut tx, requirement_version_id, &canonical)
+                    .await?;
+            }
+        }
+        for (requirement_order, record) in policy_records.iter().enumerate() {
+            let normalized = requirement_versions
+                .get(&record.source_rule_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "IMPORT_RULE_NOT_FOUND: parsed rule {} disappeared before commit",
+                        record.source_rule_id
+                    )
+                })?;
+            insert_bundle_version_requirement(
+                &mut tx,
+                bundle_version_id,
+                normalized.requirement_version_id,
+                requirement_order as i32,
+            )
+            .await?;
+        }
+        Some(requirement_versions)
+    } else {
+        None
+    };
+
+    // ── 3. Authoritative shared group validation ──────────────────────────────
+    // Build authoritative technical identities from parsed rules.
+    // This is the single source of truth for group membership and enforcement.
+    let mut authoritative_identities: std::collections::HashMap<
+        String,
+        RequirementTechnicalIdentity,
+    > = std::collections::HashMap::new();
+
+    for rec in &policy_records {
+        let parsed_rule = pkg
+            .parsed
+            .rules
+            .iter()
+            .find(|rule| rule.id == rec.source_rule_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "IMPORT_RULE_NOT_FOUND: parsed rule {} disappeared before commit",
+                    rec.source_rule_id
+                )
+            })?;
+        // Derive technical identity from rule's fix text (authoritative)
+        let fix_text = parsed_rule
+            .fix
+            .as_ref()
+            .map(|f| f.content.as_str())
+            .unwrap_or_default();
+        let identity = RequirementTechnicalIdentity::from_fix_text(fix_text);
+        authoritative_identities.insert(rec.source_rule_id.clone(), identity);
+    }
+
+    // Validate client shared-group decisions against authoritative identities.
+    // This is the sole entry point for converting untrusted SharedGroupDecision
+    // into trusted ValidatedSharedCreation objects.
+    let validated_shared_creations = validate_shared_creation_decisions(
+        &validated.shared_group_decisions,
+        &authoritative_identities,
+        &policy_records,
+    )?;
+
+    // ── 4. Build resolution plan and central policy map ──────────────────────
     let excluded_rule_count =
         (validated.rules_to_import.len() as u32).saturating_sub(policy_records.len() as u32);
 
-    let mut created_policy_version_ids: Vec<Uuid> = Vec::new();
+    // The resolution plan determines which policy each requirement gets.
+    // The planner receives only ValidatedSharedCreation objects - never raw client input.
+    let resolution_plan =
+        build_import_policy_resolution_plan(&validated_shared_creations, &policy_records)
+            .map_err(|e| anyhow::anyhow!(e))?;
 
-    for rec in &policy_records {
-        if let Some(mapped_version_id) = rec.mapped_policy_version_id {
-            let exists: Option<Uuid> =
-                sqlx::query_scalar("SELECT id FROM deployment_policy_versions WHERE id = $1")
-                    .bind(mapped_version_id)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .context("failed to verify mapped policy version")?;
-            if exists.is_none() {
+    // Central map: rule_id -> effective_policy_version_id
+    // This is populated as policies are created/reused and becomes the single source of truth.
+    let mut rule_to_policy_version: std::collections::HashMap<String, Uuid> =
+        std::collections::HashMap::new();
+
+    let mut created_policy_version_ids: Vec<Uuid> = Vec::new();
+    let mut effective_mapped_policy_versions = std::collections::HashMap::new();
+    let mut inherited_mappings = std::collections::HashMap::new();
+    let mut created_shared_policies: Vec<(Uuid, Uuid, Vec<String>)> = Vec::new();
+
+    // ── 5. Materialize policies based on resolution plan ────────────────────────
+    // Track created policies separately for digest computation.
+    let mut created_policy_objects: Vec<(Uuid, Uuid, Option<String>)> = Vec::new();
+
+    // 5a. Handle ReuseExisting outcomes (MapExisting records)
+    for (rule_id, version_id) in &resolution_plan.individual_reuses {
+        let selected: Option<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+            "SELECT pv.policy_id, pv.publication_state, dp.current_published_version_id \
+             FROM deployment_policy_versions pv \
+             JOIN deployment_policies dp ON dp.id = pv.policy_id \
+             WHERE pv.id = $1",
+        )
+        .bind(version_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("failed to verify mapped policy version")?;
+        let Some((policy_id, publication_state, current_published_version_id)) = selected else {
+            anyhow::bail!(
+                "IMPORT_POLICY_VERSION_NOT_FOUND: mapped policy version {} does not exist",
+                version_id
+            );
+        };
+
+        // Every reuse decision must carry an explicit proof and the proof is
+        // never trusted from preview: it is revalidated from authoritative
+        // source bytes inside this transaction.
+        let rec = policy_records
+            .iter()
+            .find(|r| r.source_rule_id == *rule_id)
+            .context("IMPORT_RULE_NOT_FOUND: resolution refers to non-existent record")?;
+
+        match (
+            rec.mapped_policy_proof,
+            rec.mapping_semantics
+                .as_ref()
+                .and_then(|semantics| semantics.reviewed_related_candidate.as_ref()),
+        ) {
+            (Some(MapExistingProof::ExactTechnicalMatch), None) => {
+                // Re-derive the technical identity from the parsed rule's
+                // authoritative fix text, then re-check that the selected
+                // policy version still exists, is accepted, is the current
+                // published version, and its config still implements the
+                // enforcement. Any stale or superseded decision aborts the
+                // whole import transaction (no partial writes).
+                let parsed_rule = pkg
+                    .parsed
+                    .rules
+                    .iter()
+                    .find(|rule| rule.id == rec.source_rule_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "IMPORT_RULE_NOT_FOUND: parsed rule {} disappeared before commit",
+                            rec.source_rule_id
+                        )
+                    })?;
+                let authoritative_fix_text = parsed_rule
+                    .fix
+                    .as_ref()
+                    .map(|fix| fix.content.as_str())
+                    .unwrap_or_default();
+                match revalidate_exact_technical_match(&mut tx, *version_id, authoritative_fix_text)
+                    .await?
+                {
+                    ExactTechnicalMatchValidation::Valid { .. } => {}
+                    ExactTechnicalMatchValidation::Invalid { code, message } => {
+                        anyhow::bail!("{code}: {message}");
+                    }
+                }
+            }
+            (Some(MapExistingProof::InheritedMapping), None) | (None, None) => {
+                if let Some(requirement_versions) = &normalized_requirements {
+                    let requirement = requirement_versions.get(&rec.source_rule_id).ok_or_else(
+                        || {
+                            anyhow::anyhow!(
+                                "IMPORT_REQUIREMENT_NOT_FOUND: missing normalized requirement for {}",
+                                rec.source_rule_id
+                            )
+                        },
+                    )?;
+                    let inherited_mapping: Option<(String, String, Option<String>)> = if requirement
+                        .unchanged_from_previous_release
+                    {
+                        let previous_requirement_version_id =
+                            requirement.previous_requirement_version_id.ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "IMPORT_REUSE_INELIGIBLE: missing prior requirement version"
+                                )
+                            })?;
+                        sqlx::query_as(
+                            "SELECT relationship, coverage, rationale FROM policy_requirement_mappings \
+                             WHERE policy_version_id = $1 AND requirement_version_id = $2 \
+                               AND trust_state = 'trusted'",
+                        )
+                        .bind(version_id)
+                        .bind(previous_requirement_version_id)
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .context("failed to validate selected policy reuse")?
+                    } else {
+                        None
+                    };
+                    let Some(inherited_mapping) = inherited_mapping else {
+                        anyhow::bail!(
+                            "IMPORT_REUSE_INELIGIBLE: policy version {} is not a trusted mapping for an unchanged prior requirement",
+                            version_id
+                        );
+                    };
+                    inherited_mappings.insert(rec.source_rule_id.clone(), inherited_mapping);
+                }
+                // Inherited reuse refers to the exact immutable local policy
+                // version, so it must still be the current accepted version.
+                if publication_state != "accepted"
+                    || current_published_version_id != Some(*version_id)
+                {
+                    anyhow::bail!(
+                        "IMPORT_REUSE_INELIGIBLE: policy version {} must be the current accepted version of policy {}",
+                        version_id,
+                        policy_id
+                    );
+                }
+            }
+            (None, Some(reviewed_related)) => {
+                let requirement = normalized_requirements
+                    .as_ref()
+                    .and_then(|requirements| requirements.get(&rec.source_rule_id))
+                    .context("IMPORT_REQUIREMENT_NOT_FOUND: missing normalized requirement")?;
+                revalidate_reviewed_related_candidate(
+                    &mut tx,
+                    *version_id,
+                    requirement.requirement_version_id,
+                    reviewed_related,
+                )
+                .await?;
+            }
+            (Some(MapExistingProof::ExactTechnicalMatch), Some(_))
+            | (Some(MapExistingProof::InheritedMapping), Some(_)) => {
                 anyhow::bail!(
-                    "IMPORT_POLICY_VERSION_NOT_FOUND: mapped policy version {} does not exist",
-                    mapped_version_id
+                    "IMPORT_RELATED_REVIEW_INVALID: reviewed related evidence cannot accompany deterministic MapExisting proof"
                 );
             }
-            continue;
         }
+        let effective_policy_version_id = ensure_policy_draft(
+            &mut tx,
+            policy_id,
+            Some(importing_user_id),
+            None,
+            PolicyDraftIntent::EnsureMutable,
+        )
+        .await
+        .context("failed to derive mutable policy draft for STIG requirement reuse")?;
+        effective_mapped_policy_versions.insert(*version_id, effective_policy_version_id);
+        rule_to_policy_version.insert(rule_id.clone(), effective_policy_version_id);
+    }
+
+    // 5b. Handle CreateShared outcomes (from resolution plan, authoritative source)
+    // For each shared creation in the plan, create 1 policy lineage and version with authoritative technical identity.
+    for shared in &resolution_plan.shared_creations {
+        // Use technical identity from resolution plan (item 8: trust boundary)
+        let technical_identity = &shared.technical_identity;
+
+        // Construct policy config from authoritative technical identity.
+        // This is the actual enforcement that will be evaluated.
+        let policy_config = serde_json::Value::Object(technical_identity.enforced_options.clone());
+
+        // Use the technical hash as the policy name (derived from enforcement, not client input)
+        let policy_name = format!(
+            "Technical: {} [{}]",
+            shared.group_id.technical_hash,
+            &shared.policy_id.simple().to_string()[..8]
+        );
+        let policy_description = format!(
+            "Shared implementation of {}",
+            shared.group_id.technical_hash
+        );
+
+        // Insert policy lineage using IDs from resolution plan (item 8: trust boundary)
+        sqlx::query(
+            r#"
+            INSERT INTO deployment_policies (id, name, description, policy_type, config, enabled)
+            VALUES ($1, $2, $3, 'native', $4, false)
+            "#,
+        )
+        .bind(shared.policy_id)
+        .bind(&policy_name)
+        .bind(&policy_description)
+        .bind(&policy_config)
+        .execute(&mut *tx)
+        .await
+        .context("failed to insert shared policy lineage")?;
+
+        // Insert policy version with same config
+        sqlx::query(
+            r#"
+            INSERT INTO deployment_policy_versions (
+                id, policy_id, version,
+                name, description,
+                policy_type, implementation_state, execution_phase,
+                config, compliance_metadata, dependencies,
+                semantic_digest, source_artifact_id,
+                created_by, enabled_by_default
+            ) VALUES (
+                $1, $2, $3,
+                $4, $5,
+                $6, $7, $8,
+                $9, $10, $11,
+                'pending', $12,
+                $13, false
+            )
+            "#,
+        )
+        .bind(shared.policy_version_id)
+        .bind(shared.policy_id)
+        .bind("0.1-draft")
+        .bind(&policy_name)
+        .bind(&policy_description)
+        .bind("native")
+        .bind("native")
+        .bind("deploy")
+        .bind(&policy_config)
+        .bind(serde_json::json!({}))
+        .bind(serde_json::json!([]))
+        .bind(source_artifact_id)
+        .bind(importing_user_id)
+        .execute(&mut *tx)
+        .await
+        .context("failed to insert shared policy version")?;
+
+        // Set the policy's current_draft_version_id pointer
+        sqlx::query("UPDATE deployment_policies SET current_draft_version_id = $1 WHERE id = $2")
+            .bind(shared.policy_version_id)
+            .bind(shared.policy_id)
+            .execute(&mut *tx)
+            .await
+            .context("failed to set shared policy current_draft_version_id")?;
+
+        // Track as created with opaque_xml = None (no source XML for shared)
+        created_policy_objects.push((shared.policy_id, shared.policy_version_id, None));
+        created_policy_version_ids.push(shared.policy_version_id);
+
+        // Map all members to this shared policy (item 7: carry technical_identity)
+        for rule_id in &shared.requirement_keys {
+            rule_to_policy_version.insert(rule_id.clone(), shared.policy_version_id);
+        }
+
+        created_shared_policies.push((
+            shared.policy_id,
+            shared.policy_version_id,
+            shared.requirement_keys.clone(),
+        ));
+    }
+
+    // 5c. Handle CreateIndividual outcomes
+    for record_idx in &resolution_plan.individual_creations {
+        let rec = &policy_records[*record_idx];
+
         // Insert policy lineage.
         sqlx::query(
             r#"
@@ -257,30 +1140,115 @@ pub async fn commit_foreign_import(
             .await
             .context("failed to set policy current_draft_version_id")?;
 
+        // Track as created (opaque_xml is stored for individual policies)
+        created_policy_objects.push((rec.policy_id, rec.policy_version_id, rec.opaque_xml.clone()));
         created_policy_version_ids.push(rec.policy_version_id);
+
+        // Map to central rule map
+        rule_to_policy_version.insert(rec.source_rule_id.clone(), rec.policy_version_id);
     }
 
-    // ── 4. Ordered membership ─────────────────────────────────────────────────
-    for (policy_order, rec) in policy_records.iter().enumerate() {
-        let policy_version_id = rec
-            .mapped_policy_version_id
-            .unwrap_or(rec.policy_version_id);
-        sqlx::query(
-            r#"
+    // ── 6. Ordered bundle membership (deduplicated by central map) ─────────────
+    let mut bundled_policy_versions = std::collections::HashSet::new();
+    let mut policy_order = 0_i32;
+
+    // Iterate through policy_records in order, using the central rule_to_policy_version map
+    // to determine which policy version belongs to each record.
+    for rec in &policy_records {
+        let policy_version_id = rule_to_policy_version
+            .get(&rec.source_rule_id)
+            .copied()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "IMPORT_INTERNAL_ERROR: no resolution for rule {}",
+                    rec.source_rule_id
+                )
+            })?;
+
+        // Insert deduplicated bundle membership
+        if bundled_policy_versions.insert(policy_version_id) {
+            sqlx::query(
+                r#"
             INSERT INTO compliance_bundle_version_policies
                 (bundle_version_id, policy_version_id, policy_order, selected)
             VALUES ($1, $2, $3, true)
             "#,
-        )
-        .bind(bundle_version_id)
-        .bind(policy_version_id)
-        .bind(policy_order as i32)
-        .execute(&mut *tx)
-        .await
-        .context("failed to insert bundle membership row")?;
+            )
+            .bind(bundle_version_id)
+            .bind(policy_version_id)
+            .bind(policy_order)
+            .execute(&mut *tx)
+            .await
+            .context("failed to insert bundle membership row")?;
+            policy_order += 1;
+        }
+
+        // ── 7. Per-requirement policy mappings ────────────────────────────────
+        if let Some(requirement_versions) = &normalized_requirements {
+            let requirement = requirement_versions
+                .get(&rec.source_rule_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "IMPORT_REQUIREMENT_NOT_FOUND: missing normalized requirement for {}",
+                        rec.source_rule_id
+                    )
+                })?;
+
+            // Mapping semantics stay per requirement so a shared policy can
+            // carry a different reviewed relationship/coverage for each
+            // requirement it satisfies (item 13).
+            let (relationship, coverage, rationale, provenance) =
+                if let Some((relationship, coverage, rationale)) =
+                    inherited_mappings.get(&rec.source_rule_id)
+                {
+                    (
+                        relationship.as_str(),
+                        coverage.as_str(),
+                        rationale.as_deref(),
+                        "inherited",
+                    )
+                } else {
+                    let semantics = rec.mapping_semantics.as_ref();
+                    let relationship = semantics
+                        .and_then(|s| s.relationship.as_deref())
+                        .filter(|value| {
+                            matches!(*value, "implements" | "supports" | "provides_evidence_for")
+                        })
+                        .unwrap_or("implements");
+                    let coverage = semantics
+                        .and_then(|s| s.coverage.as_deref())
+                        .filter(|value| matches!(*value, "full" | "partial"))
+                        .unwrap_or("full");
+                    let rationale = semantics.and_then(|s| s.rationale.as_deref());
+                    let provenance = if semantics
+                        .and_then(|s| s.reviewed_related_candidate.as_ref())
+                        .is_some()
+                    {
+                        "suggested"
+                    } else if rec.mapped_policy_version_id.is_some() {
+                        "inferred"
+                    } else {
+                        "imported"
+                    };
+                    (relationship, coverage, rationale, provenance)
+                };
+
+            insert_policy_mapping_in_tx(
+                &mut tx,
+                policy_version_id,
+                requirement.requirement_version_id,
+                relationship,
+                coverage,
+                rationale,
+                provenance,
+                Some(source_artifact_id),
+                importing_user_id,
+            )
+            .await?;
+        }
     }
 
-    // ── 5. Source-object mappings ─────────────────────────────────────────────
+    // ── 8. Source-object mappings ─────────────────────────────────────────────
     // Benchmark → bundle version
     if let Some(ref bm) = pkg.parsed.benchmark {
         sqlx::query(
@@ -299,11 +1267,17 @@ pub async fn commit_foreign_import(
         .context("failed to insert benchmark source mapping")?;
     }
 
-    // Rules → policy versions
+    // Rules → policy versions (using central rule_to_policy_version map)
     for rec in &policy_records {
-        let policy_version_id = rec
-            .mapped_policy_version_id
-            .unwrap_or(rec.policy_version_id);
+        let policy_version_id = rule_to_policy_version
+            .get(&rec.source_rule_id)
+            .copied()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "IMPORT_INTERNAL_ERROR: no resolution for rule {}",
+                    rec.source_rule_id
+                )
+            })?;
         sqlx::query(
             r#"
             INSERT INTO compliance_source_object_mappings
@@ -321,33 +1295,61 @@ pub async fn commit_foreign_import(
     }
 
     // Profile → bundle version (if selected)
-    if let Some(ref pid) = validated.expected_sha256.as_str().get(0..0) {
+    if let Some(ref _pid) = validated.expected_sha256.as_str().get(0..0) {
         // placeholder — profile mappings are inserted below
-        let _ = pid;
     }
 
-    // ── 6. Compute and persist semantic digests ───────────────────────────────
-    for rec in &policy_records {
-        if rec.mapped_policy_version_id.is_some() {
-            continue;
-        }
-        let opaque_xml_digest =
-            PolicyVersionCanonical::digest_opaque_xml(rec.opaque_xml.as_deref());
+    // ── 9. Compute and persist semantic digests ───────────────────────────────
+    // Compute digests only for newly-created policies (not reused ones).
+    // Read the persisted versions and build canonical from what was actually inserted.
+    for (policy_id, policy_version_id, opaque_xml_opt) in &created_policy_objects {
+        // Read back the persisted policy version to ensure digest matches persisted state
+        let (
+            name,
+            description,
+            policy_type,
+            implementation_state,
+            execution_phase,
+            config,
+            compliance_metadata,
+            dependencies,
+        ): (
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            serde_json::Value,
+            serde_json::Value,
+            serde_json::Value,
+        ) = sqlx::query_as(
+            "SELECT name, description, policy_type, implementation_state, execution_phase, \
+                    config, compliance_metadata, dependencies \
+             FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(policy_version_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("failed to read back persisted policy version for digesting")?;
 
+        let opaque_xml_digest =
+            PolicyVersionCanonical::digest_opaque_xml(opaque_xml_opt.as_deref());
+
+        // Build canonical from persisted values (guarantees digest matches DB row)
         let canonical = PolicyVersionCanonical {
-            name: rec.name.clone(),
-            description: rec.description.clone(),
-            policy_type: rec.policy_type.clone(),
-            implementation_state: rec.implementation_state.clone(),
-            execution_phase: rec.execution_phase.clone(),
-            config: rec.config.clone(),
-            compliance_metadata: rec.compliance_metadata.clone(),
-            dependencies: rec.dependencies.clone(),
+            name,
+            description,
+            policy_type,
+            implementation_state,
+            execution_phase,
+            config,
+            compliance_metadata,
+            dependencies,
             opaque_xml_digest,
-            enabled_by_default: Some(rec.enabled_by_default),
+            enabled_by_default: Some(false),
         };
 
-        write_policy_version_digest(&mut tx, rec.policy_id, &canonical)
+        write_policy_version_digest(&mut tx, *policy_id, &canonical)
             .await
             .context("failed to write policy version digest")?;
     }
@@ -379,13 +1381,26 @@ pub async fn commit_foreign_import(
             .await
             .context("failed to read bundle semantic digest")?;
 
-    // ── 7. Audit event ────────────────────────────────────────────────────────
+    // ── 10. Audit event and result calculation ────────────────────────────────
+    let created_policy_count = created_policy_version_ids.len() as u32;
+    let created_policy_lineages = created_policy_objects.len() as u32;
+    let created_policy_versions = created_policy_objects.len() as u32;
+    let reused_policy_versions = effective_mapped_policy_versions
+        .values()
+        .copied()
+        .collect::<std::collections::HashSet<_>>()
+        .len() as u32;
+
     let metadata = serde_json::json!({
         "source_artifact_id": source_artifact_id,
         "original_sha256": source_sha256,
         "bundle_id": bundle_id,
         "bundle_version_id": bundle_version_id,
-        "created_policy_count": policy_records.len(),
+        "created_policy_count": created_policy_count,
+        "created_policy_lineages": created_policy_lineages,
+        "created_policy_versions": created_policy_versions,
+        "reused_policy_versions": reused_policy_versions,
+        "shared_groups_created": created_shared_policies.len(),
         "excluded_rule_count": excluded_rule_count,
         "document_class": document_class,
         "fidelity": fidelity,
@@ -406,7 +1421,7 @@ pub async fn commit_foreign_import(
     .await
     .context("failed to write audit event")?;
 
-    // ── 8. Commit ─────────────────────────────────────────────────────────────
+    // ── 11. Commit ────────────────────────────────────────────────────────────
     tx.commit()
         .await
         .context("failed to commit import transaction")?;
@@ -415,10 +1430,10 @@ pub async fn commit_foreign_import(
         source_artifact_id,
         bundle_id,
         bundle_version_id,
-        created_policy_count: policy_records.len() as u32,
-        created_policy_lineages: policy_records.len() as u32,
-        created_policy_versions: policy_records.len() as u32,
-        reused_policy_versions: 0,
+        created_policy_count,
+        created_policy_lineages,
+        created_policy_versions,
+        reused_policy_versions,
         bundle_lineage_created: true,
         bundle_version_created: true,
         excluded_rule_count,
@@ -820,6 +1835,7 @@ pub async fn commit_cf_native_import(
             .execute(&mut *tx)
             .await
             .context("failed to finalize CF-native bundle digest")?;
+        refresh_bundle_requirement_digest(&mut tx, bundle_version_id).await?;
     }
     if let Some(benchmark) = pkg.parsed.benchmark.as_ref() {
         upsert_native_mapping(
@@ -1112,6 +2128,7 @@ async fn insert_native_bundle_version(
         .execute(&mut **tx)
         .await
         .context("failed to restore CF-native bundle digest")?;
+    refresh_bundle_requirement_digest(&mut *tx, bundle_version_id).await?;
     Ok(())
 }
 
@@ -1161,6 +2178,10 @@ async fn upsert_native_mapping(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compliance::requirement_model::RequirementVersionCanonical;
+    use crate::compliance::xccdf::import_models::{
+        ImportedMappingSemantics, ReviewedRelatedCandidate, SharedGroupAction, SharedGroupDecision,
+    };
 
     fn minimal_xccdf_bytes() -> Vec<u8> {
         br#"<?xml version="1.0" encoding="UTF-8"?>
@@ -1217,6 +2238,10 @@ mod tests {
                     evidence_requirements: Vec::new(),
                 })
                 .collect(),
+            mapping_semantics: std::collections::HashMap::new(),
+
+            shared_group_decisions: Vec::new(),
+
             bundle: ImportedBundlePlan {
                 name: "Test Import Bundle".into(),
                 framework: "XCCDF-TEST".into(),
@@ -1368,6 +2393,1577 @@ mod tests {
             .await
             .expect("test user");
         user.id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn phase_22_shared_creation_materializes_one_policy_for_three_requirements() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_Phase22_Shared_{}",
+            Uuid::new_v4().simple()
+        );
+        let fix = "services.openssh.settings.PermitRootLogin = \"no\";";
+        let rule_ids = [
+            "xccdf_test_stig_rule_0",
+            "xccdf_test_stig_rule_1",
+            "xccdf_test_stig_rule_2",
+        ];
+        let pkg = make_package(shared_stig_bytes(
+            &benchmark_id,
+            "V1R1",
+            &[
+                ("V-22-001", "First shared requirement"),
+                ("V-22-002", "Second shared requirement"),
+                ("V-22-003", "Third shared requirement"),
+            ],
+            &[fix, fix, fix],
+        ));
+        let decision = shared_decision_for_fix(&rule_ids, fix);
+        let mapping_semantics = [
+            (
+                "xccdf_test_stig_rule_0",
+                ("implements", "full", "direct enforcement"),
+            ),
+            (
+                "xccdf_test_stig_rule_1",
+                ("supports", "partial", "supporting control"),
+            ),
+            (
+                "xccdf_test_stig_rule_2",
+                ("provides_evidence_for", "partial", "evidence collection"),
+            ),
+        ]
+        .into_iter()
+        .map(|(rule_id, (relationship, coverage, rationale))| {
+            (
+                rule_id.to_string(),
+                ImportedMappingSemantics {
+                    relationship: Some(relationship.to_string()),
+                    coverage: Some(coverage.to_string()),
+                    rationale: Some(rationale.to_string()),
+                    reviewed_related_candidate: None,
+                },
+            )
+        })
+        .collect();
+        let (validated, records) =
+            shared_native_plan(&pkg, vec![decision], &rule_ids, mapping_semantics);
+
+        let identity = RequirementTechnicalIdentity::from_fix_text(fix);
+        let stale_name = format!(
+            "Technical: {}%",
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(
+                &identity,
+            )
+            .technical_hash
+        );
+        let stale_policy_ids: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM deployment_policies WHERE name LIKE $1")
+                .bind(stale_name)
+                .fetch_all(&pool)
+                .await
+                .expect("find stale shared fixture policies");
+        for policy_id in stale_policy_ids {
+            let version_ids: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM deployment_policy_versions WHERE policy_id = $1",
+            )
+            .bind(policy_id)
+            .fetch_all(&pool)
+            .await
+            .expect("find stale shared fixture versions");
+            for version_id in version_ids {
+                let _ = sqlx::query(
+                    "DELETE FROM compliance_source_object_mappings WHERE policy_version_id = $1",
+                )
+                .bind(version_id)
+                .execute(&pool)
+                .await;
+                let _ = sqlx::query(
+                    "DELETE FROM policy_requirement_mappings WHERE policy_version_id = $1",
+                )
+                .bind(version_id)
+                .execute(&pool)
+                .await;
+                let _ = sqlx::query(
+                    "DELETE FROM compliance_bundle_version_policies WHERE policy_version_id = $1",
+                )
+                .bind(version_id)
+                .execute(&pool)
+                .await;
+            }
+            let _ = sqlx::query("DELETE FROM deployment_policy_versions WHERE policy_id = $1")
+                .bind(policy_id)
+                .execute(&pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM deployment_policies WHERE id = $1")
+                .bind(policy_id)
+                .execute(&pool)
+                .await;
+        }
+
+        let result = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("shared import should commit");
+        assert_eq!(result.created_policy_count, 1);
+        assert_eq!(result.created_policy_versions, 1);
+
+        let policy_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policies WHERE id = (SELECT policy_id FROM deployment_policy_versions WHERE id = $1)",
+        )
+        .bind(result.created_policy_version_ids[0])
+        .fetch_one(&pool)
+        .await
+        .expect("count shared policy");
+        assert_eq!(policy_count, 1);
+
+        let requirement_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_bundle_version_requirements WHERE bundle_version_id = $1",
+        )
+        .bind(result.bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count requirement memberships");
+        assert_eq!(requirement_count, 3);
+
+        let mapping_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM policy_requirement_mappings WHERE policy_version_id = $1",
+        )
+        .bind(result.created_policy_version_ids[0])
+        .fetch_one(&pool)
+        .await
+        .expect("count shared mappings");
+        assert_eq!(mapping_count, 3);
+
+        let mapping_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT relationship, coverage, rationale FROM policy_requirement_mappings WHERE policy_version_id = $1 ORDER BY rationale",
+        )
+        .bind(result.created_policy_version_ids[0])
+        .fetch_all(&pool)
+        .await
+        .expect("load shared mapping semantics");
+        assert_eq!(
+            mapping_rows,
+            vec![
+                (
+                    "implements".to_string(),
+                    "full".to_string(),
+                    Some("direct enforcement".to_string())
+                ),
+                (
+                    "provides_evidence_for".to_string(),
+                    "partial".to_string(),
+                    Some("evidence collection".to_string())
+                ),
+                (
+                    "supports".to_string(),
+                    "partial".to_string(),
+                    Some("supporting control".to_string())
+                ),
+            ]
+        );
+
+        let policy_membership_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_bundle_version_policies WHERE bundle_version_id = $1",
+        )
+        .bind(result.bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count policy membership");
+        assert_eq!(policy_membership_count, 1);
+
+        let source_mapping_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_source_object_mappings WHERE source_artifact_id = $1 AND object_kind = 'rule'",
+        )
+        .bind(result.source_artifact_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count source rule mappings");
+        assert_eq!(source_mapping_count, 3);
+
+        let mapped_versions: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT policy_version_id FROM compliance_source_object_mappings WHERE source_artifact_id = $1 AND object_kind = 'rule' ORDER BY policy_version_id",
+        )
+        .bind(result.source_artifact_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load mapped policy versions");
+        assert_eq!(mapped_versions, vec![result.created_policy_version_ids[0]]);
+
+        let (name, description, policy_type, implementation_state, execution_phase, config, metadata, dependencies, digest, mapping_digest, enabled): (String, Option<String>, String, String, String, serde_json::Value, serde_json::Value, serde_json::Value, String, String, bool) = sqlx::query_as(
+            "SELECT name, description, policy_type, implementation_state, execution_phase, config, compliance_metadata, dependencies, semantic_digest, mapping_digest, enabled_by_default FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(result.created_policy_version_ids[0])
+        .fetch_one(&pool)
+        .await
+        .expect("load shared policy version");
+        let expected_config = serde_json::json!({
+            "services.openssh.settings.PermitRootLogin": "no"
+        });
+        assert_eq!(config, expected_config);
+        let expected_digest = crate::compliance::digest::PolicyVersionCanonical {
+            name,
+            description,
+            policy_type,
+            implementation_state,
+            execution_phase,
+            config,
+            compliance_metadata: metadata,
+            dependencies,
+            opaque_xml_digest: None,
+            enabled_by_default: Some(enabled),
+        }
+        .compute_digest();
+        assert_eq!(digest, expected_digest);
+
+        let component_rows: Vec<(Uuid, String, String, Option<String>, String, String)> =
+            sqlx::query_as(
+                "SELECT requirement_version_id, relationship, coverage, rationale, provenance, trust_state \
+                 FROM policy_requirement_mappings WHERE policy_version_id = $1 \
+                 ORDER BY requirement_version_id",
+            )
+            .bind(result.created_policy_version_ids[0])
+            .fetch_all(&pool)
+            .await
+            .expect("load mapping digest inputs");
+        let expected_mapping_digest =
+            crate::compliance::canonical::semantic_digest(&serde_json::json!(
+                component_rows
+                    .into_iter()
+                    .map(
+                        |(
+                            requirement_version_id,
+                            relationship,
+                            coverage,
+                            rationale,
+                            provenance,
+                            trust_state,
+                        )| {
+                            serde_json::json!({
+                                "coverage": coverage,
+                                "provenance": provenance,
+                                "rationale": rationale,
+                                "relationship": relationship,
+                                "requirement_version_id": requirement_version_id.to_string(),
+                                "trust_state": trust_state,
+                            })
+                        }
+                    )
+                    .collect::<Vec<_>>()
+            ));
+        assert_eq!(mapping_digest, expected_mapping_digest);
+
+        cleanup_import(&pool, result.bundle_id, &result.created_policy_version_ids).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn phase_22_shared_creation_rejects_mismatched_enforcement_without_writes() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_Phase22_Mismatch_{}",
+            Uuid::new_v4().simple()
+        );
+        let fix_a = "services.openssh.enable = true;";
+        let fix_b = "services.openssh.enable = false;";
+        let rule_ids = ["xccdf_test_stig_rule_0", "xccdf_test_stig_rule_1"];
+        let pkg = make_package(shared_stig_bytes(
+            &benchmark_id,
+            "V1R1",
+            &[("V-22-101", "Mismatch A"), ("V-22-102", "Mismatch B")],
+            &[fix_a, fix_b],
+        ));
+        let decision = shared_decision_for_fix(&rule_ids, fix_a);
+        let (validated, records) = shared_native_plan(
+            &pkg,
+            vec![decision],
+            &rule_ids,
+            std::collections::HashMap::new(),
+        );
+        let source_sha = pkg.provenance.sha256.clone();
+        let before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1",
+        )
+        .bind(&source_sha)
+        .fetch_one(&pool)
+        .await
+        .expect("count source artifact");
+
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("mismatched enforcement must reject the import");
+        assert!(
+            error
+                .to_string()
+                .contains("IMPORT_SHARED_IMPLEMENTATION_STALE")
+        );
+
+        let after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1",
+        )
+        .bind(&source_sha)
+        .fetch_one(&pool)
+        .await
+        .expect("count rolled-back source artifact");
+        assert_eq!(after, before, "rejected import must leave no artifact row");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn phase_22_shared_creation_rejects_manual_member_without_writes() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_Phase22_Action_{}",
+            Uuid::new_v4().simple()
+        );
+        let fix = "services.openssh.enable = true;";
+        let pkg = make_package(shared_stig_bytes(
+            &benchmark_id,
+            "V1R1",
+            &[("V-22-201", "Native member"), ("V-22-202", "Manual member")],
+            &[fix, fix],
+        ));
+        let rule_ids = ["xccdf_test_stig_rule_0", "xccdf_test_stig_rule_1"];
+        let decision = shared_decision_for_fix(&rule_ids, fix);
+        let (mut validated, records) = make_plan(&pkg, &rule_ids);
+        validated.shared_group_decisions = vec![decision];
+        let source_sha = pkg.provenance.sha256.clone();
+
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("manual member must reject CreateShared");
+        assert!(
+            error
+                .to_string()
+                .contains("IMPORT_SHARED_IMPLEMENTATION_STALE")
+        );
+        let artifact_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1",
+        )
+        .bind(source_sha)
+        .fetch_one(&pool)
+        .await
+        .expect("count rolled-back artifact");
+        assert_eq!(artifact_count, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn phase_22_shared_creation_breakout_maps_third_requirement_individually() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_Phase22_Breakout_{}",
+            Uuid::new_v4().simple()
+        );
+        let fix = "services.openssh.enable = true;";
+        let rule_ids = [
+            "xccdf_test_stig_rule_0",
+            "xccdf_test_stig_rule_1",
+            "xccdf_test_stig_rule_2",
+        ];
+        let pkg = make_package(shared_stig_bytes(
+            &benchmark_id,
+            "V1R1",
+            &[
+                ("V-22-301", "Shared A"),
+                ("V-22-302", "Shared B"),
+                ("V-22-303", "Individual C"),
+            ],
+            &[fix, fix, fix],
+        ));
+        let decision = shared_decision_for_fix(&rule_ids[..2], fix);
+        let (validated, records) = shared_native_plan(
+            &pkg,
+            vec![decision],
+            &rule_ids,
+            std::collections::HashMap::new(),
+        );
+        cleanup_shared_policy_fixture(&pool, fix).await;
+        let result = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("breakout import should commit");
+        assert_eq!(result.created_policy_count, 2);
+        assert_eq!(result.created_policy_versions, 2);
+
+        let mapped: Vec<(String, Uuid)> = sqlx::query_as(
+            "SELECT source_identity, policy_version_id FROM compliance_source_object_mappings WHERE source_artifact_id = $1 AND object_kind = 'rule' ORDER BY source_identity",
+        )
+        .bind(result.source_artifact_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load breakout mappings");
+        assert_eq!(mapped.len(), 3);
+        assert_eq!(mapped[0].1, mapped[1].1, "A and B must share one version");
+        assert_ne!(mapped[1].1, mapped[2].1, "C must use its own version");
+        cleanup_import(&pool, result.bundle_id, &result.created_policy_version_ids).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn phase_22_shared_creation_exact_reimport_is_idempotent() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_Phase22_Idempotent_{}",
+            Uuid::new_v4().simple()
+        );
+        let fix = "services.openssh.enable = true;";
+        let rule_ids = ["xccdf_test_stig_rule_0", "xccdf_test_stig_rule_1"];
+        let bytes = shared_stig_bytes(
+            &benchmark_id,
+            "V1R1",
+            &[("V-22-401", "Idempotent A"), ("V-22-402", "Idempotent B")],
+            &[fix, fix],
+        );
+        let pkg = make_package(bytes.clone());
+        let decision = shared_decision_for_fix(&rule_ids, fix);
+        let (validated, records) = shared_native_plan(
+            &pkg,
+            vec![decision],
+            &rule_ids,
+            std::collections::HashMap::new(),
+        );
+        cleanup_shared_policy_fixture(&pool, fix).await;
+        let first = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("first shared import");
+
+        let benchmark_mapping: Uuid = sqlx::query_scalar(
+            "SELECT bundle_version_id FROM compliance_source_object_mappings
+             WHERE source_artifact_id = $1 AND object_kind = 'benchmark'",
+        )
+        .bind(first.source_artifact_id)
+        .fetch_one(&pool)
+        .await
+        .expect("benchmark mapping must exist for exact-artifact fast path");
+        assert_eq!(benchmark_mapping, first.bundle_version_id);
+        let counts_before: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT
+                (SELECT COUNT(*) FROM compliance_framework_versions WHERE source_artifact_id = $1),
+                (SELECT COUNT(*) FROM compliance_bundle_versions WHERE bundle_id = $2),
+                (SELECT COUNT(*) FROM compliance_requirement_versions rv JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id WHERE fv.source_artifact_id = $1),
+                (SELECT COUNT(*) FROM policy_requirement_mappings m WHERE m.requirement_version_id IN (SELECT rv.id FROM compliance_requirement_versions rv JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id WHERE fv.source_artifact_id = $1)),
+                (SELECT COUNT(*) FROM compliance_bundle_version_policies WHERE bundle_version_id = $3)",
+        )
+        .bind(first.source_artifact_id)
+        .bind(first.bundle_id)
+        .bind(first.bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count rows before exact reimport");
+
+        let second_pkg = make_package(bytes);
+        let second_decision = shared_decision_for_fix(&rule_ids, fix);
+        let (second_validated, second_records) = shared_native_plan(
+            &second_pkg,
+            vec![second_decision],
+            &rule_ids,
+            std::collections::HashMap::new(),
+        );
+        let second =
+            commit_foreign_import(&pool, user_id, second_pkg, second_validated, second_records)
+                .await
+                .expect("exact shared reimport");
+        assert_eq!(second.bundle_id, first.bundle_id);
+        assert_eq!(second.bundle_version_id, first.bundle_version_id);
+        assert_eq!(second.created_policy_versions, 0);
+
+        let counts_after: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT
+                (SELECT COUNT(*) FROM compliance_framework_versions WHERE source_artifact_id = $1),
+                (SELECT COUNT(*) FROM compliance_bundle_versions WHERE bundle_id = $2),
+                (SELECT COUNT(*) FROM compliance_requirement_versions rv JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id WHERE fv.source_artifact_id = $1),
+                (SELECT COUNT(*) FROM policy_requirement_mappings m WHERE m.requirement_version_id IN (SELECT rv.id FROM compliance_requirement_versions rv JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id WHERE fv.source_artifact_id = $1)),
+                (SELECT COUNT(*) FROM compliance_bundle_version_policies WHERE bundle_version_id = $3)",
+        )
+        .bind(first.source_artifact_id)
+        .bind(first.bundle_id)
+        .bind(first.bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count rows after exact reimport");
+        assert_eq!(counts_after, counts_before);
+        cleanup_import(&pool, first.bundle_id, &first.created_policy_version_ids).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn phase_22_shared_creation_rolls_back_after_shared_materialization_failure() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_Phase22_Rollback_{}",
+            Uuid::new_v4().simple()
+        );
+        let fix = "services.openssh.enable = true;";
+        let rule_ids = [
+            "xccdf_test_stig_rule_0",
+            "xccdf_test_stig_rule_1",
+            "xccdf_test_stig_rule_2",
+        ];
+        let pkg = make_package(shared_stig_bytes(
+            &benchmark_id,
+            "V1R1",
+            &[
+                ("V-22-501", "Rollback A"),
+                ("V-22-502", "Rollback B"),
+                ("V-22-503", "Rollback C"),
+            ],
+            &[fix, fix, fix],
+        ));
+        let decision = shared_decision_for_fix(&rule_ids[..2], fix);
+        let (validated, mut records) = shared_native_plan(
+            &pkg,
+            vec![decision],
+            &rule_ids,
+            std::collections::HashMap::new(),
+        );
+        cleanup_shared_policy_fixture(&pool, fix).await;
+        let bundle_name = validated.bundle.name.clone();
+        let shared_name: String =
+            sqlx::query_scalar("SELECT name FROM deployment_policies ORDER BY created_at LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .expect("find existing policy name for late collision");
+        let existing_name_counts: (i64, i64) = sqlx::query_as(
+            "SELECT
+                (SELECT COUNT(*) FROM deployment_policies WHERE name = $1),
+                (SELECT COUNT(*) FROM deployment_policy_versions pv JOIN deployment_policies p ON p.id = pv.policy_id WHERE p.name = $1)",
+        )
+        .bind(&shared_name)
+        .fetch_one(&pool)
+        .await
+        .expect("count existing collision policy");
+        records[2].name = shared_name.clone();
+
+        let source_sha = pkg.provenance.sha256.clone();
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("late duplicate name must roll back the import");
+        assert!(error.to_string().contains("policy lineage"));
+
+        let durable_rows: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT
+                (SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1),
+                (SELECT COUNT(*) FROM compliance_bundles WHERE name = $2),
+                (SELECT COUNT(*) FROM compliance_bundle_versions WHERE name = $2),
+                (SELECT COUNT(*) FROM deployment_policies WHERE name = $3),
+                (SELECT COUNT(*) FROM deployment_policy_versions pv JOIN deployment_policies p ON p.id = pv.policy_id WHERE p.name = $3),
+                (SELECT COUNT(*) FROM compliance_source_object_mappings WHERE source_artifact_id IN (SELECT id FROM compliance_source_artifacts WHERE sha256 = $1))",
+        )
+        .bind(source_sha)
+        .bind(bundle_name)
+        .bind(shared_name)
+        .fetch_one(&pool)
+        .await
+        .expect("count rollback rows");
+        assert_eq!(durable_rows.0, 0, "source artifact must roll back");
+        assert_eq!(durable_rows.1, 0, "bundle lineage must roll back");
+        assert_eq!(durable_rows.2, 0, "bundle version must roll back");
+        assert_eq!(
+            durable_rows.3, existing_name_counts.0,
+            "shared policy lineage must roll back"
+        );
+        assert_eq!(
+            durable_rows.4, existing_name_counts.1,
+            "shared policy version must roll back"
+        );
+        assert_eq!(durable_rows.5, 0, "source mappings must roll back");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn phase_22_shared_creation_rejects_duplicate_identity_groups_without_writes() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_Phase22_Duplicate_{}",
+            Uuid::new_v4().simple()
+        );
+        let fix = "services.openssh.enable = true;";
+        let rule_ids = [
+            "xccdf_test_stig_rule_0",
+            "xccdf_test_stig_rule_1",
+            "xccdf_test_stig_rule_2",
+            "xccdf_test_stig_rule_3",
+        ];
+        let pkg = make_package(shared_stig_bytes(
+            &benchmark_id,
+            "V1R1",
+            &[
+                ("V-22-601", "Duplicate A"),
+                ("V-22-602", "Duplicate B"),
+                ("V-22-603", "Duplicate C"),
+                ("V-22-604", "Duplicate D"),
+            ],
+            &[fix, fix, fix, fix],
+        ));
+        let first = shared_decision_for_fix(&rule_ids[..2], fix);
+        let second = shared_decision_for_fix(&rule_ids[2..], fix);
+        let (validated, records) = shared_native_plan(
+            &pkg,
+            vec![first, second],
+            &rule_ids,
+            std::collections::HashMap::new(),
+        );
+        let source_sha = pkg.provenance.sha256.clone();
+
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("duplicate identity groups must reject the import");
+        assert!(
+            error
+                .to_string()
+                .contains("IMPORT_SHARED_IMPLEMENTATION_STALE")
+        );
+        let artifact_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1",
+        )
+        .bind(source_sha)
+        .fetch_one(&pool)
+        .await
+        .expect("count rolled-back duplicate artifact");
+        assert_eq!(artifact_count, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn phase_22_shared_reuse_maps_three_requirements_to_one_existing_policy() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let fix = "services.openssh.enable = true;";
+        let config = serde_json::json!({"services.openssh.enable": true});
+        let (_policy_id, source_version_id) =
+            insert_published_technical_policy(&pool, "Phase22 Shared Reuse", config).await;
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_Phase22_Reuse_{}",
+            Uuid::new_v4().simple()
+        );
+        let rule_ids = [
+            "xccdf_test_stig_rule_0",
+            "xccdf_test_stig_rule_1",
+            "xccdf_test_stig_rule_2",
+        ];
+        let pkg = make_package(shared_stig_bytes(
+            &benchmark_id,
+            "V1R1",
+            &[
+                ("V-22-701", "Reuse A"),
+                ("V-22-702", "Reuse B"),
+                ("V-22-703", "Reuse C"),
+            ],
+            &[fix, fix, fix],
+        ));
+        let (validated, records) = shared_reuse_plan(&pkg, source_version_id, &rule_ids);
+        let result = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("shared reuse import should commit");
+        assert_eq!(result.created_policy_count, 0);
+        assert_eq!(result.created_policy_versions, 0);
+        assert_eq!(result.reused_policy_versions, 1);
+
+        let mapped_versions: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT policy_version_id FROM compliance_source_object_mappings WHERE source_artifact_id = $1 AND object_kind = 'rule'",
+        )
+        .bind(result.source_artifact_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load shared reuse source mappings");
+        assert_eq!(mapped_versions.len(), 1);
+        assert_ne!(mapped_versions[0], source_version_id);
+        let effective_version = mapped_versions[0];
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM policy_requirement_mappings WHERE policy_version_id = $1",
+            )
+            .bind(effective_version)
+            .fetch_one(&pool)
+            .await
+            .expect("count shared reuse mappings"),
+            3
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM compliance_bundle_version_policies WHERE bundle_version_id = $1 AND policy_version_id = $2",
+            )
+            .bind(result.bundle_version_id)
+            .bind(effective_version)
+            .fetch_one(&pool)
+            .await
+            .expect("count shared reuse membership"),
+            1
+        );
+        cleanup_import(&pool, result.bundle_id, &[]).await;
+        let _ = sqlx::query("DELETE FROM deployment_policy_versions WHERE id = $1")
+            .bind(effective_version)
+            .execute(&pool)
+            .await;
+    }
+
+    fn disa_stig_bytes(benchmark_id: &str, release: &str, rules: &[(&str, &str)]) -> Vec<u8> {
+        let rules = rules
+            .iter()
+            .enumerate()
+            .map(|(index, (vuln_id, title))| {
+                format!(
+                    r#"  <Rule id="xccdf_test_stig_rule_{index}"><title>{title}</title><description>Stable requirement {vuln_id}</description><ident system="http://cyber.mil/stigs/stig">{vuln_id}</ident><check system="urn:test"><check-content>Verify {vuln_id}.</check-content></check></Rule>"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="{benchmark_id}">
+  <status>draft</status><title>MapExisting Test STIG</title><version>{release}</version>
+{rules}
+</Benchmark>"#
+        )
+        .into_bytes()
+    }
+
+    fn disa_stig_bytes_with_cci(
+        benchmark_id: &str,
+        release: &str,
+        vuln_id: &str,
+        title: &str,
+        cci_id: &str,
+    ) -> Vec<u8> {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="{benchmark_id}">
+  <status>draft</status><title>Related Candidate Test STIG</title><version>{release}</version>
+  <Rule id="xccdf_test_stig_rule_0"><title>{title}</title><description>Stable requirement {vuln_id}</description><ident system="http://cyber.mil/stigs/stig">{vuln_id}</ident><ident system="http://cyber.mil/cci">{cci_id}</ident><check system="urn:test"><check-content>Verify {vuln_id}.</check-content></check></Rule>
+</Benchmark>"#
+        )
+        .into_bytes()
+    }
+
+    fn shared_stig_bytes(
+        benchmark_id: &str,
+        release: &str,
+        rules: &[(&str, &str)],
+        assignments: &[&str],
+    ) -> Vec<u8> {
+        let rules = rules
+            .iter()
+            .enumerate()
+            .map(|(index, (vuln_id, title))| {
+                format!(
+                    r#"  <Rule id="xccdf_test_stig_rule_{index}"><title>{title}</title><description>Stable requirement {vuln_id}</description><ident system="http://cyber.mil/stigs/stig">{vuln_id}</ident><fix system="urn:test">{assignment}</fix><check system="urn:test"><check-content>Verify {vuln_id}.</check-content></check></Rule>"#,
+                    assignment = assignments[index]
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="{benchmark_id}">
+  <status>draft</status><title>Shared Test STIG</title><version>{release}</version>
+{rules}
+</Benchmark>"#
+        )
+        .into_bytes()
+    }
+
+    fn shared_native_plan(
+        pkg: &ProcessedXccdfPackage,
+        shared_groups: Vec<SharedGroupDecision>,
+        native_rule_ids: &[&str],
+        mapping_semantics: std::collections::HashMap<String, ImportedMappingSemantics>,
+    ) -> (ValidatedImportPlan, Vec<ImportedPolicyRecord>) {
+        use crate::compliance::xccdf::import_models::{
+            ImportedBundlePlan, ImportedCustomCheck, ImportedCustomCheckRule, XccdfImportPlan,
+            XccdfRuleImportAction,
+        };
+        use crate::compliance::xccdf::importer::validate_import_plan;
+
+        let rule_actions = native_rule_ids
+            .iter()
+            .map(|rule_id| XccdfRuleImportAction::CreateNativeCustom {
+                rule_id: (*rule_id).to_string(),
+                customization: Default::default(),
+                custom_check: ImportedCustomCheck {
+                    mode: "all".to_string(),
+                    rules: vec![ImportedCustomCheckRule {
+                        field_name: "shared".to_string(),
+                        expression:
+                            "cfg.config.services.openssh.settings.PermitRootLogin == \"no\""
+                                .to_string(),
+                        description: "shared test".to_string(),
+                        strict: true,
+                    }],
+                },
+                evidence_requirements: Vec::new(),
+            })
+            .collect();
+        let plan = XccdfImportPlan {
+            expected_sha256: pkg.provenance.sha256.clone(),
+            selected_profile_id: None,
+            selected_rule_ids: native_rule_ids.iter().map(|id| (*id).to_string()).collect(),
+            rule_actions,
+            mapping_semantics,
+            shared_group_decisions: shared_groups,
+            bundle: ImportedBundlePlan {
+                name: format!("Shared Test Bundle {}", Uuid::new_v4()),
+                framework: "DISA STIG".to_string(),
+                version: "V1R1".to_string(),
+                layer: Some("os".to_string()),
+                owner: Some("Security Team".to_string()),
+                description: None,
+            },
+        };
+        let mut validated =
+            validate_import_plan(plan, &pkg.parsed).expect("valid shared test plan");
+        let suffix = Uuid::new_v4().simple().to_string();
+        validated.bundle.name = format!("{}-{suffix}", validated.bundle.name);
+        let mut records = build_policy_records(&validated);
+        for record in &mut records {
+            record.name = format!("{}-{suffix}", record.name);
+        }
+        (validated, records)
+    }
+
+    fn shared_decision_for_fix(rule_ids: &[&str], fix_text: &str) -> SharedGroupDecision {
+        use crate::compliance::shared_implementation::SharedImplementationId;
+        use crate::compliance::xccdf::import_models::SharedGroupAction;
+
+        let identity = RequirementTechnicalIdentity::from_fix_text(fix_text);
+        let group_id = SharedImplementationId::from_technical_identity(&identity);
+        SharedGroupDecision {
+            group_id: group_id.technical_hash,
+            rule_ids: rule_ids.iter().map(|id| (*id).to_string()).collect(),
+            action: SharedGroupAction::CreateShared,
+        }
+    }
+
+    fn shared_reuse_plan(
+        pkg: &ProcessedXccdfPackage,
+        policy_version_id: Uuid,
+        rule_ids: &[&str],
+    ) -> (ValidatedImportPlan, Vec<ImportedPolicyRecord>) {
+        use crate::compliance::xccdf::import_models::{
+            ImportedBundlePlan, ImportedMappingSemantics, MapExistingProof, XccdfImportPlan,
+            XccdfRuleImportAction,
+        };
+        use crate::compliance::xccdf::importer::validate_import_plan;
+
+        let rule_ids_owned: Vec<String> = rule_ids.iter().map(|id| (*id).to_string()).collect();
+        let plan = XccdfImportPlan {
+            expected_sha256: pkg.provenance.sha256.clone(),
+            selected_profile_id: None,
+            selected_rule_ids: rule_ids_owned.clone(),
+            rule_actions: rule_ids_owned
+                .iter()
+                .map(|rule_id| XccdfRuleImportAction::MapExisting {
+                    rule_id: rule_id.clone(),
+                    policy_version_id,
+                    proof: Some(MapExistingProof::ExactTechnicalMatch),
+                })
+                .collect(),
+            mapping_semantics: rule_ids_owned
+                .iter()
+                .map(|rule_id| {
+                    (
+                        rule_id.clone(),
+                        ImportedMappingSemantics {
+                            relationship: Some("implements".into()),
+                            coverage: Some("full".into()),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
+            shared_group_decisions: vec![SharedGroupDecision {
+                group_id: SharedImplementationId::from_technical_identity(
+                    &RequirementTechnicalIdentity::from_fix_text("services.openssh.enable = true;"),
+                )
+                .technical_hash,
+                rule_ids: rule_ids_owned,
+                action: SharedGroupAction::ReuseExisting,
+            }],
+            bundle: ImportedBundlePlan {
+                name: format!("Shared Reuse Test Bundle {}", Uuid::new_v4()),
+                framework: "DISA STIG".to_string(),
+                version: "V1R1".to_string(),
+                layer: Some("os".to_string()),
+                owner: Some("Security Team".to_string()),
+                description: None,
+            },
+        };
+        let mut validated =
+            validate_import_plan(plan, &pkg.parsed).expect("valid shared reuse plan");
+        let suffix = Uuid::new_v4().simple().to_string();
+        validated.bundle.name = format!("{}-{suffix}", validated.bundle.name);
+        let records = build_policy_records(&validated);
+        (validated, records)
+    }
+
+    fn map_existing_plan(
+        pkg: &ProcessedXccdfPackage,
+        policy_version_id: Uuid,
+    ) -> (ValidatedImportPlan, Vec<ImportedPolicyRecord>) {
+        use crate::compliance::xccdf::import_models::{
+            ImportedBundlePlan, XccdfImportPlan, XccdfRuleImportAction,
+        };
+        use crate::compliance::xccdf::importer::validate_import_plan;
+
+        let rule_ids: Vec<String> = pkg
+            .parsed
+            .rules
+            .iter()
+            .map(|rule| rule.id.clone())
+            .collect();
+        let plan = XccdfImportPlan {
+            expected_sha256: pkg.provenance.sha256.clone(),
+            selected_profile_id: None,
+            selected_rule_ids: rule_ids.clone(),
+            rule_actions: rule_ids
+                .iter()
+                .map(|rule_id| XccdfRuleImportAction::MapExisting {
+                    rule_id: rule_id.clone(),
+                    policy_version_id,
+                    proof: None,
+                })
+                .collect(),
+            mapping_semantics: std::collections::HashMap::new(),
+
+            shared_group_decisions: Vec::new(),
+
+            bundle: ImportedBundlePlan {
+                name: format!("MapExisting STIG bundle {}", Uuid::new_v4()),
+                framework: "DISA STIG".into(),
+                version: "test".into(),
+                layer: Some("os".into()),
+                owner: Some("Security Team".into()),
+                description: None,
+            },
+        };
+        let validated = validate_import_plan(plan, &pkg.parsed).expect("valid MapExisting plan");
+        let records = build_policy_records(&validated);
+        (validated, records)
+    }
+
+    async fn publish_policy_version(
+        pool: &PgPool,
+        actor_id: Uuid,
+        policy_id: Uuid,
+        policy_version_id: Uuid,
+    ) {
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("begin policy publish transaction");
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET trust_state = 'trusted', trusted_by = $2, trusted_at = CURRENT_TIMESTAMP WHERE id = $1",
+        )
+        .bind(policy_version_id)
+        .bind(actor_id)
+        .execute(&mut *tx)
+        .await
+        .expect("trust policy version");
+        sqlx::query(
+            "UPDATE deployment_policies SET current_draft_version_id = NULL WHERE id = $1 AND current_draft_version_id = $2",
+        )
+        .bind(policy_id)
+        .bind(policy_version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("clear policy draft pointer");
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET publication_state = 'accepted', published_at = CURRENT_TIMESTAMP WHERE id = $1",
+        )
+        .bind(policy_version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("accept policy version");
+        sqlx::query(
+            "UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(policy_version_id)
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .expect("set published policy pointer");
+        tx.commit()
+            .await
+            .expect("commit policy publish transaction");
+    }
+
+    struct MapExistingSource {
+        policy_id: Uuid,
+        policy_version_id: Uuid,
+        requirement_version_ids: Vec<Uuid>,
+        benchmark_id: String,
+    }
+
+    async fn prepare_map_existing_source(
+        pool: &PgPool,
+        user_id: Uuid,
+        mapping_trust_state: &str,
+        publish: bool,
+    ) -> MapExistingSource {
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_MapExisting_Test_STIG_{}",
+            Uuid::new_v4().simple()
+        );
+        let pkg = make_package(disa_stig_bytes(
+            &benchmark_id,
+            "V1R1",
+            &[
+                ("V-418-001", "First stable requirement"),
+                ("V-418-002", "Second stable requirement"),
+            ],
+        ));
+        let (validated, records) =
+            make_plan(&pkg, &["xccdf_test_stig_rule_0", "xccdf_test_stig_rule_1"]);
+        let result = commit_foreign_import(pool, user_id, pkg, validated, records)
+            .await
+            .expect("import prior STIG release");
+        let policy_version_id = result.created_policy_version_ids[0];
+        let policy_id: Uuid =
+            sqlx::query_scalar("SELECT policy_id FROM deployment_policy_versions WHERE id = $1")
+                .bind(policy_version_id)
+                .fetch_one(pool)
+                .await
+                .expect("load source policy lineage");
+        let requirement_version_ids: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT requirement_version_id FROM compliance_bundle_version_requirements WHERE bundle_version_id = $1 ORDER BY requirement_order",
+        )
+        .bind(result.bundle_version_id)
+        .fetch_all(pool)
+        .await
+        .expect("load prior requirement versions");
+
+        // Both prior requirements deliberately share the one source policy and
+        // carry non-default mapping semantics that the inherited reuse must copy.
+        sqlx::query(
+            "UPDATE policy_requirement_mappings SET relationship = 'supports', coverage = 'partial', rationale = 'shared inherited rationale', trust_state = $2 WHERE policy_version_id = $1",
+        )
+        .bind(policy_version_id)
+        .bind(mapping_trust_state)
+        .execute(pool)
+        .await
+        .expect("update first source mapping semantics");
+        sqlx::query(
+            "INSERT INTO policy_requirement_mappings (policy_version_id, requirement_version_id, relationship, coverage, rationale, provenance, trust_state, created_by) VALUES ($1, $2, 'supports', 'partial', 'shared inherited rationale', 'manual', $3, $4)",
+        )
+        .bind(policy_version_id)
+        .bind(requirement_version_ids[1])
+        .bind(mapping_trust_state)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("map shared source policy to second requirement");
+
+        if publish {
+            publish_policy_version(pool, user_id, policy_id, policy_version_id).await;
+        }
+        MapExistingSource {
+            policy_id,
+            policy_version_id,
+            requirement_version_ids,
+            benchmark_id,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn map_existing_stig_reuses_current_policy_draft_and_preserves_inherited_mappings() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let source = prepare_map_existing_source(&pool, user_id, "trusted", true).await;
+        let source_version_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policy_versions WHERE policy_id = $1",
+        )
+        .bind(source.policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count source policy versions before reuse");
+        let pkg = make_package(disa_stig_bytes(
+            &source.benchmark_id,
+            "V1R2",
+            &[
+                ("V-418-001", "First stable requirement"),
+                ("V-418-002", "Second stable requirement"),
+            ],
+        ));
+        let (validated, records) = map_existing_plan(&pkg, source.policy_version_id);
+        let result = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("current accepted STIG mapping should be reused");
+
+        assert_eq!(result.created_policy_count, 0);
+        assert_eq!(result.created_policy_versions, 0);
+        assert_eq!(result.reused_policy_versions, 1);
+        assert!(result.created_policy_version_ids.is_empty());
+
+        let draft_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(source.policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load derived policy draft");
+        assert_ne!(draft_id, source.policy_version_id);
+        let derived_from: Option<Uuid> = sqlx::query_scalar(
+            "SELECT derived_from_version_id FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(draft_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load derived draft provenance");
+        assert_eq!(derived_from, Some(source.policy_version_id));
+
+        let members: Vec<(Uuid, i32)> = sqlx::query_as(
+            "SELECT policy_version_id, policy_order FROM compliance_bundle_version_policies WHERE bundle_version_id = $1 ORDER BY policy_order",
+        )
+        .bind(result.bundle_version_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load bundle membership");
+        assert_eq!(members, vec![(draft_id, 0)]);
+
+        let mappings: Vec<(Uuid, String, String, Option<String>, String)> = sqlx::query_as(
+            "SELECT requirement_version_id, relationship, coverage, rationale, provenance FROM policy_requirement_mappings WHERE policy_version_id = $1 ORDER BY requirement_version_id",
+        )
+        .bind(draft_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load inherited mappings");
+        assert_eq!(mappings.len(), 2);
+        assert_eq!(
+            mappings
+                .iter()
+                .map(|(_, relationship, coverage, rationale, provenance)| (
+                    relationship.as_str(),
+                    coverage.as_str(),
+                    rationale.as_deref(),
+                    provenance.as_str(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "supports",
+                    "partial",
+                    Some("shared inherited rationale"),
+                    "inherited"
+                ),
+                (
+                    "supports",
+                    "partial",
+                    Some("shared inherited rationale"),
+                    "inherited"
+                ),
+            ]
+        );
+        assert_ne!(mappings[0].0, source.requirement_version_ids[0]);
+        assert_ne!(mappings[1].0, source.requirement_version_ids[1]);
+
+        let version_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policy_versions WHERE policy_id = $1",
+        )
+        .bind(source.policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count source policy versions");
+        assert_eq!(
+            version_count,
+            source_version_count + 1,
+            "both rules must reuse one existing mutable draft"
+        );
+
+        let audit_counts: (i64, i64) = sqlx::query_as(
+            "SELECT (metadata->>'created_policy_count')::bigint, (metadata->>'reused_policy_versions')::bigint FROM admin_audit_events WHERE (metadata->>'bundle_id')::uuid = $1",
+        )
+        .bind(result.bundle_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load import accounting audit event");
+        assert_eq!(audit_counts, (0, 1));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn reviewed_related_stig_reuses_current_policy_with_reviewed_provenance() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let source = prepare_map_existing_source(&pool, user_id, "trusted", false).await;
+        let shared_cci = "CCI-000770";
+
+        let foreign_key = format!("reviewed-related-foreign-{}", Uuid::new_v4());
+        let mut tx = pool.begin().await.expect("begin foreign requirement setup");
+        let foreign_framework = upsert_framework_lineage(
+            &mut tx,
+            "Reviewed related foreign framework",
+            None,
+            &foreign_key,
+            None,
+        )
+        .await
+        .expect("insert foreign framework lineage");
+        let foreign_framework_version = insert_framework_version(
+            &mut tx,
+            foreign_framework,
+            &FrameworkVersionCanonical {
+                canonical_source_key: foreign_key.clone(),
+                canonical_release_key: "V1R1".into(),
+                version: "V1R1".into(),
+                publisher: None,
+                title: None,
+            },
+            None,
+            None,
+        )
+        .await
+        .expect("insert foreign framework version");
+        let foreign_requirement =
+            upsert_requirement_lineage(&mut tx, foreign_framework, "FOREIGN-AC-1")
+                .await
+                .expect("insert foreign requirement lineage");
+        let foreign_requirement_version = insert_requirement_version(
+            &mut tx,
+            foreign_requirement,
+            foreign_framework_version,
+            &RequirementVersionCanonical {
+                canonical_requirement_key: "FOREIGN-AC-1".into(),
+                external_id: "FOREIGN-AC-1".into(),
+                title: Some("Foreign access control".into()),
+                description: None,
+                kind: "control".into(),
+                severity: None,
+                check_text: None,
+                fix_text: None,
+                metadata: serde_json::json!({"cci_ids": [shared_cci], "srg_ids": []}),
+            },
+            None,
+        )
+        .await
+        .expect("insert foreign requirement version");
+        insert_policy_mapping_in_tx(
+            &mut tx,
+            source.policy_version_id,
+            foreign_requirement_version,
+            "supports",
+            "partial",
+            Some("reviewed related evidence"),
+            "manual",
+            None,
+            user_id,
+        )
+        .await
+        .expect("insert trusted related mapping");
+        tx.commit().await.expect("commit foreign requirement setup");
+        publish_policy_version(&pool, user_id, source.policy_id, source.policy_version_id).await;
+
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_Reviewed_Related_{}",
+            Uuid::new_v4().simple()
+        );
+        let pkg = make_package(disa_stig_bytes_with_cci(
+            &benchmark_id,
+            "V1R2",
+            "V-418-201",
+            "Reviewed related requirement",
+            shared_cci,
+        ));
+        let (validated, mut records) = map_existing_plan(&pkg, source.policy_version_id);
+        let rule_id = records[0].source_rule_id.clone();
+        let semantics = ImportedMappingSemantics {
+            relationship: Some("supports".into()),
+            coverage: Some("partial".into()),
+            rationale: Some("human-reviewed related control".into()),
+            reviewed_related_candidate: Some(ReviewedRelatedCandidate {
+                policy_version_id: source.policy_version_id,
+                related_requirement_version_id: foreign_requirement_version,
+                shared_cci_ids: vec![shared_cci.into()],
+                shared_srg_ids: vec![],
+            }),
+        };
+        let mut mapping_semantics = std::collections::HashMap::new();
+        mapping_semantics.insert(rule_id.clone(), semantics);
+        records[0].mapping_semantics = mapping_semantics.get(&rule_id).cloned();
+        let mut validated = validated;
+        validated.mapping_semantics = mapping_semantics;
+
+        let result = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("reviewed related reuse should succeed");
+        assert_eq!(result.reused_policy_versions, 1);
+        assert_eq!(result.created_policy_versions, 0);
+
+        let draft_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(source.policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load derived reviewed draft");
+        let mappings: Vec<(String, String, Option<String>, String, String)> = sqlx::query_as(
+            "SELECT relationship, coverage, rationale, provenance, trust_state FROM policy_requirement_mappings WHERE policy_version_id = $1",
+        )
+        .bind(draft_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load reviewed mapping");
+        assert!(mappings.iter().any(|mapping| {
+            mapping.0 == "supports"
+                && mapping.1 == "partial"
+                && mapping.2.as_deref() == Some("human-reviewed related control")
+                && mapping.3 == "suggested"
+                && mapping.4 == "trusted"
+        }));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn reviewed_related_stig_rejects_forged_identifier_claim_and_rolls_back() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let source = prepare_map_existing_source(&pool, user_id, "trusted", true).await;
+        let pkg = make_package(disa_stig_bytes_with_cci(
+            &format!(
+                "xccdf_mil.disa.stig_benchmark_Reviewed_Related_Forged_{}",
+                Uuid::new_v4().simple()
+            ),
+            "V1R2",
+            "V-418-202",
+            "Forged related requirement",
+            "CCI-000771",
+        ));
+        let (mut validated, mut records) = map_existing_plan(&pkg, source.policy_version_id);
+        let rule_id = records[0].source_rule_id.clone();
+        let forged = ReviewedRelatedCandidate {
+            policy_version_id: source.policy_version_id,
+            related_requirement_version_id: Uuid::new_v4(),
+            shared_cci_ids: vec!["CCI-000770".into()],
+            shared_srg_ids: vec![],
+        };
+        let semantics = ImportedMappingSemantics {
+            reviewed_related_candidate: Some(forged),
+            ..Default::default()
+        };
+        validated
+            .mapping_semantics
+            .insert(rule_id.clone(), semantics.clone());
+        records[0].mapping_semantics = Some(semantics);
+        let bundle_name = validated.bundle.name.clone();
+        let source_sha256 = pkg.provenance.sha256.clone();
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("forged related evidence must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("IMPORT_RELATED_REUSE_INELIGIBLE")
+        );
+        let bundle_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundles WHERE name = $1")
+                .bind(bundle_name)
+                .fetch_one(&pool)
+                .await
+                .expect("count rolled back bundle");
+        assert_eq!(bundle_count, 0);
+        let artifact_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1",
+        )
+        .bind(source_sha256)
+        .fetch_one(&pool)
+        .await
+        .expect("count rolled back artifact");
+        assert_eq!(artifact_count, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn map_existing_stig_rejects_non_current_nonaccepted_untrusted_and_changed_sources() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+
+        let mutable = prepare_map_existing_source(&pool, user_id, "trusted", false).await;
+        let pkg = make_package(disa_stig_bytes(
+            &mutable.benchmark_id,
+            "V1R2",
+            &[
+                ("V-418-001", "First stable requirement"),
+                ("V-418-002", "Second stable requirement"),
+            ],
+        ));
+        let (validated, records) = map_existing_plan(&pkg, mutable.policy_version_id);
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("mutable selected version must be rejected");
+        assert!(error.to_string().contains("IMPORT_REUSE_INELIGIBLE"));
+
+        let untrusted = prepare_map_existing_source(&pool, user_id, "suggested", true).await;
+        let pkg = make_package(disa_stig_bytes(
+            &untrusted.benchmark_id,
+            "V1R2",
+            &[
+                ("V-418-001", "First stable requirement"),
+                ("V-418-002", "Second stable requirement"),
+            ],
+        ));
+        let (validated, records) = map_existing_plan(&pkg, untrusted.policy_version_id);
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("untrusted source mapping must be rejected");
+        assert!(error.to_string().contains("IMPORT_REUSE_INELIGIBLE"));
+
+        let superseded = prepare_map_existing_source(&pool, user_id, "trusted", true).await;
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("begin superseding draft transaction");
+        let replacement = ensure_policy_draft(
+            &mut tx,
+            superseded.policy_id,
+            Some(user_id),
+            None,
+            PolicyDraftIntent::EnsureMutable,
+        )
+        .await
+        .expect("derive replacement draft");
+        sqlx::query(
+            "INSERT INTO policy_requirement_mappings (policy_version_id, requirement_version_id, relationship, coverage, provenance, trust_state, created_by) VALUES ($1, $2, 'implements', 'full', 'manual', 'trusted', $3)",
+        )
+        .bind(replacement)
+        .bind(superseded.requirement_version_ids[0])
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .expect("map replacement draft");
+        tx.commit().await.expect("commit replacement draft");
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET publication_state = 'deprecated' WHERE id = $1",
+        )
+        .bind(superseded.policy_version_id)
+        .execute(&pool)
+        .await
+        .expect("retire superseded source policy version");
+        publish_policy_version(&pool, user_id, superseded.policy_id, replacement).await;
+        let pkg = make_package(disa_stig_bytes(
+            &superseded.benchmark_id,
+            "V1R2",
+            &[
+                ("V-418-001", "First stable requirement"),
+                ("V-418-002", "Second stable requirement"),
+            ],
+        ));
+        let (validated, records) = map_existing_plan(&pkg, superseded.policy_version_id);
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("superseded selected version must be rejected");
+        assert!(error.to_string().contains("IMPORT_REUSE_INELIGIBLE"));
+
+        let deprecated = prepare_map_existing_source(&pool, user_id, "trusted", true).await;
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET publication_state = 'deprecated' WHERE id = $1",
+        )
+        .bind(deprecated.policy_version_id)
+        .execute(&pool)
+        .await
+        .expect("deprecate selected policy version");
+        let pkg = make_package(disa_stig_bytes(
+            &deprecated.benchmark_id,
+            "V1R2",
+            &[
+                ("V-418-001", "First stable requirement"),
+                ("V-418-002", "Second stable requirement"),
+            ],
+        ));
+        let (validated, records) = map_existing_plan(&pkg, deprecated.policy_version_id);
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("deprecated selected version must be rejected");
+        assert!(error.to_string().contains("IMPORT_REUSE_INELIGIBLE"));
+
+        let changed = prepare_map_existing_source(&pool, user_id, "trusted", true).await;
+        let pkg = make_package(disa_stig_bytes(
+            &changed.benchmark_id,
+            "V1R2",
+            &[
+                ("V-418-001", "Changed requirement"),
+                ("V-418-002", "Second stable requirement"),
+            ],
+        ));
+        let (validated, records) = map_existing_plan(&pkg, changed.policy_version_id);
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("changed requirement must not inherit a prior mapping");
+        assert!(error.to_string().contains("IMPORT_REUSE_INELIGIBLE"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn map_existing_stig_rolls_back_derived_draft_and_import_rows_on_late_failure() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let source = prepare_map_existing_source(&pool, user_id, "trusted", true).await;
+        let source_version_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policy_versions WHERE policy_id = $1",
+        )
+        .bind(source.policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count source policy versions before failed reuse");
+        let pkg = make_package(disa_stig_bytes(
+            &source.benchmark_id,
+            "V1R2",
+            &[
+                ("V-418-001", "First stable requirement"),
+                ("V-418-002", "Second stable requirement"),
+            ],
+        ));
+        let failed_sha256 = pkg.provenance.sha256.clone();
+        let artifact_count_before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1",
+        )
+        .bind(&failed_sha256)
+        .fetch_one(&pool)
+        .await
+        .expect("count future artifact rows");
+        let (validated, mut records) = map_existing_plan(&pkg, source.policy_version_id);
+        let bundle_name = validated.bundle.name.clone();
+        records[1].mapped_policy_version_id = Some(Uuid::new_v4());
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("second invalid mapping must fail after the first draft derivation");
+        assert!(
+            error
+                .to_string()
+                .contains("IMPORT_POLICY_VERSION_NOT_FOUND")
+        );
+
+        let artifact_count_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1",
+        )
+        .bind(&failed_sha256)
+        .fetch_one(&pool)
+        .await
+        .expect("count failed import artifact rows");
+        let bundle_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundles WHERE name = $1")
+                .bind(bundle_name)
+                .fetch_one(&pool)
+                .await
+                .expect("count failed import bundle rows");
+        assert_eq!(bundle_count, 0);
+        assert_eq!(artifact_count_after, artifact_count_before);
+        let draft_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policy_versions WHERE policy_id = $1",
+        )
+        .bind(source.policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count derived drafts after rollback");
+        assert_eq!(
+            draft_count, source_version_count,
+            "failed import must not retain its derived draft"
+        );
     }
 
     #[tokio::test]
@@ -1633,6 +4229,10 @@ mod tests {
                     rule_id: "xccdf_test_rule_002".into(),
                 },
             ],
+            mapping_semantics: std::collections::HashMap::new(),
+
+            shared_group_decisions: Vec::new(),
+
             bundle: ImportedBundlePlan {
                 name: "Partial Import Bundle".into(),
                 framework: "XCCDF-TEST".into(),
@@ -1684,7 +4284,8 @@ mod tests {
         // Force a failure mid-transaction to prove atomicity.
         let pool = test_pool().await.expect("DATABASE_URL required");
         let user_id = ensure_test_user(&pool).await;
-        let bytes = minimal_xccdf_bytes();
+        let mut bytes = minimal_xccdf_bytes();
+        bytes.extend_from_slice(format!("<!-- {} -->", Uuid::new_v4()).as_bytes());
         let pkg = make_package(bytes);
         let artifact_count_before: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1",
@@ -1802,10 +4403,6 @@ mod tests {
     async fn cleanup_import(pool: &PgPool, bundle_id: Uuid, policy_version_ids: &[Uuid]) {
         // Delete policy versions first (FK from membership), then lineages.
         for pvid in policy_version_ids {
-            let _ = sqlx::query("DELETE FROM deployment_policy_versions WHERE id = $1")
-                .bind(pvid)
-                .execute(pool)
-                .await;
             let policy_id: Option<Uuid> = sqlx::query_scalar(
                 "SELECT policy_id FROM deployment_policy_versions WHERE id = $1",
             )
@@ -1813,6 +4410,27 @@ mod tests {
             .fetch_optional(pool)
             .await
             .unwrap_or(None);
+            let _ = sqlx::query(
+                "DELETE FROM compliance_source_object_mappings WHERE policy_version_id = $1",
+            )
+            .bind(pvid)
+            .execute(pool)
+            .await;
+            let _ =
+                sqlx::query("DELETE FROM policy_requirement_mappings WHERE policy_version_id = $1")
+                    .bind(pvid)
+                    .execute(pool)
+                    .await;
+            let _ = sqlx::query(
+                "DELETE FROM compliance_bundle_version_policies WHERE policy_version_id = $1",
+            )
+            .bind(pvid)
+            .execute(pool)
+            .await;
+            let _ = sqlx::query("DELETE FROM deployment_policy_versions WHERE id = $1")
+                .bind(pvid)
+                .execute(pool)
+                .await;
             if let Some(pid) = policy_id {
                 let _ = sqlx::query("DELETE FROM deployment_policies WHERE id = $1")
                     .bind(pid)
@@ -1825,6 +4443,60 @@ mod tests {
             .bind(bundle_id)
             .execute(pool)
             .await;
+    }
+
+    async fn cleanup_shared_policy_fixture(pool: &PgPool, fix: &str) {
+        let identity = RequirementTechnicalIdentity::from_fix_text(fix);
+        let name = format!(
+            "Technical: {}%",
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(
+                &identity,
+            )
+            .technical_hash
+        );
+        let policy_ids: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM deployment_policies WHERE name LIKE $1")
+                .bind(name)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
+        for policy_id in policy_ids {
+            let version_ids: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM deployment_policy_versions WHERE policy_id = $1",
+            )
+            .bind(policy_id)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+            for version_id in version_ids {
+                let _ = sqlx::query(
+                    "DELETE FROM compliance_source_object_mappings WHERE policy_version_id = $1",
+                )
+                .bind(version_id)
+                .execute(pool)
+                .await;
+                let _ = sqlx::query(
+                    "DELETE FROM policy_requirement_mappings WHERE policy_version_id = $1",
+                )
+                .bind(version_id)
+                .execute(pool)
+                .await;
+                let _ = sqlx::query(
+                    "DELETE FROM compliance_bundle_version_policies WHERE policy_version_id = $1",
+                )
+                .bind(version_id)
+                .execute(pool)
+                .await;
+            }
+            let _ = sqlx::query("DELETE FROM deployment_policy_versions WHERE policy_id = $1")
+                .bind(policy_id)
+                .execute(pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM deployment_policies WHERE id = $1")
+                .bind(policy_id)
+                .execute(pool)
+                .await;
+        }
     }
 
     #[tokio::test]
@@ -2230,7 +4902,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!((pol_state.as_str(), pol_trust.as_str()), ("accepted", "trusted"));
+        assert_eq!(
+            (pol_state.as_str(), pol_trust.as_str()),
+            ("accepted", "trusted")
+        );
         let (bun_state, bun_trust): (String, String) = sqlx::query_as(
             "SELECT publication_state, trust_state FROM compliance_bundle_versions WHERE id = $1",
         )
@@ -2238,7 +4913,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!((bun_state.as_str(), bun_trust.as_str()), ("accepted", "trusted"));
+        assert_eq!(
+            (bun_state.as_str(), bun_trust.as_str()),
+            ("accepted", "trusted")
+        );
 
         // Exact re-import of the same bytes must reuse, not error.
         let second_pkg = make_package(bytes);
@@ -2269,7 +4947,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!((pol_state.as_str(), pol_trust.as_str()), ("accepted", "trusted"));
+        assert_eq!(
+            (pol_state.as_str(), pol_trust.as_str()),
+            ("accepted", "trusted")
+        );
         let (bun_state, bun_trust): (String, String) = sqlx::query_as(
             "SELECT publication_state, trust_state FROM compliance_bundle_versions WHERE id = $1",
         )
@@ -2277,7 +4958,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!((bun_state.as_str(), bun_trust.as_str()), ("accepted", "trusted"));
+        assert_eq!(
+            (bun_state.as_str(), bun_trust.as_str()),
+            ("accepted", "trusted")
+        );
 
         // Pointer invariants survive the re-import.
         let (pol_draft, pol_pub): (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
@@ -2447,7 +5131,10 @@ mod tests {
         assert!(second.bundle_version_created);
         assert_eq!(second.bundle_id, bundle_id);
         assert_eq!(second.bundle_version_id, new_bundle_version_id);
-        assert_eq!(second.created_policy_version_ids, vec![new_policy_version_id]);
+        assert_eq!(
+            second.created_policy_version_ids,
+            vec![new_policy_version_id]
+        );
 
         // Version A rows must be unchanged (still accepted + trusted).
         let (a_state, a_trust): (String, String) = sqlx::query_as(
@@ -2457,7 +5144,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!((a_state.as_str(), a_trust.as_str()), ("accepted", "trusted"));
+        assert_eq!(
+            (a_state.as_str(), a_trust.as_str()),
+            ("accepted", "trusted")
+        );
         let (ab_state, ab_trust): (String, String) = sqlx::query_as(
             "SELECT publication_state, trust_state FROM compliance_bundle_versions WHERE id = $1",
         )
@@ -2465,7 +5155,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!((ab_state.as_str(), ab_trust.as_str()), ("accepted", "trusted"));
+        assert_eq!(
+            (ab_state.as_str(), ab_trust.as_str()),
+            ("accepted", "trusted")
+        );
 
         // Version B rows exist in the same lineages as fresh drafts.
         let (b_state, b_trust): (String, String) = sqlx::query_as(
@@ -2483,26 +5176,27 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!((bb_state.as_str(), bb_trust.as_str()), ("draft", "untrusted"));
+        assert_eq!(
+            (bb_state.as_str(), bb_trust.as_str()),
+            ("draft", "untrusted")
+        );
 
         // The bundle version label must be lineage-unique: version B gets a
         // deterministic disambiguated label instead of colliding with A's.
-        let bb_label: String = sqlx::query_scalar(
-            "SELECT version FROM compliance_bundle_versions WHERE id = $1",
-        )
-        .bind(new_bundle_version_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let bb_label: String =
+            sqlx::query_scalar("SELECT version FROM compliance_bundle_versions WHERE id = $1")
+                .bind(new_bundle_version_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         let short_b = &new_bundle_version_id.simple().to_string()[..8];
         assert_eq!(bb_label, format!("0.1.0-{short_b}"));
-        let a_label: String = sqlx::query_scalar(
-            "SELECT version FROM compliance_bundle_versions WHERE id = $1",
-        )
-        .bind(bundle_version_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let a_label: String =
+            sqlx::query_scalar("SELECT version FROM compliance_bundle_versions WHERE id = $1")
+                .bind(bundle_version_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(a_label, "0.1.0");
 
         // Pointer invariants: draft now points at B, published still at A.
@@ -2571,5 +5265,808 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(mapped_bundle, Some(new_bundle_version_id));
+    }
+
+    /// Single-rule DISA STIG whose fix text carries explicit NixOS assignments,
+    /// giving the exact-technical-match commit revalidation something
+    /// authoritative to re-derive the technical identity from.
+    fn stig_bytes_with_fix(
+        benchmark_id: &str,
+        vuln_id: &str,
+        title: &str,
+        fix_text: &str,
+    ) -> Vec<u8> {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="{benchmark_id}">
+  <status>draft</status><title>Exact Match STIG</title><version>V1R1</version>
+  <Rule id="xccdf_test_stig_rule_0"><title>{title}</title><description>Stable requirement {vuln_id}</description><ident system="http://cyber.mil/stigs/stig">{vuln_id}</ident><fix>{fix_text}</fix><check system="urn:test"><check-content>Verify {vuln_id}.</check-content></check></Rule>
+</Benchmark>"#
+        )
+        .into_bytes()
+    }
+
+    /// Plan mapping every selected rule to one existing policy version with an
+    /// explicit proof and per-requirement reviewed mapping semantics.
+    fn exact_match_plan(
+        pkg: &ProcessedXccdfPackage,
+        policy_version_id: Uuid,
+        proof: Option<MapExistingProof>,
+        semantics: Option<crate::compliance::xccdf::import_models::ImportedMappingSemantics>,
+    ) -> (ValidatedImportPlan, Vec<ImportedPolicyRecord>) {
+        use crate::compliance::xccdf::import_models::{
+            ImportedBundlePlan, XccdfImportPlan, XccdfRuleImportAction,
+        };
+        use crate::compliance::xccdf::importer::validate_import_plan;
+
+        let rule_ids: Vec<String> = pkg
+            .parsed
+            .rules
+            .iter()
+            .map(|rule| rule.id.clone())
+            .collect();
+        let plan = XccdfImportPlan {
+            expected_sha256: pkg.provenance.sha256.clone(),
+            selected_profile_id: None,
+            selected_rule_ids: rule_ids.clone(),
+            rule_actions: rule_ids
+                .iter()
+                .map(|rule_id| XccdfRuleImportAction::MapExisting {
+                    rule_id: rule_id.clone(),
+                    policy_version_id,
+                    proof,
+                })
+                .collect(),
+            mapping_semantics: semantics
+                .map(|s| rule_ids.iter().map(|id| (id.clone(), s.clone())).collect())
+                .unwrap_or_default(),
+            shared_group_decisions: Vec::new(),
+            bundle: ImportedBundlePlan {
+                name: format!("ExactMatch STIG bundle {}", Uuid::new_v4()),
+                framework: "DISA STIG".into(),
+                version: "test".into(),
+                layer: Some("os".into()),
+                owner: Some("Security Team".into()),
+                description: None,
+            },
+        };
+        let validated = validate_import_plan(plan, &pkg.parsed).expect("valid exact match plan");
+        let records = build_policy_records(&validated);
+        (validated, records)
+    }
+
+    /// Create an accepted, currently-published policy whose flat config
+    /// implements the given NixOS option assignments.  This simulates any
+    /// policy established by an earlier import from a different framework.
+    /// Policy names are randomized to avoid unique constraint violations across test runs.
+    async fn insert_published_technical_policy(
+        pool: &PgPool,
+        policy_name_base: &str,
+        config: serde_json::Value,
+    ) -> (Uuid, Uuid) {
+        // Note: this must be called from an async context and the caller should pass user_id
+        // For now, use a placeholder that violates the FK but can be fixed by the test helper
+        let trusted_user_id = ensure_test_user(pool).await;
+        let policy_id = Uuid::new_v4();
+        let policy_version_id = Uuid::new_v4();
+        let policy_name = format!("{}-{}", policy_name_base, Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO deployment_policies (id, name, description, policy_type) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(policy_id)
+        .bind(&policy_name)
+        .bind(format!("{policy_name} technical enforcement"))
+        .bind("native")
+        .execute(pool)
+        .await
+        .unwrap();
+        // Insert version in draft state (required by trigger guard_version_insert_state)
+        sqlx::query(
+            "INSERT INTO deployment_policy_versions \
+             (id, policy_id, version, publication_state, name, policy_type, \
+              implementation_state, execution_phase, config, compliance_metadata, \
+              dependencies, semantic_digest, digest_algorithm) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+        )
+        .bind(policy_version_id)
+        .bind(policy_id)
+        .bind("1.0")
+        .bind("draft")
+        .bind(&policy_name)
+        .bind("native")
+        .bind("native")
+        .bind("deploy")
+        .bind(&config)
+        .bind(serde_json::json!({}))
+        .bind(serde_json::json!([]))
+        .bind("test-digest")
+        .bind("sha-256")
+        .execute(pool)
+        .await
+        .unwrap();
+
+        // Publish the version so it becomes the current published version
+        // First mark as trusted
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET trust_state = 'trusted', trusted_by = $2, \
+              trusted_at = CURRENT_TIMESTAMP WHERE id = $1",
+        )
+        .bind(policy_version_id)
+        .bind(trusted_user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        // Then mark as accepted AND update pointer in same transaction
+        // (trigger validate_policy_lineage_pointer_after_state_change requires this)
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET publication_state = 'accepted', \
+              published_at = CURRENT_TIMESTAMP WHERE id = $1",
+        )
+        .bind(policy_version_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(policy_version_id)
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+        tx.commit().await.unwrap();
+        (policy_id, policy_version_id)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn exact_technical_match_end_to_end_commit() {
+        // Phase 21 end-to-end: a brand-new requirement with no prior mapping
+        // whose exact technical match was found at preview, selected via
+        // MapExisting + ExactTechnicalMatch proof, and committed through
+        // commit_foreign_import.  The proof is revalidated from the parsed
+        // rule's authoritative fix text inside the import transaction.
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+
+        let ssh_config = serde_json::json!({
+            "services.openssh.enable": false,
+            "services.openssh.settings.PermitRootLogin": "no",
+        });
+        let (_existing_policy_id, existing_policy_version_id) =
+            insert_published_technical_policy(&pool, "existing-ssh-hardening", ssh_config).await;
+
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_Exact_Match_End_To_End_{}",
+            Uuid::new_v4().simple()
+        );
+        let fix_text =
+            "services.openssh.enable = false;\nservices.openssh.settings.PermitRootLogin = \"no\";";
+        let pkg = make_package(stig_bytes_with_fix(
+            &benchmark_id,
+            "V-418-101",
+            "SSH root login must be disabled",
+            fix_text,
+        ));
+
+        let semantics = crate::compliance::xccdf::import_models::ImportedMappingSemantics {
+            relationship: Some("supports".into()),
+            coverage: Some("partial".into()),
+            rationale: Some("independent reviewed rationale".into()),
+            reviewed_related_candidate: None,
+        };
+        let (validated, records) = exact_match_plan(
+            &pkg,
+            existing_policy_version_id,
+            Some(MapExistingProof::ExactTechnicalMatch),
+            Some(semantics),
+        );
+
+        let result = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("exact technical match commit should succeed");
+
+        // Nothing new was created; the reuse path derived a mutable draft.
+        assert_eq!(result.created_policy_count, 0);
+        assert_eq!(result.created_policy_lineages, 0);
+        assert_eq!(result.created_policy_versions, 0);
+        assert_eq!(result.reused_policy_versions, 1);
+
+        // The bundle contains the derived draft (one member), not the accepted
+        // published version, which must remain untouched.
+        let members: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT policy_version_id FROM compliance_bundle_version_policies \
+             WHERE bundle_version_id = $1",
+        )
+        .bind(result.bundle_version_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(members.len(), 1);
+        let effective_draft = members[0];
+        assert_ne!(effective_draft, existing_policy_version_id);
+
+        let published_state: String = sqlx::query_scalar(
+            "SELECT publication_state FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(existing_policy_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(published_state, "accepted");
+
+        // The derived draft carries the independent, per-requirement reviewed
+        // mapping semantics with inferred provenance (technical candidate origin).
+        let mapping: (String, String, Option<String>, String, String) = sqlx::query_as(
+            "SELECT relationship, coverage, rationale, provenance, trust_state \
+             FROM policy_requirement_mappings WHERE policy_version_id = $1",
+        )
+        .bind(effective_draft)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(mapping.0, "supports");
+        assert_eq!(mapping.1, "partial");
+        assert_eq!(mapping.2.as_deref(), Some("independent reviewed rationale"));
+        assert_eq!(mapping.3, "inferred");
+        assert_eq!(mapping.4, "trusted");
+
+        // Source mapping points at the effective draft.
+        let mapped_rule: Uuid = sqlx::query_scalar(
+            "SELECT policy_version_id FROM compliance_source_object_mappings \
+             WHERE source_artifact_id = $1 AND object_kind = 'rule'",
+        )
+        .bind(result.source_artifact_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(mapped_rule, effective_draft);
+
+        // Requirement baseline membership exists for the one imported rule.
+        let requirement_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_bundle_version_requirements \
+             WHERE bundle_version_id = $1",
+        )
+        .bind(result.bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(requirement_count, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn exact_technical_match_end_to_end_mismatch_rolls_back() {
+        // A stale or mismatched enforcement must abort the whole import: the
+        // policy config no longer implements what the authoritative fix text
+        // demands, so nothing may be written (no partial import).
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+
+        let ssh_config = serde_json::json!({
+            "services.openssh.enable": false,
+            "services.openssh.settings.PermitRootLogin": "no",
+        });
+        let (_existing_policy_id, existing_policy_version_id) =
+            insert_published_technical_policy(&pool, "existing-ssh-hardening", ssh_config).await;
+
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_Exact_Match_Mismatch_{}",
+            Uuid::new_v4().simple()
+        );
+        // Authoritative fix text now demands the opposite enforcement.
+        let mismatched_fix_text =
+            "services.openssh.enable = true;\nservices.openssh.settings.PermitRootLogin = \"yes\";";
+        let pkg = make_package(stig_bytes_with_fix(
+            &benchmark_id,
+            "V-418-102",
+            "SSH root login must be disabled",
+            mismatched_fix_text,
+        ));
+        let (validated, records) = exact_match_plan(
+            &pkg,
+            existing_policy_version_id,
+            Some(MapExistingProof::ExactTechnicalMatch),
+            Some(ImportedMappingSemantics {
+                relationship: Some("implements".into()),
+                coverage: Some("full".into()),
+                ..Default::default()
+            }),
+        );
+        let bundle_name = validated.bundle.name.clone();
+        let source_sha256 = pkg.provenance.sha256.clone();
+
+        let err = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("mismatched enforcement must be rejected");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("IMPORT_REUSE_INELIGIBLE"),
+            "unexpected error: {message}"
+        );
+
+        // The entire transaction rolled back: no bundle lineage, no source
+        // artifact, and no mapping for the reused policy version.
+        let bundle_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundles WHERE name = $1")
+                .bind(&bundle_name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(bundle_count, 0);
+        let artifact_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1",
+        )
+        .bind(&source_sha256)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(artifact_count, 0);
+        let mapping_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM policy_requirement_mappings WHERE policy_version_id = $1",
+        )
+        .bind(existing_policy_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(mapping_count, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn exact_technical_match_end_to_end_missing_policy_rolls_back() {
+        // Mapping onto a policy version that no longer exists must fail the
+        // commit cleanly, leaving no bundle behind.
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_Exact_Match_Missing_{}",
+            Uuid::new_v4().simple()
+        );
+        let fix_text = "services.openssh.enable = false;";
+        let pkg = make_package(stig_bytes_with_fix(
+            &benchmark_id,
+            "V-418-103",
+            "SSH service must be disabled",
+            fix_text,
+        ));
+        let (validated, records) = exact_match_plan(
+            &pkg,
+            Uuid::new_v4(),
+            Some(MapExistingProof::ExactTechnicalMatch),
+            Some(ImportedMappingSemantics {
+                relationship: Some("implements".into()),
+                coverage: Some("full".into()),
+                ..Default::default()
+            }),
+        );
+        let bundle_name = validated.bundle.name.clone();
+
+        let err = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("missing target policy must be rejected");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("IMPORT_POLICY_VERSION_NOT_FOUND"),
+            "unexpected error: {message}"
+        );
+
+        let bundle_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundles WHERE name = $1")
+                .bind(&bundle_name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(bundle_count, 0);
+    }
+}
+
+// ── Phase 22 unit tests: ValidatedSharedCreation trust boundary ────────────────
+
+#[cfg(test)]
+mod phase_22_shared_validation_unit_tests {
+    use super::*;
+    use crate::compliance::xccdf::exact_technical_match::RequirementTechnicalIdentity;
+    use crate::compliance::xccdf::import_models::{
+        ImportedMappingSemantics, SharedGroupAction, SharedGroupDecision,
+    };
+    use serde_json::json;
+    use uuid::Uuid;
+
+    /// Helper: build a technical identity from a serde_json::Map of enforced options
+    fn identity_from_options(
+        options: serde_json::Map<String, serde_json::Value>,
+    ) -> RequirementTechnicalIdentity {
+        RequirementTechnicalIdentity {
+            enforced_options: options,
+        }
+    }
+
+    /// Helper: build a non-empty technical identity {key: value}
+    fn identity_with(key: &str, value: &str) -> RequirementTechnicalIdentity {
+        let mut opts = serde_json::Map::new();
+        opts.insert(key.to_string(), json!(value));
+        identity_from_options(opts)
+    }
+
+    /// Helper: create a native (non-mapped) ImportedPolicyRecord eligible for shared groups
+    fn native_record(rule_id: &str) -> ImportedPolicyRecord {
+        ImportedPolicyRecord {
+            policy_id: Uuid::new_v4(),
+            policy_version_id: Uuid::new_v4(),
+            source_rule_id: rule_id.to_string(),
+            source_rule_order: 0,
+            implementation_state: "native".to_string(),
+            policy_type: "native".to_string(), // Must be "native" for shared groups
+            version: None,
+            execution_phase: "not-applicable".to_string(),
+            config: serde_json::json!({}),
+            dependencies: serde_json::json!([]),
+            enabled_by_default: false,
+            portable: false,
+            semantic_digest: None,
+            selected: true,
+            policy_order: 0,
+            name: rule_id.to_string(),
+            description: None,
+            compliance_metadata: serde_json::json!({}),
+            opaque_xml: None,
+            mapped_policy_version_id: None,
+            mapped_policy_proof: None,
+            mapping_semantics: None,
+            evidence_requirements: Vec::new(),
+        }
+    }
+
+    /// Helper: create a manual ImportedPolicyRecord
+    fn manual_record(rule_id: &str) -> ImportedPolicyRecord {
+        let mut rec = native_record(rule_id);
+        rec.implementation_state = "manual".to_string();
+        rec.policy_type = "manual".to_string();
+        rec
+    }
+
+    /// Helper: create a mapped (MapExisting) ImportedPolicyRecord
+    fn mapped_record(rule_id: &str, version: Uuid) -> ImportedPolicyRecord {
+        let mut rec = native_record(rule_id);
+        rec.implementation_state = "mapped".to_string();
+        rec.mapped_policy_version_id = Some(version);
+        rec
+    }
+
+    /// Helper: create a test SharedGroupDecision for CreateShared
+    fn create_shared_decision(group_id: &str, rule_ids: &[&str]) -> SharedGroupDecision {
+        SharedGroupDecision {
+            group_id: group_id.to_string(),
+            action: SharedGroupAction::CreateShared,
+            rule_ids: rule_ids.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// Helper: build an authoritative_identities map from records
+    fn build_authoritative_identities(
+        _records: &[ImportedPolicyRecord],
+        identities: &[(&str, RequirementTechnicalIdentity)],
+    ) -> std::collections::HashMap<String, RequirementTechnicalIdentity> {
+        let mut map = std::collections::HashMap::new();
+        for (rule_id, identity) in identities {
+            map.insert(rule_id.to_string(), identity.clone());
+        }
+        map
+    }
+
+    #[test]
+    fn test_empty_technical_identity_rejected() {
+        // Phase 22 item 1: reject empty enforced_options by invoking real validator
+        let records = vec![native_record("A"), native_record("B")];
+        let empty_identity = identity_from_options(serde_json::Map::new());
+        let authoritative_identities = build_authoritative_identities(
+            &records,
+            &[("A", empty_identity.clone()), ("B", empty_identity)],
+        );
+        let decisions = vec![create_shared_decision("hash1", &["A", "B"])];
+
+        let err =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .unwrap_err();
+
+        assert_eq!(
+            err.code, "IMPORT_SHARED_IMPLEMENTATION_STALE",
+            "empty enforced_options must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_member_rejected() {
+        // Phase 22 item 2: reject duplicate member IDs by invoking real validator
+        let records = vec![native_record("A")];
+        let identity = identity_with("key1", "value1");
+        let group_id =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
+        let authoritative_identities = build_authoritative_identities(&records, &[("A", identity)]);
+        let decisions = vec![create_shared_decision(
+            &group_id.technical_hash,
+            &["A", "A"],
+        )];
+
+        let err =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .unwrap_err();
+
+        assert_eq!(
+            err.code, "IMPORT_SHARED_IMPLEMENTATION_STALE",
+            "duplicate members [A, A] must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_single_member_rejected() {
+        // Phase 22 item 3: reject single-member CreateShared by invoking real validator
+        let records = vec![native_record("A")];
+        let identity = identity_with("key1", "value1");
+        let group_id =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
+        let authoritative_identities = build_authoritative_identities(&records, &[("A", identity)]);
+        let decisions = vec![create_shared_decision(&group_id.technical_hash, &["A"])];
+
+        let err =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .unwrap_err();
+
+        assert_eq!(
+            err.code, "IMPORT_SHARED_IMPLEMENTATION_STALE",
+            "single-member [A] must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_overlapping_groups_rejected() {
+        // Phase 22 item 4: reject overlapping shared decisions by invoking real validator
+        // B appears in both decisions → overlap must be detected
+        let records = vec![native_record("A"), native_record("B"), native_record("C")];
+        let identity = identity_with("key1", "value1");
+        let group_id =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
+        let authoritative_identities = build_authoritative_identities(
+            &records,
+            &[
+                ("A", identity.clone()),
+                ("B", identity.clone()),
+                ("C", identity),
+            ],
+        );
+        let decisions = vec![
+            create_shared_decision(&group_id.technical_hash, &["A", "B"]),
+            create_shared_decision(&group_id.technical_hash, &["B", "C"]),
+        ];
+
+        let err =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .unwrap_err();
+
+        assert_eq!(
+            err.code, "IMPORT_SHARED_IMPLEMENTATION_STALE",
+            "overlapping groups (B in both) must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_two_shared_decisions_same_technical_hash_rejected() {
+        // Phase 22 item 5: reject multiple CreateShared for same technical identity
+        // by invoking real validator
+        let records = vec![
+            native_record("A"),
+            native_record("B"),
+            native_record("C"),
+            native_record("D"),
+        ];
+        let identity = identity_with("key1", "value1");
+        let group_id =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
+
+        let authoritative_identities = build_authoritative_identities(
+            &records,
+            &[
+                ("A", identity.clone()),
+                ("B", identity.clone()),
+                ("C", identity.clone()),
+                ("D", identity),
+            ],
+        );
+
+        let decisions = vec![
+            create_shared_decision(&group_id.technical_hash, &["A", "B"]),
+            create_shared_decision(&group_id.technical_hash, &["C", "D"]),
+        ];
+
+        let err =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .unwrap_err();
+
+        assert_eq!(
+            err.code, "IMPORT_SHARED_IMPLEMENTATION_STALE",
+            "multiple CreateShared for same technical identity must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_different_technical_identities_cannot_share() {
+        // If A has {key1: val1} and B has {key1: val2}, they should not share.
+        // Attempting to share them should be rejected by the real validator.
+        let records = vec![native_record("A"), native_record("B")];
+        let identity_a = identity_with("key1", "valueA");
+        let identity_b = identity_with("key1", "valueB");
+
+        let hash_a =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity_a);
+        // Client claims they share the hash of A
+        let authoritative_identities =
+            build_authoritative_identities(&records, &[("A", identity_a), ("B", identity_b)]);
+        let decisions = vec![create_shared_decision(&hash_a.technical_hash, &["A", "B"])];
+
+        let err =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .unwrap_err();
+
+        assert_eq!(
+            err.code, "IMPORT_SHARED_IMPLEMENTATION_STALE",
+            "different technical identities cannot share"
+        );
+    }
+
+    #[test]
+    fn test_client_group_id_mismatch_rejected() {
+        // Phase 22 validation: client group_id must match server-derived hash
+        // by invoking real validator
+        let records = vec![native_record("A"), native_record("B")];
+        let identity = identity_with("key1", "value1");
+        // Client submitted a different group_id (stale decision)
+        let client_submitted_group_id = "fake_hash_from_old_preview";
+
+        let authoritative_identities =
+            build_authoritative_identities(&records, &[("A", identity.clone()), ("B", identity)]);
+        let decisions = vec![create_shared_decision(
+            client_submitted_group_id,
+            &["A", "B"],
+        )];
+
+        let err =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .unwrap_err();
+
+        assert_eq!(
+            err.code, "IMPORT_SHARED_IMPLEMENTATION_STALE",
+            "client group_id mismatch must be rejected as stale"
+        );
+    }
+
+    #[test]
+    fn test_valid_native_pair_produces_one_validated_creation() {
+        // Happy path: A and B both native, same technical identity
+        // by invoking real validator
+        let records = vec![native_record("A"), native_record("B")];
+        let identity = identity_with("key1", "value1");
+        let group_id =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
+
+        let authoritative_identities = build_authoritative_identities(
+            &records,
+            &[("A", identity.clone()), ("B", identity.clone())],
+        );
+        let decisions = vec![create_shared_decision(
+            &group_id.technical_hash,
+            &["A", "B"],
+        )];
+
+        let validated =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .expect("valid A/B pair should succeed");
+
+        assert_eq!(validated.len(), 1, "exactly one shared creation");
+        let shared = &validated[0];
+        assert_eq!(
+            shared.requirement_keys,
+            vec!["A".to_string(), "B".to_string()]
+        );
+        assert_eq!(shared.technical_identity, identity);
+        assert_eq!(shared.group_id, group_id);
+        assert!(!shared.policy_id.is_nil(), "policy_id must be generated");
+        assert!(
+            !shared.policy_version_id.is_nil(),
+            "policy_version_id must be generated"
+        );
+    }
+
+    #[test]
+    fn test_manual_record_rejected_in_shared_group() {
+        // Phase 22 validation: manual (not native) records cannot be in shared groups
+        let records = vec![native_record("A"), manual_record("B")];
+        let identity = identity_with("key1", "value1");
+        let group_id =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
+
+        let authoritative_identities =
+            build_authoritative_identities(&records, &[("A", identity.clone()), ("B", identity)]);
+        let decisions = vec![create_shared_decision(
+            &group_id.technical_hash,
+            &["A", "B"],
+        )];
+
+        let err =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .unwrap_err();
+
+        assert_eq!(
+            err.code, "IMPORT_SHARED_IMPLEMENTATION_STALE",
+            "manual records cannot be in shared groups"
+        );
+    }
+
+    #[test]
+    fn test_mapped_record_rejected_in_shared_group() {
+        // Phase 22 validation: mapped (MapExisting) records cannot be in shared groups
+        let version = Uuid::new_v4();
+        let records = vec![native_record("A"), mapped_record("B", version)];
+        let identity = identity_with("key1", "value1");
+        let group_id =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
+
+        let authoritative_identities =
+            build_authoritative_identities(&records, &[("A", identity.clone()), ("B", identity)]);
+        let decisions = vec![create_shared_decision(
+            &group_id.technical_hash,
+            &["A", "B"],
+        )];
+
+        let err =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .unwrap_err();
+
+        assert_eq!(
+            err.code, "IMPORT_SHARED_IMPLEMENTATION_STALE",
+            "mapped records cannot be in shared groups"
+        );
+    }
+
+    #[test]
+    fn test_valid_three_way_shared() {
+        // Happy path: A, B, C all native, same technical identity
+        // by invoking real validator
+        let records = vec![native_record("A"), native_record("B"), native_record("C")];
+        let identity = identity_with("key1", "value1");
+        let group_id =
+            crate::compliance::shared_implementation::SharedImplementationId::from_technical_identity(&identity);
+
+        let authoritative_identities = build_authoritative_identities(
+            &records,
+            &[
+                ("A", identity.clone()),
+                ("B", identity.clone()),
+                ("C", identity.clone()),
+            ],
+        );
+        let decisions = vec![create_shared_decision(
+            &group_id.technical_hash,
+            &["A", "B", "C"],
+        )];
+
+        let validated =
+            validate_shared_creation_decisions(&decisions, &authoritative_identities, &records)
+                .expect("valid A/B/C triple should succeed");
+
+        assert_eq!(validated.len(), 1, "exactly one shared creation");
+        let shared = &validated[0];
+        assert_eq!(
+            shared.requirement_keys,
+            vec!["A".to_string(), "B".to_string(), "C".to_string()]
+        );
+        assert_eq!(shared.technical_identity, identity);
+        assert_eq!(shared.group_id, group_id);
     }
 }

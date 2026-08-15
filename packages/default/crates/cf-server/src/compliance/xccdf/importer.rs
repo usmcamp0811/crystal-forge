@@ -12,7 +12,7 @@ use crate::compliance::digest::{
 };
 use crate::compliance::interchange::{CANONICALIZATION_VERSION, DIGEST_ALGORITHM};
 use crate::compliance::xccdf::import_models::{
-    ImportPlanError, ImportedPolicyRecord, ValidatedImportPlan, XccdfImportPlan,
+    ImportPlanError, ImportedPolicyRecord, MapExistingProof, ValidatedImportPlan, XccdfImportPlan,
     XccdfRuleImportAction,
 };
 use crate::compliance::xccdf::models::{DocumentClass, ParsedRule, ParsedXccdf};
@@ -223,6 +223,8 @@ pub fn validate_cf_native_document(
             compliance_metadata,
             opaque_xml: rule.preserved_xml.clone(),
             mapped_policy_version_id: None,
+            mapped_policy_proof: None,
+            mapping_semantics: None,
             evidence_requirements: Vec::new(),
         });
         rules.push((
@@ -284,6 +286,8 @@ pub fn validate_cf_native_document(
         },
         is_disa_stig: false,
         rules_to_import: rules,
+        mapping_semantics: std::collections::HashMap::new(),
+        shared_group_decisions: Vec::new(),
     };
     Ok((validated, records))
 }
@@ -399,6 +403,85 @@ pub fn validate_import_plan(
         }
     }
 
+    // Related-candidate evidence is only meaningful as provenance for an
+    // explicitly reviewed MapExisting selection. It must never be attached to
+    // a newly authored policy or combined with deterministic proof.
+    for (rule_id, semantics) in &plan.mapping_semantics {
+        let Some(reviewed) = semantics.reviewed_related_candidate.as_ref() else {
+            continue;
+        };
+        let Some(action) = action_by_rule_id.get(rule_id.as_str()) else {
+            return Err(ImportPlanError::cf_native_invalid(
+                "IMPORT_RELATED_REVIEW_INVALID",
+                format!("reviewed related candidate references unknown rule {rule_id}"),
+            ));
+        };
+        let XccdfRuleImportAction::MapExisting {
+            policy_version_id,
+            proof,
+            ..
+        } = action
+        else {
+            return Err(ImportPlanError::cf_native_invalid(
+                "IMPORT_RELATED_REVIEW_INVALID",
+                format!("reviewed related candidate for {rule_id} requires MapExisting"),
+            ));
+        };
+        if proof.is_some() || *policy_version_id != reviewed.policy_version_id {
+            return Err(ImportPlanError::cf_native_invalid(
+                "IMPORT_RELATED_REVIEW_INVALID",
+                format!("reviewed related candidate for {rule_id} must match unproved MapExisting"),
+            ));
+        }
+        if !matches!(
+            semantics.relationship.as_deref(),
+            Some("implements" | "supports" | "provides_evidence_for")
+        ) || !matches!(semantics.coverage.as_deref(), Some("full" | "partial"))
+        {
+            return Err(ImportPlanError::cf_native_invalid(
+                "IMPORT_RELATED_REVIEW_INVALID",
+                format!(
+                    "reviewed related candidate for {rule_id} requires explicit relationship and coverage"
+                ),
+            ));
+        }
+    }
+
+    // Exact technical reuse is deterministic evidence for policy selection,
+    // but it does not establish that the whole compliance requirement is fully
+    // implemented. Require the reviewer to state the mapping semantics rather
+    // than silently applying implements/full defaults.
+    for action in &plan.rule_actions {
+        let XccdfRuleImportAction::MapExisting {
+            rule_id,
+            proof: Some(MapExistingProof::ExactTechnicalMatch),
+            ..
+        } = action
+        else {
+            continue;
+        };
+        let Some(semantics) = plan.mapping_semantics.get(rule_id) else {
+            return Err(ImportPlanError::cf_native_invalid(
+                "IMPORT_MAPPING_SEMANTICS_INVALID",
+                format!(
+                    "exact technical reuse for {rule_id} requires explicit relationship and coverage"
+                ),
+            ));
+        };
+        if !matches!(
+            semantics.relationship.as_deref(),
+            Some("implements" | "supports" | "provides_evidence_for")
+        ) || !matches!(semantics.coverage.as_deref(), Some("full" | "partial"))
+        {
+            return Err(ImportPlanError::cf_native_invalid(
+                "IMPORT_MAPPING_SEMANTICS_INVALID",
+                format!(
+                    "exact technical reuse for {rule_id} requires explicit relationship and coverage"
+                ),
+            ));
+        }
+    }
+
     // ── Profile validation ─────────────────────────────────────────────────
     let profile_rule_set: Option<HashSet<&str>> = if let Some(ref pid) = plan.selected_profile_id {
         let profile = parsed
@@ -448,6 +531,8 @@ pub fn validate_import_plan(
                 .and_then(|benchmark| benchmark.publisher.as_deref())
                 .is_some_and(|publisher| publisher.eq_ignore_ascii_case("DISA")),
         rules_to_import,
+        mapping_semantics: plan.mapping_semantics,
+        shared_group_decisions: plan.shared_group_decisions,
     })
 }
 
@@ -526,12 +611,15 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
             let description = customization
                 .and_then(|c| c.policy_description.clone())
                 .or_else(|| rule.description.clone());
-            let mapped_policy_version_id = match action {
+            let (mapped_policy_version_id, mapped_policy_proof) = match action {
                 XccdfRuleImportAction::MapExisting {
-                    policy_version_id, ..
-                } => Some(*policy_version_id),
-                _ => None,
+                    policy_version_id,
+                    proof,
+                    ..
+                } => (Some(*policy_version_id), *proof),
+                _ => (None, None),
             };
+            let mapping_semantics = validated.mapping_semantics.get(&rule.id).cloned();
 
             Some(ImportedPolicyRecord {
                 policy_id: Uuid::new_v4(),
@@ -554,6 +642,8 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
                 compliance_metadata,
                 opaque_xml,
                 mapped_policy_version_id,
+                mapped_policy_proof,
+                mapping_semantics,
                 evidence_requirements,
             })
         })
@@ -566,8 +656,8 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
 mod tests {
     use super::*;
     use crate::compliance::xccdf::import_models::{
-        ImportedBundlePlan, ImportedCustomCheck, ImportedCustomCheckRule,
-        ImportedPolicyCustomization, XccdfImportPlan, XccdfRuleImportAction,
+        ImportedBundlePlan, ImportedCustomCheck, ImportedCustomCheckRule, ImportedMappingSemantics,
+        ImportedPolicyCustomization, MapExistingProof, XccdfImportPlan, XccdfRuleImportAction,
     };
     use crate::compliance::xccdf::models::{DocumentClass, Fidelity, ParsedXccdf};
 
@@ -638,6 +728,10 @@ mod tests {
                     evidence_requirements: Vec::new(),
                 })
                 .collect(),
+            mapping_semantics: std::collections::HashMap::new(),
+
+            shared_group_decisions: Vec::new(),
+
             bundle: ImportedBundlePlan {
                 name: "Test Bundle".into(),
                 framework: "TEST".into(),
@@ -782,6 +876,7 @@ mod tests {
         plan.rule_actions = vec![XccdfRuleImportAction::MapExisting {
             rule_id: "rule-1".into(),
             policy_version_id: mapped_version_id,
+            proof: None,
         }];
 
         let validated = validate_import_plan(plan, &parsed).expect("mapping plan is valid");
@@ -789,6 +884,95 @@ mod tests {
         assert_eq!(records[0].mapped_policy_version_id, Some(mapped_version_id));
         assert_eq!(records[0].implementation_state, "mapped");
         assert_eq!(records[0].policy_type, "imported_xccdf");
+    }
+
+    #[test]
+    fn deterministic_proof_cannot_be_combined_with_related_review() {
+        let parsed = minimal_foreign_parsed(&["rule-1"]);
+        let policy_version_id = Uuid::new_v4();
+        let related = crate::compliance::xccdf::import_models::ReviewedRelatedCandidate {
+            policy_version_id,
+            related_requirement_version_id: Uuid::new_v4(),
+            shared_cci_ids: vec!["CCI-000001".into()],
+            shared_srg_ids: vec![],
+        };
+        for proof in [
+            Some(MapExistingProof::ExactTechnicalMatch),
+            Some(MapExistingProof::InheritedMapping),
+        ] {
+            let mut plan = valid_plan(&["rule-1"]);
+            plan.rule_actions = vec![XccdfRuleImportAction::MapExisting {
+                rule_id: "rule-1".into(),
+                policy_version_id,
+                proof,
+            }];
+            plan.mapping_semantics.insert(
+                "rule-1".into(),
+                ImportedMappingSemantics {
+                    reviewed_related_candidate: Some(related.clone()),
+                    ..Default::default()
+                },
+            );
+            let result = validate_import_plan(plan, &parsed);
+            assert!(matches!(
+                result,
+                Err(ImportPlanError {
+                    code: "IMPORT_RELATED_REVIEW_INVALID",
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn reviewed_related_requires_explicit_mapping_semantics() {
+        let parsed = minimal_foreign_parsed(&["rule-1"]);
+        let policy_version_id = Uuid::new_v4();
+        let related = crate::compliance::xccdf::import_models::ReviewedRelatedCandidate {
+            policy_version_id,
+            related_requirement_version_id: Uuid::new_v4(),
+            shared_cci_ids: vec!["CCI-000001".into()],
+            shared_srg_ids: vec![],
+        };
+        let mut plan = valid_plan(&["rule-1"]);
+        plan.rule_actions = vec![XccdfRuleImportAction::MapExisting {
+            rule_id: "rule-1".into(),
+            policy_version_id,
+            proof: None,
+        }];
+        plan.mapping_semantics.insert(
+            "rule-1".into(),
+            ImportedMappingSemantics {
+                reviewed_related_candidate: Some(related),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            validate_import_plan(plan, &parsed),
+            Err(ImportPlanError {
+                code: "IMPORT_RELATED_REVIEW_INVALID",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn exact_technical_reuse_requires_explicit_mapping_semantics() {
+        let parsed = minimal_foreign_parsed(&["rule-1"]);
+        let policy_version_id = Uuid::new_v4();
+        let mut plan = valid_plan(&["rule-1"]);
+        plan.rule_actions = vec![XccdfRuleImportAction::MapExisting {
+            rule_id: "rule-1".into(),
+            policy_version_id,
+            proof: Some(MapExistingProof::ExactTechnicalMatch),
+        }];
+        assert!(matches!(
+            validate_import_plan(plan, &parsed),
+            Err(ImportPlanError {
+                code: "IMPORT_MAPPING_SEMANTICS_INVALID",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1032,6 +1216,10 @@ mod tests {
                     rule_id: "r2".into(),
                 },
             ],
+            mapping_semantics: std::collections::HashMap::new(),
+
+            shared_group_decisions: Vec::new(),
+
             bundle: ImportedBundlePlan {
                 name: "Bundle".into(),
                 framework: "FW".into(),

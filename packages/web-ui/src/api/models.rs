@@ -1226,6 +1226,8 @@ pub struct CreateComplianceBundleRequest {
     pub layer: Option<String>,
     pub required_envs: Vec<Uuid>,
     pub policy_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub requirement_version_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1236,6 +1238,8 @@ pub struct UpdateComplianceBundleRequest {
     pub description: Option<String>,
     pub required_envs: Vec<Uuid>,
     pub policy_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub requirement_version_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1532,6 +1536,93 @@ pub struct XccdfPreviewResponse {
     /// CF-native reconciliation data (present only for CfNativeExact documents)
     #[serde(default)]
     pub cf_native_reconciliation: Option<CfNativeReconciliationPreview>,
+    /// Requirement-aware reconciliation for a foreign DISA STIG.  This is
+    /// server-computed from normalized framework/requirement/mapping data.
+    #[serde(default)]
+    pub foreign_stig_reconciliation: Option<ForeignStigReconciliationPreview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignStigReconciliationPreview {
+    pub framework: ForeignStigFrameworkReconciliation,
+    #[serde(default)]
+    pub requirements: Vec<ForeignStigRequirementReconciliation>,
+    #[serde(default)]
+    pub shared_implementation_groups: Vec<ForeignStigSharedImplementationGroup>,
+    /// Requirements present in the previous release but absent from the upload.
+    #[serde(default)]
+    pub removed_requirements: Vec<ForeignStigRemovedRequirement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignStigSharedImplementationGroup {
+    pub group_id: String,
+    #[serde(default)]
+    pub requirement_keys: Vec<String>,
+    pub recommended_action: String,
+    pub has_existing_candidate: bool,
+    #[serde(default)]
+    pub existing_candidate: Option<ForeignStigSharedCandidate>,
+    #[serde(default)]
+    pub member_proofs: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignStigSharedCandidate {
+    pub policy_id: Uuid,
+    pub policy_version_id: Uuid,
+    pub policy_name: String,
+    pub confidence: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignStigRemovedRequirement {
+    pub external_id: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignStigFrameworkReconciliation {
+    pub canonical_source_key: String,
+    pub canonical_release_key: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignStigRequirementReconciliation {
+    pub rule_id: String,
+    pub external_id: String,
+    pub title: Option<String>,
+    pub state: String,
+    pub auto_resolvable: bool,
+    pub inferred_enforcement: bool,
+    #[serde(default)]
+    pub candidates: Vec<ForeignStigPolicyCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignStigPolicyCandidate {
+    pub policy_id: Uuid,
+    pub policy_version_id: Uuid,
+    pub policy_name: String,
+    pub match_type: String,
+    pub confidence: u8,
+    #[serde(default)]
+    pub match_reasons: Vec<String>,
+    #[serde(default)]
+    pub related_evidence: Option<ForeignStigRelatedEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignStigRelatedEvidence {
+    #[serde(default)]
+    pub shared_cci_ids: Vec<String>,
+    #[serde(default)]
+    pub shared_srg_ids: Vec<String>,
+    pub related_requirement_version_id: Uuid,
+    pub related_framework_id: Uuid,
+    pub related_framework_name: String,
+    pub related_external_id: String,
 }
 
 /// CF-native reconciliation preview for import
@@ -1644,10 +1735,19 @@ pub enum XccdfRuleImportAction {
     MapExisting {
         rule_id: String,
         policy_version_id: Uuid,
+        #[serde(default)]
+        proof: Option<MapExistingProof>,
     },
     Exclude {
         rule_id: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MapExistingProof {
+    InheritedMapping,
+    ExactTechnicalMatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -1724,7 +1824,62 @@ pub struct XccdfImportPlan {
     pub selected_profile_id: Option<String>,
     pub selected_rule_ids: Vec<String>,
     pub rule_actions: Vec<XccdfRuleImportAction>,
+    #[serde(default)]
+    pub mapping_semantics: std::collections::HashMap<String, ImportedMappingSemantics>,
     pub bundle: ImportedBundlePlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ImportedMappingSemantics {
+    pub relationship: Option<String>,
+    pub coverage: Option<String>,
+    pub rationale: Option<String>,
+    #[serde(default)]
+    pub reviewed_related_candidate: Option<ReviewedRelatedCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedRelatedCandidate {
+    pub policy_version_id: Uuid,
+    pub related_requirement_version_id: Uuid,
+    #[serde(default)]
+    pub shared_cci_ids: Vec<String>,
+    #[serde(default)]
+    pub shared_srg_ids: Vec<String>,
+}
+
+#[cfg(test)]
+mod xccdf_mapping_contract_tests {
+    use super::*;
+
+    #[test]
+    fn map_existing_proofs_use_server_wire_names() {
+        let action = XccdfRuleImportAction::MapExisting {
+            rule_id: "rule-1".into(),
+            policy_version_id: Uuid::nil(),
+            proof: Some(MapExistingProof::ExactTechnicalMatch),
+        };
+        let value = serde_json::to_value(action).expect("serialize map action");
+        assert_eq!(value["proof"], "exact_technical_match");
+    }
+
+    #[test]
+    fn reviewed_related_candidate_preserves_evidence() {
+        let semantics = ImportedMappingSemantics {
+            relationship: Some("supports".into()),
+            coverage: Some("partial".into()),
+            rationale: Some("reviewed shared CCI".into()),
+            reviewed_related_candidate: Some(ReviewedRelatedCandidate {
+                policy_version_id: Uuid::nil(),
+                related_requirement_version_id: Uuid::from_u128(1),
+                shared_cci_ids: vec!["CCI-000770".into()],
+                shared_srg_ids: vec!["SRG-OS-000109-GPOS-00051".into()],
+            }),
+        };
+        let value = serde_json::to_value(semantics).expect("serialize reviewed semantics");
+        assert_eq!(value["reviewed_related_candidate"]["shared_cci_ids"][0], "CCI-000770");
+        assert_eq!(value["coverage"], "partial");
+    }
 }
 
 /// Response body from `POST /api/v1/compliance/xccdf/import`.
@@ -1964,6 +2119,8 @@ pub struct CreateDeploymentPolicyRequest {
     pub cis_section: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requirement_mappings: Vec<CreatePolicyMappingRequest>,
 }
 
 /// Request to update an existing deployment policy.
@@ -3589,7 +3746,7 @@ pub struct UpdateAutomaticRetryPolicyRequest {
 }
 
 #[cfg(test)]
-mod tests {
+mod reconciliation_tests {
     use super::*;
 
     #[test]
@@ -3661,5 +3818,225 @@ mod tests {
             Some(&serde_json::json!(120)),
             "Set(120) must serialize as 120"
         );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TASK-418: Compliance Frameworks, Requirements, Mappings, and Coverage
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Summary of a compliance framework lineage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceFrameworkSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub publisher: Option<String>,
+    pub canonical_source_key: String,
+    pub description: Option<String>,
+    pub version_count: i64,
+}
+
+/// Summary of a specific framework version (release).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceFrameworkVersionSummary {
+    pub id: Uuid,
+    pub framework_id: Uuid,
+    pub version: String,
+    pub canonical_release_key: String,
+    pub title: Option<String>,
+    pub published_at: Option<String>,
+    pub semantic_digest: String,
+    #[serde(default = "default_finalized")]
+    pub migration_recovery_status: String,
+    pub migration_recovery_reason: Option<String>,
+    pub requirement_count: i64,
+}
+
+fn default_finalized() -> String {
+    "finalized".to_string()
+}
+
+/// Compact projection used to split a bundle picker into mapped policies and
+/// explicit custom additions for a selected normalized framework.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FrameworkMappedPolicyVersionsResponse {
+    #[serde(default)]
+    pub policy_version_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BundleVersionRequirementMembership {
+    pub requirement_version_id: Uuid,
+    pub requirement_id: Uuid,
+    pub framework_id: Uuid,
+    pub framework_version_id: Uuid,
+    pub framework_name: String,
+    pub framework_version: String,
+    pub external_id: String,
+    pub title: Option<String>,
+    pub kind: String,
+    pub selected: bool,
+    pub requirement_order: i32,
+}
+
+/// A single requirement version row from a search or list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RequirementVersionSummary {
+    pub id: Uuid,
+    pub requirement_id: Uuid,
+    pub framework_version_id: Uuid,
+    pub external_id: String,
+    pub title: Option<String>,
+    pub kind: String,
+    pub severity: Option<String>,
+    pub parent_requirement_version_id: Option<Uuid>,
+    pub semantic_digest: String,
+}
+
+/// A policy-requirement mapping row returned by the list endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyMappingRow {
+    pub id: Uuid,
+    pub policy_version_id: Uuid,
+    pub requirement_version_id: Uuid,
+    pub relationship: String,
+    pub coverage: String,
+    pub rationale: Option<String>,
+    pub provenance: String,
+    pub trust_state: String,
+    // Joined framework/requirement data for display.
+    pub framework_id: Uuid,
+    pub framework_name: String,
+    pub framework_version_id: Uuid,
+    pub framework_version: String,
+    pub requirement_external_id: String,
+    pub requirement_title: Option<String>,
+}
+
+/// Coverage classification for a single requirement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementCoverage {
+    Full,
+    Partial,
+    Unmapped,
+    /// The requirement's framework release is pending migration recovery and
+    /// cannot supply authoritative evidence, but is still counted in the total.
+    RecoveryRequired,
+}
+
+/// One row in the bundle requirement coverage report.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BundleCoverageRow {
+    pub requirement_version_id: Uuid,
+    pub external_id: String,
+    pub title: Option<String>,
+    pub kind: String,
+    pub parent_requirement_version_id: Option<Uuid>,
+    pub coverage: RequirementCoverage,
+    pub mapped_policy_version_ids: Vec<Uuid>,
+    pub mappings: Vec<BundleCoverageMapping>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BundleCoverageMapping {
+    pub policy_version_id: Uuid,
+    pub policy_name: String,
+    pub relationship: String,
+    pub coverage: String,
+    pub provenance: String,
+    pub rationale: Option<String>,
+}
+
+/// Aggregated requirement coverage for a bundle version.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BundleCoverageReport {
+    pub bundle_version_id: Uuid,
+    pub total_requirements: i64,
+    pub full: i64,
+    pub partial: i64,
+    pub unmapped: i64,
+    #[serde(default)]
+    pub recovery_required: i64,
+    pub rows: Vec<BundleCoverageRow>,
+}
+
+/// Request body for creating a requirement mapping.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreatePolicyMappingRequest {
+    pub requirement_version_id: Uuid,
+    pub relationship: String,
+    pub coverage: String,
+    pub rationale: Option<String>,
+    #[serde(default = "default_provenance")]
+    pub provenance: String,
+}
+
+fn default_provenance() -> String {
+    "manual".to_string()
+}
+
+/// Request body for updating an existing mapping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdatePolicyMappingRequest {
+    pub relationship: String,
+    pub coverage: String,
+    pub rationale: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::XccdfPreviewResponse;
+
+    #[test]
+    fn deserializes_20ac_shared_implementation_group() {
+        let preview: XccdfPreviewResponse = serde_json::from_value(serde_json::json!({
+            "sha256": "fixture-stig-import-sha256",
+            "rule_count": 2,
+            "profile_count": 0,
+            "foreign_stig_reconciliation": {
+                "framework": {
+                    "canonical_source_key": "disa-anduril-nixos-stig",
+                    "canonical_release_key": "v1r2",
+                    "state": "exact_release"
+                },
+                "requirements": [],
+                "shared_implementation_groups": [{
+                    "group_id": "fixture-shared-group",
+                    "requirement_keys": ["V-999001", "V-999002"],
+                    "recommended_action": "reuse_existing",
+                    "has_existing_candidate": true,
+                    "existing_candidate": {
+                        "policy_id": "11111111-1111-4111-8111-111111111111",
+                        "policy_version_id": "22222222-2222-4222-8222-222222222222",
+                        "policy_name": "Fixture authoritative policy",
+                        "confidence": 100
+                    },
+                    "member_proofs": {
+                        "V-999001": "exact_technical",
+                        "V-999002": "shared_implementation"
+                    }
+                }],
+                "removed_requirements": []
+            }
+        }))
+        .expect("20ac fixture should deserialize");
+
+        let reconciliation = preview
+            .foreign_stig_reconciliation
+            .expect("foreign reconciliation");
+        assert_eq!(reconciliation.shared_implementation_groups.len(), 1);
+
+        let group = &reconciliation.shared_implementation_groups[0];
+        assert_eq!(group.group_id, "fixture-shared-group");
+        assert_eq!(group.requirement_keys, ["V-999001", "V-999002"]);
+        assert_eq!(group.recommended_action, "reuse_existing");
+        assert!(group.has_existing_candidate);
+
+        let candidate = group.existing_candidate.as_ref().expect("candidate");
+        assert_eq!(candidate.policy_name, "Fixture authoritative policy");
+        assert_eq!(candidate.confidence, 100);
+        assert_eq!(group.member_proofs.get("V-999001").map(String::as_str), Some("exact_technical"));
+        assert_eq!(group.member_proofs.get("V-999002").map(String::as_str), Some("shared_implementation"));
     }
 }

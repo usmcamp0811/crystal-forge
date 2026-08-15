@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            service_name as \"service_name!\",\n            affected_systems_count as \"affected_systems_count!\",\n            avg_score as \"avg_score!\",\n            min_score as \"min_score!\",\n            max_score as \"max_score!\"\n        FROM view_hardening_top_vulnerable_services\n        LIMIT $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "service_name!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "affected_systems_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "avg_score!",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 3,
+        "name": "min_score!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "max_score!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "9eb2377770d713b7831fa0513f85ec1246d61439f26623aee89d76477e6f1cf9"
+}

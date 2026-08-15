@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO service_hardening_results (\n            id, scan_id, service_name, service_type,\n            hardening_score, risk_level, directives_detail,\n            enabled_directives_count, disabled_directives_count, missing_directives_count\n        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Varchar",
+        "Jsonb",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "49c6285141e3e8b05f39c95cd447819d80981472212fad2edb238f7d0d09e81a"
+}

@@ -23,8 +23,8 @@ use crystal_forge::{
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
             builders, caches, commits, compliance, config_health, cves, dashboard,
-            deployment_policies, deployments, environments, flakes, hardening, navigation,
-            scanning, setup_wizard, systems, user_preferences,
+            deployment_policies, deployments, environments, flakes, framework_requirements,
+            hardening, navigation, scanning, setup_wizard, systems, user_preferences,
         },
         status,
         webhook::webhook_handler,
@@ -149,8 +149,17 @@ async fn main() -> anyhow::Result<()> {
     let deployment_pool = pool.clone();
     let flake_init_pool = pool.clone();
 
-    // Backfill any compliance digest rows set to 'pending' by migrations.
-    // This runs once at startup and fails fast if any row cannot be computed.
+    // Framework releases reopened by migration may require an operator to
+    // supply historical source material. Do not let one unresolved release
+    // prevent the service from starting.
+    if let Err(error) =
+        crystal_forge::compliance::framework_model::backfill_pending_framework_version_digests(
+            &pool,
+        )
+        .await
+    {
+        warn!(error = ?error, "framework version recovery remains unresolved");
+    }
     crystal_forge::compliance::digest::backfill_pending_digests(&pool)
         .await
         .context("Failed to backfill compliance semantic digests")?;
@@ -480,6 +489,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/compliance/bundle-versions/:version_id/policies",
             get(compliance::get_bundle_version_policy_membership),
         )
+        .route(
+            "/api/v1/compliance/bundle-versions/:version_id/requirements",
+            get(compliance::get_bundle_version_requirement_membership),
+        )
         // Phase 2: Bundle assignment endpoints
         .route(
             "/api/v1/compliance/assignments",
@@ -548,6 +561,45 @@ async fn main() -> anyhow::Result<()> {
             post(compliance::policy_interchange_preview).layer(DefaultBodyLimit::max(
                 crystal_forge::compliance::interchange::MAX_XCCDF_MULTIPART_BYTES,
             )),
+        )
+        // ── Framework, requirement, mapping, and coverage endpoints ──────────
+        .route(
+            "/api/v1/compliance/frameworks",
+            get(framework_requirements::list_compliance_frameworks),
+        )
+        .route(
+            "/api/v1/compliance/frameworks/:id/versions",
+            get(framework_requirements::list_compliance_framework_versions),
+        )
+        .route(
+            "/api/v1/compliance/frameworks/:id/mapped-policy-versions",
+            get(framework_requirements::list_framework_mapped_policies),
+        )
+        .route(
+            "/api/v1/compliance/framework-versions/:fv_id/requirements",
+            get(framework_requirements::search_framework_requirements),
+        )
+        .route(
+            "/api/v1/compliance/framework-versions/:fv_id/recover",
+            post(framework_requirements::recover_framework_version),
+        )
+        .route(
+            "/api/v1/compliance/requirement-versions/:rv_id/children",
+            get(framework_requirements::list_requirement_version_children),
+        )
+        .route(
+            "/api/v1/compliance/bundle-versions/:bv_id/requirement-coverage",
+            get(framework_requirements::get_bundle_requirement_coverage),
+        )
+        .route(
+            "/api/v1/policy-versions/:pv_id/requirement-mappings",
+            get(framework_requirements::list_policy_requirement_mappings)
+                .post(framework_requirements::create_policy_requirement_mapping),
+        )
+        .route(
+            "/api/v1/policy-versions/:pv_id/requirement-mappings/:m_id",
+            put(framework_requirements::update_policy_requirement_mapping)
+                .delete(framework_requirements::delete_policy_requirement_mapping),
         )
         // Deployment policies CRUD endpoints
         .route(

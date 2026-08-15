@@ -16,6 +16,7 @@ pub mod deployment_policies;
 pub mod deployments;
 pub mod environments;
 pub mod flakes;
+pub mod framework_requirements;
 pub mod hardening;
 pub mod navigation;
 pub mod rbac;

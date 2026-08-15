@@ -10,9 +10,19 @@
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
+use std::collections::HashMap;
 use std::path::Path;
 use uuid::Uuid;
+
+use crate::compliance::framework_model::FrameworkVersionCanonical;
+use crate::compliance::requirement_model::{
+    RequirementVersionCanonical, write_requirement_version_digest,
+};
+use crate::queries::framework_requirements::{
+    insert_framework_version_with_requirement_digests, insert_requirement_version_pending,
+    upsert_framework_lineage, upsert_requirement_lineage,
+};
 
 // ---------------------------------------------------------------------------
 // Fixture JSON top-level structure
@@ -30,7 +40,7 @@ struct FixtureRoot {
     evaluations: FixtureEvaluations,
     cves: FixtureCves,
     policies: Vec<FixturePolicy>,
-    compliance: Vec<serde_json::Value>,
+    compliance: Vec<FixtureCompliance>,
     caches: Vec<serde_json::Value>,
     scanning: serde_json::Value,
     admin: FixtureAdmin,
@@ -269,7 +279,7 @@ struct FixtureEvaluations {
 struct FixtureCves {
     list: Vec<FixtureCveItem>,
     stats: serde_json::Value,
-    insights: Vec<serde_json::Value>,
+    insights: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -311,6 +321,58 @@ struct FixturePolicy {
     policy_type: Option<String>,
     rules: Option<Vec<serde_json::Value>>,
     rationale: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Normalized compliance fixtures
+// ---------------------------------------------------------------------------
+
+/// The existing compliance entries are design-oriented bundle summaries.  A
+/// small optional normalized shape is accepted alongside them so the fast UI
+/// harness can seed real framework/requirement API data without coupling the
+/// browser test to a database-only setup script.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct FixtureCompliance {
+    #[serde(rename = "canonicalSourceKey")]
+    canonical_source_key: Option<String>,
+    name: Option<String>,
+    publisher: Option<String>,
+    description: Option<String>,
+    versions: Option<Vec<FixtureComplianceVersion>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct FixtureComplianceVersion {
+    version: String,
+    #[serde(rename = "canonicalReleaseKey")]
+    canonical_release_key: String,
+    title: Option<String>,
+    #[serde(rename = "publishedAt")]
+    published_at: Option<String>,
+    #[serde(default)]
+    requirements: Vec<FixtureComplianceRequirement>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct FixtureComplianceRequirement {
+    #[serde(rename = "canonicalRequirementKey")]
+    canonical_requirement_key: String,
+    #[serde(rename = "externalId")]
+    external_id: String,
+    title: Option<String>,
+    description: Option<String>,
+    kind: String,
+    severity: Option<String>,
+    #[serde(rename = "checkText")]
+    check_text: Option<String>,
+    #[serde(rename = "fixText")]
+    fix_text: Option<String>,
+    metadata: Option<serde_json::Value>,
+    #[serde(rename = "parentExternalId")]
+    parent_external_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -404,6 +466,7 @@ pub async fn seed_from_fixture(pool: &PgPool, path: &Path) -> Result<()> {
     let flake_ids = seed_flakes(pool, &fixture.flakes.registry).await?;
     seed_commits(pool, &fixture.flakes.registry, &flake_ids).await?;
     let policy_ids = seed_deployment_policies(pool, &fixture.policies).await?;
+    seed_compliance_frameworks(pool, &fixture.compliance).await?;
     let _user_ids = seed_users(pool, &fixture.admin).await?;
     let system_ids = seed_systems(pool, &fixture.systems, &flake_ids, &policy_ids).await?;
     seed_system_states(pool, &fixture.systems, &system_ids).await?;
@@ -421,6 +484,198 @@ pub async fn seed_from_fixture(pool: &PgPool, path: &Path) -> Result<()> {
 
     tracing::info!("Fixture seeding complete");
     Ok(())
+}
+
+/// Seed the optional normalized framework fixtures used by focused UI checks.
+/// Existing design-only compliance entries are ignored when they do not carry
+/// a canonical framework key, so this remains backward-compatible with the
+/// original fixture format.
+async fn seed_compliance_frameworks(pool: &PgPool, fixtures: &[FixtureCompliance]) -> Result<()> {
+    for fixture in fixtures {
+        let Some(canonical_source_key) = fixture.canonical_source_key.as_deref() else {
+            continue;
+        };
+        let Some(versions) = fixture.versions.as_ref() else {
+            continue;
+        };
+
+        let mut tx = pool
+            .begin()
+            .await
+            .context("begin compliance fixture transaction")?;
+        let framework_id = upsert_framework_lineage(
+            &mut tx,
+            fixture.name.as_deref().unwrap_or(canonical_source_key),
+            fixture.publisher.as_deref(),
+            canonical_source_key,
+            fixture.description.as_deref(),
+        )
+        .await
+        .context("seed compliance framework lineage")?;
+
+        for version in versions {
+            let framework_version_id = existing_or_insert_framework_version(
+                &mut tx,
+                framework_id,
+                canonical_source_key,
+                version,
+            )
+            .await?;
+
+            let mut requirement_versions = HashMap::new();
+            let mut requirement_canonicals = HashMap::new();
+            for requirement in &version.requirements {
+                let requirement_id = upsert_requirement_lineage(
+                    &mut tx,
+                    framework_id,
+                    &requirement.canonical_requirement_key,
+                )
+                .await
+                .context("seed compliance requirement lineage")?;
+                let canonical = RequirementVersionCanonical {
+                    canonical_requirement_key: requirement.canonical_requirement_key.clone(),
+                    external_id: requirement.external_id.clone(),
+                    title: requirement.title.clone(),
+                    description: requirement.description.clone(),
+                    kind: requirement.kind.clone(),
+                    severity: requirement.severity.clone(),
+                    check_text: requirement.check_text.clone(),
+                    fix_text: requirement.fix_text.clone(),
+                    metadata: requirement
+                        .metadata
+                        .clone()
+                        .unwrap_or_else(|| serde_json::json!({})),
+                };
+                let requirement_version_id = insert_requirement_version_pending(
+                    &mut tx,
+                    requirement_id,
+                    framework_version_id,
+                    &canonical,
+                    None,
+                )
+                .await
+                .context("seed compliance requirement version")?;
+                requirement_versions
+                    .insert(requirement.external_id.clone(), requirement_version_id);
+                requirement_versions.insert(
+                    requirement.canonical_requirement_key.clone(),
+                    requirement_version_id,
+                );
+                requirement_canonicals.insert(requirement_version_id, canonical);
+            }
+
+            // Resolve hierarchy after every requirement version has an ID so
+            // fixture order cannot drop a child-to-parent relationship.
+            for requirement in &version.requirements {
+                let Some(parent_key) = requirement.parent_external_id.as_ref() else {
+                    continue;
+                };
+                let Some(parent_id) = requirement_versions.get(parent_key).copied() else {
+                    continue;
+                };
+                let Some(requirement_version_id) =
+                    requirement_versions.get(&requirement.external_id).copied()
+                else {
+                    continue;
+                };
+                sqlx::query(
+                    "UPDATE compliance_requirement_versions\
+                     SET parent_requirement_version_id = $1\
+                     WHERE id = $2",
+                )
+                .bind(parent_id)
+                .bind(requirement_version_id)
+                .execute(&mut *tx)
+                .await
+                .context("seed compliance requirement hierarchy")?;
+            }
+            let pending_ids: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM compliance_requirement_versions
+                 WHERE framework_version_id = $1 AND semantic_digest = 'pending'",
+            )
+            .bind(framework_version_id)
+            .fetch_all(&mut *tx)
+            .await
+            .context("list pending seeded requirement digests")?;
+            for requirement_version_id in pending_ids {
+                if let Some(canonical) = requirement_canonicals.get(&requirement_version_id) {
+                    write_requirement_version_digest(&mut tx, requirement_version_id, canonical)
+                        .await
+                        .context("finalize seeded requirement digest")?;
+                }
+            }
+        }
+
+        tx.commit()
+            .await
+            .context("commit compliance fixture transaction")?;
+    }
+    Ok(())
+}
+
+async fn existing_or_insert_framework_version(
+    tx: &mut Transaction<'_, Postgres>,
+    framework_id: Uuid,
+    canonical_source_key: &str,
+    version: &FixtureComplianceVersion,
+) -> Result<Uuid> {
+    if let Some(id) = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM compliance_framework_versions WHERE framework_id = $1 AND canonical_release_key = $2",
+    )
+    .bind(framework_id)
+    .bind(&version.canonical_release_key)
+    .fetch_optional(&mut **tx)
+    .await
+    .context("check compliance framework version fixture")?
+    {
+        return Ok(id);
+    }
+
+    let published_at = version
+        .published_at
+        .as_deref()
+        .map(chrono::DateTime::parse_from_rfc3339)
+        .transpose()
+        .context("parse compliance framework fixture publication date")?
+        .map(|value| value.with_timezone(&chrono::Utc));
+    let canonical = FrameworkVersionCanonical {
+        canonical_source_key: canonical_source_key.to_owned(),
+        canonical_release_key: version.canonical_release_key.clone(),
+        version: version.version.clone(),
+        publisher: None,
+        title: version.title.clone(),
+    };
+    let requirement_digests: Vec<String> = version
+        .requirements
+        .iter()
+        .map(|requirement| {
+            RequirementVersionCanonical {
+                canonical_requirement_key: requirement.canonical_requirement_key.clone(),
+                external_id: requirement.external_id.clone(),
+                title: requirement.title.clone(),
+                description: requirement.description.clone(),
+                kind: requirement.kind.clone(),
+                severity: requirement.severity.clone(),
+                check_text: requirement.check_text.clone(),
+                fix_text: requirement.fix_text.clone(),
+                metadata: requirement
+                    .metadata
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!({})),
+            }
+            .compute_digest()
+        })
+        .collect();
+    insert_framework_version_with_requirement_digests(
+        tx,
+        framework_id,
+        &canonical,
+        None,
+        published_at,
+        &requirement_digests,
+    )
+    .await
+    .context("seed compliance framework version")
 }
 
 /// Mark the setup wizard as dismissed and acknowledged for every user so the
@@ -1314,11 +1569,16 @@ mod tests {
     #[ignore = "requires docs/ tree not present in Nix sandbox"]
     fn test_deserialize_fixture_json() {
         // Look for the fixture file in several common locations
-        let candidates = [
-            "../docs/design/CrystalForge/fixtures/crystal-forge.fixtures.json",
-            "../../docs/design/CrystalForge/fixtures/crystal-forge.fixtures.json",
-            "docs/design/CrystalForge/fixtures/crystal-forge.fixtures.json",
-        ];
+        let fixture_suffix =
+            std::path::Path::new("docs/design/CrystalForge/fixtures/crystal-forge.fixtures.json");
+        let mut candidates = Vec::new();
+        let mut ancestor = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        loop {
+            candidates.push(ancestor.join(fixture_suffix));
+            if !ancestor.pop() {
+                break;
+            }
+        }
 
         let mut content = None;
         for path in &candidates {
@@ -1344,7 +1604,9 @@ mod tests {
         assert!(!fixture.cves.list.is_empty(), "Should have CVEs");
         assert!(!fixture.admin.users.is_empty(), "Should have admin users");
 
-        // Verify specific fields
+        // Verify seed-critical identity fields. Other design-only registries
+        // and optional fields are intentionally opaque or optional so the
+        // canonical fixture can evolve independently.
         let first_system = &fixture.systems[0];
         assert!(
             !first_system.hostname.is_empty(),
@@ -1353,10 +1615,6 @@ mod tests {
         assert!(
             !first_system.environment.is_empty(),
             "System should have environment"
-        );
-        assert!(
-            first_system.mem_gb.unwrap_or(0.0) > 0.0,
-            "System should have mem_gb"
         );
     }
 

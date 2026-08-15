@@ -1194,6 +1194,17 @@ pub async fn fetch_bundle_version_policy_membership(
     fetch_json(&url).await
 }
 
+pub async fn fetch_bundle_version_requirement_membership(
+    version_id: &Uuid,
+) -> Result<Vec<BundleVersionRequirementMembership>, ApiClientError> {
+    let url = format!(
+        "{}/compliance/bundle-versions/{}/requirements",
+        base_url(),
+        version_id
+    );
+    fetch_json(&url).await
+}
+
 pub async fn fetch_compliance_bundle_systems(
     bundle_id: &Uuid,
     version_id: Option<&Uuid>,
@@ -2453,4 +2464,141 @@ pub async fn fetch_system_effective_policies(
 ) -> Result<EffectivePolicySetResponse, ApiClientError> {
     let url = format!("{}/systems/{}/effective-policies", base_url(), system_id);
     fetch_json(&url).await
+}
+
+// ── TASK-418: Frameworks, requirements, mappings, coverage ────────────────────
+
+/// List all compliance framework lineages.
+pub async fn fetch_compliance_frameworks(
+) -> Result<Vec<ComplianceFrameworkSummary>, ApiClientError> {
+    let url = format!("{}/compliance/frameworks", base_url());
+    fetch_json(&url).await
+}
+
+/// List all versions of a specific compliance framework.
+pub async fn fetch_compliance_framework_versions(
+    framework_id: &Uuid,
+) -> Result<Vec<ComplianceFrameworkVersionSummary>, ApiClientError> {
+    let url = format!("{}/compliance/frameworks/{}/versions", base_url(), framework_id);
+    fetch_json(&url).await
+}
+
+/// Fetch policy versions that have a normalized requirement mapping to a
+/// framework.  This is a bulk projection for the bundle policy picker.
+pub async fn fetch_framework_mapped_policy_versions(
+    framework_id: &Uuid,
+) -> Result<FrameworkMappedPolicyVersionsResponse, ApiClientError> {
+    let url = format!(
+        "{}/compliance/frameworks/{}/mapped-policy-versions",
+        base_url(),
+        framework_id
+    );
+    fetch_json(&url).await
+}
+
+/// Server-side requirement search within a framework version.
+///
+/// `q` is matched against external_id, title, CCI IDs, and SRG IDs.
+pub async fn search_requirements(
+    framework_version_id: &Uuid,
+    q: Option<&str>,
+    kind: Option<&str>,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<RequirementVersionSummary>, ApiClientError> {
+    let mut params = vec![
+        format!("limit={}", limit),
+        format!("offset={}", offset),
+    ];
+    if let Some(q_str) = q {
+        params.push(format!("q={}", encode_uri_component(q_str)));
+    }
+    if let Some(kind_str) = kind {
+        params.push(format!("kind={}", encode_uri_component(kind_str)));
+    }
+    let url = format!(
+        "{}/compliance/framework-versions/{}/requirements?{}",
+        base_url(),
+        framework_version_id,
+        params.join("&")
+    );
+    fetch_json(&url).await
+}
+
+/// List child requirement versions for a parent in the hierarchy.
+pub async fn fetch_requirement_children(
+    parent_id: &Uuid,
+) -> Result<Vec<RequirementVersionSummary>, ApiClientError> {
+    let url = format!(
+        "{}/compliance/requirement-versions/{}/children",
+        base_url(),
+        parent_id
+    );
+    fetch_json(&url).await
+}
+
+/// Fetch authoritative requirement coverage for a bundle version.
+pub async fn fetch_bundle_requirement_coverage(
+    bundle_version_id: &Uuid,
+) -> Result<BundleCoverageReport, ApiClientError> {
+    let url = format!(
+        "{}/compliance/bundle-versions/{}/requirement-coverage",
+        base_url(),
+        bundle_version_id
+    );
+    fetch_json(&url).await
+}
+
+/// List all requirement mappings for a policy version.
+pub async fn fetch_policy_requirement_mappings(
+    policy_version_id: &Uuid,
+) -> Result<Vec<PolicyMappingRow>, ApiClientError> {
+    let url = format!(
+        "{}/policy-versions/{}/requirement-mappings",
+        base_url(),
+        policy_version_id
+    );
+    fetch_json(&url).await
+}
+
+/// Create a new requirement mapping on a mutable (draft) policy version.
+pub async fn create_policy_mapping(
+    policy_version_id: &Uuid,
+    request: &CreatePolicyMappingRequest,
+) -> Result<serde_json::Value, ApiClientError> {
+    let url = format!(
+        "{}/policy-versions/{}/requirement-mappings",
+        base_url(),
+        policy_version_id
+    );
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+/// Update relationship/coverage/rationale on an existing mapping.
+pub async fn update_policy_mapping(
+    policy_version_id: &Uuid,
+    mapping_id: &Uuid,
+    request: &UpdatePolicyMappingRequest,
+) -> Result<serde_json::Value, ApiClientError> {
+    let url = format!(
+        "{}/policy-versions/{}/requirement-mappings/{}",
+        base_url(),
+        policy_version_id,
+        mapping_id
+    );
+    send_json_with_csrf("PUT", &url, Some(request)).await
+}
+
+/// Delete a requirement mapping.
+pub async fn delete_policy_mapping(
+    policy_version_id: &Uuid,
+    mapping_id: &Uuid,
+) -> Result<(), ApiClientError> {
+    let url = format!(
+        "{}/policy-versions/{}/requirement-mappings/{}",
+        base_url(),
+        policy_version_id,
+        mapping_id
+    );
+    send_empty_with_csrf("DELETE", &url, None::<&()>).await
 }

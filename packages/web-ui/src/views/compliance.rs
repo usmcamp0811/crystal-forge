@@ -2,24 +2,29 @@ use dioxus::prelude::*;
 
 use crate::api::client::{
     create_bundle_draft, create_compliance_assignment, create_compliance_bundle,
-    delete_compliance_bundle, fetch_bundle_version_policy_membership,
+    delete_compliance_bundle, fetch_bundle_requirement_coverage,
+    fetch_bundle_version_policy_membership, fetch_bundle_version_requirement_membership,
     fetch_compliance_bundle_systems, fetch_compliance_bundles, fetch_compliance_system_evidence,
-    fetch_environments, fetch_policies, fetch_systems, import_xccdf, preview_compliance_assignment,
-    preview_xccdf, publish_bundle_version, trust_bundle_version, update_compliance_bundle,
+    fetch_compliance_framework_versions, fetch_compliance_frameworks, fetch_environments,
+    fetch_framework_mapped_policy_versions, search_requirements,
+    fetch_policies, fetch_systems, import_xccdf, preview_compliance_assignment, preview_xccdf,
+    publish_bundle_version, trust_bundle_version, update_compliance_bundle,
 };
 use crate::api::models::{
-    ComplianceBundleSummary, ComplianceBundleSystemsResponse, ComplianceEvidenceResponse,
-    CreateAssignmentRequest, CreateBundleDraftRequest, CreateComplianceBundleRequest,
-    DeploymentPolicySummary, EnvironmentSummary, ImportedBundlePlan, ImportedCustomCheck,
-    ImportedCustomCheckRule, ImportedEvidenceRequirement, ImportedPolicyCustomization,
-    PolicyValueOverride, PublishBundleVersionRequest, SortOrder, SystemSummary, SystemsListParams,
-    TrustBundleVersionRequest, UpdateComplianceBundleRequest, XccdfImportPlan, XccdfImportResponse,
-    UpdateAssignmentRequest, XccdfPreviewResponse, XccdfRuleImportAction,
+    BundleCoverageReport, BundleCoverageRow, ComplianceBundleSummary, ComplianceBundleSystemsResponse,
+    ComplianceEvidenceResponse, CreateAssignmentRequest, CreateBundleDraftRequest,
+    CreateComplianceBundleRequest, ComplianceFrameworkSummary, ComplianceFrameworkVersionSummary,
+    DeploymentPolicySummary, EnvironmentSummary, RequirementVersionSummary,
+    ImportedBundlePlan, ImportedCustomCheck, ImportedCustomCheckRule, ImportedEvidenceRequirement,
+    ImportedPolicyCustomization, PolicyValueOverride, PublishBundleVersionRequest,
+    RequirementCoverage, SortOrder, SystemSummary, SystemsListParams,
+    TrustBundleVersionRequest, UpdateAssignmentRequest, UpdateComplianceBundleRequest,
+    XccdfImportPlan, XccdfImportResponse, XccdfPreviewResponse, XccdfRuleImportAction,
 };
 use crate::components::compliance::{
     BundleCatalog, BundleHeader, EvidenceDrawer, ImportReview, RefinePolicyStep,
     RefinedPolicyDraft, RefinedRuleAction, RefinedStigRule, ScoreStrip, SourceCheck,
-    SourceCheckBodyPart, SourceStigRule, SystemsMatrix, action_to_import,
+    SourceCheckBodyPart, SourceStigRule, SystemsMatrix, action_to_import, mapping_semantics_for,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::components::io_menu::{IOMenu, IOMenuItem};
@@ -63,6 +68,9 @@ pub fn ComplianceView() -> Element {
     let mut version_action_busy = use_signal(|| false);
     let mut version_action_error = use_signal(|| None::<String>);
     let mut policies = use_signal(Vec::<DeploymentPolicySummary>::new);
+    // Requirement coverage for the selected bundle version.
+    let mut coverage_report: Signal<Option<BundleCoverageReport>> = use_signal(|| None);
+    let mut coverage_expanded = use_signal(|| false);
     let mut environments = use_signal(Vec::<EnvironmentSummary>::new);
     let mut sys_filter = use_signal(|| "all".to_string());
     let mut selected_export_version_id = use_signal(|| None::<uuid::Uuid>);
@@ -514,15 +522,32 @@ pub fn ComplianceView() -> Element {
                                     div { style: "font-size:12px;", "Loading systems rollup…" }
                                 }
                              } else if let Some(resp) = systems.read().as_ref() {
-                                 ScoreStrip { totals: resp.totals.clone() }
-                                 SystemsMatrix {
-                                    systems: resp.systems.clone(),
-                                    on_evidence,
-                                    filter: sys_filter.read().clone(),
-                                     on_filter: move |f| sys_filter.set(f),
-                                 }
-                                 // Administrative assignment controls stay below operational posture.
-                                 if is_admin {
+                                  ScoreStrip { totals: resp.totals.clone() }
+                                  SystemsMatrix {
+                                     systems: resp.systems.clone(),
+                                     on_evidence,
+                                     filter: sys_filter.read().clone(),
+                                      on_filter: move |f| sys_filter.set(f),
+                                  }
+                                  // ── Requirement coverage card ───────────────
+                                  if let Some(vid) = *selected_export_version_id.read() {
+                                      {
+                                          // Lazy-load coverage when the version changes.
+                                          if coverage_report.read().as_ref().map(|r| r.bundle_version_id) != Some(vid) {
+                                              spawn(async move {
+                                                  if let Ok(report) = fetch_bundle_requirement_coverage(&vid).await {
+                                                      coverage_report.set(Some(report));
+                                                  }
+                                              });
+                                          }
+                                          rsx! { div {} }
+                                      }
+                                      if let Some(report) = coverage_report.read().clone() {
+                                          RequirementCoverageCard { report, expanded: coverage_expanded }
+                                      }
+                                  }
+                                  // Administrative assignment controls stay below operational posture.
+                                  if is_admin {
                                      if let Some(vid) = *selected_export_version_id.read() {
                                           button {
                                               class: "btn btn-primary focus-ring",
@@ -672,7 +697,6 @@ pub fn ComplianceView() -> Element {
         if is_admin && *show_import_stig.read() {
             ImportStigModal {
                 environments: environments.read().clone(),
-                existing_policies: policies.read().iter().filter_map(|policy| policy.version_id.map(|version_id| (version_id, policy.name.clone()))).collect(),
                 is_stig_import: *import_mode_stig.read(),
                 on_close: move |_| show_import_stig.set(false),
                 on_success: move |_| {
@@ -1786,6 +1810,37 @@ fn human_fidelity(value: Option<&str>) -> &'static str {
     }
 }
 
+fn reconciliation_match_label(match_type: &str) -> &'static str {
+    match match_type {
+        "authoritative_mapping" => "Existing mapping",
+        "inherited_mapping" => "Inherited mapping",
+        "exact_technical_match" => "Exact technical match",
+        "related_mapping" => "Related candidate",
+        "fuzzy_similarity" => "Similarity candidate",
+        _ => "Candidate",
+    }
+}
+
+fn reconciliation_match_class(match_type: &str) -> &'static str {
+    match match_type {
+        "authoritative_mapping" | "inherited_mapping" | "exact_technical_match" => "chip chip-success",
+        "related_mapping" | "fuzzy_similarity" => "chip chip-warning",
+        _ => "chip chip-unknown",
+    }
+}
+
+fn shared_reconciliation_action_label(action: &str) -> &'static str {
+    match action {
+        "reuse_existing" => "Reuse existing",
+        "create_shared" => "Create one policy",
+        _ => "Review individually",
+    }
+}
+
+fn shared_reconciliation_requirement_keys(keys: &[String]) -> String {
+    keys.join(", ")
+}
+
 fn import_action_from_rule(rule: &StigRule) -> XccdfRuleImportAction {
     let customization = ImportedPolicyCustomization {
         policy_name: Some(rule.local_name.clone()),
@@ -1860,13 +1915,17 @@ fn refined_rules_from_rules(rules: &[StigRule]) -> Vec<RefinedStigRule> {
             evidence_requirements: rule.evidence_requirements.iter().filter_map(|evidence| match evidence { ImportedEvidenceRequirement::Command { command, expected_output } => Some(crate::components::compliance::refine_policy::EvidenceRequirementDraft::Command { command: command.clone(), expected_output: expected_output.clone() }), ImportedEvidenceRequirement::Attestation { description } => Some(crate::components::compliance::refine_policy::EvidenceRequirementDraft::Attestation { description: description.clone() }), _ => None }).collect(),
         },
         selected: rule.selected,
+        mapping_relationship: None,
+        mapping_coverage: None,
+        mapping_rationale: None,
+        candidate_options: vec![],
+        selected_candidate: None,
     }).collect()
 }
 
 #[derive(Props, Clone, PartialEq)]
 struct ImportStigModalProps {
     environments: Vec<EnvironmentSummary>,
-    existing_policies: Vec<(uuid::Uuid, String)>,
     on_close: EventHandler<()>,
     on_success: EventHandler<()>,
     is_stig_import: bool,
@@ -1878,12 +1937,18 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
     let mut step = use_signal(|| "upload".to_string());
     let mut rules = use_signal(|| Vec::<StigRule>::new());
     let mut refined_rules = use_signal(|| Vec::<RefinedStigRule>::new());
+    let mut mapping_semantics = use_signal(
+        std::collections::HashMap::<String, crate::api::models::ImportedMappingSemantics>::new,
+    );
     let mut bundle_name = use_signal(String::new);
     let mut file_name = use_signal(String::new);
     let mut bench_title = use_signal(String::new);
     let mut bench_ver = use_signal(String::new);
     let mut selected_envs = use_signal(|| Vec::<String>::new());
     let mut cursor = use_signal(|| 0usize);
+    // Source rule IDs shown in the refine walkthrough.  All selected controls
+    // remain in the import plan; this only narrows the human-review path.
+    let mut refine_rule_ids = use_signal(Vec::<String>::new);
     let mut parse_error = use_signal(|| Option::<String>::None);
     // done-step summary
     let mut done_total = use_signal(|| 0usize);
@@ -1927,6 +1992,84 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
     let can_advance = sel_count > 0
         && !bundle_name.read().trim().is_empty()
         && (props.environments.is_empty() || !selected_envs.read().is_empty());
+    let foreign_reconciliation = preview_response
+        .read()
+        .as_ref()
+        .and_then(|preview| preview.foreign_stig_reconciliation.clone());
+    let reconciliation_rows = foreign_reconciliation
+        .as_ref()
+        .map(|reconciliation| reconciliation.requirements.clone())
+        .unwrap_or_default();
+    let selected_rule_ids: std::collections::HashSet<String> = selected_rules
+        .iter()
+        .map(|rule| rule.rule_id.clone())
+        .collect();
+    let reconciliation_rows: Vec<_> = reconciliation_rows
+        .into_iter()
+        .filter(|row| selected_rule_ids.contains(&row.rule_id))
+        .collect();
+    let shared_groups = foreign_reconciliation
+        .as_ref()
+        .map(|reconciliation| reconciliation.shared_implementation_groups.clone())
+        .unwrap_or_default();
+    let shared_group_proof = shared_groups
+        .iter()
+        .map(|group| {
+            format!(
+                "{} ({})",
+                shared_reconciliation_requirement_keys(&group.requirement_keys),
+                shared_reconciliation_action_label(&group.recommended_action),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let framework_reconciliation = foreign_reconciliation
+        .as_ref()
+        .map(|reconciliation| reconciliation.framework.clone());
+    let framework_state_label = framework_reconciliation
+        .as_ref()
+        .map(|framework| {
+            if framework.state == "exact_release" {
+                "Exact release"
+            } else {
+                "Release requires review"
+            }
+        });
+    let attention_rule_ids: Vec<String> = reconciliation_rows
+        .iter()
+        .filter(|row| !row.auto_resolvable || row.state == "identity_conflict")
+        .map(|row| row.rule_id.clone())
+        .collect();
+    let reused_count = reconciliation_rows
+        .iter()
+        .filter(|row| !row.candidates.is_empty())
+        .count();
+    let authoritative_count = reconciliation_rows
+        .iter()
+        .filter(|row| row.candidates.iter().any(|candidate| candidate.match_type == "authoritative_mapping"))
+        .count();
+    let inherited_count = reconciliation_rows
+        .iter()
+        .filter(|row| row.candidates.iter().any(|candidate| candidate.match_type == "inherited_mapping"))
+        .count();
+    let exact_count = reconciliation_rows
+        .iter()
+        .filter(|row| row.candidates.iter().any(|candidate| candidate.match_type == "exact_technical_match"))
+        .count();
+    let ready_count = reconciliation_rows
+        .iter()
+        .filter(|row| row.candidates.is_empty() && row.auto_resolvable)
+        .count();
+    let review_count = if attention_rule_ids.is_empty() {
+        sel_count
+    } else {
+        attention_rule_ids.len()
+    };
+    let refine_all_rule_ids: Vec<String> = selected_rules
+        .iter()
+        .map(|rule| rule.rule_id.clone())
+        .collect();
+    let fallback_review_rule_ids = refine_all_rule_ids.clone();
 
     rsx! {
         div {
@@ -2017,7 +2160,8 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                  bench_ver.set(bm_ver);
                                                                  file_name.set(fname.clone());
                                                                  file_bytes.set(bytes_vec);
-                                                                 preview_response.set(Some(resp));
+                                                                   let foreign_reconciliation = resp.foreign_stig_reconciliation.clone();
+                                                                  preview_response.set(Some(resp));
                                                                  previewing.set(false);
                                                                  
                                                                  if is_cf_native {
@@ -2025,9 +2169,37 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                      step.set("native-review".to_string());
                                                                  } else {
                                                                      // Foreign XCCDF workflow: do rule processing
-                                                                     let parsed_rules = rules_from_preview(&preview_response.read().as_ref().unwrap());
-                                                                     rules.set(parsed_rules);
-                                                                     refined_rules.set(refined_rules_from_rules(&rules.read()));
+                                                                      let parsed_rules = rules_from_preview(&preview_response.read().as_ref().unwrap());
+                                                                      rules.set(parsed_rules.clone());
+                                                                      let mut refined = refined_rules_from_rules(&parsed_rules);
+                                                                      if let Some(reconciliation) = foreign_reconciliation.as_ref() {
+                                                                          for rule in refined.iter_mut() {
+                                                                              if let Some(requirement) = reconciliation.requirements.iter().find(|requirement| requirement.rule_id == rule.source.rule_id) {
+                                                                                  rule.candidate_options = requirement.candidates.clone();
+                                                                              }
+                                                                          }
+                                                                      }
+                                                                      refined_rules.set(refined);
+                                                                      mapping_semantics.set(
+                                                                      foreign_reconciliation
+                                                                          .as_ref()
+                                                                          .into_iter()
+                                                                          .flat_map(|reconciliation| reconciliation.requirements.iter())
+                                                                          .filter_map(|requirement| {
+                                                                              requirement.candidates.first().map(|candidate| {
+                                                                                  (
+                                                                                      requirement.rule_id.clone(),
+                                                                                       crate::api::models::ImportedMappingSemantics {
+                                                                                           relationship: None,
+                                                                                           coverage: None,
+                                                                                           rationale: Some(candidate.match_reasons.join(" ")),
+                                                                                           reviewed_related_candidate: None,
+                                                                                      },
+                                                                                  )
+                                                                              })
+                                                                          })
+                                                                          .collect(),
+                                                                  );
                                                                      selected_envs.set(all_env_names.clone());
                                                                      step.set("review".to_string());
                                                                  }
@@ -2127,11 +2299,12 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         committing.set(true);
                                         spawn(async move {
                                             if let Some(preview) = preview_response.read().clone() {
-                                                let plan = XccdfImportPlan {
+                                     let plan = XccdfImportPlan {
                                                     expected_sha256: preview.sha256,
                                                     selected_profile_id: None,
-                                                    selected_rule_ids: vec![],
-                                                    rule_actions: vec![],
+                                                     selected_rule_ids: vec![],
+                                                     rule_actions: vec![],
+                                                     mapping_semantics: std::collections::HashMap::new(),
                                                     bundle: ImportedBundlePlan {
                                                         name: String::new(),
                                                         framework: "unknown".into(),
@@ -2373,17 +2546,15 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         div { style: "display:flex;gap:8px;",
                             button {
                                 class: "btn btn-primary focus-ring",
-                                "data-testid": "xccdf-review-refine-button",
+                                "data-testid": "xccdf-review-reconcile-button",
                                 disabled: !can_advance || *committing.read(),
                                 style: if !can_advance || *committing.read() { "opacity:0.5;cursor:not-allowed;" } else { "" },
                                 onclick: move |_| {
                                     if can_advance && !*committing.read() {
-                                        cursor.set(0);
-                                        step.set("refine".to_string());
+                                        step.set("reconcile".to_string());
                                     }
                                 },
-                                "Refine {sel_count} "
-                                if sel_count == 1 { "policy" } else { "policies" }
+                                "Continue "
                                 Icon { name: IconName::ChevronRight, size: 13 }
                             }
                             button {
@@ -2398,11 +2569,11 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         .filter(|r| r.selected)
                                         .map(|r| r.rule_id.clone())
                                         .collect();
-                                    let rule_actions: Vec<XccdfRuleImportAction> = rules
+                                     let rule_actions: Vec<XccdfRuleImportAction> = rules
                                         .read()
                                         .iter()
                                         .filter(|r| r.selected)
-                                        .map(import_action_from_rule)
+                                         .map(import_action_from_rule)
                                         .collect();
                                     let sha256 = preview_response
                                         .read()
@@ -2413,7 +2584,24 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         expected_sha256: sha256,
                                         selected_profile_id: None,
                                         selected_rule_ids,
-                                        rule_actions,
+                                         rule_actions,
+                                     mapping_semantics: refined_rules
+                                         .read()
+                                         .iter()
+                                         .filter_map(|rule| {
+                                             matches!(rule.draft.action, RefinedRuleAction::Existing(Some(_))).then(|| {
+                                                 (
+                                                     rule.source.rule_id.clone(),
+                                                      crate::api::models::ImportedMappingSemantics {
+                                                          relationship: rule.mapping_relationship.clone(),
+                                                          coverage: rule.mapping_coverage.clone(),
+                                                          rationale: rule.mapping_rationale.clone().filter(|value| !value.trim().is_empty()),
+                                                          reviewed_related_candidate: None,
+                                                     },
+                                                 )
+                                             })
+                                         })
+                                         .collect(),
                                         bundle: ImportedBundlePlan {
                                             name: bundle_name.read().trim().to_string(),
                                             framework: "xccdf".to_string(),
@@ -2459,6 +2647,143 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                 }
 
                 // ══════════════════════════════════════════════════════
+                // STEP: reconcile (DISA STIG requirement reconciliation)
+                // ══════════════════════════════════════════════════════
+                if *step.read() == "reconcile" {
+                     div {
+                         class: "modal-head",
+                         "data-testid": "xccdf-reconciliation-stage",
+                         "data-reconciliation-row-count": "{reconciliation_rows.len()}",
+                         "data-shared-group-count": "{shared_groups.len()}",
+                         h2 { style: "display:flex;align-items:center;gap:8px;",
+                             Icon { name: IconName::Link, size: 14 }
+                             "Reconciling {sel_count} requirements"
+                         }
+                          p { "Deterministic implementation candidates are resolved from server-side requirement and policy evidence before review." }
+                          div {
+                              class: "sd-callout sd-callout-info",
+                              "data-testid": "xccdf-shared-implementation-groups",
+                              style: if shared_groups.is_empty() { "display:none;" } else { "" },
+                              "Shared implementation groups · {shared_groups.len()}: {shared_group_proof}"
+                          }
+                      }
+                     div { class: "modal-body", style: "overflow-y:auto;",
+                          if let Some(framework) = framework_reconciliation.as_ref() {
+                              div { class: "card", style: "display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 12px;margin-bottom:12px;",
+                                  div {
+                                      div { style: "font-size:11px;color:var(--cf-text-muted);", "Framework release" }
+                                      div { class: "mono", style: "font-size:12px;margin-top:3px;", "{framework.canonical_source_key} · {framework.canonical_release_key}" }
+                                  }
+                                  span { class: "chip chip-success", "{framework_state_label.unwrap_or(\"Release requires review\")}" }
+                              }
+                          }
+                          div { style: "display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;",
+                              for (count, label, color) in [
+                                 (authoritative_count, "authoritative mappings", "#34d399"),
+                                 (inherited_count, "inherited mappings", "#34d399"),
+                                 (exact_count, "exact technical matches", "#60a5fa"),
+                                 (attention_rule_ids.len(), "need review — no automatic resolution", if attention_rule_ids.is_empty() { "var(--cf-text-muted)" } else { "#fbbf24" }),
+                             ] {
+                                 div { class: "card", style: "padding:14px 12px;text-align:center;",
+                                    div { style: "font-size:24px;font-weight:700;color:{color};", "{count}" }
+                                    div { style: "font-size:11px;color:var(--cf-text-muted);line-height:1.4;margin-top:2px;", "{label}" }
+                                 }
+                             }
+                         }
+                         if ready_count > 0 {
+                             div { class: "sd-callout sd-callout-info", style: "font-size:11px;margin-bottom:12px;", "{ready_count} requirements have inferred enforcement and can be reviewed without a reusable policy candidate." }
+                         }
+                         if reconciliation_rows.is_empty() {
+                            div { class: "sd-callout sd-callout-warn",
+                                Icon { name: IconName::Warn, size: 13 }
+                                div { style: "font-size:12px;", "This XCCDF source does not expose a stable DISA STIG identity. Review all selected controls before importing." }
+                         }
+                         }
+                        if !attention_rule_ids.is_empty() {
+                            div { class: "field",
+                                label { "Requiring attention · {attention_rule_ids.len()}" }
+                                div { style: "display:flex;flex-direction:column;gap:5px;max-height:220px;overflow-y:auto;",
+                                    for row in reconciliation_rows.iter().filter(|row| !row.auto_resolvable || row.state == "identity_conflict") {
+                                         div { key: "attention-{row.rule_id}", style: "display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-radius:8px;border:1px solid var(--cf-divider);",
+                                            span { style: "color:#fbbf24;margin-top:2px;flex-shrink:0;display:inline-flex;", Icon { name: IconName::Warn, size: 13 } }
+                                            div { style: "min-width:0;",
+                                                div { style: "font-size:12.5px;font-weight:600;line-height:1.4;", "{row.title.clone().unwrap_or_else(|| row.external_id.clone())}" }
+                                                div { class: "mono", style: "font-size:10.5px;color:var(--cf-text-muted);", "{row.external_id}" }
+                                                  div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;",
+                                                      if row.state == "identity_conflict" { "Requirement identity conflict needs a human decision." } else if let Some(candidate) = row.candidates.first() {
+                                                          span { class: reconciliation_match_class(&candidate.match_type), style: "font-size:9px;padding:2px 6px;", "{reconciliation_match_label(&candidate.match_type)}" }
+                                                          span { "{candidate.confidence}% confidence" }
+                                                      } else { "No trusted mapped implementation or inferred enforcement is available." }
+                                                 }
+                                                  if let Some(candidate) = row.candidates.first() {
+                                                      div { style: "display:flex;gap:5px;flex-wrap:wrap;margin-top:5px;",
+                                                          span { class: "chip chip-neutral", style: "font-size:9px;", "{candidate.policy_name}" }
+                                                          for reason in candidate.match_reasons.iter() {
+                                                              span { class: "chip mono", style: "font-size:9px;", "{reason}" }
+                                                          }
+                                                     }
+                                                 }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if reused_count + ready_count > 0 {
+                            details { style: "margin-top:4px;",
+                                 summary { style: "cursor:pointer;font-size:11.5px;font-weight:600;color:var(--cf-text-muted);", "Show {reused_count + ready_count} auto-resolved requirements" }
+                                div { style: "display:flex;flex-direction:column;gap:5px;margin-top:8px;max-height:220px;overflow-y:auto;",
+                                      for row in reconciliation_rows.iter().filter(|row| row.auto_resolvable && row.state != "identity_conflict") {
+                                          div { key: "resolved-{row.rule_id}", "data-testid": "xccdf-reconciliation-resolved-row", style: "display:flex;gap:10px;align-items:flex-start;padding:7px 10px;border-radius:8px;background:var(--cf-subtle-bg);",
+                                            span { style: if !row.candidates.is_empty() { "color:#34d399;margin-top:2px;display:inline-flex;" } else { "color:#60a5fa;margin-top:2px;display:inline-flex;" }, Icon { name: if !row.candidates.is_empty() { IconName::Check } else { IconName::Shield }, size: 12 } }
+                                            div { style: "min-width:0;",
+                                                div { style: "font-size:12px;font-weight:600;line-height:1.4;", "{row.title.clone().unwrap_or_else(|| row.external_id.clone())}" }
+                                                 div { style: "font-size:10.5px;color:var(--cf-text-muted);margin-top:1px;",
+                                      if let Some(candidate) = row.candidates.first() {
+                                          span { class: reconciliation_match_class(&candidate.match_type), style: "font-size:9px;padding:2px 6px;margin-right:4px;", "{reconciliation_match_label(&candidate.match_type)}" }
+                                          "{candidate.policy_name} · {candidate.confidence}%"
+                                      } else { "Enforcement inferred from the STIG fix text" }
+                                                 }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "modal-foot", style: "justify-content:space-between;",
+                        button { class: "btn btn-ghost focus-ring", onclick: move |_| step.set("review".to_string()), Icon { name: IconName::ArrowLeft, size: 13 } " Back" }
+                        div { style: "display:flex;gap:8px;align-items:center;",
+                            button {
+                                class: "btn btn-ghost focus-ring",
+                                title: "Walk through every control, not just the ones needing attention",
+                                onclick: move |_| {
+                                    refine_rule_ids.set(refine_all_rule_ids.clone());
+                                    cursor.set(0);
+                                    step.set("refine".to_string());
+                                },
+                                "Refine all instead"
+                            }
+                            if attention_rule_ids.is_empty() && !reconciliation_rows.is_empty() {
+                                button { class: "btn btn-primary focus-ring", onclick: move |_| step.set("final-review".to_string()), Icon { name: IconName::Check, size: 13 } " Create bundle + {sel_count} policies" }
+                            } else {
+                                button {
+                                    class: "btn btn-primary focus-ring",
+                                    onclick: move |_| {
+                                        let scope = if attention_rule_ids.is_empty() { fallback_review_rule_ids.clone() } else { attention_rule_ids.clone() };
+                                        refine_rule_ids.set(scope);
+                                        cursor.set(0);
+                                        step.set("refine".to_string());
+                                    },
+                                     "Review {review_count} requirements "
+                                    Icon { name: IconName::ChevronRight, size: 13 }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ══════════════════════════════════════════════════════
                 // STEP: refine (structured per-control walkthrough)
                 // ══════════════════════════════════════════════════════
                 if *step.read() == "refine" {
@@ -2469,8 +2794,8 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         RefinePolicyStep {
                             rules: refined_rules_signal,
                             cursor: cursor_signal,
-                            existing_policies: props.existing_policies.clone(),
-                            on_back: move |_| step.set("review".to_string()),
+                            review_rule_ids: Some(refine_rule_ids.read().clone()),
+                            on_back: move |_| step.set("reconcile".to_string()),
                             on_review: move |_| step.set("final-review".to_string()),
                         }
                     }
@@ -2484,11 +2809,28 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 if *committing.read() { return; }
                                 let selected_rule_ids = refined_rules.read().iter().filter(|rule| rule.selected).map(|rule| rule.source.rule_id.clone()).collect::<Vec<_>>();
                                 let rule_actions = refined_rules.read().iter().filter(|rule| rule.selected).map(action_to_import).collect::<Vec<_>>();
-                                let plan = XccdfImportPlan {
+                                 let plan = XccdfImportPlan {
                                     expected_sha256: preview_response.read().as_ref().map(|preview| preview.sha256.clone()).unwrap_or_default(),
                                     selected_profile_id: None,
                                     selected_rule_ids,
                                     rule_actions,
+                                     mapping_semantics: refined_rules
+                                         .read()
+                                         .iter()
+                                         .filter_map(|rule| {
+                                             matches!(rule.draft.action, RefinedRuleAction::Existing(Some(_))).then(|| {
+                                                 (
+                                                     rule.source.rule_id.clone(),
+                                                     crate::api::models::ImportedMappingSemantics {
+                                                         relationship: rule.mapping_relationship.clone(),
+                                                         coverage: rule.mapping_coverage.clone(),
+                                                         rationale: rule.mapping_rationale.clone().filter(|value| !value.trim().is_empty()),
+                                                         reviewed_related_candidate: mapping_semantics_for(rule).and_then(|semantics| semantics.reviewed_related_candidate),
+                                                     },
+                                                 )
+                                             })
+                                         })
+                                         .collect(),
                                     bundle: ImportedBundlePlan { name: bundle_name.read().trim().to_string(), framework: "xccdf".into(), version: bench_ver.read().clone(), layer: None, owner: None, description: None },
                                 };
                                 let bytes = file_bytes.read().clone();
@@ -3313,6 +3655,8 @@ struct BundleFrameworkFieldProps {
 #[component]
 fn BundleFrameworkField(props: BundleFrameworkFieldProps) -> Element {
     let mut framework = props.framework;
+    let mut normalized_frameworks = use_signal(Vec::<ComplianceFrameworkSummary>::new);
+    let mut normalized_frameworks_loading = use_signal(|| false);
     let mut defining_new = use_signal(|| false);
     let mut new_framework = use_signal(String::new);
     let mut accepted_frameworks = use_signal(Vec::<String>::new);
@@ -3322,6 +3666,21 @@ fn BundleFrameworkField(props: BundleFrameworkFieldProps) -> Element {
         .eq_ignore_ascii_case("CMMC")
         .then_some(current_framework.clone());
     let mut custom_frameworks = props.custom_frameworks.clone();
+    if normalized_frameworks.read().is_empty() && !*normalized_frameworks_loading.read() {
+        normalized_frameworks_loading.set(true);
+        spawn(async move {
+            if let Ok(value) = fetch_compliance_frameworks().await {
+                normalized_frameworks.set(value);
+            }
+            normalized_frameworks_loading.set(false);
+        });
+    }
+    custom_frameworks.extend(
+        normalized_frameworks
+            .read()
+            .iter()
+            .map(|item| item.name.clone()),
+    );
     custom_frameworks.extend(accepted_frameworks.read().iter().cloned());
     custom_frameworks.sort_by_key(|framework| framework.to_ascii_lowercase());
     custom_frameworks.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
@@ -3407,6 +3766,347 @@ fn BundleFrameworkField(props: BundleFrameworkFieldProps) -> Element {
 }
 
 #[derive(Props, Clone, PartialEq)]
+struct BundlePolicyPickerProps {
+    framework: Signal<String>,
+    policies: Vec<DeploymentPolicySummary>,
+    selected_policy_ids: Signal<Vec<uuid::Uuid>>,
+}
+
+/// Framework-aware bundle policy selector.  The split is driven by the
+/// authoritative mapping projection, not legacy policy framework metadata.
+#[component]
+fn BundlePolicyPicker(props: BundlePolicyPickerProps) -> Element {
+    let mut query = use_signal(String::new);
+    let mut mapped_policy_version_ids = use_signal(Vec::<uuid::Uuid>::new);
+    let mut loaded_framework_name = use_signal(|| None::<String>);
+    let mut loading = use_signal(|| false);
+    let framework_name = props.framework.read().trim().to_string();
+
+    if *loaded_framework_name.read() != Some(framework_name.clone()) && !*loading.read() {
+        loaded_framework_name.set(Some(framework_name.clone()));
+        mapped_policy_version_ids.set(vec![]);
+        loading.set(true);
+        let framework_name_for_request = framework_name.clone();
+        spawn(async move {
+            let mapped = match fetch_compliance_frameworks().await {
+                Ok(frameworks) => match frameworks
+                    .iter()
+                    .find(|framework| {
+                        framework.name.eq_ignore_ascii_case(&framework_name_for_request)
+                            || (framework_name_for_request.eq_ignore_ascii_case("DISA STIG")
+                                && framework
+                                    .canonical_source_key
+                                    .to_ascii_lowercase()
+                                    .starts_with("disa-"))
+                    })
+                {
+                    Some(framework) => fetch_framework_mapped_policy_versions(&framework.id)
+                        .await
+                        .map(|response| response.policy_version_ids)
+                        .unwrap_or_default(),
+                    None => vec![],
+                },
+                Err(_) => vec![],
+            };
+            mapped_policy_version_ids.set(mapped);
+            loading.set(false);
+        });
+    }
+
+    let filter = query.read().to_ascii_lowercase();
+    let matches_query = |policy: &&DeploymentPolicySummary| {
+        filter.is_empty()
+            || policy.name.to_ascii_lowercase().contains(&filter)
+            || policy
+                .description
+                .as_deref()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .contains(&filter)
+    };
+    let mapped_versions = mapped_policy_version_ids.read().clone();
+    let mapped: Vec<_> = props
+        .policies
+        .iter()
+        .filter(|policy| {
+            policy
+                .version_id
+                .is_some_and(|version_id| mapped_versions.contains(&version_id))
+                && matches_query(policy)
+        })
+        .cloned()
+        .collect();
+    let custom: Vec<_> = props
+        .policies
+        .iter()
+        .filter(|policy| {
+            !policy
+                .version_id
+                .is_some_and(|version_id| mapped_versions.contains(&version_id))
+                && matches_query(policy)
+        })
+        .cloned()
+        .collect();
+    let selected_count = props.selected_policy_ids.read().len();
+
+    rsx! {
+        div { style: "padding:14px;border:1px solid var(--cf-divider);border-radius:10px;background:color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg));",
+            div { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;",
+                div { style: "font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px;",
+                    Icon { name: IconName::File, size: 13 }
+                    "Controls in this bundle"
+                    span { class: "chip chip-info", style: "font-size:10px;", "{selected_count} selected" }
+                }
+                div { class: "filter-search", style: "max-width:200px;margin:0;",
+                    Icon { name: IconName::Search, size: 14 }
+                    input { class: "input focus-ring", placeholder: "Filter policies…", value: "{query}", oninput: move |event| query.set(event.value()) }
+                }
+            }
+            if *loading.read() {
+                div { style: "font-size:11px;color:var(--cf-text-muted);padding:4px 0 8px;", "Loading normalized mappings…" }
+            }
+            BundlePolicyPickerSection {
+                title: format!("Mapped to {framework_name}"),
+                subtitle: "Policies with an authoritative requirement mapping to this framework.",
+                policies: mapped,
+                selected_policy_ids: props.selected_policy_ids,
+            }
+            BundlePolicyPickerSection {
+                title: format!("Custom addition / No mapping to {framework_name}"),
+                subtitle: "Explicit additions. These policies are included without claiming framework ownership.",
+                policies: custom,
+                selected_policy_ids: props.selected_policy_ids,
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct BundlePolicyPickerSectionProps {
+    title: String,
+    subtitle: &'static str,
+    policies: Vec<DeploymentPolicySummary>,
+    selected_policy_ids: Signal<Vec<uuid::Uuid>>,
+}
+
+#[component]
+fn BundlePolicyPickerSection(mut props: BundlePolicyPickerSectionProps) -> Element {
+    rsx! {
+        div { style: "display:flex;flex-direction:column;gap:4px;margin-top:12px;",
+            div { style: "font-size:11px;font-weight:700;color:var(--cf-text-secondary);", "{props.title}" }
+            div { style: "font-size:10.5px;color:var(--cf-text-muted);margin-bottom:3px;", "{props.subtitle}" }
+            if props.policies.is_empty() {
+                div { style: "font-size:11px;color:var(--cf-text-muted);padding:7px 0;", "No policies in this section." }
+            }
+            for policy in props.policies {
+                {
+                    let policy_id = policy.id;
+                    let selected = props.selected_policy_ids.read().contains(&policy_id);
+                    let description = policy.description.clone().unwrap_or_default();
+                    rsx! {
+                        button {
+                            key: "{policy_id}", class: "focus-ring",
+                            style: if selected { "all:unset;cursor:pointer;display:flex;gap:10px;align-items:flex-start;padding:9px 11px;border-radius:8px;border:1px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 9%,var(--cf-card-bg));" } else { "all:unset;cursor:pointer;display:flex;gap:10px;align-items:flex-start;padding:9px 11px;border-radius:8px;border:1px solid var(--cf-divider);background:var(--cf-card-bg);" },
+                            onclick: move |_| toggle_uuid(&mut props.selected_policy_ids, policy_id),
+                            div { style: if selected { "width:16px;height:16px;border-radius:5px;flex-shrink:0;margin-top:1px;border:1.5px solid var(--cf-brand-purple);background:var(--cf-brand-purple);display:grid;place-items:center;" } else { "width:16px;height:16px;border-radius:5px;flex-shrink:0;margin-top:1px;border:1.5px solid var(--cf-card-border);background:transparent;display:grid;place-items:center;" }, if selected { span { style: "color:#fff;display:inline-flex;", Icon { name: IconName::Check, size: 11 } } } }
+                            div { style: "min-width:0;flex:1;",
+                                div { style: "display:flex;align-items:center;gap:8px;", span { class: "mono", style: "font-size:12px;font-weight:600;", "{policy.name}" } span { class: "chip chip-unknown", style: "font-size:9px;", "{policy.policy_type}" } }
+                                div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{description}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct BundleRequirementPickerProps {
+    framework: Signal<String>,
+    selected_requirement_ids: Signal<Vec<uuid::Uuid>>,
+    baseline_version_id: Option<uuid::Uuid>,
+}
+
+/// Selects the exact normalized requirement versions that form a bundle's
+/// baseline. This is intentionally independent from policy selection so a
+/// bundle may contain requirements with no implementation yet.
+#[component]
+fn BundleRequirementPicker(mut props: BundleRequirementPickerProps) -> Element {
+    let mut frameworks = use_signal(Vec::<ComplianceFrameworkSummary>::new);
+    let mut versions = use_signal(Vec::<ComplianceFrameworkVersionSummary>::new);
+    let mut results = use_signal(Vec::<RequirementVersionSummary>::new);
+    let mut query = use_signal(String::new);
+    let mut loading = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+    let mut loaded_framework = use_signal(|| None::<String>);
+    let mut loaded_baseline = use_signal(|| false);
+    let mut selected_version_id = use_signal(|| None::<uuid::Uuid>);
+    let framework_name = props.framework.read().trim().to_string();
+
+    if !*loaded_baseline.read() {
+        loaded_baseline.set(true);
+        if let Some(version_id) = props.baseline_version_id {
+            let mut selected_requirement_ids = props.selected_requirement_ids;
+            spawn(async move {
+                if let Ok(members) = fetch_bundle_version_requirement_membership(&version_id).await {
+                    selected_requirement_ids.set(
+                        members.into_iter().filter(|member| member.selected).map(|member| member.requirement_version_id).collect(),
+                    );
+                }
+            });
+        }
+    }
+
+    if *loaded_framework.read() != Some(framework_name.clone()) {
+        loaded_framework.set(Some(framework_name.clone()));
+        versions.set(Vec::new());
+        results.set(Vec::new());
+        error.set(None);
+        let framework_name_for_request = framework_name.clone();
+        spawn(async move {
+            let loaded = if frameworks.read().is_empty() {
+                match fetch_compliance_frameworks().await {
+                    Ok(value) => {
+                        frameworks.set(value.clone());
+                        value
+                    }
+                    Err(err) => {
+                        error.set(Some(err.to_string()));
+                        return;
+                    }
+                }
+            } else {
+                frameworks.read().clone()
+            };
+            if let Some(framework) = loaded.iter().find(|candidate| {
+                candidate.name.eq_ignore_ascii_case(&framework_name_for_request)
+                    || (framework_name_for_request.eq_ignore_ascii_case("DISA STIG")
+                        && candidate.canonical_source_key.to_ascii_lowercase().starts_with("disa-"))
+            }) {
+                match fetch_compliance_framework_versions(&framework.id).await {
+                    Ok(value) => {
+                        let first_version_id = value.first().map(|version| version.id);
+                        selected_version_id.set(first_version_id);
+                        versions.set(value);
+                        if let Some(version_id) = first_version_id {
+                            match search_requirements(&version_id, None, None, 50, 0).await {
+                                Ok(value) => results.set(value),
+                                Err(err) => error.set(Some(err.to_string())),
+                            }
+                        }
+                    }
+                    Err(err) => error.set(Some(err.to_string())),
+                }
+            }
+        });
+    }
+
+    let version_id = *selected_version_id.read();
+    let selected_ids = props.selected_requirement_ids.read().clone();
+    let selected_count = selected_ids.len();
+    let visible_results = results.read().clone();
+
+    rsx! {
+        div { style: "margin-top:14px;padding:14px;border:1px solid var(--cf-divider);border-radius:10px;background:color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg));",
+            div { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;",
+                div {
+                    div { style: "font-size:13px;font-weight:600;", "Requirement baseline" }
+                    div { style: "font-size:10.5px;color:var(--cf-text-muted);margin-top:2px;", "Select exact requirements independently of the policies in this bundle." }
+                }
+                span { class: "chip chip-info", style: "font-size:10px;", "{selected_count} selected" }
+            }
+            if let Some(message) = error.read().as_ref() {
+                div { class: "sd-callout sd-callout-danger", style: "font-size:11px;margin-bottom:8px;", "{message}" }
+            }
+            if versions.read().is_empty() {
+                div { style: "font-size:11px;color:var(--cf-text-muted);padding:6px 0;", "Loading normalized framework releases…" }
+            } else {
+                div { class: "field", style: "margin-top:0;",
+                    label { "Framework release" }
+                    select {
+                        class: "input focus-ring mono",
+                        value: version_id.map(|id| id.to_string()).unwrap_or_default(),
+                        onchange: move |event| {
+                            let selected = event.value().parse::<uuid::Uuid>().ok();
+                            selected_version_id.set(selected);
+                            // Requirement-version IDs are release-specific. Do not
+                            // silently carry a baseline from the previous release.
+                            props.selected_requirement_ids.set(Vec::new());
+                            results.set(Vec::new());
+                            if let Some(id) = selected {
+                                let q = query.read().clone();
+                                loading.set(true);
+                                spawn(async move {
+                                    match search_requirements(&id, (!q.trim().is_empty()).then_some(q.as_str()), None, 50, 0).await {
+                                        Ok(value) => results.set(value),
+                                        Err(err) => error.set(Some(err.to_string())),
+                                    }
+                                    loading.set(false);
+                                });
+                            }
+                        },
+                        for version in versions.read().iter() {
+                            option { value: "{version.id}", "{version.version}" }
+                        }
+                    }
+                }
+                div { class: "filter-search", style: "max-width:none;margin:8px 0 6px;",
+                    Icon { name: IconName::Search, size: 14 }
+                    input {
+                        class: "input focus-ring",
+                        placeholder: "Search requirement ID or title…",
+                        value: "{query}",
+                        oninput: move |event| {
+                            let value = event.value();
+                            query.set(value.clone());
+                            if let Some(id) = version_id {
+                                loading.set(true);
+                                spawn(async move {
+                                    match search_requirements(&id, (!value.trim().is_empty()).then_some(value.as_str()), None, 50, 0).await {
+                                        Ok(found) => results.set(found),
+                                        Err(err) => error.set(Some(err.to_string())),
+                                    }
+                                    loading.set(false);
+                                });
+                            }
+                        }
+                    }
+                }
+                if *loading.read() { div { style: "font-size:10.5px;color:var(--cf-text-muted);", "Searching…" } }
+                div { style: "display:flex;flex-direction:column;gap:4px;max-height:180px;overflow-y:auto;",
+                    for requirement in visible_results {
+                        {
+                            let requirement_id = requirement.id;
+                            let selected = selected_ids.contains(&requirement_id);
+                            let external_id = requirement.external_id.clone();
+                            let title = requirement.title.clone().unwrap_or_default();
+                            rsx! {
+                                button {
+                                    key: "{requirement_id}", class: "focus-ring",
+                                    style: if selected { "all:unset;cursor:pointer;padding:7px 9px;border-radius:7px;border:1px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 9%,var(--cf-card-bg));" } else { "all:unset;cursor:pointer;padding:7px 9px;border-radius:7px;border:1px solid var(--cf-divider);background:var(--cf-card-bg);" },
+                                    onclick: move |_| {
+                                        let mut ids = props.selected_requirement_ids.write();
+                                        if let Some(position) = ids.iter().position(|id| *id == requirement_id) { ids.remove(position); } else { ids.push(requirement_id); }
+                                    },
+                                    div { style: "display:flex;align-items:center;gap:7px;",
+                                        span { class: "mono", style: "font-size:11px;font-weight:600;", "{external_id}" }
+                                        if selected { span { class: "chip chip-info", style: "font-size:9px;", "Selected" } }
+                                    }
+                                    if !title.is_empty() { div { style: "font-size:10.5px;color:var(--cf-text-secondary);margin-top:2px;", "{title}" } }
+                                }
+                            }
+                        }
+                    }
+                }
+                if selected_count == 0 { div { style: "font-size:10.5px;color:var(--cf-text-muted);margin-top:7px;", "No requirement baseline selected. This is valid for a custom policy-only bundle." } }
+                if selected_count > 0 { div { style: "font-size:10px;color:var(--cf-text-muted);margin-top:7px;", "Changing the framework release clears the selected requirement versions." } }
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
 struct NewBundleModalProps {
     policies: Vec<DeploymentPolicySummary>,
     bundles: Vec<ComplianceBundleSummary>,
@@ -3423,12 +4123,14 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
     let mut description = use_signal(String::new);
     let mut selected_env_ids = use_signal(Vec::<uuid::Uuid>::new);
     let mut selected_policy_ids = use_signal(Vec::<uuid::Uuid>::new);
+    let selected_requirement_ids = use_signal(Vec::<uuid::Uuid>::new);
     let mut query = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
     let mut saving = use_signal(|| false);
     let framework_options = custom_bundle_frameworks(&props.bundles, &props.policies);
 
-    let can_save = !name.read().trim().is_empty() && !selected_policy_ids.read().is_empty();
+    let can_save = !name.read().trim().is_empty()
+        && (!selected_policy_ids.read().is_empty() || !selected_requirement_ids.read().is_empty());
 
     let filtered_policies: Vec<_> = props
         .policies
@@ -3535,79 +4237,13 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
                         }
                     }
 
-                    // Policy picker
-                    div {
-                        style: "padding:14px;border:1px solid var(--cf-divider);border-radius:10px;background:color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg));",
-                        div {
-                            style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;",
-                            div {
-                                style: "font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px;",
-                                Icon { name: IconName::File, size: 13 }
-                                "Controls in this bundle"
-                                span { class: "chip chip-info", style: "font-size:10px;", "{selected_policy_ids.read().len()} selected" }
-                            }
-                            div { class: "filter-search", style: "max-width:200px;margin:0;",
-                                Icon { name: IconName::Search, size: 14 }
-                                input {
-                                    class: "input focus-ring",
-                                    placeholder: "Filter policies…",
-                                    value: "{query}",
-                                    oninput: move |e| query.set(e.value()),
-                                }
-                            }
-                        }
-                        div { style: "display:flex;flex-direction:column;gap:4px;max-height:260px;overflow-y:auto;",
-                            if filtered_policies.is_empty() {
-                                div {
-                                    style: "font-size:12px;color:var(--cf-text-muted);padding:16px 0;text-align:center;",
-                                    "No policies match. Define new policies in the Policies view."
-                                }
-                            }
-                            for policy in filtered_policies.iter() {
-                                {
-                                    let pid = policy.id;
-                                    let pname = policy.name.clone();
-                                    let pdesc = policy.description.clone().unwrap_or_default();
-                                    let ptype = policy.policy_type.clone();
-                                    let on = selected_policy_ids.read().contains(&pid);
-                                    rsx! {
-                                        button {
-                                            class: "focus-ring",
-                                            style: if on {
-                                                "all:unset;cursor:pointer;display:flex;gap:10px;align-items:flex-start;padding:9px 11px;border-radius:8px;border:1px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 9%,var(--cf-card-bg));"
-                                            } else {
-                                                "all:unset;cursor:pointer;display:flex;gap:10px;align-items:flex-start;padding:9px 11px;border-radius:8px;border:1px solid var(--cf-divider);background:var(--cf-card-bg);"
-                                            },
-                                            onclick: move |_| toggle_uuid(&mut selected_policy_ids, pid),
-                                            // Checkbox
-                                            div {
-                                                style: if on {
-                                                    "width:16px;height:16px;border-radius:5px;flex-shrink:0;margin-top:1px;border:1.5px solid var(--cf-brand-purple);background:var(--cf-brand-purple);display:grid;place-items:center;"
-                                                } else {
-                                                    "width:16px;height:16px;border-radius:5px;flex-shrink:0;margin-top:1px;border:1.5px solid var(--cf-card-border);background:transparent;display:grid;place-items:center;"
-                                                },
-                                                if on {
-                                                    span { style: "color:#fff;display:inline-flex;", Icon { name: IconName::Check, size: 11 } }
-                                                }
-                                            }
-                                            div { style: "min-width:0;flex:1;",
-                                                div { style: "display:flex;align-items:center;gap:8px;",
-                                                    span { class: "mono", style: "font-size:12px;font-weight:600;", "{pname}" }
-                                                    span { class: "chip chip-unknown", style: "font-size:9px;", "{ptype}" }
-                                                }
-                                                div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{pdesc}" }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    BundlePolicyPicker { framework, policies: props.policies.clone(), selected_policy_ids }
+                    BundleRequirementPicker { framework, selected_requirement_ids, baseline_version_id: None }
 
                     if !can_save && !name.read().trim().is_empty() {
                         div { class: "help", style: "color:#fbbf24;margin-top:8px;",
                             Icon { name: IconName::Warn, size: 10 }
-                            " Select at least one policy. A bundle is a collection of policies that together represent a standard."
+                            " Select at least one policy or requirement. A requirement-only baseline is valid."
                         }
                     }
                 }
@@ -3634,6 +4270,7 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
                                 layer: Some("fleet".to_string()),
                                 required_envs: selected_env_ids.read().clone(),
                                 policy_ids: selected_policy_ids.read().clone(),
+                                requirement_version_ids: selected_requirement_ids.read().clone(),
                             };
                             saving.set(true);
                             spawn(async move {
@@ -3680,6 +4317,7 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
     let initial_policy_ids: Vec<uuid::Uuid> = props.bundle.policy_ids.clone();
     let mut selected_env_ids = use_signal(|| initial_env_ids);
     let mut selected_policy_ids = use_signal(|| initial_policy_ids);
+    let selected_requirement_ids = use_signal(Vec::<uuid::Uuid>::new);
     let mut query = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
     let mut saving = use_signal(|| false);
@@ -3700,7 +4338,8 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
     });
     let assigned_count = props.bundle.active_assignment_count;
 
-    let can_save = !name.read().trim().is_empty() && !selected_policy_ids.read().is_empty();
+    let can_save = !name.read().trim().is_empty()
+        && (!selected_policy_ids.read().is_empty() || !selected_requirement_ids.read().is_empty());
 
     let filtered_policies: Vec<_> = props
         .policies
@@ -3844,77 +4483,13 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                         }
                     }
 
-                    div {
-                        style: "padding:14px;border:1px solid var(--cf-divider);border-radius:10px;background:color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg));",
-                        div {
-                            style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;",
-                            div {
-                                style: "font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px;",
-                                Icon { name: IconName::File, size: 13 }
-                                "Controls in this bundle"
-                                span { class: "chip chip-info", style: "font-size:10px;", "{selected_policy_ids.read().len()} selected" }
-                            }
-                            div { class: "filter-search", style: "max-width:200px;margin:0;",
-                                Icon { name: IconName::Search, size: 14 }
-                                input {
-                                    class: "input focus-ring",
-                                    placeholder: "Filter policies…",
-                                    value: "{query}",
-                                    oninput: move |e| query.set(e.value()),
-                                }
-                            }
-                        }
-                        div { style: "display:flex;flex-direction:column;gap:4px;max-height:260px;overflow-y:auto;",
-                            if filtered_policies.is_empty() {
-                                div {
-                                    style: "font-size:12px;color:var(--cf-text-muted);padding:16px 0;text-align:center;",
-                                    "No policies match. Define new policies in the Policies view."
-                                }
-                            }
-                            for policy in filtered_policies.iter() {
-                                {
-                                    let pid = policy.id;
-                                    let pname = policy.name.clone();
-                                    let pdesc = policy.description.clone().unwrap_or_default();
-                                    let ptype = policy.policy_type.clone();
-                                    let on = selected_policy_ids.read().contains(&pid);
-                                    rsx! {
-                                        button {
-                                            class: "focus-ring",
-                                            style: if on {
-                                                "all:unset;cursor:pointer;display:flex;gap:10px;align-items:flex-start;padding:9px 11px;border-radius:8px;border:1px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 9%,var(--cf-card-bg));"
-                                            } else {
-                                                "all:unset;cursor:pointer;display:flex;gap:10px;align-items:flex-start;padding:9px 11px;border-radius:8px;border:1px solid var(--cf-divider);background:var(--cf-card-bg);"
-                                            },
-                                            onclick: move |_| toggle_uuid(&mut selected_policy_ids, pid),
-                                            div {
-                                                style: if on {
-                                                    "width:16px;height:16px;border-radius:5px;flex-shrink:0;margin-top:1px;border:1.5px solid var(--cf-brand-purple);background:var(--cf-brand-purple);display:grid;place-items:center;"
-                                                } else {
-                                                    "width:16px;height:16px;border-radius:5px;flex-shrink:0;margin-top:1px;border:1.5px solid var(--cf-card-border);background:transparent;display:grid;place-items:center;"
-                                                },
-                                                if on {
-                                                    span { style: "color:#fff;display:inline-flex;", Icon { name: IconName::Check, size: 11 } }
-                                                }
-                                            }
-                                            div { style: "min-width:0;flex:1;",
-                                                div { style: "display:flex;align-items:center;gap:8px;",
-                                                    span { class: "mono", style: "font-size:12px;font-weight:600;", "{pname}" }
-                                                    span { class: if ptype == "builtin" { "chip chip-unknown" } else { "chip chip-info" }, style: "font-size:9px;", "{ptype}" }
-                                                }
-                                                div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{pdesc}" }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    BundlePolicyPicker { framework, policies: props.policies.clone(), selected_policy_ids }
+                    BundleRequirementPicker { framework, selected_requirement_ids, baseline_version_id: props.bundle.current_draft_version_id }
 
                     if selected_policy_ids.read().is_empty() {
                         div { class: "help", style: "color:#fbbf24;margin-top:8px;",
                             Icon { name: IconName::Warn, size: 10 }
-                            " Select at least one policy. A bundle is a collection of policies that together represent a standard."
+                            " Select at least one policy or requirement. A requirement-only baseline is valid."
                         }
                     }
 
@@ -4048,6 +4623,7 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                                 },
                                 required_envs: selected_env_ids.read().clone(),
                                 policy_ids: selected_policy_ids.read().clone(),
+                                requirement_version_ids: selected_requirement_ids.read().clone(),
                             };
                             saving.set(true);
                             spawn(async move {
@@ -4258,6 +4834,7 @@ mod tests {
             errors: vec![],
             warnings: vec![],
             cf_native_reconciliation: None,
+            foreign_stig_reconciliation: None,
         };
 
         let rules = rules_from_preview(&preview);
@@ -4267,5 +4844,104 @@ mod tests {
             import_action_from_rule(&rules[0]),
             XccdfRuleImportAction::CreateUnbound { .. }
         ));
+    }
+}
+
+// ── Requirement coverage card ─────────────────────────────────────────────────
+
+/// Renders the requirement coverage card for a selected bundle version.
+///
+/// Matches the design from commit 861fd877: three summary chips (full/partial/
+/// unmapped), expandable to show individual requirement rows grouped by parent.
+#[component]
+fn RequirementCoverageCard(
+    report: BundleCoverageReport,
+    expanded: Signal<bool>,
+) -> Element {
+    let total = report.total_requirements;
+    let full = report.full;
+    let partial = report.partial;
+    let unmapped = report.unmapped;
+    let recovery_required = report.recovery_required;
+
+    rsx! {
+         div { class: "card", "data-testid": "requirement-coverage-card", style: "display:flex;flex-direction:column;gap:10px;",
+            // Header row with expand toggle.
+            div { style: "display:flex;align-items:center;justify-content:space-between;",
+                div { style: "font-size:13px;font-weight:600;", "Requirement coverage" }
+                button {
+                    class: "btn btn-ghost xs focus-ring",
+                    style: "font-size:11px;",
+                    onclick: move |_| {
+                        let current = *expanded.read();
+                        expanded.set(!current);
+                    },
+                    if *expanded.read() { "Collapse" } else { "Expand" }
+                }
+            }
+            // Summary chips.
+            div { style: "display:flex;gap:8px;flex-wrap:wrap;",
+                div { style: "display:flex;align-items:center;gap:4px;",
+                    span { class: "chip chip-success", "{full}" }
+                    span { style: "font-size:11px;color:var(--cf-text-muted);", "Fully covered" }
+                }
+                div { style: "display:flex;align-items:center;gap:4px;",
+                    span { class: "chip chip-warn", "{partial}" }
+                    span { style: "font-size:11px;color:var(--cf-text-muted);", "Partially covered" }
+                }
+                div { style: "display:flex;align-items:center;gap:4px;",
+                    span { class: "chip chip-neutral", "{unmapped}" }
+                    span { style: "font-size:11px;color:var(--cf-text-muted);", "Unmapped" }
+                }
+                if recovery_required > 0 {
+                    div { style: "display:flex;align-items:center;gap:4px;",
+                        span { class: "chip chip-error", "data-testid": "recovery-required-count", "{recovery_required}" }
+                        span { style: "font-size:11px;color:var(--cf-text-muted);", "Recovery required" }
+                    }
+                }
+                div { style: "display:flex;align-items:center;gap:4px;margin-left:auto;",
+                    span { style: "font-size:11px;color:var(--cf-text-muted);", "{total} total" }
+                }
+            }
+            // Expanded requirement rows.
+            if *expanded.read() && !report.rows.is_empty() {
+                div { style: "display:flex;flex-direction:column;gap:2px;max-height:360px;overflow-y:auto;",
+                    for row in report.rows.iter() {
+                        {
+                            let row_id = row.requirement_version_id;
+                            let coverage_color = match row.coverage {
+                                RequirementCoverage::Full => "var(--cf-success)",
+                                RequirementCoverage::Partial => "var(--cf-warn)",
+                                RequirementCoverage::Unmapped => "var(--cf-text-muted)",
+                                RequirementCoverage::RecoveryRequired => "var(--cf-error)",
+                            };
+                            let coverage_label = match row.coverage {
+                                RequirementCoverage::Full => "Full",
+                                RequirementCoverage::Partial => "Partial",
+                                RequirementCoverage::Unmapped => "Unmapped",
+                                RequirementCoverage::RecoveryRequired => "Recovery required",
+                            };
+                            rsx! {
+                                 div { key: "{row_id}", "data-testid": "requirement-coverage-row",
+                                    style: "display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;padding:5px 8px;border-radius:6px;font-size:11px;background:var(--cf-subtle-bg);",
+                                    span { class: "mono", style: "color:var(--cf-text-secondary);", "{row.external_id}" }
+                                    span { style: "color:var(--cf-text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                                        {row.title.as_deref().unwrap_or("-")}
+                                    }
+                                     div { style: "display:flex;flex-direction:column;align-items:flex-end;gap:3px;",
+                                         span { style: "color:{coverage_color};font-weight:600;white-space:nowrap;", "{coverage_label}" }
+                                         for mapping in row.mappings.iter() {
+                                             span { style: "font-size:10px;color:var(--cf-text-muted);white-space:nowrap;", "{mapping.policy_name} · {mapping.relationship} · {mapping.coverage}" }
+                                         }
+                                     }
+                                 }
+                            }
+                        }
+                    }
+                }
+            } else if *expanded.read() && report.rows.is_empty() {
+                div { style: "font-size:11px;color:var(--cf-text-muted);", "No requirements in this bundle version's baseline." }
+            }
+        }
     }
 }

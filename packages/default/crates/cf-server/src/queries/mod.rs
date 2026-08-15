@@ -23,6 +23,7 @@ pub mod environments;
 pub mod eval_logs;
 pub mod flake_credentials;
 pub mod flakes;
+pub mod framework_requirements;
 pub mod hardening_scans;
 pub mod navigation;
 pub mod scanning;

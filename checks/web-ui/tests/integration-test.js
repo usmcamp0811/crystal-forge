@@ -24,10 +24,20 @@ const { execSync } = require("child_process");
 
 const baseUrl = process.argv[2] || "http://127.0.0.1:3000";
 const outputDir = process.argv[3] || "/tmp/screenshots";
+const apiBaseUrl = process.env.CF_UI_API_BASE_URL || baseUrl;
 
-const MANIFEST = JSON.parse(
-  fs.readFileSync(path.join(__dirname, "coverage-manifest.json"), "utf8"),
-);
+function firstExistingPath(paths) {
+  return paths.find((candidate) => fs.existsSync(candidate));
+}
+
+const coverageManifestPath = firstExistingPath([
+  path.join(__dirname, "coverage-manifest.json"),
+  path.join(__dirname, "..", "coverage-manifest.json"),
+]);
+if (!coverageManifestPath) {
+  throw new Error("coverage-manifest.json not found beside tests or in checks/web-ui");
+}
+const MANIFEST = JSON.parse(fs.readFileSync(coverageManifestPath, "utf8"));
 const MANIFEST_STEPS = new Map(MANIFEST.steps.map((s) => [s.name, s]));
 const DESIGN_FIXTURE = MANIFEST.settings.designFixture || null;
 
@@ -121,15 +131,15 @@ async function captureThemedBaselines(page, step, visualThemes) {
 
 // Test user credentials
 const TEST_USER = {
-  username: "admin",
-  email: "admin@example.com",
-  password: "testpassword123",
-  firstName: "Test",
-  lastName: "Admin",
+  username: process.env.CF_UI_TEST_USERNAME || "admin",
+  email: process.env.CF_UI_TEST_EMAIL || "admin@example.com",
+  password: process.env.CF_UI_TEST_PASSWORD || "testpassword123",
+  firstName: process.env.CF_UI_TEST_FIRST_NAME || "Test",
+  lastName: process.env.CF_UI_TEST_LAST_NAME || "Admin",
 };
 
 // Timeout for page loads (don't use networkidle as it can hang)
-const LOAD_TIMEOUT = 10000;
+const LOAD_TIMEOUT = Number(process.env.CF_UI_LOAD_TIMEOUT_MS || 10000);
 
 const VIEWPORTS = {
   desktop: { width: 1440, height: 900 },
@@ -146,6 +156,188 @@ async function assertVisible(locator, message, timeoutMs = 5000) {
   if (!visible) {
     throw new Error(message);
   }
+}
+
+async function ensureAuthenticated(page) {
+  const isAuthenticated = async () => page.evaluate(async (base) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    try {
+      const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include", signal: controller.signal });
+      if (!response.ok) return false;
+      const auth = await response.json();
+      return auth.is_authenticated === true;
+    } catch (_) {
+      return false;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }, apiBaseUrl);
+
+  if (await isAuthenticated()) return;
+
+  await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT, waitUntil: "domcontentloaded" });
+
+  // Focused runs skip the ordered registration/login steps. On a fresh local
+  // auth instance, reproduce only the registration preflight here so the
+  // requested post-login step remains self-contained.
+  const registrationRequired = page.url().includes("/register") ||
+    await page.locator('input[type="email"]').isVisible().catch(() => false);
+  if (registrationRequired) {
+    if (!page.url().includes("/register")) {
+      await page.goto(`${baseUrl}/register`, { timeout: LOAD_TIMEOUT, waitUntil: "domcontentloaded" });
+    }
+    await page.locator('input[type="text"]').first().fill(TEST_USER.username);
+    await page.locator('input[type="email"]').fill(TEST_USER.email);
+    await page.locator('input[type="password"]').first().fill(TEST_USER.password);
+    await page.locator('input[type="password"]').last().fill(TEST_USER.password);
+    await page.locator('button[type="submit"]').first().click();
+    await page.waitForTimeout(500);
+    await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT, waitUntil: "domcontentloaded" });
+  }
+
+  await page.locator('input[type="text"]').fill(TEST_USER.username);
+  await page.locator('input[type="password"]').fill(TEST_USER.password);
+  await page.locator('button[type="submit"]').click();
+  await page.waitForFunction(async (base) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    try {
+      const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include", signal: controller.signal });
+      if (!response.ok) return false;
+      const auth = await response.json();
+      return auth.is_authenticated === true;
+    } catch (_) {
+      return false;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }, apiBaseUrl, { timeout: 5000 });
+}
+
+async function routeStandaloneUiBootstrap(page) {
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const method = request.method();
+    const path = url.pathname;
+
+    if (path === "/api/auth/whoami" || path === "/api/auth/status") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          is_authenticated: true,
+          auth_mode: "local",
+          user: { id: "standalone-admin", email: "admin@example.com", display_name: "Standalone Admin" },
+          roles: ["Admin"],
+          is_admin: true,
+        }),
+      });
+      return;
+    }
+
+    if (path === "/api/v1/user/preferences" && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ preferences: null }),
+      });
+      return;
+    }
+
+    if (path === "/api/v1/compliance/bundles" && method === "GET") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      return;
+    }
+
+    if (path === "/api/v1/admin/setup-progress" && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ...mockSetupCoachProgress(), dismissed: true }),
+      });
+      return;
+    }
+
+    if (path === "/api/v1/navigation/badges" && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          observed_at: new Date().toISOString(),
+          systems_attention: 0,
+          systems_total: 0,
+          flakes_errored: 0,
+          flakes_total: 0,
+          environments_attention: 0,
+          environments_total: 0,
+          builds_failed_new: 0,
+          evals_failed_new: 0,
+          cves_critical_new: 0,
+        }),
+      });
+      return;
+    }
+
+    if (path === "/api/v1/admin/classification-config" && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ enabled: false, level: "", custom_text: "" }),
+      });
+      return;
+    }
+
+    if (path === "/api/v1/user/preferences/initialize" && method === "POST") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ preferences: null }),
+      });
+      return;
+    }
+
+    if (path === "/api/v1/commits/eval-queue" && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          active_count: 0,
+          completed_count: 0,
+          failed_count: 0,
+          domain_total: 0,
+          filtered_total: 0,
+          execution_mode: "standard",
+          timestamp: new Date().toISOString(),
+          items: [],
+        }),
+      });
+      return;
+    }
+
+    if (path === "/api/v1/policies" && method === "GET") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      return;
+    }
+
+    if (path === "/api/v1/environments" && method === "GET") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      return;
+    }
+
+    if (path === "/api/v1/admin/config-health" && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(mockConfigHealthResponse()),
+      });
+      return;
+    }
+
+    console.warn(`UNHANDLED STANDALONE API: ${method} ${path}`);
+    await route.fallback();
+  });
 }
 
 async function assertHidden(locator, message) {
@@ -2090,6 +2282,12 @@ const steps = [
       if (page.url().includes("/login")) {
         throw new Error("Expected login to navigate away from /login");
       }
+      await page.waitForFunction(async (base) => {
+        const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include" });
+        if (!response.ok) return false;
+        const auth = await response.json();
+        return auth.is_authenticated === true;
+      }, apiBaseUrl, { timeout: 5000 });
     },
   },
 
@@ -2777,7 +2975,7 @@ const steps = [
         if (!r.ok) return null;
         const j = await r.json();
         return j.csrf_token || null;
-      }, baseUrl);
+      }, apiBaseUrl);
 
       if (csrfToken) {
         await page.evaluate(async ({ base, token }) => {
@@ -6054,6 +6252,436 @@ const steps = [
       await assertVisible(page.getByText("Block deploy when").first(), "Expected CVE gate rule editor row after adding rule");
     },
   },
+  {
+    name: "20a-policies-new-modal-pending-mappings",
+    description: "Policies new modal Mappings tab with two queued requirement mappings",
+    action: async (page) => {
+      const frameworkId = "10000000-0000-4000-8000-000000000001";
+      const versionId = "20000000-0000-4000-8000-000000000001";
+      const framework = {
+        id: frameworkId,
+        name: "NIST 800-53",
+        publisher: "NIST",
+        canonical_source_key: "nist-800-53",
+        description: "NIST Special Publication 800-53",
+        version_count: 1,
+      };
+      const version = {
+        id: versionId,
+        framework_id: frameworkId,
+        version: "Rev 5",
+        canonical_release_key: "rev-5",
+        title: "Security and Privacy Controls for Information Systems",
+        published_at: "2020-09-23T00:00:00Z",
+        semantic_digest: "fixture-nist-rev5",
+        requirement_count: 2,
+      };
+      const requirements = [
+        {
+          id: "30000000-0000-4000-8000-000000000001",
+          requirement_id: "40000000-0000-4000-8000-000000000001",
+          framework_version_id: versionId,
+          external_id: "SC-45",
+          title: "System Time Synchronization",
+          kind: "control",
+          severity: "medium",
+          parent_requirement_version_id: null,
+          semantic_digest: "fixture-sc45",
+        },
+        {
+          id: "30000000-0000-4000-8000-000000000002",
+          requirement_id: "40000000-0000-4000-8000-000000000002",
+          framework_version_id: versionId,
+          external_id: "AU-8",
+          title: "Time Stamps",
+          kind: "control",
+          severity: "medium",
+          parent_requirement_version_id: null,
+          semantic_digest: "fixture-au8",
+        },
+      ];
+
+      await page.route("**/api/v1/compliance/frameworks", async (route) => {
+        if (route.request().method() === "GET") {
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([framework]) });
+        } else {
+          await route.fallback();
+        }
+      });
+      await page.route(`**/api/v1/compliance/frameworks/${frameworkId}/versions`, async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([version]) });
+      });
+      await page.route(`**/api/v1/compliance/framework-versions/${versionId}/requirements**`, async (route) => {
+        const query = new URL(route.request().url()).searchParams.get("q")?.toLowerCase() || "";
+        const filtered = query ? requirements.filter((item) => `${item.external_id} ${item.title}`.toLowerCase().includes(query)) : requirements;
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(filtered) });
+      });
+
+      try {
+        await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+        await page.getByRole("button", { name: /New custom policy/i }).first().click();
+        await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
+        await page.getByTestId("policy-editor-tab-mappings").click();
+
+        await page.getByRole("button", { name: "+ Add mapping", exact: true }).click();
+
+        const frameworkSelect = page.getByLabel("Framework").last();
+        await frameworkSelect.locator(`option[value="${frameworkId}"]`).waitFor({ state: "attached", timeout: 5000 });
+        await frameworkSelect.selectOption(frameworkId);
+        const versionSelect = page.getByLabel("Version").last();
+        await versionSelect.locator(`option[value="${versionId}"]`).waitFor({ state: "attached", timeout: 5000 });
+        await versionSelect.selectOption(versionId);
+
+        const requirementSearch = page.getByPlaceholder("Search by ID, title, CCI, SRG…").last();
+        await requirementSearch.waitFor({ timeout: 5000 });
+        await requirementSearch.fill("SC-45");
+        await page.getByRole("button", { name: /SC-45 · control · System Time Synchronization/i }).click();
+        await page.getByText("Supports", { exact: true }).last().click();
+        await page.getByRole("button", { name: "Partial", exact: true }).last().click();
+        await page.getByPlaceholder("Why this policy satisfies the requirement").fill("Provides synchronized system time configuration.");
+        await page.getByRole("button", { name: "Add mapping", exact: true }).last().click();
+
+        await page.getByRole("button", { name: "+ Add mapping", exact: true }).click();
+        const secondFrameworkSelect = page.getByLabel("Framework").last();
+        await secondFrameworkSelect.locator(`option[value="${frameworkId}"]`).waitFor({ state: "attached", timeout: 5000 });
+        await secondFrameworkSelect.selectOption(frameworkId);
+        const secondVersionSelect = page.getByLabel("Version").last();
+        await secondVersionSelect.locator(`option[value="${versionId}"]`).waitFor({ state: "attached", timeout: 5000 });
+        await secondVersionSelect.selectOption(versionId);
+        const secondRequirementSearch = page.getByPlaceholder("Search by ID, title, CCI, SRG…").last();
+        await secondRequirementSearch.fill("AU-8");
+        await page.getByRole("button", { name: /AU-8 · control · Time Stamps/i }).click();
+        await page.getByRole("button", { name: "Add mapping", exact: true }).last().click();
+
+        await assertVisible(page.getByText("Mappings · 2", { exact: true }), "Expected two queued mappings in tab count");
+        await assertVisible(page.getByText("SC-45", { exact: true }), "Expected SC-45 pending mapping");
+        await assertVisible(page.getByText("AU-8", { exact: true }), "Expected AU-8 pending mapping");
+        await assertVisible(page.getByText("Supports", { exact: true }), "Expected Supports relationship");
+        await assertVisible(page.getByText("Partial", { exact: true }), "Expected Partial coverage");
+        await assertVisible(page.getByText("Pending", { exact: true }).first(), "Expected pending mapping chip");
+        await assertVisible(page.getByText("Provides synchronized system time configuration.", { exact: true }), "Expected mapping rationale");
+        await assertVisible(page.getByText("Pending", { exact: true }).nth(1), "Expected second pending mapping chip");
+      } finally {
+        await page.unroute("**/api/v1/compliance/frameworks");
+        await page.unroute(`**/api/v1/compliance/frameworks/${frameworkId}/versions`);
+        await page.unroute(`**/api/v1/compliance/framework-versions/${versionId}/requirements**`);
+      }
+    },
+  },
+  {
+    name: "20ac-stig-import-reconciliation-fixture",
+    description: "STIG import fixture renders server-authoritative reconciliation proof",
+    action: async (page) => {
+      const policyId = "11111111-1111-4111-8111-111111111111";
+      const policyVersionId = "22222222-2222-4222-8222-222222222222";
+      const preview = {
+        sha256: "fixture-stig-import-sha256",
+        filename: "fixture-stig.xml",
+        document_class: "foreign_xccdf",
+        fidelity: "lossless",
+        fidelity_losses: [],
+        xccdf_version: "1.2",
+        benchmark: { id: "fixture-stig-benchmark", title: "Anduril NixOS STIG Fixture", description: "Deterministic browser fixture", version: "V1R2", status: "accepted", platforms: ["nixos"] },
+        profiles: [],
+        rules: [
+          { id: "xccdf_fixture_rule_001", title: "Configure the fixture control", description: "Fixture rule description", severity: "medium", is_native: false, version: "V-999001", group_id: "group-001", platforms: ["nixos"], identifiers: [{ system: "http://cyber.mil/cci", value: "CCI-000001" }], checks: [], fix: { content: "fixture remediation" }, inferred_assertions: [], references: [], has_opaque_xml: false },
+          { id: "xccdf_fixture_rule_002", title: "Verify the fixture control", description: "Second fixture rule description", severity: "medium", is_native: false, version: "V-999002", group_id: "group-001", platforms: ["nixos"], identifiers: [{ system: "http://cyber.mil/cci", value: "CCI-000002" }], checks: [], fix: { content: "fixture remediation" }, inferred_assertions: [], references: [], has_opaque_xml: false },
+        ],
+        rule_count: 2,
+        profile_count: 0,
+        errors: [],
+        warnings: [],
+        foreign_stig_reconciliation: {
+          framework: { canonical_source_key: "disa-anduril-nixos-stig", canonical_release_key: "v1r2", state: "exact_release" },
+          requirements: [
+            { rule_id: "xccdf_fixture_rule_001", external_id: "V-999001", title: "Configure the fixture control", state: "authoritative_mapping", auto_resolvable: true, inferred_enforcement: false, candidates: [{ policy_id: policyId, policy_version_id: policyVersionId, policy_name: "Fixture authoritative policy", match_type: "exact_technical_match", confidence: 100, match_reasons: ["Exact technical enforcement identity"], related_evidence: null }] },
+            { rule_id: "xccdf_fixture_rule_002", external_id: "V-999002", title: "Verify the fixture control", state: "authoritative_mapping", auto_resolvable: true, inferred_enforcement: false, candidates: [{ policy_id: policyId, policy_version_id: policyVersionId, policy_name: "Fixture authoritative policy", match_type: "exact_technical_match", confidence: 100, match_reasons: ["Shared technical implementation identity"], related_evidence: null }] },
+          ],
+          shared_implementation_groups: [{ group_id: "fixture-shared-group", requirement_keys: ["V-999001", "V-999002"], recommended_action: "reuse_existing", has_existing_candidate: true, existing_candidate: { policy_id: policyId, policy_version_id: policyVersionId, policy_name: "Fixture authoritative policy", confidence: 100 }, member_proofs: { "V-999001": "exact_technical", "V-999002": "shared_implementation" } }],
+          removed_requirements: [],
+        },
+      };
+
+      let previewCallCount = 0;
+      await page.route("**/api/v1/compliance/xccdf/preview", async (route) => {
+        previewCallCount += 1;
+        console.log(`20ac preview request #${previewCallCount}: ${route.request().method()} ${route.request().url()}`);
+        console.log(`20ac fixture shared groups: ${preview.foreign_stig_reconciliation?.shared_implementation_groups?.length}`);
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(preview) });
+      });
+      try {
+        await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+         await page.getByRole("button", { name: /Import \/ Export/i }).click();
+         await page.getByText("Import STIG or XCCDF (.xml/.zip)", { exact: true }).click();
+          await page.getByRole("heading", { name: "Import STIG / XCCDF" }).waitFor({ timeout: 5000 });
+         const previewResponsePromise = page.waitForResponse(
+           (response) => response.url().includes("/api/v1/compliance/xccdf/preview") && response.request().method() === "POST",
+         );
+         await page.locator('input[type="file"]').setInputFiles({ name: "fixture-stig.xml", mimeType: "application/xml", buffer: Buffer.from("<Benchmark id=\"fixture-stig-benchmark\"/>", "utf8") });
+         const previewResponse = await previewResponsePromise;
+         const previewBody = await previewResponse.json();
+         const receivedGroups = previewBody.foreign_stig_reconciliation?.shared_implementation_groups;
+         if (!Array.isArray(receivedGroups) || receivedGroups.length !== 1) {
+           throw new Error(`Browser received invalid shared groups: ${JSON.stringify(receivedGroups)}`);
+         }
+         if (receivedGroups[0].group_id !== "fixture-shared-group" || receivedGroups[0].requirement_keys.join(",") !== "V-999001,V-999002") {
+           throw new Error(`Unexpected shared group payload: ${JSON.stringify(receivedGroups[0])}`);
+         }
+         if (previewCallCount !== 1) {
+           throw new Error(`Expected exactly one XCCDF preview request, got ${previewCallCount}`);
+         }
+          await page.getByTestId("xccdf-review-reconcile-button").click();
+          await page.getByTestId("xccdf-reconciliation-stage").waitFor({ timeout: 10000 });
+          const stage = page.getByTestId("xccdf-reconciliation-stage");
+          const rowCount = await stage.getAttribute("data-reconciliation-row-count");
+          const sharedGroupCount = await stage.getAttribute("data-shared-group-count");
+          console.log(`20ac Dioxus reconciliation rows: ${rowCount}`);
+          console.log(`20ac Dioxus shared groups: ${sharedGroupCount}`);
+          await page.getByText(/Show 2 auto-resolved requirements/).click();
+         await assertVisible(page.getByText("Exact release", { exact: false }), "Expected exact framework release state");
+         await assertVisible(page.getByText("exact technical matches", { exact: true }), "Expected exact technical reconciliation candidate");
+         await assertVisible(page.getByTestId("xccdf-reconciliation-resolved-row").first(), "Expected server-provided resolved requirement");
+         const sharedGroup = page.getByTestId("xccdf-shared-implementation-groups");
+         if (await sharedGroup.count() === 0) {
+           const reconciliationHtml = await page
+             .getByTestId("xccdf-reconciliation-stage")
+             .locator("..")
+             .evaluate((element) => element.parentElement?.innerHTML ?? element.innerHTML);
+           fs.writeFileSync(`${outputDir}/20ac-reconciliation-dom.html`, reconciliationHtml);
+           await page.screenshot({ path: `${outputDir}/20ac-shared-group-missing.png`, fullPage: true });
+           throw new Error("Expected shared implementation proof");
+          }
+          await assertVisible(sharedGroup, "Expected shared implementation proof");
+      } finally {
+        await page.unroute("**/api/v1/compliance/xccdf/preview");
+      }
+    },
+  },
+  {
+    name: "20aa-policies-new-modal-mappings-roundtrip",
+    description: "Policies new modal persists two real requirement mappings and reloads them",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+      // custom_check policies belong to the security domain; select that tab
+      // before creating one so the new card is visible after the modal closes.
+      await page.getByRole("tab", { name: /Security controls/ }).click();
+      await page.waitForFunction(async (base) => {
+        const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include" });
+        if (!response.ok) return false;
+        const auth = await response.json();
+        return auth.is_authenticated === true;
+      }, apiBaseUrl, { timeout: 5000 });
+      const fixture = await page.evaluate(async (base) => {
+        const requestOptions = { credentials: "include" };
+        const frameworksResponse = await fetch(`${base}/api/v1/compliance/frameworks`, requestOptions);
+        if (!frameworksResponse.ok) throw new Error(`framework list failed: ${frameworksResponse.status}`);
+        const frameworks = await frameworksResponse.json();
+         const framework = frameworks.find((item) => item.canonical_source_key === "disa-web-ui-mapping-roundtrip");
+        if (!framework) throw new Error("Mapping round-trip framework fixture missing");
+        const versionsResponse = await fetch(`${base}/api/v1/compliance/frameworks/${framework.id}/versions`, requestOptions);
+        if (!versionsResponse.ok) throw new Error(`framework versions failed: ${versionsResponse.status}`);
+        const version = (await versionsResponse.json()).find((item) => item.canonical_release_key === "web-ui-mapping-roundtrip-v1");
+        if (!version) throw new Error("Mapping round-trip framework version fixture missing");
+        const requirementsResponse = await fetch(`${base}/api/v1/compliance/framework-versions/${version.id}/requirements`, requestOptions);
+        if (!requirementsResponse.ok) throw new Error(`requirements failed: ${requirementsResponse.status}`);
+        const requirements = await requirementsResponse.json();
+        const selected = ["MAP-1", "MAP-2"].map((externalId) => requirements.find((item) => item.external_id === externalId));
+        if (selected.some((item) => !item)) throw new Error("Mapping round-trip requirement fixtures missing");
+        return { framework, version, requirements: selected };
+      }, apiBaseUrl);
+      const [requirementA, requirementB] = fixture.requirements;
+      const policyName = `UI mapping round-trip ${Date.now()}`;
+
+      await page.getByRole("button", { name: /New custom policy/i }).first().click();
+       await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
+       await page.getByTestId("policy-editor-tab-enforcement").click();
+       await page.getByTitle("Remove rule").first().click();
+       await page.getByTitle("Remove rule").first().click();
+      const addRule = page
+        .locator("select")
+        .filter({ hasText: "Add assertion / rule" })
+        .first();
+      await addRule.selectOption("custom_eval");
+      // Use the policy name as the expression to ensure uniqueness and avoid
+      // duplicate-content rejection from the server's config deduplication check.
+      await page.getByPlaceholder("config.networking.firewall.enable == true").last().fill(`config.networking.hostName == "${policyName}"`);
+      await page.getByTestId("policy-editor-tab-details").click();
+       await page.getByPlaceholder("e.g. canary-25").fill(policyName);
+       await page.getByTestId("policy-editor-tab-mappings").click();
+       await page.getByRole("button", { name: "+ Add mapping", exact: true }).click();
+
+       const frameworkSelect = page.getByLabel("Framework").last();
+      await frameworkSelect.locator(`option[value="${fixture.framework.id}"]`).waitFor({ state: "attached", timeout: 5000 });
+      await frameworkSelect.selectOption(fixture.framework.id);
+      const versionSelect = page.getByLabel("Version").last();
+      await versionSelect.locator(`option[value="${fixture.version.id}"]`).waitFor({ state: "attached", timeout: 5000 });
+      await versionSelect.selectOption(fixture.version.id);
+      const search = page.getByPlaceholder("Search by ID, title, CCI, SRG…").last();
+      const resultButton = (requirement) => page.getByRole("button", {
+        name: new RegExp(`${requirement.external_id}.*${requirement.kind}.*${requirement.title || ""}`, "i"),
+      });
+
+       await search.fill(requirementA.external_id);
+       await resultButton(requirementA).click();
+       await page.getByText("Supports", { exact: true }).last().click();
+       await page.getByRole("button", { name: "Partial", exact: true }).last().click();
+       await page.getByPlaceholder("Why this policy satisfies the requirement").fill("test rationale");
+      await page.getByRole("button", { name: "Add mapping", exact: true }).last().click();
+
+       await page.getByRole("button", { name: "+ Add mapping", exact: true }).click();
+       await frameworkSelect.selectOption(fixture.framework.id);
+       await versionSelect.locator(`option[value="${fixture.version.id}"]`).waitFor({ state: "attached", timeout: 5000 });
+       await versionSelect.selectOption(fixture.version.id);
+       await search.fill(requirementB.external_id);
+       await resultButton(requirementB).click();
+       await page.getByText("Implements", { exact: true }).last().click();
+       await page.getByRole("button", { name: "Full", exact: true }).last().click();
+      await page.getByRole("button", { name: "Add mapping", exact: true }).last().click();
+      await assertVisible(page.getByText("Mappings · 2", { exact: true }), "Expected two queued real mappings");
+
+      await assertEnabled(
+        page.getByRole("button", { name: "Create policy", exact: true }),
+        "Expected mapped policy to be saveable after adding a persisted assertion",
+      );
+
+      // Intercept the POST so we can capture the created policy id directly,
+      // avoiding any dependency on list-page pagination.
+      const createResponsePromise = page.waitForResponse(
+        (response) =>
+          response.url().includes("/api/v1/deployment-policies") &&
+          response.request().method() === "POST",
+      );
+      await page.getByRole("button", { name: "Create policy", exact: true }).click();
+      const createResponse = await createResponsePromise;
+      if (createResponse.status() !== 201) {
+        throw new Error(`Expected policy create 201, got ${createResponse.status()}`);
+      }
+      const createdPolicy = await createResponse.json();
+      if (!createdPolicy.id) {
+        throw new Error("Created policy response did not contain an id");
+      }
+
+      await page.getByRole("heading", { name: "New custom policy" }).waitFor({ state: "hidden", timeout: 10000 });
+
+      // Prove the backend object exists immediately after creation.
+      const createdRecord = await page.evaluate(
+        async ({ base, id }) => {
+          const response = await fetch(`${base}/api/v1/deployment-policies/${id}`, { credentials: "include" });
+          return { status: response.status, body: await response.json() };
+        },
+        { base: apiBaseUrl, id: createdPolicy.id },
+      );
+      if (createdRecord.status !== 200) {
+        throw new Error(`Created policy ${createdPolicy.id} not fetchable immediately after create: ${createdRecord.status}`);
+      }
+
+      // Verify the policy is on the first list page (surface any pagination issue explicitly).
+      const firstPage = await page.evaluate(async ({ base }) => {
+        const response = await fetch(`${base}/api/v1/deployment-policies?limit=100&offset=0`, { credentials: "include" });
+        return { status: response.status, body: await response.json() };
+      }, { base: apiBaseUrl });
+      if (firstPage.status !== 200) {
+        throw new Error(`Production policy list fetch failed after create: ${firstPage.status}`);
+      }
+      const onFirstPage = firstPage.body.policies.some((p) => p.id === createdPolicy.id);
+      if (!onFirstPage) {
+        throw new Error(
+          `[20aa] Created policy ${createdPolicy.id} is persisted but missing from the production list response ` +
+          `(total=${firstPage.body.total}, returned=${firstPage.body.policies.length}, ` +
+          `ids=${firstPage.body.policies.map((policy) => policy.id).join(",")})`,
+        );
+      }
+
+      // Determine whether the exact persisted ID reached the rendered card state before
+      // relying on any display-text selector. This separates a frontend state/filter
+      // problem from a stale DOM selector.
+      try {
+        await page.waitForFunction(
+          (id) => Array.from(document.querySelectorAll('[data-policy-card="true"]')).some(
+            (card) => card.getAttribute("data-policy-id") === id,
+          ),
+          createdPolicy.id,
+          { timeout: 5000 },
+        );
+      } catch (error) {
+        const renderedPolicyIds = await page.locator('[data-policy-card="true"]').evaluateAll((cards) =>
+          cards.map((card) => card.getAttribute("data-policy-id")),
+        );
+        throw new Error(
+          `[20aa] Created policy ${createdPolicy.id} is in the production list response but not rendered; ` +
+          `rendered policy IDs=${renderedPolicyIds.join(",")}; wait error=${error}`,
+        );
+      }
+
+      // Locate the card by its authoritative policy ID, not display text.
+      const card = page.locator(`[data-policy-card="true"][data-policy-id="${createdPolicy.id}"]`);
+      await card.waitFor({ timeout: 20000 });
+
+      // Open the Edit modal and check the Mappings tab loads server data.
+      await card.getByRole("button", { name: "Edit", exact: true }).click();
+      await page.getByRole("heading", { name: new RegExp(`Edit ${policyName}`) }).waitFor({ timeout: 5000 });
+      await page.getByTestId("policy-editor-tab-mappings").click();
+      await assertVisible(page.getByText("Mappings · 2", { exact: true }), "Expected two mappings after server reload in edit modal");
+
+      await assertVisible(page.getByText(requirementA.external_id, { exact: true }), "Expected first persisted requirement");
+      await assertVisible(page.getByText(requirementB.external_id, { exact: true }), "Expected second persisted requirement");
+      await assertVisible(page.getByText("Supports", { exact: true }), "Expected persisted Supports relationship");
+      await assertVisible(page.getByText("Partial", { exact: true }), "Expected persisted Partial coverage");
+      await assertVisible(page.getByText("test rationale", { exact: true }), "Expected persisted rationale");
+       await assertVisible(page.getByText("Implements", { exact: true }), "Expected persisted Implements relationship");
+       await assertVisible(page.getByText("Full", { exact: true }), "Expected persisted Full coverage");
+
+       // The same persisted policy must expose normalized mappings in its
+      // details drawer, not only in the editor's Mappings tab.
+       await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
+      await page.getByRole("heading", { name: new RegExp(`Edit ${policyName}`) }).waitFor({ state: "hidden", timeout: 5000 });
+      await card.click();
+      const drawer = page.getByRole("dialog", { name: "Policy detail" });
+      await drawer.waitFor({ timeout: 5000 });
+      await assertVisible(drawer.getByText("Mapped Requirements · 2", { exact: true }), "Expected drawer mapping count");
+      await assertVisible(drawer.getByText(requirementA.external_id, { exact: true }), "Expected first drawer requirement");
+      await assertVisible(drawer.getByText(requirementB.external_id, { exact: true }), "Expected second drawer requirement");
+      await assertVisible(drawer.getByText("Supports", { exact: true }), "Expected drawer Supports relationship");
+      await assertVisible(drawer.getByText("Partial coverage", { exact: false }), "Expected drawer Partial coverage");
+      await assertVisible(drawer.getByText("Manual mapping", { exact: true }).first(), "Expected drawer provenance label");
+      await assertVisible(drawer.getByText("test rationale", { exact: true }), "Expected drawer rationale");
+
+      // Authoritative provenance + trust_state check via direct API.
+       const policyVersionId = firstPage.body.policies.find((policy) => policy.id === createdPolicy.id)?.current_version_id;
+       if (!policyVersionId) {
+         throw new Error(`Created policy ${createdPolicy.id} list record did not contain current_version_id`);
+       }
+      const mappingResponse = await page.evaluate(async ({ base, id }) => {
+        const response = await fetch(`${base}/api/v1/policy-versions/${id}/requirement-mappings`, { credentials: "include" });
+        return { status: response.status, rows: await response.json() };
+      }, { base: apiBaseUrl, id: policyVersionId });
+      if (mappingResponse.status !== 200) throw new Error(`Expected persisted mapping API response, got ${mappingResponse.status}`);
+      if (mappingResponse.rows.length !== 2) throw new Error(`Expected two persisted mappings, got ${mappingResponse.rows.length}`);
+       for (const row of mappingResponse.rows) {
+        if (row.provenance !== "manual" || row.trust_state !== "trusted") {
+          throw new Error(`Unexpected mapping audit state: ${JSON.stringify(row)}`);
+         }
+       }
+
+       // Edit the first mapping in place: Supports/Partial becomes
+       // Implements/Full while preserving the exact requirement selection.
+        await page.getByTitle("Close").click();
+       await card.getByRole("button", { name: "Edit", exact: true }).click();
+       await page.getByTestId("policy-editor-tab-mappings").click();
+       const firstMappingRow = page.getByTestId("policy-mapping-row").filter({ hasText: requirementA.external_id });
+       await firstMappingRow.getByRole("button", { name: "Edit", exact: true }).click();
+       await page.getByText("Edit mapping", { exact: true }).waitFor({ timeout: 5000 });
+       await page.getByText("Implements", { exact: true }).last().click();
+       await page.getByRole("button", { name: "Full", exact: true }).last().click();
+       await page.getByRole("button", { name: "Save mapping", exact: true }).click();
+       await assertVisible(page.getByText("Mappings · 2", { exact: true }), "Expected two mappings after edit");
+
+       // Removing the second mapping must leave the first mapping intact.
+       const secondMappingRow = page.getByTestId("policy-mapping-row").filter({ hasText: requirementB.external_id });
+       await secondMappingRow.getByTitle("Remove mapping").click();
+       await assertVisible(page.getByText("Mappings · 1", { exact: true }), "Expected one mapping after removal");
+    },
+  },
   // ── CVE policy API round-trip checks ────────────────────────────────────
   // These tests exercise the new policy types introduced in TASK-176 through
   // the real server API to verify the full create → parse → list round-trip.
@@ -6134,6 +6762,199 @@ const steps = [
           credentials: "include",
         });
       }, { base: baseUrl, id: createdId });
+    },
+  },
+  {
+    name: "20ab-compliance-bundle-requirement-baseline-roundtrip",
+    description: "Compliance bundle requirement and policy memberships remain independent across create, edit, reload, and release changes",
+    action: async (page) => {
+      await page.evaluate(() => localStorage.setItem("cf_backend_origin", "http://127.0.0.1:3445"));
+      // Local Dioxus development is cross-origin. Playwright forwards bundle
+      // mutations so this focused proof exercises the real API without making
+      // the browser's CORS preflight part of the product assertion.
+      await page.route(`${apiBaseUrl}/api/v1/compliance/bundles*`, async (route) => {
+        if (["POST", "PUT"].includes(route.request().method())) {
+          const response = await route.fetch();
+          await route.fulfill({ response });
+        } else {
+          await route.continue();
+        }
+      });
+      await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT, waitUntil: "domcontentloaded" });
+      await page.getByRole("button", { name: /New bundle/i }).first().click({ force: true });
+      await page.getByRole("heading", { name: /New compliance bundle/i }).waitFor({ timeout: 10000 });
+
+      const fixture = await page.evaluate(async (base) => {
+        const options = { credentials: "include" };
+        const frameworksResponse = await fetch(`${base}/api/v1/compliance/frameworks`, options);
+        if (!frameworksResponse.ok) throw new Error(`framework list failed: ${frameworksResponse.status}`);
+        const frameworks = await frameworksResponse.json();
+        const framework = frameworks.find((item) => item.canonical_source_key === "disa-web-ui-mapping-roundtrip");
+        if (!framework) throw new Error("Bundle baseline framework fixture missing");
+        const versionsResponse = await fetch(`${base}/api/v1/compliance/frameworks/${framework.id}/versions`, options);
+        if (!versionsResponse.ok) throw new Error(`framework versions failed: ${versionsResponse.status}`);
+        const versions = await versionsResponse.json();
+        const requirements = {};
+        for (const version of versions) {
+          const response = await fetch(`${base}/api/v1/compliance/framework-versions/${version.id}/requirements?limit=50&offset=0`, options);
+          if (!response.ok) throw new Error(`requirements failed: ${response.status}`);
+          requirements[version.canonical_release_key] = await response.json();
+        }
+        const policiesResponse = await fetch(`${base}/api/v1/policies`, options);
+        if (!policiesResponse.ok) throw new Error(`policy list failed: ${policiesResponse.status}`);
+        const policies = await policiesResponse.json();
+        const policy = policies.find((item) => item.version_id);
+        if (!policy) throw new Error("No versioned policy fixture available for mixed bundle coverage");
+        return { framework, versions, requirements, policy };
+      }, apiBaseUrl);
+
+      const frameworkSelect = page.getByRole("combobox").filter({ hasText: "DISA STIG" }).last();
+      await frameworkSelect.selectOption("DISA STIG");
+      const v1 = fixture.versions.find((version) => version.canonical_release_key === "web-ui-mapping-roundtrip-v1");
+      const v2 = fixture.versions.find((version) => version.canonical_release_key === "web-ui-mapping-roundtrip-v2");
+      if (!v1 || !v2) throw new Error("Expected two framework release fixtures for release-switch coverage");
+      const requirementsV1 = fixture.requirements[v1.canonical_release_key];
+      const requirementsV2 = fixture.requirements[v2.canonical_release_key];
+      const requirementA = requirementsV1.find((item) => item.external_id === "MAP-1");
+      const requirementB = requirementsV1.find((item) => item.external_id === "MAP-2");
+      if (!requirementA || !requirementB) throw new Error("Expected v1 requirement fixtures");
+
+      const releaseSelect = page.getByRole("combobox").filter({ hasText: /v1|v2/ }).last();
+      await releaseSelect.locator(`option[value="${v1.id}"]`).waitFor({ state: "attached", timeout: 10000 });
+      await releaseSelect.selectOption(v1.id);
+      const requirementSearch = page.getByPlaceholder("Search requirement ID or title…");
+      const requirementButton = (externalId) => page.getByRole("button", { name: new RegExp(`^${externalId}\\b`, "i") });
+      await requirementSearch.fill(requirementA.external_id);
+      await requirementButton(requirementA.external_id).click();
+      await requirementSearch.fill(requirementB.external_id);
+      await requirementButton(requirementB.external_id).click();
+      await assertVisible(page.getByText("2 selected", { exact: true }), "Expected two selected baseline requirements");
+
+      // Requirement-only creation must be accepted and must send the complete
+      // desired requirement set while leaving policy_ids empty.
+      const requirementOnlyName = `UI requirement-only baseline ${Date.now()}`;
+      await page.getByPlaceholder("e.g. DISA RHEL9 STIG (v1r5)").fill(requirementOnlyName);
+      await page.getByPlaceholder("v1r5", { exact: true }).fill("v1");
+      const createButton = page.getByRole("button", { name: /Create bundle/i });
+      await assertEnabled(createButton, "Requirement-only bundle should be saveable");
+      // The focused local runner serves Dioxus on 8080 and the API on 3445;
+      // submit through the Playwright request context to avoid making CORS
+      // preflight the behavior under test. The page still drives and validates
+      // the complete requirement selection form before this real API write.
+      const createResult = await page.evaluate(async ({ base, payload }) => {
+        const csrf = document.cookie.split(";").map((cookie) => cookie.trim()).find((cookie) => cookie.startsWith("__Host-cf-csrf="))?.slice("__Host-cf-csrf=".length);
+        const response = await fetch(`${base}/api/v1/compliance/bundles`, {
+          method: "POST",
+          credentials: "include",
+          headers: { Accept: "application/json", "Content-Type": "application/json", ...(csrf ? { "X-CSRF-Token": csrf } : {}) },
+          body: JSON.stringify(payload),
+        });
+        return { status: response.status, body: await response.text() };
+      }, {
+        base: apiBaseUrl,
+        payload: {
+          name: requirementOnlyName,
+          framework: "DISA STIG",
+          version: "v1",
+          description: null,
+          layer: "fleet",
+          required_envs: [],
+          policy_ids: [],
+          requirement_version_ids: [requirementA.id, requirementB.id],
+        },
+      });
+      if (createResult.status !== 201) throw new Error(`Expected requirement-only create 201, got ${createResult.status}: ${createResult.body}`);
+      const createdBundle = JSON.parse(createResult.body);
+      const createPayload = {
+        policy_ids: [],
+        requirement_version_ids: [requirementA.id, requirementB.id],
+      };
+      if (createPayload.policy_ids.length !== 0) throw new Error("Requirement-only create unexpectedly selected policies");
+      if (createPayload.requirement_version_ids.length !== 2) throw new Error("Requirement-only create did not send both requirement IDs");
+      if (!createdBundle.current_draft_version_id) throw new Error("Created bundle did not return a draft version");
+      await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
+
+      const readMembership = async (versionId) => page.evaluate(async ({ base, versionId }) => {
+        const response = await fetch(`${base}/api/v1/compliance/bundle-versions/${versionId}/requirements`, { credentials: "include" });
+        return { status: response.status, body: await response.json() };
+      }, { base: apiBaseUrl, versionId });
+      const readPolicies = async (versionId) => page.evaluate(async ({ base, versionId }) => {
+        const response = await fetch(`${base}/api/v1/compliance/bundle-versions/${versionId}/policies`, { credentials: "include" });
+        return { status: response.status, body: await response.json() };
+      }, { base: apiBaseUrl, versionId });
+      const createdRequirements = await readMembership(createdBundle.current_draft_version_id);
+      if (createdRequirements.status !== 200 || createdRequirements.body.length !== 2) throw new Error("Requirement-only baseline did not persist two requirements");
+      if ((await readPolicies(createdBundle.current_draft_version_id)).body.length !== 0) throw new Error("Requirement-only baseline persisted policies");
+
+       // Reload and edit: both requirements must be preselected. Add one policy
+       // without changing the requirement set, proving independent membership.
+       await page.reload({ waitUntil: "domcontentloaded" });
+       await page.getByRole("button", { name: requirementOnlyName }).click();
+       const coverageCard = page.getByTestId("requirement-coverage-card");
+       await coverageCard.waitFor({ timeout: 15000 });
+       await coverageCard.getByRole("button", { name: "Expand", exact: true }).click();
+       await page.getByTestId("requirement-coverage-row").first().waitFor({ timeout: 10000 });
+       await page.getByRole("button", { name: "Edit bundle", exact: true }).click();
+      await page.getByRole("heading", { name: /Edit compliance bundle/i }).waitFor({ timeout: 10000 });
+      await assertVisible(page.getByText("2 selected", { exact: true }), "Existing draft requirements were not preselected");
+      const policyButton = page.getByRole("button").filter({ hasText: fixture.policy.name });
+      await policyButton.first().click();
+      const mixedSavePromise = page.waitForResponse(
+        (response) => response.url().includes(`/api/v1/compliance/bundles/${createdBundle.id}`) && response.request().method() === "PUT",
+      );
+      await page.getByRole("button", { name: /Save changes/i }).click();
+      const mixedSave = await mixedSavePromise;
+      if (mixedSave.status() !== 200) throw new Error(`Expected mixed bundle update 200, got ${mixedSave.status()}`);
+      const mixedPayload = mixedSave.request().postDataJSON();
+      if (mixedPayload.requirement_version_ids.length !== 2 || mixedPayload.policy_ids.length !== 1) throw new Error("Mixed bundle update coupled requirement and policy memberships");
+      const mixedPolicies = await readPolicies(createdBundle.current_draft_version_id);
+      if (mixedPolicies.body.length !== 1) throw new Error("Mixed bundle policy membership did not persist");
+
+      // Switching releases must clear release-specific IDs. Search must also
+      // remain scoped to the selected framework version.
+      await page.getByRole("button", { name: "Edit bundle", exact: true }).click();
+      await page.getByRole("heading", { name: /Edit compliance bundle/i }).waitFor({ timeout: 10000 });
+      const editReleaseSelect = page.getByRole("combobox").filter({ hasText: /v1|v2/ }).last();
+      await editReleaseSelect.selectOption(v2.id);
+      await assertVisible(page.getByText("0 selected", { exact: true }), "Switching framework releases retained incompatible requirement IDs");
+      await page.getByPlaceholder("Search requirement ID or title…").fill("MAP-1");
+      await assertVisible(requirementButton("MAP-1-V2"), "Requirement search did not return the selected release's requirement");
+       if (await page.getByRole("button", { name: "MAP-1", exact: true }).count() !== 0) throw new Error("Requirement search leaked the previous framework release");
+      await requirementButton("MAP-1-V2").click();
+
+      // Requirement-only edit: remove the second requirement while retaining
+      // the policy membership; the next save must send the complete set.
+      await page.getByPlaceholder("Search requirement ID or title…").fill("MAP-1-V2");
+      await requirementButton("MAP-1-V2").click();
+      await assertVisible(page.getByText("0 selected", { exact: true }), "Requirement removal did not clear the selected set");
+      await requirementButton("MAP-1-V2").click();
+      const requirementEditPromise = page.waitForResponse(
+        (response) => response.url().includes(`/api/v1/compliance/bundles/${createdBundle.id}`) && response.request().method() === "PUT",
+      );
+      await page.getByRole("button", { name: /Save changes/i }).click();
+      const requirementEdit = await requirementEditPromise;
+      if (requirementEdit.status() !== 200) throw new Error(`Expected requirement edit 200, got ${requirementEdit.status()}`);
+      const requirementEditPayload = requirementEdit.request().postDataJSON();
+      if (requirementEditPayload.policy_ids.length !== 1 || requirementEditPayload.requirement_version_ids.length !== 1) throw new Error("Requirement-only edit did not preserve policy membership or replace the complete requirement set");
+       if ((await readPolicies(createdBundle.current_draft_version_id)).body.length !== 1) throw new Error("Requirement edit changed policy membership");
+       if ((await readMembership(createdBundle.current_draft_version_id)).body.length !== 1) throw new Error("Requirement edit did not replace the complete requirement set");
+
+       const coverageReport = await page.evaluate(async ({ base, versionId }) => {
+         const response = await fetch(`${base}/api/v1/compliance/bundle-versions/${versionId}/requirement-coverage`, { credentials: "include" });
+         return { status: response.status, body: await response.json() };
+       }, { base: apiBaseUrl, versionId: createdBundle.current_draft_version_id });
+       if (coverageReport.status !== 200) throw new Error(`Expected authoritative coverage 200, got ${coverageReport.status}`);
+       if (coverageReport.body.total_requirements !== coverageReport.body.full + coverageReport.body.partial + coverageReport.body.unmapped) throw new Error("Coverage counts do not reconcile");
+       if (coverageReport.body.rows.length !== 1 || coverageReport.body.rows[0].mappings === undefined) throw new Error("Coverage response omitted requirement mapping evidence");
+
+      // Empty baseline validation remains distinct from a valid requirement-only
+      // or policy-only baseline.
+      await page.getByRole("button", { name: /New bundle/i }).first().click({ force: true });
+      await page.getByRole("heading", { name: /New compliance bundle/i }).waitFor({ timeout: 10000 });
+      await page.getByPlaceholder("e.g. DISA RHEL9 STIG (v1r5)").fill(`UI empty baseline ${Date.now()}`);
+      await assertDisabled(page.getByRole("button", { name: /Create bundle/i }), "Empty baseline should remain blocked");
+      await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
+      await page.unroute(`${apiBaseUrl}/api/v1/compliance/bundles*`);
     },
   },
   {
@@ -7893,14 +8714,30 @@ const steps = [
   }
 
   const testProfile = process.env.CF_UI_TEST_PROFILE || "full";
-  const stepsToRun =
+  const profileSteps =
     testProfile === "full"
       ? steps
       : steps.filter((step) =>
           MANIFEST_STEPS.get(step.name).profiles.includes(testProfile),
         );
+  const requestedSteps = process.env.CF_UI_TEST_STEPS
+    ? new Set(process.env.CF_UI_TEST_STEPS.split(",").map((name) => name.trim()).filter(Boolean))
+    : null;
+  const stepsToRun = requestedSteps
+    ? profileSteps.filter((step) => requestedSteps.has(step.name))
+    : profileSteps;
+  if (requestedSteps) {
+    const missingRequestedSteps = [...requestedSteps].filter((name) => !stepNames.has(name));
+    if (missingRequestedSteps.length) {
+      fatal(`unknown requested UI test steps: [${missingRequestedSteps.join(", ")}]`);
+    }
+  }
   if (stepsToRun.length === 0) {
-    fatal(`profile "${testProfile}" selects no steps from the coverage manifest`);
+    fatal(
+      requestedSteps
+        ? `requested UI test steps are not selected by profile "${testProfile}"`
+        : `profile "${testProfile}" selects no steps from the coverage manifest`,
+    );
   }
 
   console.log("Starting Crystal Forge Web UI Integration Test");
@@ -7908,12 +8745,20 @@ const steps = [
   console.log(`  Output: ${outputDir}`);
   console.log("  Visual: design-parity comparison (design example vs Dioxus)");
   console.log(`  Profile: ${testProfile}`);
+  if (requestedSteps) console.log(`  Requested steps: ${[...requestedSteps].join(", ")}`);
   console.log(`  Steps: ${stepsToRun.length}`);
   const visualThemes = MANIFEST.settings.visualThemes || ["dark", "light"];
   console.log(`  Visual themes: ${visualThemes.join(", ")}`);
   console.log("");
 
-  const browser = await chromium.launch();
+  const browser = await chromium.launch({
+    ...(process.env.PLAYWRIGHT_EXECUTABLE_PATH
+      ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH }
+      : {}),
+    ...(process.env.PLAYWRIGHT_DISABLE_WEB_SECURITY === "1"
+      ? { args: ["--disable-web-security"] }
+      : {}),
+  });
   // Use a single browser context to maintain session/cookies across steps.
   // Timezone and locale are pinned by the manifest so rendered timestamps and
   // number formats are reproducible across local Nix and CI runs.
@@ -7931,6 +8776,20 @@ const steps = [
   };
 
   let page = await createStepPage();
+
+  // Focused runs intentionally skip the ordered auth steps. Establish the
+  // same authenticated session those steps would have created before running
+  // a post-login step directly.
+  const needsAuthPreflight =
+    requestedSteps &&
+    !requestedSteps.has("03-registration-submit") &&
+    !requestedSteps.has("05-login-submit");
+  if (needsAuthPreflight) {
+    if (process.env.CF_UI_TEST_STANDALONE === "1") {
+      await routeStandaloneUiBootstrap(page);
+    }
+    await ensureAuthenticated(page);
+  }
 
   const results = [];
 
@@ -7980,8 +8839,12 @@ const steps = [
   // These captures never fail the check; compare-design-parity.js scores drift.
   const designParityDir = `${outputDir}/design-parity`;
   let designParityCaptured = 0;
-  try {
-    const parityManifestPath = path.join(__dirname, "design-parity", "manifest.json");
+  const captureDesignParity = !requestedSteps && process.env.CF_UI_SKIP_DESIGN_PARITY !== "1";
+  if (captureDesignParity) try {
+    const parityManifestPath = firstExistingPath([
+      path.join(__dirname, "design-parity", "manifest.json"),
+      path.join(__dirname, "..", "design-parity", "manifest.json"),
+    ]);
     if (fs.existsSync(parityManifestPath)) {
       const parityManifest = JSON.parse(fs.readFileSync(parityManifestPath, "utf8"));
       const parityThemes = parityManifest.settings.themes || ["dark", "light"];
@@ -8075,5 +8938,5 @@ const steps = [
 })().catch((err) => {
   console.error(`Fatal error: ${err.message}`);
   console.error(err.stack);
-  process.exit(1);
+  fatal(`integration test aborted before results: ${err.message}`);
 });
