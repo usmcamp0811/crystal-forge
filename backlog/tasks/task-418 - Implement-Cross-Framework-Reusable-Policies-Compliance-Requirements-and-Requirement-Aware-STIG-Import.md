@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 16:43'
+updated_date: '2026-08-15 16:57'
 labels: []
 milestone: m-22
 dependencies:
@@ -212,6 +212,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15 focused runtime attempts: direct Playwright execution is available via CF_UI_TEST_STEPS=20ac-stig-import-reconciliation-fixture. Initial attempt exposed a fixture selector defect: the STIG action is inside the Import / Export menu; fixed and pushed as cb756c45. Local run-ui-dev execution then remained blocked by local-auth/bootstrap setup and did not produce screenshots. The authoritative NixOS check was not rerun to completion; focused Playwright PASS and dark/light screenshots remain outstanding.
 
 2026-08-15 focused-check failure reporting fix committed/pushed as 4f7314bf. Top-level integration failures now write fatal.json; Nix wrapper records integration.exit and waits for results/fatal/exit; focused timeout is 180s while normal web-ui remains 1800s. node --check and git diff --check pass. A post-fix focused build was started but the outer command timed out during server compilation before a Playwright result was observed; 20ac matrix expansion remains blocked.
+
+2026-08-15 review remediation pushed as 9e90de5e. Narrowed migration 0215 backfill exceptions to only pending requirement_digest or mapping_digest. Added migration 0216 DB guards for immutable framework and requirement versions, with pending digest finalization and one-time null-to-parent hierarchy construction exception. Framework release digest now includes deterministic requirement semantic digests and DISA import/fixture paths precompute them before release insertion, so same-release requirement content changes conflict without mutating existing releases. Mapping CRUD now scopes nested policy-version routes, forces manual provenance for external creation, permits operator/admin roles, and bundle mapped-policy projection filters trusted mappings. Isolated PostgreSQL 3042 applied migrations 215/216; framework-requirements ignored suite passed 9/9. cargo fmt check, SQLX_OFFLINE cargo check, and git diff check passed. MR !315 restored to Draft.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
@@ -259,5 +261,10 @@ author: opencode
 created: 2026-08-15 16:14
 ---
 Verification: framework query suite 9 passed; Phase 22 8/8 passed; Phase 21 exact technical suite 3 passed; Phase 23 reviewed-related suite 2 passed; bundle baseline lifecycle passed; SQLX_OFFLINE cargo check passed; cargo fmt and git diff check passed. XCCDF filter remains blocked by the pre-existing missing `CF_TEST_ANDURIL_STIG_ZIP` environment variable.
+---
+
+created: 2026-08-15 16:57
+---
+Review remediation checkpoint: addressed findings #1-#6 and the framework release digest blocker in commit 9e90de5e. MR remains Draft pending broader review and verification.
 ---
 <!-- COMMENTS:END -->
