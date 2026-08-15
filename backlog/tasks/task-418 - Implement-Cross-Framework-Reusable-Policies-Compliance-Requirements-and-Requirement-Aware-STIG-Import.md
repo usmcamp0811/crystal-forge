@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 16:57'
+updated_date: '2026-08-15 17:10'
 labels: []
 milestone: m-22
 dependencies:
@@ -88,6 +88,12 @@ Review remediation plan (2026-08-15):
 4. Fix mapping API nested-resource scoping, make manual mapping provenance server-authored as manual, allow operator/admin mapping CRUD, and filter bundle mapped-policy projections to trusted mappings.
 5. Add focused regression tests for trigger/API/query behavior where existing test infrastructure supports it.
 6. Verify with cargo fmt, SQLX_OFFLINE cargo check, targeted unit/DB tests if isolated PostgreSQL is available, and git diff check; commit and push each checkpoint.
+
+Follow-up review remediation (2026-08-15):
+7. Add one authoritative parsed-framework requirement canonical/digest collector and use it in preview plus commit; policy selection must not influence framework identity.
+8. Add same-release reuse/conflict tests for artifact changes, changed requirements, and different policy selections.
+9. Rework requirement hierarchy construction so parent links are assigned while rows are pending, then finalize requirement digests; remove the permanent finalized-row reparent exception and add a finalized reparent rejection test.
+10. Add migration/backfill compatibility for framework digests produced before the requirement-aware canonical representation, with an upgrade-path test on isolated PostgreSQL.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -214,6 +220,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15 focused-check failure reporting fix committed/pushed as 4f7314bf. Top-level integration failures now write fatal.json; Nix wrapper records integration.exit and waits for results/fatal/exit; focused timeout is 180s while normal web-ui remains 1800s. node --check and git diff --check pass. A post-fix focused build was started but the outer command timed out during server compilation before a Playwright result was observed; 20ac matrix expansion remains blocked.
 
 2026-08-15 review remediation pushed as 9e90de5e. Narrowed migration 0215 backfill exceptions to only pending requirement_digest or mapping_digest. Added migration 0216 DB guards for immutable framework and requirement versions, with pending digest finalization and one-time null-to-parent hierarchy construction exception. Framework release digest now includes deterministic requirement semantic digests and DISA import/fixture paths precompute them before release insertion, so same-release requirement content changes conflict without mutating existing releases. Mapping CRUD now scopes nested policy-version routes, forces manual provenance for external creation, permits operator/admin roles, and bundle mapped-policy projection filters trusted mappings. Isolated PostgreSQL 3042 applied migrations 215/216; framework-requirements ignored suite passed 9/9. cargo fmt check, SQLX_OFFLINE cargo check, and git diff check passed. MR !315 restored to Draft.
+
+2026-08-15 follow-up review found framework preview/commit digest mismatch, commit digest derived from policy_records instead of authoritative parsed requirements, permanent finalized requirement reparent escape hatch, and legacy framework digest upgrade compatibility gap. These are now the active remediation scope.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
