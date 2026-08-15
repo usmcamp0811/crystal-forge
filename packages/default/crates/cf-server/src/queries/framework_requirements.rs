@@ -912,6 +912,8 @@ pub async fn preview_requirement_reconciliation(
         None => sqlx::query_scalar(
             "SELECT id FROM compliance_framework_versions \
               WHERE framework_id = $1 \
+                AND semantic_digest <> 'pending' \
+                AND migration_recovery_status = 'finalized' \
               ORDER BY created_at DESC LIMIT 1",
         )
         .bind(framework_id)
@@ -1582,6 +1584,7 @@ pub async fn insert_bundle_version_requirement(
     requirement_version_id: Uuid,
     requirement_order: i32,
 ) -> Result<()> {
+    require_framework_requirement_usable(tx, requirement_version_id).await?;
     sqlx::query(
         r#"
         INSERT INTO compliance_bundle_version_requirements
@@ -1631,6 +1634,7 @@ pub async fn insert_policy_mapping_in_tx(
     source_artifact_id: Option<Uuid>,
     created_by: Uuid,
 ) -> Result<()> {
+    require_framework_requirement_usable(tx, requirement_version_id).await?;
     sqlx::query(
         r#"
         INSERT INTO policy_requirement_mappings
@@ -1654,6 +1658,29 @@ pub async fn insert_policy_mapping_in_tx(
 
     refresh_policy_mapping_digest(tx, policy_version_id).await?;
 
+    Ok(())
+}
+
+async fn require_framework_requirement_usable(
+    tx: &mut Transaction<'_, Postgres>,
+    requirement_version_id: Uuid,
+) -> Result<()> {
+    let usable: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM compliance_requirement_versions rv
+             JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id
+             WHERE rv.id = $1 AND fv.semantic_digest <> 'pending'
+               AND fv.migration_recovery_status = 'finalized'
+         )",
+    )
+    .bind(requirement_version_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if !usable {
+        bail!(
+            "FRAMEWORK_RELEASE_RECOVERY_REQUIRED: requirement version {requirement_version_id} is not trusted"
+        );
+    }
     Ok(())
 }
 
