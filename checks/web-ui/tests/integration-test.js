@@ -160,10 +160,18 @@ async function assertVisible(locator, message, timeoutMs = 5000) {
 
 async function ensureAuthenticated(page) {
   const isAuthenticated = async () => page.evaluate(async (base) => {
-    const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include" });
-    if (!response.ok) return false;
-    const auth = await response.json();
-    return auth.is_authenticated === true;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    try {
+      const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include", signal: controller.signal });
+      if (!response.ok) return false;
+      const auth = await response.json();
+      return auth.is_authenticated === true;
+    } catch (_) {
+      return false;
+    } finally {
+      clearTimeout(timeout);
+    }
   }, apiBaseUrl);
 
   if (await isAuthenticated()) return;
@@ -192,10 +200,18 @@ async function ensureAuthenticated(page) {
   await page.locator('input[type="password"]').fill(TEST_USER.password);
   await page.locator('button[type="submit"]').click();
   await page.waitForFunction(async (base) => {
-    const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include" });
-    if (!response.ok) return false;
-    const auth = await response.json();
-    return auth.is_authenticated === true;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    try {
+      const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include", signal: controller.signal });
+      if (!response.ok) return false;
+      const auth = await response.json();
+      return auth.is_authenticated === true;
+    } catch (_) {
+      return false;
+    } finally {
+      clearTimeout(timeout);
+    }
   }, apiBaseUrl, { timeout: 5000 });
 }
 
