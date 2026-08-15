@@ -30,6 +30,21 @@ Compliance view (Dioxus `web-ui`) to match the refreshed design example.
 
 Read the file at `23c88aba`, not just the diff. Line references below are for the file at that commit.
 
+### Source precedence
+
+When sources disagree, resolve in this order (from highest to lowest):
+
+1. **Production data/behaviour semantics declared in this spec** (and TASK-418's model) override
+   the mock. The mock's data shapes are illustrative, not contractual.
+2. **Existing TASK-418 functionality must be preserved** — the normalized
+   requirement/mapping model, the reconciliation STIG state machine, and their request/commit
+   behaviour are owned by TASK-418; this task may not regress them (see §8.3.1).
+3. **`23c88aba` is authoritative for visual geometry and interactions** where this spec does not
+   declare a production-specific difference (typography, spacing, colours, layout, motion,
+   click behaviour).
+
+If two claims in this document conflict, the more specific section wins; if still ambiguous, ask.
+
 ---
 
 ## 1. Prerequisite — MR !315 must be merged first
@@ -81,7 +96,7 @@ lineage/revision concept that the server does not have.
 | `groupBundlesByLineage()` "lineage" | a single CF bundle (`ComplianceBundleSummary`) |
 | lineage "revision" | an entry in `ComplianceBundleSummary.versions` (`ComplianceBundleVersionSummary`) |
 | `bundle.publicationState` (`current`/`accepted`/`draft`/`deprecated`) | `ComplianceBundleVersionSummary.publication_state` / `trust_state`; the "current" chip maps to `is_current_published` |
-| `bundle.policyIds.length` (`N controls`) | `ComplianceBundleSummary.control_count` |
+| `bundle.policyIds.length` (`N controls`) | **do not render as "controls".** TASK-418 split the legacy count into `ComplianceBundleSummary.policy_count` (implementation policies) and `.requirement_count` (normalized requirements). `control_count` still exists but is a **deprecated compatibility alias for the legacy policy count** — never display it. Render `{requirement_count} requirements · {policy_count} policies` (see §4.3). |
 | `bundle.framework` / `bundle.version` | `ComplianceBundleSummary.framework` / `.version` |
 | `bundleQuickStats(bundle).score` / `.systemCount` | see §7(a) — new server-computed aggregate on the bundle list |
 | `stats` (`overallScore`, `pass/warn/fail/waiver`, `compliantHosts`, `totalHosts`) | `ComplianceRollupTotals` from `GET /api/v1/compliance/bundles/{id}/systems[?version_id=…]` |
@@ -129,8 +144,9 @@ Outer element: `div.card` with `overflow:hidden`.
 
 - **Framework chip row** — `display:flex; gap:6; flex-wrap:nowrap; overflow-x:auto`.
   - First chip: `All <span>{total bundle count}</span>`.
-  - Then one `button.cf-fw-chip` per distinct `framework` value, ordered by descending bundle count,
-    label `{framework} <span>{count}</span>`.
+  - Then one `button.cf-fw-chip` per distinct `framework` value, ordered by **bundle count
+    descending, then framework name ascending** (deterministic tie-break so equal-count fixtures
+    produce stable, comparable screenshots), label `{framework} <span>{count}</span>`.
   - Active chip carries `.active`. Counts are computed from the loaded bundle list.
 - **Search** — `div.q-search` (`marginLeft:0; width:100%; box-sizing:border-box`) containing the
   `search` icon (13px), `input.q-search-input` with placeholder `Search bundles…`, and, only while
@@ -155,7 +171,7 @@ selected bundle):
 
 | Column | Content |
 | --- | --- |
-| Bundle | flex row `gap:8`: a `7×7` circle (`border-radius:50%`, `flex-shrink:0`) coloured by score (§4.4), then the bundle name at `font-weight:600; font-size:13`, single-line with ellipsis. Second line `font-size:11; color:var(--cf-text-muted); margin-top:2`: `{control_count} controls` plus ` · {n} revisions` only when `versions.len() > 1`. |
+| Bundle | flex row `gap:8`: a `7×7` circle (`border-radius:50%`, `flex-shrink:0`) coloured by score (§4.4), then the bundle name at `font-weight:600; font-size:13`, single-line with ellipsis. Second line `font-size:11; color:var(--cf-text-muted); margin-top:2`: `{requirement_count} requirements` plus ` · {policy_count} policies` and, only when `versions.len() > 1`, ` · {n} revisions`. **Never display `control_count` or the word "controls"** — the design mock's "N controls" meant count of implementation policies, and TASK-418 split that into `requirement_count`/`policy_count` with `control_count` retained only as a deprecated alias. |
 | Framework | `span.chip.chip-info` with the framework string |
 | Version | `div.mono` `font-size:12` with the version string; below it (`margin-top:3`) a publication-state chip (§4.5) |
 | Score | `span.mono` `font-size:13; font-weight:600`, colour by score, text `{score}%` or `—` when unknown. Second line `font-size:11; color:var(--cf-text-muted); margin-top:2`: `{n} system` / `{n} systems` |
@@ -228,6 +244,30 @@ Existing production functionality that has no design counterpart — the XCCDF v
 the overview body (below the revisions section) with behaviour and admin gating unchanged. Do not
 delete it.
 
+### 5.2a Single source of truth for the selected bundle version
+
+There is exactly **one** selected bundle-version signal for the whole Compliance view. Production
+already has `selected_export_version_id` (`packages/web-ui/src/views/compliance.rs:68`), which
+drives systems, evidence and version actions. **Rename it to `selected_bundle_version_id`
+throughout the view rather than introducing a second signal** (do not create
+`selected_revision_id`, `coverage_version_id`, etc.).
+
+```text
+On bundle selection:
+  current_published_version_id, else current_draft_version_id, else first available version
+
+Revision buttons in the drawer:      write selected_bundle_version_id
+Existing XCCDF revision <select>:    writes the same selected_bundle_version_id
+Systems request:                     uses selected_bundle_version_id
+Requirement-coverage request:        uses selected_bundle_version_id
+Evidence request:                    uses selected_bundle_version_id
+Trust / publish / create-draft:      operate on selected_bundle_version_id
+```
+
+If a bundle has no version at all, the systems/coverage sections render their empty states and the
+version actions are disabled. Every request that carries a version must read this single signal, so
+stats, coverage, and the Systems table can never disagree with each other.
+
 ### 5.3 Requirement-coverage summary row (`ComplianceView.jsx:396-423`)
 
 `padding:16`. When the coverage report has `total_requirements == 0`, render a static block:
@@ -276,9 +316,37 @@ Body: `overflow:auto; flex:1; padding:"14px 18px"`, flex column, `gap:16`.
 Clicking a `cf-policy-link` opens the **policy drawer as an overlay on top of the Compliance view**
 (`ComplianceView.jsx:113,127-135`) — it does **not** navigate to `/deployment-policies`. While the
 policy drawer is open the bundle drawer is not rendered; closing the policy drawer returns to the
-bundle drawer still in `coverage` view with filters intact. `PolicyDrawer` in
-`packages/web-ui/src/views/policies.rs:762` is currently private and must be made reusable
-(e.g. moved to `packages/web-ui/src/components/policy/`) without behavioural change.
+bundle drawer still in `coverage` view with filters intact.
+
+### 5.4a Policy drawer drill-in — data-loading path
+
+Extract the existing private `PolicyDrawer` (`packages/web-ui/src/views/policies.rs:762`) into a
+reusable component (e.g. `packages/web-ui/src/components/policy/`) **without behavioural change**.
+Do not write a second, partial drawer.
+
+The gap the implementer must close is: a coverage row only carries `BundleCoverageMapping.policy_id`,
+but `PolicyDrawer` consumes the richer `PolicyDefinition` model. Require:
+
+```text
+1. Move PolicyDrawer (and its sub-components) verbatim into a shared component; keep PoliciesView
+   using it with identical behaviour. Existing policies web-ui checks must stay green.
+
+2. Wire the coverage drill-in through the same policy-loading path PoliciesView already uses:
+   policies_api::load_policies() (packages/web-ui/src/views/policies.rs:47). Do NOT build a
+   separate partial PolicyDefinition construction.
+
+3. Look up the policy by BundleCoverageMapping.policy_id within the loaded library; PolicyDrawer
+   receives the resolved PolicyDefinition.
+
+4. Load the policy library lazily on first Enforced-by click, or once with the page — but never
+   one request per coverage row and never one request per click on the same session.
+
+5. While policy data is loading show the standard loading state used by PoliciesView.
+
+6. If policy_id cannot be resolved in the library, surface an explicit error state (with a close
+   affordance) rather than silently rendering an empty drawer. The bundle drawer must still be
+   restored intact when the policy drawer closes.
+```
 
 ### 5.5 Systems drilldown (`ComplianceView.jsx:534-620`)
 
@@ -387,6 +455,22 @@ Semantics must match the existing rollup so the drawer and the table never disag
   version; `None` when no system applies or no control is evaluated (rendered as `—`).
 - Computed set-based in the existing list query. It must not become one query per bundle.
 
+**Do not independently reimplement the compliance scoring formula in a new SQL expression if the
+existing implementation can be reused.** Fetch the bundle/system/policy inputs set-wise, group them
+in Rust, and reuse the existing rollup/totals functions where possible. "Set-based" means *no
+per-bundle database query*; it does **not** require duplicating the evaluation semantics in SQL.
+
+Required tests (server/API level):
+
+```text
+no applicable systems           → applicable_system_count 0, aggregate_score None
+applicable but none evaluated   → count N, aggregate_score None
+all pass                        → aggregate_score 100
+mixed pass/warn/fail/waiver     → equals systems-endpoint totals for the same version
+published + draft versions      → published is selected
+draft only                      → draft version is selected
+```
+
 Mirror the fields in `packages/web-ui/src/api/models.rs`.
 
 ### (b) `policy_id` on coverage mappings
@@ -434,20 +518,88 @@ The mock stores the whole parsed benchmark in `localStorage`. In production the 
 comes from `POST /api/v1/compliance/xccdf/preview` and can be large, and `localStorage` is limited
 (~5 MB) and browser-local.
 
+#### 8.3.1 TASK-418 preservation invariant (read before implementing)
+
+**Do not replace the production STIG/XCCDF state machine with the simpler design-example state
+machine.** The design commit is authoritative for *appearance and pause/resume interaction only*.
+All reconciliation states, decisions, request models, rule actions, mapping semantics, and commit
+behaviour delivered by TASK-418 (MR !315) must remain intact. Pause/resume must **wrap the
+post-TASK-418 production workflow**, not re-implement it.
+
+The post-!315 production `ImportStigModal` state machine is:
+
+```text
+upload → native-review → review → reconcile → refine → final-review → committing → done
+```
+
+- `native-review` is the CF-native benchmark review (post-XCCDF parse).
+- `reconcile` contains the normalized requirement/reuse workflow: native controls vs. reusable
+  policies, shared-implementation reconciliation, reviewed-related decisions.
+- `final-review` is the summary before commit.
+
+A design-copy could "look right" while deleting `native-review`/`reconcile`/`final-review`
+semantics. Verify the resumed flow still exercises every one of these states and preserves the
+decisions/request shapes TASK-418 introduced. See also `packages/web-ui/src/views/compliance.rs`
+on the TASK-418 branch (step values `"upload" | "native-review" | "review" | "reconcile" |
+"refine" | "final-review" | "committing" | "done"`).
+
+#### 8.3.2 Draft persistence — schema, size guard, and the raw-file problem
+
 Required production behaviour:
 
 - Use a browser-compatible storage API (`web_sys` local storage — see existing usage in
   `packages/web-ui/src/views/systems_list.rs` and `components/widget_grid.rs`). Do not assume any
   native/`std` filesystem behaviour.
-- Persist a **size-guarded** draft. If the serialized draft exceeds the guard, persist wizard
-  metadata only (step, file name, bundle name, environments, cursor, selected/refined control
-  identity) and omit the parsed payload.
-- If the parsed payload is not restorable on resume, reopen at the `upload` step with the previously
-  entered bundle name and environments preserved and an explicit prompt to re-select the benchmark
-  file. Never silently drop the operator's work and never resume into a step whose data is missing.
+- **Never persist raw uploaded benchmark bytes in `localStorage`.** After a page reload the
+  original file bytes are gone (they live only in the in-memory `file_bytes` signal, and the
+  commit path `import_xccdf(&bytes, &filename, &plan)` needs them).
+- Persist a **versioned, size-guarded** object under `cf-stig-import-draft` with at least:
+
+  ```text
+  version: 1                                  ← schema version; bump on wizard shape changes
+  step                                      ← current state-machine step
+  original_filename
+  expected_sha256                           ← verified against the parsed preview bytes
+  bundle_name, environments
+  refine cursor position, selected/refined control identity
+  parsed preview payload                    ← only when it fits the guard
+  ```
+
+  Size guard (deterministic, do not invent a different one):
+
+  ```text
+  MAX_STIG_IMPORT_DRAFT_BYTES = 2 * 1024 * 1024   (2 MiB)
+  ```
+
+  If the serialized draft exceeds the guard, persist wizard **metadata only** (step, file name,
+  bundle name, environments, cursor, selected/refined control identity) and omit the parsed
+  payload.
+
+- **Source-file re-attachment before commit (the raw-file problem).** Because the original bytes
+  are never persisted, a resumed workflow that reaches a commit-capable state must:
+
+  ```text
+  1. Require the operator to re-select the source benchmark file before commit is allowed.
+  2. Run the persisted expected SHA-256 against the re-selected file's parsed preview bytes.
+  3. Reject a different artifact (mismatching SHA/summary) with a clear error; never commit it.
+  4. Then restore the saved workflow state (decisions, refinement, selections) on top of the
+     re-attached artifact.
+  ```
+
+  The UI **may** display the restored review/reconciliation state from the saved preview *before*
+  re-selection, but the final import action (the button that would call `import_xccdf`/commit)
+  must remain **disabled** until the matching source artifact has been reattached.
+
+- If the parsed payload is not restorable on resume (oversize/omitted/corrupt), reopen at the
+  `upload` step with the previously entered bundle name and environments preserved and an explicit
+  prompt to re-select the benchmark file; if commit would be needed, also require SHA re-verification
+  as above. Never silently drop the operator's work and never resume into a step whose data is
+  missing.
 - Never persist credentials, session tokens, signed URLs or any authorization header material in the
   draft.
-- Corrupt or unparsable draft data must be treated as "no draft" rather than causing a panic.
+- Corrupt or unparsable draft data (wrong `version`, missing fields, bad JSON) must be treated as
+  "no draft" rather than causing a panic; a later wizard change must not break deserialization of
+  stale browser state (hence the `version` field).
 
 ---
 
@@ -543,7 +695,76 @@ Checks a reviewer should make:
 
 ---
 
-## 10. Verification
+## 10. Required implementation sequence
+
+Implement in this order; each phase ends at a STOP point with a commit and its own verification
+before starting the next phase. Do not reorder phases to "get the design visible early" — the
+server contract and the reusable drawer must exist first.
+
+**Phase 0 — prerequisite/baseline (no code changes)**
+- Verify MR !315 is merged into `dev`.
+- Branch from updated `dev`.
+- Run the existing compliance browser steps (29…29e) to confirm the pre-change baseline.
+- Refresh/reference the captured design screenshots `cb-1.png` … `cb-7.png` (§9.3).
+- Do not change code yet.
+
+**Phase 1 — additive server contract**
+- `aggregate_score` + `applicable_system_count` on the bundle list (§7a), reusing the existing
+  rollup functions with the required tests.
+- `BundleCoverageMapping.policy_id` (§7b).
+- Regenerate SQLx offline metadata if query shapes change.
+- Server/API tests green; `nix build .#server` passes.
+
+> STOP: commit + verify.
+
+**Phase 2 — reusable PolicyDrawer + single version signal (no visual redesign)**
+- Extract `PolicyDrawer` into a shared component without behavioural change (§5.4a); existing
+  Policies web-ui checks must remain green.
+- Rename `selected_export_version_id` → `selected_bundle_version_id` and establish it as the single
+  source of truth (§5.2a).
+- Do not touch the bundle table/drawer layout yet.
+
+> STOP: commit + verify (touches existing surfaces; confirm no visual regressions).
+
+**Phase 3 — bundle table + drawer overview**
+- Full-width table, framework chips (deterministic order), search, empty state (§4).
+- Drawer shell/header (§5.1), overview body (§5.2): BundleHeader (card-less), stat-strip-flush,
+  revisions disclosure, relocated XCCDF selector/version actions/assignment panel.
+- Systems drilldown dense layout (§5.5).
+- Browser steps + dark/light screenshots.
+
+> STOP: commit + screenshots + browser checks.
+
+**Phase 4 — requirement coverage**
+- Exact-version coverage fetch with a generation guard (§5.3, §5.4).
+- Segmented filter, search, ancestor grouping.
+- Enforced-by policy drawer overlay + coverage-state restoration (§5.4a).
+
+> STOP: commit + dark/light screenshots.
+
+**Phase 5 — STIG pause/resume**
+- Versioned draft schema (`version: 1`), `MAX_STIG_IMPORT_DRAFT_BYTES = 2 MiB` size guard,
+  no raw bytes persisted (§8.3.2).
+- Preserve the post-TASK-418 state machine (§8.3.1); pause/resume wraps it.
+- Source-file re-attachment + SHA-256 verification before commit; disable the commit action until
+  the matching artifact is reattached.
+- Paused-import callout + `Resume STIG import…` menu label (§8.2).
+- Corrupt/oversize/missing-payload paths.
+
+> STOP: commit + focused browser proof.
+
+**Phase 6 — final visual/acceptance pass**
+- CSS parity pass (§6) in both themes.
+- Update steps 29…29e and add focused NixOS check (`checks/web-ui-reconciliation` pattern).
+- 13-state dark/light walkthrough (§9.4) with screenshots; network assertion that the Score column
+  is served by a single bundle-list request.
+- Full builds and checks (§11 "Verification" below).
+
+> STOP: open MR, record reviewer results.
+
+---
+
+## 11. Verification
 
 - `nix build .#web-ui -L`
 - `nix build .#server --no-link` (only if server code changed)
@@ -563,7 +784,7 @@ Checks a reviewer should make:
 
 ---
 
-## 11. Out of scope
+## 12. Out of scope
 
 - Changing the normalized framework/requirement/mapping model or its mapping CRUD semantics
   (owned by TASK-418 / MR !315).
