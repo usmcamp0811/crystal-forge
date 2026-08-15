@@ -221,6 +221,9 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
             tx.commit().await?;
             continue;
         }
+        let requires_stig_reconstruction = publisher
+            .as_deref()
+            .is_some_and(|publisher| publisher.eq_ignore_ascii_case("DISA"));
         let mut parsed_stig = None;
         if let Some(source_artifact_id) = source_artifact_id {
             let source: Option<(Vec<u8>, String)> = sqlx::query_as(
@@ -232,14 +235,28 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
             if let Some((content, filename)) = source {
                 match process_xccdf_bytes(content, Some(filename), &InterchangeLimits::default()) {
                     Ok(package) => {
-                        if is_disa_stig(&package.parsed)
-                            && identify_framework(&package.parsed).is_some()
-                        {
+                        if is_disa_stig(&package.parsed) {
+                            let source_identity = identify_framework(&package.parsed).ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "cannot identify legacy DISA framework source artifact for {id}"
+                                )
+                            })?;
+                            if source_identity.canonical_source_key != source_key
+                                || source_identity.canonical_release_key != release_key
+                            {
+                                bail!(
+                                    "legacy DISA framework source artifact identity does not match framework version {id}"
+                                );
+                            }
                             persist_legacy_stig_topology(&mut tx, id, &package.parsed).await?;
                             parsed_stig = Some(package.parsed);
+                        } else if requires_stig_reconstruction {
+                            bail!(
+                                "legacy DISA framework source artifact for {id} is not a DISA STIG"
+                            );
                         }
                     }
-                    Err(error) if source_key.starts_with("disa-") => {
+                    Err(error) if requires_stig_reconstruction => {
                         bail!(
                             "cannot parse legacy DISA framework source artifact for {id}: {error:?}"
                         );
@@ -248,7 +265,7 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
                 }
             }
         }
-        if parsed_stig.is_none() && source_key.starts_with("disa-") {
+        if parsed_stig.is_none() && requires_stig_reconstruction {
             bail!("cannot finalize legacy DISA framework version {id} without its source artifact");
         }
 
@@ -309,6 +326,7 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
             }
         }
         let (requirements, hierarchy_edges) = if let Some(parsed) = parsed_stig {
+            verify_legacy_stig_topology(&mut tx, id, &parsed).await?;
             let canonical = canonical_framework_requirements_for_framework(&parsed);
             (
                 requirement_semantic_digests(&canonical),
@@ -362,7 +380,7 @@ async fn persist_legacy_stig_topology(
     parsed: &super::xccdf::models::ParsedXccdf,
 ) -> Result<()> {
     use crate::queries::framework_requirements::{
-        insert_requirement_version, upsert_requirement_lineage,
+        insert_requirement_version_pending, upsert_requirement_lineage,
     };
 
     let framework_id = framework_id(tx, framework_version_id).await?;
@@ -399,8 +417,14 @@ async fn persist_legacy_stig_topology(
             .await?;
             version_id
         } else {
-            insert_requirement_version(tx, requirement_id, framework_version_id, &canonical, None)
-                .await?
+            insert_requirement_version_pending(
+                tx,
+                requirement_id,
+                framework_version_id,
+                &canonical,
+                None,
+            )
+            .await?
         };
         group_versions.insert(group.id.clone(), version_id);
     }
@@ -412,7 +436,7 @@ async fn persist_legacy_stig_topology(
             .and_then(|id| group_versions.get(id))
             .copied();
         let canonical = canonical_for_rule(rule, &key);
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE compliance_requirement_versions rv
              SET external_id = $1, title = $2, description = $3, kind = $4,
                  severity = $5, check_text = $6, fix_text = $7, metadata = $8,
@@ -435,6 +459,60 @@ async fn persist_legacy_stig_topology(
         .bind(&key)
         .execute(&mut **tx)
         .await?;
+        if updated.rows_affected() == 0 {
+            let requirement_id = upsert_requirement_lineage(tx, framework_id, &key).await?;
+            insert_requirement_version_pending(
+                tx,
+                requirement_id,
+                framework_version_id,
+                &canonical,
+                parent_id,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn verify_legacy_stig_topology(
+    tx: &mut Transaction<'_, Postgres>,
+    framework_version_id: Uuid,
+    parsed: &super::xccdf::models::ParsedXccdf,
+) -> Result<()> {
+    let expected_nodes: BTreeSet<String> = canonical_framework_requirements_for_framework(parsed)
+        .into_iter()
+        .map(|canonical| canonical.canonical_requirement_key)
+        .collect();
+    let persisted_nodes: BTreeSet<String> = sqlx::query_scalar(
+        "SELECT r.canonical_requirement_key
+         FROM compliance_requirement_versions rv
+         JOIN compliance_requirements r ON r.id = rv.requirement_id
+         WHERE rv.framework_version_id = $1",
+    )
+    .bind(framework_version_id)
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .collect();
+    let expected_edges: BTreeSet<String> =
+        hierarchy_edges_for_framework(parsed).into_iter().collect();
+    let persisted_edges: BTreeSet<String> = sqlx::query_scalar(
+        "SELECT parent_req.canonical_requirement_key || '->' || child_req.canonical_requirement_key
+         FROM compliance_requirement_versions child
+         JOIN compliance_requirements child_req ON child_req.id = child.requirement_id
+         JOIN compliance_requirement_versions parent ON parent.id = child.parent_requirement_version_id
+         JOIN compliance_requirements parent_req ON parent_req.id = parent.requirement_id
+         WHERE child.framework_version_id = $1",
+    )
+    .bind(framework_version_id)
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .collect();
+    if persisted_nodes != expected_nodes || persisted_edges != expected_edges {
+        bail!(
+            "legacy DISA topology reconstruction did not match parsed source for framework version {framework_version_id}"
+        );
     }
     Ok(())
 }
@@ -495,13 +573,19 @@ mod tests {
         )
         .unwrap();
         assert!(is_disa_stig(&package.parsed));
-        assert!(identify_framework(&package.parsed).is_some());
+        let identity = identify_framework(&package.parsed).unwrap();
 
         let mut tx = pool.begin().await.unwrap();
         let framework_id =
-            upsert_framework_lineage(&mut tx, "Legacy STIG", Some("DISA"), &key, None)
-                .await
-                .unwrap();
+            upsert_framework_lineage(
+                &mut tx,
+                "Legacy STIG",
+                Some("DISA"),
+                &identity.canonical_source_key,
+                None,
+            )
+            .await
+            .unwrap();
         let artifact_id: Uuid = sqlx::query_scalar(
             "INSERT INTO compliance_source_artifacts
                 (content, filename, media_type, sha256, parser_version)
@@ -516,10 +600,12 @@ mod tests {
             "INSERT INTO compliance_framework_versions
                 (framework_id, version, canonical_release_key, title,
                  source_artifact_id, semantic_digest, canonicalization_version)
-             VALUES ($1, 'V1R1', 'V1R1', 'Legacy STIG', $2, 'pending', 'cf-model-json-4')
-             RETURNING id",
+              VALUES ($1, $2, $3, 'Legacy STIG', $4, 'pending', 'cf-model-json-4')
+              RETURNING id",
         )
         .bind(framework_id)
+        .bind(&identity.version)
+        .bind(&identity.canonical_release_key)
         .bind(artifact_id)
         .fetch_one(&mut *tx)
         .await
