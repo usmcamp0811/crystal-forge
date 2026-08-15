@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 18:51'
+updated_date: '2026-08-15 19:10'
 labels: []
 milestone: m-22
 dependencies:
@@ -236,6 +236,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15 review found concurrent startup backfill race, vacuous legacy-backfill test, DISA external_id incorrectly using canonical V-ID, and production STIG hierarchy not persisted. These are now the active remediation scope.
 
 2026-08-15 v4 checkpoint committed/pushed as 8b7e445e. Framework canonicalization now includes complete group/rule content plus hierarchy edges; migration 0220 reopens cf-model-json-3 rows and permits pending requirement content reconstruction while the parent framework remains pending. Startup backfill reconstructs legacy DISA topology from persisted source artifacts, preserves XCCDF Rule external IDs, and uses the same complete requirement set for framework identity. Verification: cargo fmt --all --check, SQLX_OFFLINE=true cargo check -p cf-server, and git diff --check passed. Isolated DB legacy topology test passed after correcting the fixture to use XCCDF <version> element. The broader framework_requirements DB filter had 8/11 passing; 3 failures were RowNotFound because the isolated database lacked seeded users after an attempted reset. Untracked packages/web-ui/assets/tailwind.css was intentionally not staged.
+
+2026-08-15 hardening checkpoint committed/pushed as 537668d9. v4 backfill now classifies legacy DISA state by persisted publisher, rejects missing/unparseable/non-DISA artifacts, verifies parsed source/release identity before mutation, reconstructs absent rule versions, and verifies persisted node/edge topology before finalizing. Added 0221 to narrow 0220's pending-framework exception so structural identity fields remain immutable. Updated the topology DB test to use identify_framework()-derived key/release; it passed. cargo fmt, SQLX_OFFLINE cargo check, git diff check, nix build .#server, and nix build .#web-ui passed. nix flake check --keep-going exceeded the 10-minute execution limit while building VM checks, so no final flake-check result. Negative DB tests and properly seeded 11/11 framework suite remain outstanding; the current isolated database is unseeded after the prior reset attempt. tailwind.css remains intentionally untracked.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
