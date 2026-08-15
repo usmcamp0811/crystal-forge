@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 02:25'
+updated_date: '2026-08-15 02:33'
 labels: []
 milestone: m-22
 dependencies:
@@ -479,6 +479,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15 browser coverage slice added as 20ab-compliance-bundle-requirement-baseline-roundtrip. It exercises requirement-only creation, reload/policy independence, mixed edit, complete update payloads, release switching with clearing, release-scoped search, requirement edit preserving policies, and empty-baseline blocking. Added v2 normalized fixture release and exposed normalized framework names in bundle framework selection. Static checks and web-ui build pass. Browser verification is incomplete: the authoritative web-ui VM check exceeded the 20-minute command timeout before a final result; local focused run was blocked because run-ui-dev --dev invokes a missing `crystal-forge-server` binary from the `server` flake output. No commit made because browser proof is not green.
 
 2026-08-15 checkpoint committed and pushed as 14f8d962 (feat(web-ui): add bundle requirement baseline editing). Includes 20ab browser coverage, v2 release fixture, Nix-compatible Playwright executable override, and load-time override. Static checks, web-ui cargo check, and nix build .#web-ui pass. Focused local browser execution reached the new test but remains blocked at the cross-origin bundle POST in the local Dioxus/API setup; the authoritative VM check was previously timeout-limited. Branch is pushed for review.
+
+2026-08-15 follow-up committed/pushed as e8c0765c (test(web-ui): harden bundle baseline browser coverage). Added Nix Chromium executable support, configurable load timeout, cross-origin local forwarding, and request-context cookie handling to the focused browser harness. Static checks pass. Local focused browser now reaches the real create API but receives HTTP 403 because the standalone Playwright request context does not inherit the authenticated session; authoritative VM execution remains the required browser proof.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
