@@ -204,6 +204,8 @@ pub async fn list_framework_mapped_policy_versions(
         JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id
         WHERE fv.framework_id = $1
           AND m.trust_state = 'trusted'
+          AND fv.semantic_digest <> 'pending'
+          AND fv.migration_recovery_status = 'finalized'
         ORDER BY m.policy_version_id
         "#,
     )
@@ -404,6 +406,23 @@ pub async fn create_policy_mapping(
             policy_version_id
         ),
         _ => {}
+    }
+    let requirement_is_usable: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM compliance_requirement_versions rv
+             JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id
+             WHERE rv.id = $1
+               AND fv.semantic_digest <> 'pending'
+               AND fv.migration_recovery_status = 'finalized'
+         )",
+    )
+    .bind(requirement_version_id)
+    .fetch_one(pool)
+    .await?;
+    if !requirement_is_usable {
+        bail!(
+            "FRAMEWORK_RELEASE_RECOVERY_REQUIRED: requirement version {requirement_version_id} is not trusted"
+        );
     }
 
     let mut tx = pool
