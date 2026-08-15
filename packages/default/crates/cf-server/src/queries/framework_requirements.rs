@@ -562,6 +562,7 @@ pub async fn compute_bundle_requirement_coverage(
     bundle_version_id: Uuid,
 ) -> Result<BundleCoverageReport> {
     // Single query: join bundle requirements → bundle policies → mappings.
+    #[derive(sqlx::FromRow)]
     struct RawRow {
         requirement_version_id: Uuid,
         external_id: String,
@@ -573,15 +574,22 @@ pub async fn compute_bundle_requirement_coverage(
         mapped_policy_version_ids: Vec<Uuid>,
     }
 
-    // We need a macro-compatible query.  Use query! with anonymous struct.
-    let rows = sqlx::query!(
+    let rows = sqlx::query_as::<_, RawRow>(
         r#"
         WITH bundle_reqs AS (
-            -- All selected requirements in the bundle version
+            -- Selected requirements from finalized framework releases only.
+            -- Historical unresolved rows remain visible elsewhere, but cannot
+            -- act as authoritative bundle-baseline evidence.
             SELECT bvr.requirement_version_id
             FROM compliance_bundle_version_requirements bvr
+            JOIN compliance_requirement_versions rv
+              ON rv.id = bvr.requirement_version_id
+            JOIN compliance_framework_versions fv
+              ON fv.id = rv.framework_version_id
             WHERE bvr.bundle_version_id = $1
               AND bvr.selected = true
+              AND fv.semantic_digest <> 'pending'
+              AND fv.migration_recovery_status = 'finalized'
         ),
         bundle_policies AS (
             -- All policy version IDs in the bundle
@@ -603,32 +611,32 @@ pub async fn compute_bundle_requirement_coverage(
               AND m.policy_version_id      IN (SELECT policy_version_id       FROM bundle_policies)
         )
         SELECT
-            rv.id              AS "requirement_version_id!",
-            rv.external_id     AS "external_id!",
+            rv.id              AS requirement_version_id,
+            rv.external_id     AS external_id,
             rv.title,
-            rv.kind            AS "kind!",
+            rv.kind            AS kind,
             rv.parent_requirement_version_id,
             COALESCE(
                 BOOL_OR(
                     am.relationship = 'implements' AND am.coverage = 'full'
                 ), false
-            )                  AS "has_full_coverage!: bool",
+            )                  AS has_full_coverage,
             COALESCE(
                 BOOL_OR(am.requirement_version_id IS NOT NULL),
                 false
-            )                  AS "has_partial_coverage!: bool",
+            )                  AS has_partial_coverage,
             COALESCE(
                 ARRAY_AGG(am.policy_version_id) FILTER (WHERE am.policy_version_id IS NOT NULL),
                 ARRAY[]::uuid[]
-            )                  AS "mapped_policy_version_ids!: Vec<Uuid>"
+            )                  AS mapped_policy_version_ids
         FROM bundle_reqs br
         JOIN compliance_requirement_versions rv ON rv.id = br.requirement_version_id
         LEFT JOIN applicable_mappings am ON am.requirement_version_id = br.requirement_version_id
         GROUP BY rv.id, rv.external_id, rv.title, rv.kind, rv.parent_requirement_version_id
         ORDER BY rv.external_id
         "#,
-        bundle_version_id
     )
+    .bind(bundle_version_id)
     .fetch_all(pool)
     .await
     .context("failed to compute bundle requirement coverage")?;
@@ -690,12 +698,23 @@ pub async fn compute_bundle_requirement_coverage(
          AND bvp.bundle_version_id = $1
          AND bvp.selected = true
         JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id
+        JOIN compliance_requirement_versions rv ON rv.id = m.requirement_version_id
+        JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id
         WHERE m.trust_state = 'trusted'
+          AND fv.semantic_digest <> 'pending'
+          AND fv.migration_recovery_status = 'finalized'
           AND m.requirement_version_id IN (
-              SELECT requirement_version_id
-              FROM compliance_bundle_version_requirements
-              WHERE bundle_version_id = $1 AND selected = true
-          )
+               SELECT requirement_version_id
+               FROM compliance_bundle_version_requirements bvr
+               JOIN compliance_requirement_versions baseline_rv
+                 ON baseline_rv.id = bvr.requirement_version_id
+               JOIN compliance_framework_versions baseline_fv
+                 ON baseline_fv.id = baseline_rv.framework_version_id
+               WHERE bvr.bundle_version_id = $1
+                 AND bvr.selected = true
+                 AND baseline_fv.semantic_digest <> 'pending'
+                 AND baseline_fv.migration_recovery_status = 'finalized'
+           )
         ORDER BY m.requirement_version_id, pv.name, m.relationship
         "#,
     )
@@ -1051,8 +1070,12 @@ pub async fn find_policy_candidates(
             FROM policy_requirement_mappings m
             JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id
             JOIN deployment_policies dp ON dp.id = pv.policy_id
+            JOIN compliance_requirement_versions rv ON rv.id = m.requirement_version_id
+            JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id
             WHERE m.requirement_version_id = $1
               AND m.trust_state = 'trusted'
+              AND fv.semantic_digest <> 'pending'
+              AND fv.migration_recovery_status = 'finalized'
               AND pv.publication_state = 'accepted'
               AND dp.current_published_version_id = pv.id
             ORDER BY pv.name
@@ -1090,8 +1113,12 @@ pub async fn find_policy_candidates(
             FROM policy_requirement_mappings m
             JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id
             JOIN deployment_policies dp ON dp.id = pv.policy_id
+            JOIN compliance_requirement_versions rv ON rv.id = m.requirement_version_id
+            JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id
             WHERE m.requirement_version_id = $1
               AND m.trust_state = 'trusted'
+              AND fv.semantic_digest <> 'pending'
+              AND fv.migration_recovery_status = 'finalized'
               AND pv.publication_state = 'accepted'
               AND dp.current_published_version_id = pv.id
             ORDER BY pv.name
@@ -1184,9 +1211,12 @@ pub async fn find_policy_candidates(
                 JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id
                 JOIN deployment_policies dp ON dp.id = pv.policy_id
                 JOIN compliance_requirement_versions rv ON rv.id = m.requirement_version_id
+                JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id
                 JOIN compliance_requirements r ON r.id = rv.requirement_id
                 JOIN compliance_frameworks f ON f.id = r.framework_id
                 WHERE m.trust_state = 'trusted'
+                  AND fv.semantic_digest <> 'pending'
+                  AND fv.migration_recovery_status = 'finalized'
                   AND pv.publication_state = 'accepted'
                   AND dp.current_published_version_id = pv.id
                   AND ($1::uuid IS NULL OR f.id <> $1)
