@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 00:50'
+updated_date: '2026-08-15 00:59'
 labels: []
 milestone: m-22
 dependencies:
@@ -473,6 +473,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-14 manual bundle requirement baseline server slice implemented in the dedicated worktree from 06b1392e. Added serde-default requirement_version_ids to create/update requests; requirement-only baselines are accepted while completely empty requests retain PolicyRequired validation; exact duplicate/missing requirement IDs are rejected transactionally; requirement membership is written in request order and refreshed via requirement_digest without changing semantic_digest; derived bundle drafts copy and refresh requirement membership; added version-scoped requirement membership query/API; preserved policy membership tables. Added unit validation and ignored DB lifecycle coverage. Verified isolated DB 3042: exact_technical_match_end_to_end 3/3, phase_22 8/8, reviewed_related_stig 2/2, requirement_baseline_lifecycle 1/1. cargo fmt check, git diff check, SQLX_OFFLINE cargo check, and focused validation unit test passed. nix build .#server --no-link was attempted twice and exceeded tool timeouts; no commit or push made. Worktree remains modified and HEAD remains 06b1392e.
 
 2026-08-14 continuation: server baseline API and lifecycle are committed at 209fb0f3/309664b2. Starting the minimal Dioxus bundle baseline selector on the dedicated TASK-418 worktree. Keep policy picker unchanged; use normalized framework/version/search APIs and send exact requirement_version_ids for create/update.
+
+2026-08-15 bundle baseline UI slice implemented in the dedicated worktree: create/edit request models now send requirement_version_ids; new framework-release/search picker selects exact normalized requirement versions independently from policies; edit loads existing draft requirement membership; zero-policy requirement-only bundles are allowed while empty requests remain blocked. Verified web-ui cargo check, server cargo check, cargo fmt --manifest-path packages/default/Cargo.toml --all -- --check, git diff --check, and nix build .#web-ui (171 tests passed, 1 ignored). Changes remain uncommitted by instruction. Focused browser proof for create/edit baseline persistence is still pending.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
