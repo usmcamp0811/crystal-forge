@@ -2160,14 +2160,6 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                  bench_ver.set(bm_ver);
                                                                  file_name.set(fname.clone());
                                                                  file_bytes.set(bytes_vec);
-                                                                   let shared_group_count = resp
-                                                                       .foreign_stig_reconciliation
-                                                                       .as_ref()
-                                                                       .map(|reconciliation| reconciliation.shared_implementation_groups.len())
-                                                                       .unwrap_or(0);
-                                                                   web_sys::console::log_1(
-                                                                       &format!("20ac deserialized shared groups: {shared_group_count}").into(),
-                                                                   );
                                                                    let foreign_reconciliation = resp.foreign_stig_reconciliation.clone();
                                                                   preview_response.set(Some(resp));
                                                                  previewing.set(false);
