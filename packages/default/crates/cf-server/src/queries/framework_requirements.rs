@@ -24,7 +24,8 @@ use uuid::Uuid;
 
 use crate::compliance::digest::{refresh_bundle_requirement_digest, refresh_policy_mapping_digest};
 use crate::compliance::framework_model::{
-    FrameworkVersionCanonical, write_framework_version_digest_with_requirement_digests,
+    FrameworkVersionCanonical, requirement_semantic_digests,
+    write_framework_version_digest_with_requirement_digests,
 };
 use crate::compliance::requirement_model::{
     FrameworkReconciliation, FrameworkReconciliationState, PolicyCandidate,
@@ -723,6 +724,7 @@ pub async fn preview_framework_reconciliation(
     pool: &PgPool,
     identity: &DisaStigFrameworkIdentity,
     source_sha256: &str,
+    proposed_requirements: &[RequirementVersionCanonical],
 ) -> Result<FrameworkReconciliation> {
     // 1. Check for exact artifact reuse.
     let artifact_exists: Option<Uuid> =
@@ -808,7 +810,9 @@ pub async fn preview_framework_reconciliation(
                 publisher: Some(identity.publisher.clone()),
                 title: identity.title.clone(),
             }
-            .compute_digest();
+            .compute_digest_with_requirement_digests(&requirement_semantic_digests(
+                proposed_requirements,
+            ));
             Ok(FrameworkReconciliation {
                 state: if existing_digest == proposed_digest {
                     FrameworkReconciliationState::ExistingRelease
@@ -1408,6 +1412,37 @@ pub async fn insert_requirement_version(
     canonical: &RequirementVersionCanonical,
     parent_requirement_version_id: Option<Uuid>,
 ) -> Result<Uuid> {
+    let id = insert_requirement_version_pending(
+        tx,
+        requirement_id,
+        framework_version_id,
+        canonical,
+        parent_requirement_version_id,
+    )
+    .await?;
+    let pending: bool = sqlx::query_scalar(
+        "SELECT semantic_digest = 'pending' FROM compliance_requirement_versions WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if pending {
+        write_requirement_version_digest(tx, id, canonical)
+            .await
+            .context("failed to write requirement version digest")?;
+    }
+    Ok(id)
+}
+
+/// Insert a requirement version while leaving its semantic digest pending so
+/// callers can complete hierarchy links before finalization.
+pub async fn insert_requirement_version_pending(
+    tx: &mut Transaction<'_, Postgres>,
+    requirement_id: Uuid,
+    framework_version_id: Uuid,
+    canonical: &RequirementVersionCanonical,
+    parent_requirement_version_id: Option<Uuid>,
+) -> Result<Uuid> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!(
             "compliance-requirement-version:{requirement_id}:{framework_version_id}"
@@ -1465,10 +1500,6 @@ pub async fn insert_requirement_version(
     .fetch_one(&mut **tx)
     .await
     .context("failed to insert requirement version")?;
-
-    write_requirement_version_digest(tx, id, canonical)
-        .await
-        .context("failed to write requirement version digest")?;
 
     Ok(id)
 }
@@ -1661,36 +1692,82 @@ pub mod tests {
             publisher: Some("DISA".to_string()),
             title: Some("Preview framework".to_string()),
         };
+        let requirement = RequirementVersionCanonical {
+            canonical_requirement_key: "V-TEST".to_string(),
+            external_id: "V-TEST".to_string(),
+            title: Some("Test requirement".to_string()),
+            description: None,
+            kind: "rule".to_string(),
+            severity: None,
+            check_text: None,
+            fix_text: None,
+            metadata: serde_json::json!({}),
+        };
 
         let mut tx = pool.begin().await.unwrap();
         let framework_id = upsert_framework_lineage(&mut tx, "Preview framework", None, &key, None)
             .await
             .unwrap();
-        let version_id = insert_framework_version(&mut tx, framework_id, &canonical, None, None)
+        let version_id = insert_framework_version_with_requirement_digests(
+            &mut tx,
+            framework_id,
+            &canonical,
+            None,
+            None,
+            &[requirement.compute_digest()],
+        )
+        .await
+        .unwrap();
+        let requirement_id = upsert_requirement_lineage(&mut tx, framework_id, "V-TEST")
+            .await
+            .unwrap();
+        insert_requirement_version(&mut tx, requirement_id, version_id, &requirement, None)
             .await
             .unwrap();
         tx.commit().await.unwrap();
 
-        let preview =
-            preview_framework_reconciliation(&pool, &identity, &Uuid::new_v4().to_string())
-                .await
-                .unwrap();
+        let preview = preview_framework_reconciliation(
+            &pool,
+            &identity,
+            &Uuid::new_v4().to_string(),
+            std::slice::from_ref(&requirement),
+        )
+        .await
+        .unwrap();
         assert_eq!(preview.state, FrameworkReconciliationState::ExistingRelease);
         assert_eq!(preview.existing_framework_version_id, Some(version_id));
 
         let conflicting_identity = DisaStigFrameworkIdentity {
             title: Some("Different content".to_string()),
-            ..identity
+            ..identity.clone()
         };
         let conflicting_preview = preview_framework_reconciliation(
             &pool,
             &conflicting_identity,
             &Uuid::new_v4().to_string(),
+            std::slice::from_ref(&requirement),
         )
         .await
         .unwrap();
         assert_eq!(
             conflicting_preview.state,
+            FrameworkReconciliationState::ReleaseConflict
+        );
+
+        let changed_requirement = RequirementVersionCanonical {
+            title: Some("Changed requirement".to_string()),
+            ..requirement
+        };
+        let changed_preview = preview_framework_reconciliation(
+            &pool,
+            &identity,
+            &Uuid::new_v4().to_string(),
+            std::slice::from_ref(&changed_requirement),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            changed_preview.state,
             FrameworkReconciliationState::ReleaseConflict
         );
     }
@@ -1814,6 +1891,43 @@ pub mod tests {
             err.unwrap_err()
                 .to_string()
                 .contains("REQUIREMENT_VERSION_CONFLICT")
+        );
+
+        let mut tx4 = pool.begin().await.unwrap();
+        let parent_lineage = upsert_requirement_lineage(&mut tx4, framework_id, "V-parent")
+            .await
+            .unwrap();
+        let parent_id = insert_requirement_version(
+            &mut tx4,
+            parent_lineage,
+            framework_version_id,
+            &RequirementVersionCanonical {
+                canonical_requirement_key: "V-parent".to_string(),
+                external_id: "V-parent".to_string(),
+                title: None,
+                description: None,
+                kind: "group".to_string(),
+                severity: None,
+                check_text: None,
+                fix_text: None,
+                metadata: serde_json::json!({}),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        tx4.commit().await.unwrap();
+        let reparent = sqlx::query(
+            "UPDATE compliance_requirement_versions
+             SET parent_requirement_version_id = $1 WHERE id = $2",
+        )
+        .bind(parent_id)
+        .bind(first_id)
+        .execute(&pool)
+        .await;
+        assert!(
+            reparent.is_err(),
+            "finalized requirement versions must not reparent"
         );
     }
 

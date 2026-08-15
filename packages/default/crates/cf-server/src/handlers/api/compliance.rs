@@ -27,7 +27,7 @@ use crate::compliance::shared_implementation::{
     SharedImplementationAction, detect_shared_implementations, recommend_action,
 };
 use crate::compliance::xccdf::disa_stig_adapter::{
-    canonical_for_rule, canonical_key_for_rule, identify_framework, is_disa_stig,
+    canonical_requirements_for_framework, identify_framework, is_disa_stig,
 };
 use crate::compliance::xccdf::exact_technical_match::RequirementTechnicalIdentity;
 use crate::compliance::xccdf::export_models::{
@@ -3891,17 +3891,11 @@ async fn compute_foreign_stig_reconciliation(
     let Some(identity) = identify_framework(parsed) else {
         return Ok(None);
     };
-    let framework = preview_framework_reconciliation(pool, &identity, source_sha256)
-        .await
-        .map_err(|error| format!("failed to reconcile framework release: {error}"))?;
-    let proposed_requirements = parsed
-        .rules
-        .iter()
-        .map(|rule| {
-            let canonical_key = canonical_key_for_rule(rule);
-            canonical_for_rule(rule, &canonical_key)
-        })
-        .collect::<Vec<_>>();
+    let proposed_requirements = canonical_requirements_for_framework(parsed);
+    let framework =
+        preview_framework_reconciliation(pool, &identity, source_sha256, &proposed_requirements)
+            .await
+            .map_err(|error| format!("failed to reconcile framework release: {error}"))?;
     let reconciliation = match framework.existing_framework_id {
         Some(framework_id) => preview_requirement_reconciliation(
             pool,

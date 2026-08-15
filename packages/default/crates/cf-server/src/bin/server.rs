@@ -151,6 +151,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Backfill any compliance digest rows set to 'pending' by migrations.
     // This runs once at startup and fails fast if any row cannot be computed.
+    crystal_forge::compliance::framework_model::backfill_pending_framework_version_digests(&pool)
+        .await
+        .context("Failed to backfill framework version semantic digests")?;
     crystal_forge::compliance::digest::backfill_pending_digests(&pool)
         .await
         .context("Failed to backfill compliance semantic digests")?;

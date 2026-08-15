@@ -307,6 +307,22 @@ pub fn canonical_for_rule(
     }
 }
 
+/// Return the complete authoritative requirement set represented by a parsed
+/// DISA framework source. This intentionally does not depend on policy import
+/// decisions or selected implementation records.
+pub fn canonical_requirements_for_framework(
+    parsed: &ParsedXccdf,
+) -> Vec<RequirementVersionCanonical> {
+    parsed
+        .rules
+        .iter()
+        .map(|rule| {
+            let key = canonical_key_for_rule(rule);
+            canonical_for_rule(rule, &key)
+        })
+        .collect()
+}
+
 /// Requirement hierarchy node produced by the adapter for a single rule.
 ///
 /// For DISA STIGs the hierarchy is: Group → Rule.

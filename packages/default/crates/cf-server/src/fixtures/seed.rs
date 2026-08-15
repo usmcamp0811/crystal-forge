@@ -16,9 +16,11 @@ use std::path::Path;
 use uuid::Uuid;
 
 use crate::compliance::framework_model::FrameworkVersionCanonical;
-use crate::compliance::requirement_model::RequirementVersionCanonical;
+use crate::compliance::requirement_model::{
+    RequirementVersionCanonical, write_requirement_version_digest,
+};
 use crate::queries::framework_requirements::{
-    insert_framework_version_with_requirement_digests, insert_requirement_version,
+    insert_framework_version_with_requirement_digests, insert_requirement_version_pending,
     upsert_framework_lineage, upsert_requirement_lineage,
 };
 
@@ -521,6 +523,7 @@ async fn seed_compliance_frameworks(pool: &PgPool, fixtures: &[FixtureCompliance
             .await?;
 
             let mut requirement_versions = HashMap::new();
+            let mut requirement_canonicals = HashMap::new();
             for requirement in &version.requirements {
                 let requirement_id = upsert_requirement_lineage(
                     &mut tx,
@@ -543,7 +546,7 @@ async fn seed_compliance_frameworks(pool: &PgPool, fixtures: &[FixtureCompliance
                         .clone()
                         .unwrap_or_else(|| serde_json::json!({})),
                 };
-                let requirement_version_id = insert_requirement_version(
+                let requirement_version_id = insert_requirement_version_pending(
                     &mut tx,
                     requirement_id,
                     framework_version_id,
@@ -558,6 +561,7 @@ async fn seed_compliance_frameworks(pool: &PgPool, fixtures: &[FixtureCompliance
                     requirement.canonical_requirement_key.clone(),
                     requirement_version_id,
                 );
+                requirement_canonicals.insert(requirement_version_id, canonical);
             }
 
             // Resolve hierarchy after every requirement version has an ID so
@@ -584,6 +588,21 @@ async fn seed_compliance_frameworks(pool: &PgPool, fixtures: &[FixtureCompliance
                 .execute(&mut *tx)
                 .await
                 .context("seed compliance requirement hierarchy")?;
+            }
+            let pending_ids: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM compliance_requirement_versions
+                 WHERE framework_version_id = $1 AND semantic_digest = 'pending'",
+            )
+            .bind(framework_version_id)
+            .fetch_all(&mut *tx)
+            .await
+            .context("list pending seeded requirement digests")?;
+            for requirement_version_id in pending_ids {
+                if let Some(canonical) = requirement_canonicals.get(&requirement_version_id) {
+                    write_requirement_version_digest(&mut tx, requirement_version_id, canonical)
+                        .await
+                        .context("finalize seeded requirement digest")?;
+                }
             }
         }
 

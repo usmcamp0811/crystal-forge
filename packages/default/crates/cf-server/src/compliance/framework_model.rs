@@ -16,11 +16,24 @@
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use sqlx::{Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use super::canonical::semantic_digest;
+use super::requirement_model::RequirementVersionCanonical;
+
+pub const FRAMEWORK_CANONICALIZATION_VERSION: &str = "cf-model-json-2";
+
+pub fn requirement_semantic_digests(requirements: &[RequirementVersionCanonical]) -> Vec<String> {
+    let mut digests: Vec<String> = requirements
+        .iter()
+        .map(RequirementVersionCanonical::compute_digest)
+        .collect();
+    digests.sort();
+    digests.dedup();
+    digests
+}
 
 // ── Canonical DTO ─────────────────────────────────────────────────────────────
 
@@ -42,7 +55,7 @@ pub struct FrameworkVersionCanonical {
 impl FrameworkVersionCanonical {
     pub fn to_digest_value(&self) -> Value {
         json!({
-            "canonicalization_version": "cf-model-json-1",
+            "canonicalization_version": FRAMEWORK_CANONICALIZATION_VERSION,
             "canonical_release_key": self.canonical_release_key,
             "canonical_source_key": self.canonical_source_key,
             "publisher": self.publisher.as_deref().unwrap_or(""),
@@ -97,13 +110,95 @@ where
     let digest = canonical.compute_digest_with_requirement_digests(requirement_digests);
     sqlx::query(
         "UPDATE compliance_framework_versions \
-         SET semantic_digest = $1 \
+         SET semantic_digest = $1, digest_algorithm = 'sha-256', \
+             canonicalization_version = $3 \
          WHERE id = $2",
     )
     .bind(&digest)
     .bind(framework_version_id)
+    .bind(FRAMEWORK_CANONICALIZATION_VERSION)
     .execute(&mut **tx)
     .await
     .context("failed to write framework version semantic digest")?;
     Ok(())
+}
+
+pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result<()> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM compliance_framework_versions WHERE semantic_digest = 'pending'",
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to list pending framework version digests")?;
+
+    for id in ids {
+        let mut tx = pool.begin().await?;
+        let (framework_id, source_key, release_key, version, publisher, title): (
+            Uuid,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT fv.framework_id, f.canonical_source_key, fv.canonical_release_key,
+                    fv.version, f.publisher, fv.title
+             FROM compliance_framework_versions fv
+             JOIN compliance_frameworks f ON f.id = fv.framework_id
+             WHERE fv.id = $1
+             FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let requirements: Vec<String> = sqlx::query_scalar(
+            "SELECT semantic_digest FROM compliance_requirement_versions
+             WHERE framework_version_id = $1 ORDER BY semantic_digest, id",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let canonical = FrameworkVersionCanonical {
+            canonical_source_key: source_key,
+            canonical_release_key: release_key,
+            version,
+            publisher,
+            title,
+        };
+        write_framework_version_digest_with_requirement_digests(
+            &mut tx,
+            id,
+            &canonical,
+            &requirements,
+        )
+        .await?;
+        let _ = framework_id;
+        tx.commit().await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires a database"]
+    async fn framework_digest_backfill_recanonicalizes_pending_rows() {
+        let pool =
+            PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"))
+                .await
+                .unwrap();
+        backfill_pending_framework_version_digests(&pool)
+            .await
+            .unwrap();
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM compliance_framework_versions
+             WHERE semantic_digest = 'pending'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pending, 0);
+    }
 }

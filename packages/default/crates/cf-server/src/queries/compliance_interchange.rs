@@ -34,13 +34,14 @@ use crate::compliance::digest::{
     BundleVersionCanonical, PolicyVersionCanonical, load_bundle_membership,
     refresh_bundle_requirement_digest, write_bundle_version_digest, write_policy_version_digest,
 };
-use crate::compliance::framework_model::FrameworkVersionCanonical;
+use crate::compliance::framework_model::{FrameworkVersionCanonical, requirement_semantic_digests};
 use crate::compliance::shared_implementation::{
     SharedImplementationId, SharedValidationError, ValidatedSharedCreation,
     build_import_policy_resolution_plan,
 };
 use crate::compliance::xccdf::disa_stig_adapter::{
-    canonical_for_rule, canonical_key_for_rule, identify_framework, is_disa_stig,
+    canonical_for_rule, canonical_key_for_rule, canonical_requirements_for_framework,
+    identify_framework, is_disa_stig,
 };
 use crate::compliance::xccdf::exact_technical_match::RequirementTechnicalIdentity;
 use crate::compliance::xccdf::exact_technical_match::{
@@ -642,19 +643,9 @@ pub async fn commit_foreign_import(
         .fetch_optional(&mut *tx)
         .await
         .context("failed to load prior framework release for STIG reconciliation")?;
-        let incoming_requirement_digests: Vec<String> = policy_records
-            .iter()
-            .filter_map(|record| {
-                pkg.parsed
-                    .rules
-                    .iter()
-                    .find(|rule| rule.id == record.source_rule_id)
-                    .map(|rule| {
-                        let key = canonical_key_for_rule(rule);
-                        canonical_for_rule(rule, &key).compute_digest()
-                    })
-            })
-            .collect();
+        let authoritative_requirements = canonical_requirements_for_framework(&pkg.parsed);
+        let incoming_requirement_digests =
+            requirement_semantic_digests(&authoritative_requirements);
         let framework_version_id = insert_framework_version_with_requirement_digests(
             &mut tx,
             framework_id,
@@ -672,18 +663,7 @@ pub async fn commit_foreign_import(
         .await?;
 
         let mut requirement_versions = std::collections::HashMap::new();
-        for (requirement_order, record) in policy_records.iter().enumerate() {
-            let rule = pkg
-                .parsed
-                .rules
-                .iter()
-                .find(|rule| rule.id == record.source_rule_id)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "IMPORT_RULE_NOT_FOUND: parsed rule {} disappeared before commit",
-                        record.source_rule_id
-                    )
-                })?;
+        for rule in &pkg.parsed.rules {
             let canonical_key = canonical_key_for_rule(rule);
             let requirement_id =
                 upsert_requirement_lineage(&mut tx, framework_id, &canonical_key).await?;
@@ -710,25 +690,35 @@ pub async fn commit_foreign_import(
                 None,
             )
             .await?;
-            insert_bundle_version_requirement(
-                &mut tx,
-                bundle_version_id,
-                requirement_version_id,
-                requirement_order as i32,
-            )
-            .await?;
             let (previous_requirement_version_id, unchanged_from_previous_release) =
                 previous_requirement_version
                     .map(|(id, digest)| (Some(id), digest == canonical.compute_digest()))
                     .unwrap_or((None, false));
             requirement_versions.insert(
-                record.source_rule_id.clone(),
+                rule.id.clone(),
                 NormalizedRequirementImport {
                     requirement_version_id,
                     previous_requirement_version_id,
                     unchanged_from_previous_release,
                 },
             );
+        }
+        for (requirement_order, record) in policy_records.iter().enumerate() {
+            let normalized = requirement_versions
+                .get(&record.source_rule_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "IMPORT_RULE_NOT_FOUND: parsed rule {} disappeared before commit",
+                        record.source_rule_id
+                    )
+                })?;
+            insert_bundle_version_requirement(
+                &mut tx,
+                bundle_version_id,
+                normalized.requirement_version_id,
+                requirement_order as i32,
+            )
+            .await?;
         }
         Some(requirement_versions)
     } else {
