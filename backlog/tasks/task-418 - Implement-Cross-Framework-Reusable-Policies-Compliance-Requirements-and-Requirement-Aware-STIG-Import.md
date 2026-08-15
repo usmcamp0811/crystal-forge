@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 17:29'
+updated_date: '2026-08-15 17:36'
 labels: []
 milestone: m-22
 dependencies:
@@ -94,6 +94,12 @@ Follow-up review remediation (2026-08-15):
 8. Add same-release reuse/conflict tests for artifact changes, changed requirements, and different policy selections.
 9. Rework requirement hierarchy construction so parent links are assigned while rows are pending, then finalize requirement digests; remove the permanent finalized-row reparent exception and add a finalized reparent rejection test.
 10. Add migration/backfill compatibility for framework digests produced before the requirement-aware canonical representation, with an upgrade-path test on isolated PostgreSQL.
+
+Final review remediation (2026-08-15):
+11. Make framework digest backfill lock-safe and conditional: recheck pending state under lock, skip rows finalized by another instance, and verify the resulting canonical digest.
+12. Replace the vacuous backfill test with an explicit legacy row + requirement fixture and concurrent backfill calls asserting cf-model-json-2 digest and idempotent reimport.
+13. Preserve release-specific DISA XCCDF Rule IDs in requirement_version.external_id while keeping stable V-IDs as canonical_requirement_key, with regression coverage.
+14. Persist production DISA Group→Rule hierarchy using pending requirement construction before digest finalization; include a deterministic hierarchy projection in framework release identity or document and test the chosen semantics.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -224,6 +230,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15 follow-up review found framework preview/commit digest mismatch, commit digest derived from policy_records instead of authoritative parsed requirements, permanent finalized requirement reparent escape hatch, and legacy framework digest upgrade compatibility gap. These are now the active remediation scope.
 
 2026-08-15 follow-up remediation pushed as aca32444. Added shared authoritative parsed DISA requirement collector; preview and commit now hash the complete parsed requirement set, independent of policy_records or user selections. Framework digest canonicalization is versioned as cf-model-json-2. Added migration 0217 to reopen/recanonicalize pre-9e90 framework rows and startup backfill, verified on isolated PostgreSQL 3042 with pending count reduced to zero. Added migration 0218 removing finalized requirement reparenting; fixture hierarchy now links while digests are pending and finalizes afterward. Added regression coverage for same-release same-requirement reuse with different artifact SHA, changed requirement conflict, finalized reparent rejection, and digest backfill. Verification: migrations 217/218 applied; framework digest backfill test passed; framework preview and requirement immutability DB tests passed; cargo fmt, SQLX_OFFLINE cargo check, and git diff check passed. MR remains Draft at aca32444.
+
+2026-08-15 review found concurrent startup backfill race, vacuous legacy-backfill test, DISA external_id incorrectly using canonical V-ID, and production STIG hierarchy not persisted. These are now the active remediation scope.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
