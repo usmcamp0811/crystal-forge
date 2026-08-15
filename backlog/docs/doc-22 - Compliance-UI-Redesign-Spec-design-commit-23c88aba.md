@@ -476,7 +476,28 @@ reads), starts the API on `http://127.0.0.1:3445` and the UI on `http://localhos
 Sign in with `admin` / `password` (`AUTH_MODE=local`); admin is required for
 `New bundle`, `Edit bundle`, STIG import and bundle version actions.
 
-### 9.3 State-by-state comparison table
+### 9.3 Captured design-example reference screenshots
+
+Pre-captured screenshots of the design example (compliance redesign states,
+dark theme) live in
+`docs/design/CrystalForge/screens/compliance-redesign/cb-1.png` … `cb-7.png`.
+They are a quick visual reference for the implementer and reviewer; the
+state-by-state walkthrough below remains the authoritative comparison method.
+
+| File | Notes |
+| --- | --- |
+| `screens/compliance-redesign/cb-1.png` | Bundle list (dark) |
+| `screens/compliance-redesign/cb-2.png` | Bundle list (light) |
+| `screens/compliance-redesign/cb-3.png` | Bundle drawer — overview |
+| `screens/compliance-redesign/cb-4.png` | Revisions expanded / version selection |
+| `screens/compliance-redesign/cb-5.png` | Requirement coverage view |
+| `screens/compliance-redesign/cb-6.png` | Coverage filters / policy drill-in |
+| `screens/compliance-redesign/cb-7.png` | Systems drilldown / evidence |
+
+If a capture does not match its row here, treat the live design example
+(`9.1`) as the source of truth and update this table.
+
+### 9.4 State-by-state comparison table
 
 | # | State | Design example | Crystal Forge |
 | --- | --- | --- | --- |
@@ -494,7 +515,7 @@ Sign in with `admin` / `password` (`AUTH_MODE=local`); admin is required for
 | 12 | STIG import — paused draft | Import / Export → `Import STIG (.xml)`, advance to `review`, close with the pause button | same |
 | 13 | Paused-import callout + menu label | state 12, observe the warn callout and the `Resume STIG import…` menu label | same |
 
-### 9.4 Backing API endpoints (Crystal Forge, `http://127.0.0.1:3445`)
+### 9.5 Backing API endpoints (Crystal Forge, `http://127.0.0.1:3445`)
 
 Use these to confirm the UI is rendering server data rather than derived guesses:
 
