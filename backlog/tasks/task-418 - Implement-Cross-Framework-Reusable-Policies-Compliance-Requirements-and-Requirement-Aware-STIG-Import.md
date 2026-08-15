@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 02:49'
+updated_date: '2026-08-15 03:01'
 labels: []
 milestone: m-22
 dependencies:
@@ -491,6 +491,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15 follow-up committed/pushed as e8c0765c (test(web-ui): harden bundle baseline browser coverage). Added Nix Chromium executable support, configurable load timeout, cross-origin local forwarding, and request-context cookie handling to the focused browser harness. Static checks pass. Local focused browser now reaches the real create API but receives HTTP 403 because the standalone Playwright request context does not inherit the authenticated session; authoritative VM execution remains the required browser proof.
 
 2026-08-15: User confirmed the bundle baseline checkpoint at db520f61 is complete and requested continuation. Existing coverage endpoint/card already exists but currently returns only mapped policy IDs and renders flat rows; the next slice will add read-only mapping evidence and design-aligned hierarchy/details without changing mapping CRUD.
+
+2026-08-15 coverage presentation slice committed/pushed as 9034d55. Bundle coverage now returns trusted selected-policy mapping evidence (policy name/version ID, relationship, coverage, provenance, rationale) per requirement; Compliance card displays mapping evidence and design-aligned Fully covered/Partially covered/Unmapped labels with test IDs. Focused 20ab was extended with authoritative coverage response and expandable-card assertions. Static checks passed: node --check, git diff --check, cargo fmt --all --check, server/web cargo check, and nix build .#server. Focused browser rerun was not conclusive because the local UI navigation timed out at /login before the test began; retry against the newly built server before declaring this checkpoint complete.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
