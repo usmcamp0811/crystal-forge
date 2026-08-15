@@ -3,11 +3,11 @@ id: TASK-418
 title: >-
   Implement Cross-Framework Reusable Policies, Compliance Requirements, and
   Requirement-Aware STIG Import
-status: Review
+status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 15:59'
+updated_date: '2026-08-15 16:05'
 labels: []
 milestone: m-22
 dependencies:
@@ -560,5 +560,11 @@ author: opencode
 created: 2026-08-15 15:59
 ---
 Opened Draft MR !315: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/315. Focused `20ac-stig-import-reconciliation-fixture` NixOS check passes 1/1 with dark and light screenshots. TASK-418 remains open; remaining reconciliation UX and acceptance work is listed in the MR.
+---
+
+author: opencode
+created: 2026-08-15 16:05
+---
+Starting the post-deployment semantic-integrity checkpoint on MR !315. Scope is limited to immutable same-release framework handling, immutable requirement-version reuse/conflict behavior, and published bundle requirement-count fallback. Existing migrations will not be edited; schema changes, if required, will use a new migration.
 ---
 <!-- COMMENTS:END -->
