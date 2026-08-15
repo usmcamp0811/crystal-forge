@@ -6370,12 +6370,12 @@ const steps = [
       await assertVisible(page.getByText("Supports", { exact: true }), "Expected persisted Supports relationship");
       await assertVisible(page.getByText("Partial", { exact: true }), "Expected persisted Partial coverage");
       await assertVisible(page.getByText("test rationale", { exact: true }), "Expected persisted rationale");
-      await assertVisible(page.getByText("Implements", { exact: true }), "Expected persisted Implements relationship");
-      await assertVisible(page.getByText("Full", { exact: true }), "Expected persisted Full coverage");
+       await assertVisible(page.getByText("Implements", { exact: true }), "Expected persisted Implements relationship");
+       await assertVisible(page.getByText("Full", { exact: true }), "Expected persisted Full coverage");
 
-      // The same persisted policy must expose normalized mappings in its
+       // The same persisted policy must expose normalized mappings in its
       // details drawer, not only in the editor's Mappings tab.
-      await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
+       await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
       await page.getByRole("heading", { name: new RegExp(`Edit ${policyName}`) }).waitFor({ state: "hidden", timeout: 5000 });
       await card.click();
       const drawer = page.getByRole("dialog", { name: "Policy detail" });
@@ -6399,11 +6399,29 @@ const steps = [
       }, { base: apiBaseUrl, id: policyVersionId });
       if (mappingResponse.status !== 200) throw new Error(`Expected persisted mapping API response, got ${mappingResponse.status}`);
       if (mappingResponse.rows.length !== 2) throw new Error(`Expected two persisted mappings, got ${mappingResponse.rows.length}`);
-      for (const row of mappingResponse.rows) {
+       for (const row of mappingResponse.rows) {
         if (row.provenance !== "manual" || row.trust_state !== "trusted") {
           throw new Error(`Unexpected mapping audit state: ${JSON.stringify(row)}`);
-        }
-      }
+         }
+       }
+
+       // Edit the first mapping in place: Supports/Partial becomes
+       // Implements/Full while preserving the exact requirement selection.
+        await page.getByTitle("Close").click();
+       await card.getByRole("button", { name: "Edit", exact: true }).click();
+       await page.getByTestId("policy-editor-tab-mappings").click();
+       const firstMappingRow = page.getByTestId("policy-mapping-row").filter({ hasText: requirementA.external_id });
+       await firstMappingRow.getByRole("button", { name: "Edit", exact: true }).click();
+       await page.getByText("Edit mapping", { exact: true }).waitFor({ timeout: 5000 });
+       await page.getByText("Implements", { exact: true }).last().click();
+       await page.getByRole("button", { name: "Full", exact: true }).last().click();
+       await page.getByRole("button", { name: "Save mapping", exact: true }).click();
+       await assertVisible(page.getByText("Mappings · 2", { exact: true }), "Expected two mappings after edit");
+
+       // Removing the second mapping must leave the first mapping intact.
+       const secondMappingRow = page.getByTestId("policy-mapping-row").filter({ hasText: requirementB.external_id });
+       await secondMappingRow.getByTitle("Remove mapping").click();
+       await assertVisible(page.getByText("Mappings · 1", { exact: true }), "Expected one mapping after removal");
     },
   },
   // ── CVE policy API round-trip checks ────────────────────────────────────

@@ -16,12 +16,14 @@ use crate::api::client::{
     create_deployment_policy, delete_deployment_policy,
     fetch_compliance_frameworks, fetch_compliance_framework_versions,
     fetch_policy_requirement_mappings, create_policy_mapping, delete_policy_mapping,
+    update_policy_mapping,
     search_requirements, update_deployment_policy,
 };
 use crate::api::models::{
     ComplianceFrameworkSummary, ComplianceFrameworkVersionSummary,
     CreateDeploymentPolicyRequest, CreatePolicyMappingRequest,
     PolicyMappingRow, RequirementVersionSummary, UpdateDeploymentPolicyRequest,
+    UpdatePolicyMappingRequest,
 };
 use crate::views::policies_api;
 
@@ -660,6 +662,7 @@ fn PolicyMappingsTab(
     let mut rationale = use_signal(String::new);
     let mut saving = use_signal(|| false);
     let mut show_mapping_editor = use_signal(|| false);
+    let mut editing_mapping_id: Signal<Option<Uuid>> = use_signal(|| None);
 
     if !*loaded.read() {
         loaded.set(true);
@@ -739,10 +742,11 @@ fn PolicyMappingsTab(
                     for (name, group) in grouped {
                         div { key: "{name}",
                             div { style: "font-size:11.5px;font-weight:700;color:var(--cf-text-primary);margin-bottom:6px;", "{name}" }
-                            for row in group {
-                                {
-                                    let row_read_only = !mappings_editable || row.provenance == "imported" || row.trust_state == "suggested";
-                                    rsx! { div { key: "{row.id}", style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:start;padding:9px 11px;background:var(--cf-subtle-bg);border:1px solid var(--cf-divider);border-radius:8px;font-size:12px;margin-bottom:6px;",
+                             for row in group {
+                                 {
+                                     let row_read_only = !mappings_editable || row.provenance == "imported" || row.trust_state == "suggested";
+                                     let edit_row = row.clone();
+                                     rsx! { div { key: "{row.id}", "data-testid": "policy-mapping-row", style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:start;padding:9px 11px;background:var(--cf-subtle-bg);border:1px solid var(--cf-divider);border-radius:8px;font-size:12px;margin-bottom:6px;",
                                     div { style: "display:flex;flex-direction:column;gap:2px;",
                                         div { style: "font-size:11px;font-weight:700;color:var(--cf-text-muted);text-transform:uppercase;letter-spacing:0.04em;", "{row.framework_name} {row.framework_version}" }
                                         div { class: "mono", style: "font-size:12.5px;font-weight:600;margin-top:2px;", span { "{row.requirement_external_id}" } if let Some(title) = &row.requirement_title { span { style: "font-family:inherit;font-weight:400;color:var(--cf-text-secondary);", " · {title}" } } }
@@ -755,7 +759,30 @@ fn PolicyMappingsTab(
                                     }
                                     if let Some(policy_id) = editing_policy_version_id {
                                          if !row_read_only {
-                                             button { class: "btn btn-ghost xs focus-ring", style: "color:var(--cf-text-muted);padding:4px 6px;", onclick: move |_| { let row_id = row.id; spawn(async move { if let Err(e) = delete_policy_mapping(&policy_id, &row_id).await { error.set(Some(format!("Failed to remove mapping: {e}"))); } if let Ok(value) = fetch_policy_requirement_mappings(&policy_id).await { mappings.set(value); } }); }, "×" }
+                                             div { style: "display:flex;gap:4px;",
+                                                 button { class: "btn btn-ghost xs focus-ring", style: "color:var(--cf-text-muted);padding:4px 6px;", onclick: move |_| {
+                                                     editing_mapping_id.set(Some(edit_row.id));
+                                                     framework_id.set(Some(edit_row.framework_id));
+                                                     version_id.set(Some(edit_row.framework_version_id));
+                                                     requirement_id.set(Some(edit_row.requirement_version_id));
+                                                     requirement.set(Some(RequirementVersionSummary {
+                                                         id: edit_row.requirement_version_id,
+                                                         requirement_id: edit_row.requirement_version_id,
+                                                         framework_version_id: edit_row.framework_version_id,
+                                                         external_id: edit_row.requirement_external_id.clone(),
+                                                         title: edit_row.requirement_title.clone(),
+                                                         kind: "rule".to_string(),
+                                                         severity: None,
+                                                         parent_requirement_version_id: None,
+                                                         semantic_digest: String::new(),
+                                                     }));
+                                                     relationship.set(edit_row.relationship.clone());
+                                                     coverage.set(edit_row.coverage.clone());
+                                                     rationale.set(edit_row.rationale.clone().unwrap_or_default());
+                                                     show_mapping_editor.set(true);
+                                                 }, "Edit" }
+                                                 button { class: "btn btn-ghost xs focus-ring", style: "color:var(--cf-text-muted);padding:4px 6px;", title: "Remove mapping", onclick: move |_| { let row_id = row.id; spawn(async move { if let Err(e) = delete_policy_mapping(&policy_id, &row_id).await { error.set(Some(format!("Failed to remove mapping: {e}"))); } if let Ok(value) = fetch_policy_requirement_mappings(&policy_id).await { mappings.set(value); } }); }, "×" }
+                                             }
                                          } else { span { class: "chip chip-neutral", style: "font-size:10px;", "Read-only" } }
                                     }
                                 } }
@@ -770,7 +797,7 @@ fn PolicyMappingsTab(
             }
             if mapping_target != MappingEditorTarget::Unavailable && show_mapping_editor() {
                 div { style: "border:1px solid var(--cf-brand-purple);border-radius:10px;padding:14px;background:color-mix(in oklab, var(--cf-brand-purple) 5%, var(--cf-card-bg));display:flex;flex-direction:column;gap:14px;margin-top:8px;",
-                    div { style: "font-size:12.5px;font-weight:600;", "Add mapping" }
+                     div { style: "font-size:12.5px;font-weight:600;", if editing_mapping_id.read().is_some() { "Edit mapping" } else { "Add mapping" } }
                     div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:-4px;line-height:1.4;", "Map this policy to a compliance requirement it implements, supports, or provides evidence for." }
                     div { class: "field", label { r#for: "policy-mapping-framework", style: "font-size:11px;", "Framework" }, select { id: "policy-mapping-framework", class: "input focus-ring", onchange: move |event| { let value = event.value(); if let Ok(id) = value.parse() { framework_id.set(Some(id)); spawn(async move { if let Ok(value) = fetch_compliance_framework_versions(&id).await { versions.set(value); } }); } }, option { value: "", "— Select framework —" }, for item in frameworks.read().iter() { option { value: "{item.id}", "{item.name}" } } } }
                     if !versions.read().is_empty() { div { class: "field", label { r#for: "policy-mapping-version", style: "font-size:11px;", "Version" }, select { id: "policy-mapping-version", class: "input focus-ring", onchange: move |event| { version_id.set(event.value().parse().ok()); }, option { value: "", "— Select version —" }, for item in versions.read().iter() { option { value: "{item.id}", "{item.version}" } } } } }
@@ -824,8 +851,8 @@ fn PolicyMappingsTab(
                         div { class: "field", label { r#for: "policy-mapping-rationale", style: "font-size:11px;", "Mapping rationale " span { style: "color:var(--cf-text-muted);font-weight:400;", "· optional" } }, textarea { id: "policy-mapping-rationale", class: "input focus-ring", rows: "2", value: "{rationale}", placeholder: "Why this policy satisfies the requirement", style: "resize:vertical;", oninput: move |event| rationale.set(event.value()) } }
                         if let Some(text) = &*error.read() { div { class: "sd-callout sd-callout-error", style: "font-size:11px;", "{text}" } }
                         div { style: "display:flex;justify-content:flex-end;gap:8px;",
-                        button { class: "btn btn-ghost focus-ring", r#type: "button", onclick: move |_| show_mapping_editor.set(false), "Cancel" }
-                        button { class: "btn btn-primary focus-ring", disabled: *saving.read(), onclick: move |_| {
+                         button { class: "btn btn-ghost focus-ring", r#type: "button", onclick: move |_| { editing_mapping_id.set(None); show_mapping_editor.set(false); }, "Cancel" }
+                         button { class: "btn btn-primary focus-ring", disabled: *saving.read(), onclick: move |_| {
                             error.set(None);
                             let Some(rv_id) = *requirement_id.read() else { error.set(Some("Select a requirement.".into())); return; };
                             let relationship_value = relationship.read().clone();
@@ -844,12 +871,18 @@ fn PolicyMappingsTab(
                                         Err(e) => error.set(Some(e.to_string())),
                                     }
                                 }
-                                MappingEditorTarget::Persisted(policy_id) => {
-                                    saving.set(true);
-                                    spawn(async move {
-                                        let request = CreatePolicyMappingRequest { requirement_version_id: rv_id, relationship: relationship_value, coverage: coverage_value, rationale: rationale_value, provenance: "manual".into() };
-                                        match create_policy_mapping(&policy_id, &request).await {
-                                             Ok(_) => { if let Ok(value) = fetch_policy_requirement_mappings(&policy_id).await { mappings.set(value); } requirement_id.set(None); requirement.set(None); version_id.set(None); framework_id.set(None); search.set(String::new()); rationale.set(String::new()); results.set(Vec::new()); versions.set(Vec::new()); show_mapping_editor.set(false); }
+                                 MappingEditorTarget::Persisted(policy_id) => {
+                                     saving.set(true);
+                                     spawn(async move {
+                                         let result = if let Some(mapping_id) = *editing_mapping_id.read() {
+                                             let request = UpdatePolicyMappingRequest { relationship: relationship_value, coverage: coverage_value, rationale: rationale_value };
+                                             update_policy_mapping(&policy_id, &mapping_id, &request).await
+                                         } else {
+                                             let request = CreatePolicyMappingRequest { requirement_version_id: rv_id, relationship: relationship_value, coverage: coverage_value, rationale: rationale_value, provenance: "manual".into() };
+                                             create_policy_mapping(&policy_id, &request).await
+                                         };
+                                         match result {
+                                              Ok(_) => { if let Ok(value) = fetch_policy_requirement_mappings(&policy_id).await { mappings.set(value); } editing_mapping_id.set(None); requirement_id.set(None); requirement.set(None); version_id.set(None); framework_id.set(None); search.set(String::new()); rationale.set(String::new()); results.set(Vec::new()); versions.set(Vec::new()); show_mapping_editor.set(false); }
                                             Err(e) => error.set(Some(format!("Failed to add mapping: {e}"))),
                                         }
                                         saving.set(false);
@@ -857,7 +890,7 @@ fn PolicyMappingsTab(
                                 }
                                 MappingEditorTarget::Unavailable => {}
                             }
-                        }, if *saving.read() { "Adding..." } else { "Add mapping" } }
+                        }, if *saving.read() { "Saving..." } else if editing_mapping_id.read().is_some() { "Save mapping" } else { "Add mapping" } }
                         }
                     }
                 }
