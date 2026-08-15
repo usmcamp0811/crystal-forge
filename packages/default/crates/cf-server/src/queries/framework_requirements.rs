@@ -1273,7 +1273,7 @@ pub async fn upsert_framework_lineage(
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (canonical_source_key) DO UPDATE
             SET name = EXCLUDED.name,
-                publisher = COALESCE(EXCLUDED.publisher, compliance_frameworks.publisher)
+                publisher = COALESCE(compliance_frameworks.publisher, EXCLUDED.publisher)
         RETURNING id
         "#,
     )
@@ -1390,9 +1390,9 @@ where
     let id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO compliance_framework_versions
-            (framework_id, version, canonical_release_key, title,
+            (framework_id, version, canonical_release_key, title, publisher,
              published_at, source_artifact_id, semantic_digest)
-        VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
         RETURNING id
         "#,
     )
@@ -1400,6 +1400,7 @@ where
     .bind(&canonical.version)
     .bind(&canonical.canonical_release_key)
     .bind(canonical.title.as_deref())
+    .bind(canonical.publisher.as_deref().unwrap_or(""))
     .bind(published_at)
     .bind(source_artifact_id)
     .fetch_one(&mut **tx)

@@ -30,7 +30,7 @@ use super::xccdf::disa_stig_adapter::{
 };
 use super::xccdf::package::process_xccdf_bytes;
 
-pub const FRAMEWORK_CANONICALIZATION_VERSION: &str = "cf-model-json-4";
+pub const FRAMEWORK_CANONICALIZATION_VERSION: &str = "cf-model-json-5";
 
 pub fn requirement_semantic_digests(requirements: &[RequirementVersionCanonical]) -> Vec<String> {
     let mut digests: Vec<String> = requirements
@@ -195,7 +195,7 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
             Option<Uuid>,
         )> = sqlx::query_as(
             "SELECT f.canonical_source_key, fv.canonical_release_key,
-                    fv.version, f.publisher, fv.title, fv.semantic_digest,
+                     fv.version, fv.publisher, fv.title, fv.semantic_digest,
                     fv.source_artifact_id
              FROM compliance_framework_versions fv
              JOIN compliance_frameworks f ON f.id = fv.framework_id
@@ -250,11 +250,12 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
                             }
                             sqlx::query(
                                 "UPDATE compliance_framework_versions
-                                 SET version = $1, title = $2
-                                 WHERE id = $3 AND semantic_digest = 'pending'",
+                                 SET version = $1, title = $2, publisher = $3
+                                 WHERE id = $4 AND semantic_digest = 'pending'",
                             )
                             .bind(&source_identity.version)
                             .bind(source_identity.title.as_deref())
+                            .bind(&source_identity.publisher)
                             .bind(id)
                             .execute(&mut *tx)
                             .await?;
@@ -276,17 +277,18 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
                             );
                         }
                     }
-                    Err(error) if requires_stig_reconstruction => {
+                    Err(error) => {
                         bail!(
                             "cannot parse legacy DISA framework source artifact for {id}: {error:?}"
                         );
                     }
-                    Err(_) => {}
                 }
             }
         }
-        if parsed_stig.is_none() && requires_stig_reconstruction {
-            bail!("cannot finalize legacy DISA framework version {id} without its source artifact");
+        if parsed_stig.is_none() && (requires_stig_reconstruction || source_artifact_id.is_none()) {
+            bail!(
+                "cannot finalize framework version {id} without its authoritative source artifact"
+            );
         }
 
         let requirement_rows: Vec<(
