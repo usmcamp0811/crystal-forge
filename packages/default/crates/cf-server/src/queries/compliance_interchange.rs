@@ -58,7 +58,8 @@ use crate::compliance::xccdf::reconciliation::{
 };
 use crate::queries::compliance::{PolicyDraftIntent, ensure_policy_draft};
 use crate::queries::framework_requirements::{
-    insert_bundle_version_requirement, insert_framework_version, insert_policy_mapping_in_tx,
+    insert_bundle_version_requirement, insert_framework_version,
+    insert_framework_version_with_requirement_digests, insert_policy_mapping_in_tx,
     insert_requirement_version, upsert_framework_lineage, upsert_requirement_lineage,
 };
 
@@ -641,7 +642,20 @@ pub async fn commit_foreign_import(
         .fetch_optional(&mut *tx)
         .await
         .context("failed to load prior framework release for STIG reconciliation")?;
-        let framework_version_id = insert_framework_version(
+        let incoming_requirement_digests: Vec<String> = policy_records
+            .iter()
+            .filter_map(|record| {
+                pkg.parsed
+                    .rules
+                    .iter()
+                    .find(|rule| rule.id == record.source_rule_id)
+                    .map(|rule| {
+                        let key = canonical_key_for_rule(rule);
+                        canonical_for_rule(rule, &key).compute_digest()
+                    })
+            })
+            .collect();
+        let framework_version_id = insert_framework_version_with_requirement_digests(
             &mut tx,
             framework_id,
             &FrameworkVersionCanonical {
@@ -653,6 +667,7 @@ pub async fn commit_foreign_import(
             },
             Some(source_artifact_id),
             None,
+            &incoming_requirement_digests,
         )
         .await?;
 

@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 use crate::compliance::digest::{refresh_bundle_requirement_digest, refresh_policy_mapping_digest};
 use crate::compliance::framework_model::{
-    FrameworkVersionCanonical, write_framework_version_digest,
+    FrameworkVersionCanonical, write_framework_version_digest_with_requirement_digests,
 };
 use crate::compliance::requirement_model::{
     FrameworkReconciliation, FrameworkReconciliationState, PolicyCandidate,
@@ -202,6 +202,7 @@ pub async fn list_framework_mapped_policy_versions(
         JOIN compliance_requirement_versions rv ON rv.id = m.requirement_version_id
         JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id
         WHERE fv.framework_id = $1
+          AND m.trust_state = 'trusted'
         ORDER BY m.policy_version_id
         "#,
     )
@@ -440,20 +441,12 @@ pub async fn create_policy_mapping(
 /// Fails if the policy version is accepted/deprecated.
 pub async fn update_policy_mapping(
     pool: &PgPool,
+    policy_version_id: Uuid,
     mapping_id: Uuid,
     relationship: &str,
     coverage: &str,
     rationale: Option<&str>,
 ) -> Result<()> {
-    let policy_version_id: Uuid = sqlx::query_scalar(
-        "SELECT policy_version_id FROM policy_requirement_mappings WHERE id = $1",
-    )
-    .bind(mapping_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| {
-        anyhow::anyhow!("POLICY_MAPPING_IMMUTABLE_OR_NOT_FOUND: mapping {mapping_id} was not found")
-    })?;
     let mut tx = pool
         .begin()
         .await
@@ -461,14 +454,16 @@ pub async fn update_policy_mapping(
     let affected = sqlx::query(
         r#"
         UPDATE policy_requirement_mappings m
-        SET relationship = $2, coverage = $3, rationale = $4
+        SET relationship = $3, coverage = $4, rationale = $5
         FROM deployment_policy_versions pv
         WHERE m.id = $1
+          AND m.policy_version_id = $2
           AND pv.id = m.policy_version_id
           AND pv.publication_state NOT IN ('accepted', 'deprecated')
         "#,
     )
     .bind(mapping_id)
+    .bind(policy_version_id)
     .bind(relationship)
     .bind(coverage)
     .bind(rationale)
@@ -491,16 +486,11 @@ pub async fn update_policy_mapping(
 
 /// Delete a requirement mapping.
 /// Fails if the policy version is accepted/deprecated.
-pub async fn delete_policy_mapping(pool: &PgPool, mapping_id: Uuid) -> Result<()> {
-    let policy_version_id: Uuid = sqlx::query_scalar(
-        "SELECT policy_version_id FROM policy_requirement_mappings WHERE id = $1",
-    )
-    .bind(mapping_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| {
-        anyhow::anyhow!("POLICY_MAPPING_IMMUTABLE_OR_NOT_FOUND: mapping {mapping_id} was not found")
-    })?;
+pub async fn delete_policy_mapping(
+    pool: &PgPool,
+    policy_version_id: Uuid,
+    mapping_id: Uuid,
+) -> Result<()> {
     let mut tx = pool
         .begin()
         .await
@@ -510,11 +500,13 @@ pub async fn delete_policy_mapping(pool: &PgPool, mapping_id: Uuid) -> Result<()
         DELETE FROM policy_requirement_mappings m
         USING deployment_policy_versions pv
         WHERE m.id = $1
+          AND m.policy_version_id = $2
           AND pv.id = m.policy_version_id
           AND pv.publication_state NOT IN ('accepted', 'deprecated')
         "#,
     )
     .bind(mapping_id)
+    .bind(policy_version_id)
     .execute(&mut *tx)
     .await
     .context("failed to delete policy requirement mapping")?;
@@ -1286,6 +1278,29 @@ pub async fn insert_framework_version(
     source_artifact_id: Option<Uuid>,
     published_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<Uuid> {
+    insert_framework_version_with_requirement_digests(
+        tx,
+        framework_id,
+        canonical,
+        source_artifact_id,
+        published_at,
+        std::iter::empty(),
+    )
+    .await
+}
+
+pub async fn insert_framework_version_with_requirement_digests<'a, I>(
+    tx: &mut Transaction<'_, Postgres>,
+    framework_id: Uuid,
+    canonical: &FrameworkVersionCanonical,
+    source_artifact_id: Option<Uuid>,
+    published_at: Option<chrono::DateTime<chrono::Utc>>,
+    requirement_digests: I,
+) -> Result<Uuid>
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    let requirement_digests: Vec<String> = requirement_digests.into_iter().cloned().collect();
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!(
             "compliance-framework-version:{framework_id}:{}",
@@ -1306,7 +1321,9 @@ pub async fn insert_framework_version(
     .context("failed to check for existing framework version")?;
 
     if let Some((existing_id, existing_digest)) = existing {
-        if existing_digest == canonical.compute_digest() {
+        if existing_digest
+            == canonical.compute_digest_with_requirement_digests(&requirement_digests)
+        {
             return Ok(existing_id);
         }
         bail!(
@@ -1337,9 +1354,14 @@ pub async fn insert_framework_version(
     .await
     .context("failed to insert framework version")?;
 
-    write_framework_version_digest(tx, id, canonical)
-        .await
-        .context("failed to write framework version digest")?;
+    write_framework_version_digest_with_requirement_digests(
+        tx,
+        id,
+        canonical,
+        &requirement_digests,
+    )
+    .await
+    .context("failed to write framework version digest")?;
 
     Ok(id)
 }

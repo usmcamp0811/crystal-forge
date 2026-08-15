@@ -17,6 +17,7 @@
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use super::canonical::semantic_digest;
@@ -51,7 +52,20 @@ impl FrameworkVersionCanonical {
     }
 
     pub fn compute_digest(&self) -> String {
-        semantic_digest(&self.to_digest_value())
+        self.compute_digest_with_requirement_digests([])
+    }
+
+    pub fn compute_digest_with_requirement_digests<'a, I>(&self, requirement_digests: I) -> String
+    where
+        I: IntoIterator<Item = &'a String>,
+    {
+        let mut value = self.to_digest_value();
+        let digests: BTreeSet<&str> = requirement_digests
+            .into_iter()
+            .map(String::as_str)
+            .collect();
+        value["requirement_semantic_digests"] = json!(digests.into_iter().collect::<Vec<_>>());
+        semantic_digest(&value)
     }
 }
 
@@ -67,7 +81,20 @@ pub async fn write_framework_version_digest(
     framework_version_id: Uuid,
     canonical: &FrameworkVersionCanonical,
 ) -> Result<()> {
-    let digest = canonical.compute_digest();
+    write_framework_version_digest_with_requirement_digests(tx, framework_version_id, canonical, [])
+        .await
+}
+
+pub async fn write_framework_version_digest_with_requirement_digests<'a, I>(
+    tx: &mut Transaction<'_, Postgres>,
+    framework_version_id: Uuid,
+    canonical: &FrameworkVersionCanonical,
+    requirement_digests: I,
+) -> Result<()>
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    let digest = canonical.compute_digest_with_requirement_digests(requirement_digests);
     sqlx::query(
         "UPDATE compliance_framework_versions \
          SET semantic_digest = $1 \

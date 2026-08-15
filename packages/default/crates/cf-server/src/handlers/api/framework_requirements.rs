@@ -32,7 +32,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::api::models::ApiError;
-use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
+use crate::handlers::api::rbac::{authenticated_user_roles, has_operator_or_admin_role};
 use crate::queries::framework_requirements::{
     BundleCoverageReport, FrameworkSummary, FrameworkVersionSummary, PolicyMappingRow,
     RequirementVersionSummary, compute_bundle_requirement_coverage, create_policy_mapping,
@@ -119,12 +119,6 @@ pub struct CreateMappingRequest {
     pub relationship: String,
     pub coverage: String,
     pub rationale: Option<String>,
-    #[serde(default = "default_provenance")]
-    pub provenance: String,
-}
-
-fn default_provenance() -> String {
-    "manual".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -325,7 +319,7 @@ pub async fn create_policy_requirement_mapping(
     let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
-    if !has_admin_role(&roles) {
+    if !has_operator_or_admin_role(&roles) {
         return forbidden();
     }
 
@@ -349,7 +343,7 @@ pub async fn create_policy_requirement_mapping(
         &request.relationship,
         &request.coverage,
         request.rationale.as_deref(),
-        &request.provenance,
+        "manual",
         user_id,
     )
     .await
@@ -377,13 +371,13 @@ pub async fn create_policy_requirement_mapping(
 pub async fn update_policy_requirement_mapping(
     State(pool): State<PgPool>,
     headers: HeaderMap,
-    Path((_policy_version_id, mapping_id)): Path<(Uuid, Uuid)>,
+    Path((policy_version_id, mapping_id)): Path<(Uuid, Uuid)>,
     Json(request): Json<UpdateMappingRequest>,
 ) -> impl IntoResponse {
     let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
-    if !has_admin_role(&roles) {
+    if !has_operator_or_admin_role(&roles) {
         return forbidden();
     }
 
@@ -401,6 +395,7 @@ pub async fn update_policy_requirement_mapping(
 
     match update_policy_mapping(
         &pool,
+        policy_version_id,
         mapping_id,
         &request.relationship,
         &request.coverage,
@@ -432,16 +427,16 @@ pub async fn update_policy_requirement_mapping(
 pub async fn delete_policy_requirement_mapping(
     State(pool): State<PgPool>,
     headers: HeaderMap,
-    Path((_policy_version_id, mapping_id)): Path<(Uuid, Uuid)>,
+    Path((policy_version_id, mapping_id)): Path<(Uuid, Uuid)>,
 ) -> impl IntoResponse {
     let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
-    if !has_admin_role(&roles) {
+    if !has_operator_or_admin_role(&roles) {
         return forbidden();
     }
 
-    match delete_policy_mapping(&pool, mapping_id).await {
+    match delete_policy_mapping(&pool, policy_version_id, mapping_id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             let msg = e.to_string();

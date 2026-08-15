@@ -6,12 +6,10 @@ CREATE OR REPLACE FUNCTION enforce_bundle_version_immutability()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
     IF OLD.publication_state IN ('accepted', 'deprecated')
-       AND (OLD.semantic_digest = 'pending' OR OLD.requirement_digest = 'pending') THEN
+       AND OLD.requirement_digest = 'pending' THEN
         IF TG_OP = 'UPDATE'
-           AND (to_jsonb(NEW) - 'semantic_digest' - 'requirement_digest'
-                - 'digest_algorithm' - 'canonicalization_version')
-               IS DISTINCT FROM (to_jsonb(OLD) - 'semantic_digest' - 'requirement_digest'
-                - 'digest_algorithm' - 'canonicalization_version')
+           AND (to_jsonb(NEW) - 'requirement_digest')
+               IS DISTINCT FROM (to_jsonb(OLD) - 'requirement_digest')
         THEN
             RAISE EXCEPTION 'Digest backfill changed non-digest fields for bundle version %.', OLD.id;
         END IF;
@@ -48,12 +46,10 @@ CREATE OR REPLACE FUNCTION enforce_policy_version_immutability()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
     IF OLD.publication_state IN ('accepted', 'deprecated')
-       AND (OLD.semantic_digest = 'pending' OR OLD.mapping_digest = 'pending') THEN
+       AND OLD.mapping_digest = 'pending' THEN
         IF TG_OP = 'UPDATE'
-           AND (to_jsonb(NEW) - 'semantic_digest' - 'mapping_digest'
-                - 'digest_algorithm' - 'canonicalization_version')
-               IS DISTINCT FROM (to_jsonb(OLD) - 'semantic_digest' - 'mapping_digest'
-                - 'digest_algorithm' - 'canonicalization_version')
+           AND (to_jsonb(NEW) - 'mapping_digest')
+               IS DISTINCT FROM (to_jsonb(OLD) - 'mapping_digest')
         THEN
             RAISE EXCEPTION 'Digest backfill changed non-digest fields for policy version %.', OLD.id;
         END IF;

@@ -18,8 +18,8 @@ use uuid::Uuid;
 use crate::compliance::framework_model::FrameworkVersionCanonical;
 use crate::compliance::requirement_model::RequirementVersionCanonical;
 use crate::queries::framework_requirements::{
-    insert_framework_version, insert_requirement_version, upsert_framework_lineage,
-    upsert_requirement_lineage,
+    insert_framework_version_with_requirement_digests, insert_requirement_version,
+    upsert_framework_lineage, upsert_requirement_lineage,
 };
 
 // ---------------------------------------------------------------------------
@@ -626,9 +626,37 @@ async fn existing_or_insert_framework_version(
         publisher: None,
         title: version.title.clone(),
     };
-    insert_framework_version(tx, framework_id, &canonical, None, published_at)
-        .await
-        .context("seed compliance framework version")
+    let requirement_digests: Vec<String> = version
+        .requirements
+        .iter()
+        .map(|requirement| {
+            RequirementVersionCanonical {
+                canonical_requirement_key: requirement.canonical_requirement_key.clone(),
+                external_id: requirement.external_id.clone(),
+                title: requirement.title.clone(),
+                description: requirement.description.clone(),
+                kind: requirement.kind.clone(),
+                severity: requirement.severity.clone(),
+                check_text: requirement.check_text.clone(),
+                fix_text: requirement.fix_text.clone(),
+                metadata: requirement
+                    .metadata
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!({})),
+            }
+            .compute_digest()
+        })
+        .collect();
+    insert_framework_version_with_requirement_digests(
+        tx,
+        framework_id,
+        &canonical,
+        None,
+        published_at,
+        &requirement_digests,
+    )
+    .await
+    .context("seed compliance framework version")
 }
 
 /// Mark the setup wizard as dismissed and acknowledged for every user so the
