@@ -17,7 +17,14 @@
 #
 # Note: OIDC tests remain in the separate integration check.
 #
-{ lib, pkgs, inputs, ... }:
+{ lib
+, pkgs
+, inputs
+, testProfile ? "ci_fast"
+, testSteps ? null
+, runExportValidation ? true
+, ...
+}:
 let
   testDir = ./tests;
   coverageManifest = ./coverage-manifest.json;
@@ -501,11 +508,13 @@ in pkgs.testers.runNixOSTest {
     machine.succeed("cp -r ${designParityDir}/. /tmp/web-ui-tests/design-parity/")
     machine.succeed("mkdir -p /tmp/design-example && cp -r ${designExampleOffline}/. /tmp/design-example/")
 
-    test_profile = "ci_fast"
+    test_profile = "${testProfile}"
+    test_steps = ${if testSteps == null then "None" else "\"${testSteps}\""}
+    test_steps_env = f" CF_UI_TEST_STEPS={test_steps}" if test_steps else ""
 
     # Run the integration test script
     machine.succeed(
-        f"nohup env CF_UI_TEST_PROFILE={test_profile} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
+        f"nohup env CF_UI_TEST_PROFILE={test_profile}{test_steps_env} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
           toString CF_TEST_SERVER_PORT
         } /tmp/screenshots > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
     )
@@ -634,6 +643,10 @@ in pkgs.testers.runNixOSTest {
         raise Exception(
             f"Strict visual baseline failures: {[f['name'] for f in visual_failures]}"
         )
+
+    if not ${if runExportValidation then "True" else "False"}:
+        print("=== Focused web UI check complete; export validation skipped ===")
+        raise SystemExit(0)
 
     # === Phase 5: OSCAL Export Validation (end-to-end via web UI) ===
     print("=== Phase 5: OSCAL Export Validation ===")

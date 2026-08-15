@@ -159,7 +159,35 @@ async function assertVisible(locator, message, timeoutMs = 5000) {
 }
 
 async function ensureAuthenticated(page) {
+  const isAuthenticated = async () => page.evaluate(async (base) => {
+    const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include" });
+    if (!response.ok) return false;
+    const auth = await response.json();
+    return auth.is_authenticated === true;
+  }, apiBaseUrl);
+
+  if (await isAuthenticated()) return;
+
   await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT, waitUntil: "domcontentloaded" });
+
+  // Focused runs skip the ordered registration/login steps. On a fresh local
+  // auth instance, reproduce only the registration preflight here so the
+  // requested post-login step remains self-contained.
+  const registrationRequired = page.url().includes("/register") ||
+    await page.locator('input[type="email"]').isVisible().catch(() => false);
+  if (registrationRequired) {
+    if (!page.url().includes("/register")) {
+      await page.goto(`${baseUrl}/register`, { timeout: LOAD_TIMEOUT, waitUntil: "domcontentloaded" });
+    }
+    await page.locator('input[type="text"]').first().fill(TEST_USER.username);
+    await page.locator('input[type="email"]').fill(TEST_USER.email);
+    await page.locator('input[type="password"]').first().fill(TEST_USER.password);
+    await page.locator('input[type="password"]').last().fill(TEST_USER.password);
+    await page.locator('button[type="submit"]').first().click();
+    await page.waitForTimeout(500);
+    await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT, waitUntil: "domcontentloaded" });
+  }
+
   await page.locator('input[type="text"]').fill(TEST_USER.username);
   await page.locator('input[type="password"]').fill(TEST_USER.password);
   await page.locator('button[type="submit"]').click();
@@ -6214,14 +6242,20 @@ const steps = [
         xccdf_version: "1.2",
         benchmark: { id: "fixture-stig-benchmark", title: "Anduril NixOS STIG Fixture", description: "Deterministic browser fixture", version: "V1R2", status: "accepted", platforms: ["nixos"] },
         profiles: [],
-        rules: [{ id: "xccdf_fixture_rule_001", title: "Configure the fixture control", description: "Fixture rule description", severity: "medium", is_native: false, version: "V-999001", group_id: "group-001", platforms: ["nixos"], identifiers: [{ system: "http://cyber.mil/cci", value: "CCI-000001" }], checks: [], fix: { content: "fixture remediation" }, inferred_assertions: [], references: [], has_opaque_xml: false }],
-        rule_count: 1,
+        rules: [
+          { id: "xccdf_fixture_rule_001", title: "Configure the fixture control", description: "Fixture rule description", severity: "medium", is_native: false, version: "V-999001", group_id: "group-001", platforms: ["nixos"], identifiers: [{ system: "http://cyber.mil/cci", value: "CCI-000001" }], checks: [], fix: { content: "fixture remediation" }, inferred_assertions: [], references: [], has_opaque_xml: false },
+          { id: "xccdf_fixture_rule_002", title: "Verify the fixture control", description: "Second fixture rule description", severity: "medium", is_native: false, version: "V-999002", group_id: "group-001", platforms: ["nixos"], identifiers: [{ system: "http://cyber.mil/cci", value: "CCI-000002" }], checks: [], fix: { content: "fixture remediation" }, inferred_assertions: [], references: [], has_opaque_xml: false },
+        ],
+        rule_count: 2,
         profile_count: 0,
         errors: [],
         warnings: [],
         foreign_stig_reconciliation: {
           framework: { canonical_source_key: "disa-anduril-nixos-stig", canonical_release_key: "v1r2", state: "exact_release" },
-          requirements: [{ rule_id: "xccdf_fixture_rule_001", external_id: "V-999001", title: "Configure the fixture control", state: "authoritative_mapping", auto_resolvable: true, inferred_enforcement: false, candidates: [{ policy_id: policyId, policy_version_id: policyVersionId, policy_name: "Fixture authoritative policy", match_type: "exact_technical", confidence: 100, match_reasons: ["Exact technical enforcement identity"], related_evidence: null }] }],
+          requirements: [
+            { rule_id: "xccdf_fixture_rule_001", external_id: "V-999001", title: "Configure the fixture control", state: "authoritative_mapping", auto_resolvable: true, inferred_enforcement: false, candidates: [{ policy_id: policyId, policy_version_id: policyVersionId, policy_name: "Fixture authoritative policy", match_type: "exact_technical_match", confidence: 100, match_reasons: ["Exact technical enforcement identity"], related_evidence: null }] },
+            { rule_id: "xccdf_fixture_rule_002", external_id: "V-999002", title: "Verify the fixture control", state: "authoritative_mapping", auto_resolvable: true, inferred_enforcement: false, candidates: [{ policy_id: policyId, policy_version_id: policyVersionId, policy_name: "Fixture authoritative policy", match_type: "exact_technical_match", confidence: 100, match_reasons: ["Shared technical implementation identity"], related_evidence: null }] },
+          ],
           shared_implementation_groups: [{ group_id: "fixture-shared-group", requirement_keys: ["V-999001", "V-999002"], recommended_action: "reuse_existing", has_existing_candidate: true, existing_candidate: { policy_id: policyId, policy_version_id: policyVersionId, policy_name: "Fixture authoritative policy", confidence: 100 }, member_proofs: { "V-999001": "exact_technical", "V-999002": "shared_implementation" } }],
           removed_requirements: [],
         },
@@ -6238,7 +6272,7 @@ const steps = [
         await page.locator('input[type="file"]').setInputFiles({ name: "fixture-stig.xml", mimeType: "application/xml", buffer: Buffer.from("<Benchmark id=\"fixture-stig-benchmark\"/>", "utf8") });
         await page.getByTestId("xccdf-reconciliation-stage").waitFor({ timeout: 10000 });
         await assertVisible(page.getByText("Exact release", { exact: false }), "Expected exact framework release state");
-        await assertVisible(page.getByText("Exact technical", { exact: false }), "Expected exact technical match proof");
+        await assertVisible(page.getByText("Exact technical match", { exact: true }), "Expected exact technical reconciliation candidate");
         await assertVisible(page.getByText("Fixture authoritative policy", { exact: true }), "Expected server-provided candidate policy");
         await assertVisible(page.getByTestId("xccdf-shared-implementation-groups"), "Expected shared implementation proof");
         await assertVisible(page.getByText("V-999001, V-999002", { exact: true }), "Expected shared requirement keys");
