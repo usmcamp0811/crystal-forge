@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 04:41'
+updated_date: '2026-08-15 14:39'
 labels: []
 milestone: m-22
 dependencies:
@@ -527,6 +527,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15: Manifest registration for 20ac is committed as ba2f39bf. Full NixOS web-ui check reached the Playwright launch but exceeded the execution window before a final result; focused runtime proof remains required.
 
 2026-08-15 focused runtime attempts: direct Playwright execution is available via CF_UI_TEST_STEPS=20ac-stig-import-reconciliation-fixture. Initial attempt exposed a fixture selector defect: the STIG action is inside the Import / Export menu; fixed and pushed as cb756c45. Local run-ui-dev execution then remained blocked by local-auth/bootstrap setup and did not produce screenshots. The authoritative NixOS check was not rerun to completion; focused Playwright PASS and dark/light screenshots remain outstanding.
+
+2026-08-15 focused-check failure reporting fix committed/pushed as 4f7314bf. Top-level integration failures now write fatal.json; Nix wrapper records integration.exit and waits for results/fatal/exit; focused timeout is 180s while normal web-ui remains 1800s. node --check and git diff --check pass. A post-fix focused build was started but the outer command timed out during server compilation before a Playwright result was observed; 20ac matrix expansion remains blocked.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
