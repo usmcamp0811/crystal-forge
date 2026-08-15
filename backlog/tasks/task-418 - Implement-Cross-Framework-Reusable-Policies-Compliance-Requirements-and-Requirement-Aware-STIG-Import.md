@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 19:56'
+updated_date: '2026-08-15 20:25'
 labels: []
 milestone: m-22
 dependencies:
@@ -106,6 +106,8 @@ v4 upgrade hardening (2026-08-15): classify legacy DISA rows from persisted publ
 v4 metadata authority remediation (2026-08-15): make parsed DISA identity authoritative for every framework digest field during legacy reconstruction; reconcile persisted framework metadata through a new narrowly scoped migration path and keep digest state consistent with stored rows. Ensure framework lineage publisher classification is updated by authoritative adapter imports so missing artifacts cannot bypass fail-closed recovery. Add a real v3-to-v4-to-identical-reimport DB test plus negative artifact/classification cases, then restore a seeded isolated DB suite and complete feasible Nix verification.
 
 Post-0223 recovery (user-approved): preserve migrations through 0223 byte-for-byte. Add a forward recovery-status field and migration that marks 0223-pending v5 rows as recoverable. Backfill individual rows transactionally; on missing/corrupt/wrong artifacts roll back, mark the row unresolved without fabricating a digest, and continue startup. Permit explicit future recovery when authoritative artifact data is attached.
+
+Post-0224 continuation: consistently require finalized/non-pending framework releases for coverage and candidate discovery; isolate backfill failures per release and surface RecoveryRequired; add verified artifact attachment plus retry; expose status/reason through API/UI; then add post-0223 regression coverage and run the seeded framework DB suite.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -244,6 +246,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15 hardening checkpoint committed/pushed as 537668d9. v4 backfill now classifies legacy DISA state by persisted publisher, rejects missing/unparseable/non-DISA artifacts, verifies parsed source/release identity before mutation, reconstructs absent rule versions, and verifies persisted node/edge topology before finalizing. Added 0221 to narrow 0220's pending-framework exception so structural identity fields remain immutable. Updated the topology DB test to use identify_framework()-derived key/release; it passed. cargo fmt, SQLX_OFFLINE cargo check, git diff check, nix build .#server, and nix build .#web-ui passed. nix flake check --keep-going exceeded the 10-minute execution limit while building VM checks, so no final flake-check result. Negative DB tests and properly seeded 11/11 framework suite remain outstanding; the current isolated database is unseeded after the prior reset attempt. tailwind.css remains intentionally untracked.
 
 2026-08-15 metadata-authority checkpoint committed/pushed as 15d1c6d3. Parsed DISA identity now repairs pending framework version/title and lineage publisher before v4 finalization; 0222 permits only those pending framework metadata fields alongside digest metadata. Framework lineage upsert now retains an authoritative non-null publisher on canonical-key reuse. The legacy topology DB test now proves stored version/title/publisher equal identify_framework() output and passed. SQLX_OFFLINE cargo check, cargo fmt, and git diff check passed. Full v3->0220/0221->v4->reimport and negative DB coverage still remain; no claim of 11/11 suite or flake-check completion. tailwind.css remains untracked.
+
+2026-08-15: Continued post-0223 recovery work. Commit 12ae625d validates explicit comparison framework versions as belonging to the target framework and finalized/non-pending before reconciliation. Pushed to MR !315.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
