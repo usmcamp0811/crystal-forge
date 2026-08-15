@@ -2003,6 +2003,18 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
         .iter()
         .filter(|row| !row.candidates.is_empty())
         .count();
+    let authoritative_count = reconciliation_rows
+        .iter()
+        .filter(|row| row.candidates.iter().any(|candidate| candidate.match_type == "authoritative_mapping"))
+        .count();
+    let inherited_count = reconciliation_rows
+        .iter()
+        .filter(|row| row.candidates.iter().any(|candidate| candidate.match_type == "inherited_mapping"))
+        .count();
+    let exact_count = reconciliation_rows
+        .iter()
+        .filter(|row| row.candidates.iter().any(|candidate| candidate.match_type == "exact_technical_match"))
+        .count();
     let ready_count = reconciliation_rows
         .iter()
         .filter(|row| row.candidates.is_empty() && row.auto_resolvable)
@@ -2597,26 +2609,30 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                 // STEP: reconcile (DISA STIG requirement reconciliation)
                 // ══════════════════════════════════════════════════════
                 if *step.read() == "reconcile" {
-                    div { class: "modal-head",
-                        h2 { style: "display:flex;align-items:center;gap:8px;",
-                            Icon { name: IconName::Link, size: 14 }
-                            "Reconciling {sel_count} controls"
-                        }
-                        p { "Checked each control against normalized requirements and policy mappings already on file before asking you to do anything." }
-                    }
-                    div { class: "modal-body", style: "overflow-y:auto;",
-                        div { style: "display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px;",
-                             for (count, label, color) in [
-                                (reused_count, "existing implementations reused", "#34d399"),
-                                (ready_count, "ready to create — enforcement inferred", "#60a5fa"),
-                                (attention_rule_ids.len(), "need review — no automatic resolution", if attention_rule_ids.is_empty() { "var(--cf-text-muted)" } else { "#fbbf24" }),
-                            ] {
+                     div { class: "modal-head", "data-testid": "xccdf-reconciliation-stage",
+                         h2 { style: "display:flex;align-items:center;gap:8px;",
+                             Icon { name: IconName::Link, size: 14 }
+                             "Reconciling {sel_count} requirements"
+                         }
+                         p { "Deterministic implementation candidates are resolved from server-side requirement and policy evidence before review." }
+                     }
+                     div { class: "modal-body", style: "overflow-y:auto;",
+                         div { style: "display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;",
+                              for (count, label, color) in [
+                                 (authoritative_count, "authoritative mappings", "#34d399"),
+                                 (inherited_count, "inherited mappings", "#34d399"),
+                                 (exact_count, "exact technical matches", "#60a5fa"),
+                                 (attention_rule_ids.len(), "need review — no automatic resolution", if attention_rule_ids.is_empty() { "var(--cf-text-muted)" } else { "#fbbf24" }),
+                             ] {
                                  div { class: "card", style: "padding:14px 12px;text-align:center;",
                                     div { style: "font-size:24px;font-weight:700;color:{color};", "{count}" }
                                     div { style: "font-size:11px;color:var(--cf-text-muted);line-height:1.4;margin-top:2px;", "{label}" }
-                                }
-                            }
-                        }
+                                 }
+                             }
+                         }
+                         if ready_count > 0 {
+                             div { class: "sd-callout sd-callout-info", style: "font-size:11px;margin-bottom:12px;", "{ready_count} requirements have inferred enforcement and can be reviewed without a reusable policy candidate." }
+                         }
                         if reconciliation_rows.is_empty() {
                             div { class: "sd-callout sd-callout-warn",
                                 Icon { name: IconName::Warn, size: 13 }
@@ -2639,11 +2655,12 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                           span { "{candidate.confidence}% confidence" }
                                                       } else { "No trusted mapped implementation or inferred enforcement is available." }
                                                  }
-                                                 if let Some(candidate) = row.candidates.first() {
-                                                     div { style: "display:flex;gap:5px;flex-wrap:wrap;margin-top:5px;",
-                                                         for reason in candidate.match_reasons.iter() {
-                                                             span { class: "chip mono", style: "font-size:9px;", "{reason}" }
-                                                         }
+                                                  if let Some(candidate) = row.candidates.first() {
+                                                      div { style: "display:flex;gap:5px;flex-wrap:wrap;margin-top:5px;",
+                                                          span { class: "chip chip-neutral", style: "font-size:9px;", "{candidate.policy_name}" }
+                                                          for reason in candidate.match_reasons.iter() {
+                                                              span { class: "chip mono", style: "font-size:9px;", "{reason}" }
+                                                          }
                                                      }
                                                  }
                                             }
@@ -2654,10 +2671,10 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         }
                         if reused_count + ready_count > 0 {
                             details { style: "margin-top:4px;",
-                                summary { style: "cursor:pointer;font-size:11.5px;font-weight:600;color:var(--cf-text-muted);", "Show {reused_count + ready_count} auto-resolved controls" }
+                                 summary { style: "cursor:pointer;font-size:11.5px;font-weight:600;color:var(--cf-text-muted);", "Show {reused_count + ready_count} auto-resolved requirements" }
                                 div { style: "display:flex;flex-direction:column;gap:5px;margin-top:8px;max-height:220px;overflow-y:auto;",
                                       for row in reconciliation_rows.iter().filter(|row| row.auto_resolvable && row.state != "identity_conflict") {
-                                         div { key: "resolved-{row.rule_id}", style: "display:flex;gap:10px;align-items:flex-start;padding:7px 10px;border-radius:8px;background:var(--cf-subtle-bg);",
+                                          div { key: "resolved-{row.rule_id}", "data-testid": "xccdf-reconciliation-resolved-row", style: "display:flex;gap:10px;align-items:flex-start;padding:7px 10px;border-radius:8px;background:var(--cf-subtle-bg);",
                                             span { style: if !row.candidates.is_empty() { "color:#34d399;margin-top:2px;display:inline-flex;" } else { "color:#60a5fa;margin-top:2px;display:inline-flex;" }, Icon { name: if !row.candidates.is_empty() { IconName::Check } else { IconName::Shield }, size: 12 } }
                                             div { style: "min-width:0;",
                                                 div { style: "font-size:12px;font-weight:600;line-height:1.4;", "{row.title.clone().unwrap_or_else(|| row.external_id.clone())}" }
@@ -2698,7 +2715,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         cursor.set(0);
                                         step.set("refine".to_string());
                                     },
-                                    "Review {review_count} controls "
+                                     "Review {review_count} requirements "
                                     Icon { name: IconName::ChevronRight, size: 13 }
                                 }
                             }
