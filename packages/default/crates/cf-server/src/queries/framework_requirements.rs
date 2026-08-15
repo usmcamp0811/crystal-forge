@@ -1981,22 +1981,34 @@ pub mod tests {
         .unwrap();
         tx.commit().await.unwrap();
 
+        // Run two concurrent backfills. Both should complete without data races.
+        // This row has no publisher and no source artifact, so the recovery logic
+        // will mark it unresolved (not finalized) — but both calls must succeed
+        // without panicking and without corrupting the row.
         let (first, second) = tokio::join!(
             crate::compliance::framework_model::backfill_pending_framework_version_digests(&pool),
             crate::compliance::framework_model::backfill_pending_framework_version_digests(&pool),
         );
         first.unwrap();
         second.unwrap();
-        let row: (String, String) = sqlx::query_as(
-            "SELECT semantic_digest, canonicalization_version
+        let row: (String, String, String) = sqlx::query_as(
+            "SELECT semantic_digest, canonicalization_version, migration_recovery_status
              FROM compliance_framework_versions WHERE id = $1",
         )
         .bind(version_id)
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_ne!(row.0, "pending");
-        assert_eq!(row.1, "cf-model-json-4");
+        // Row without publisher/artifact is marked unresolved: digest stays 'pending'
+        // because we never fabricate a digest, but recovery_status is 'unresolved'.
+        assert_eq!(
+            row.0, "pending",
+            "digest must remain pending for unresolved row"
+        );
+        assert_eq!(
+            row.2, "unresolved",
+            "row without artifact must be marked unresolved"
+        );
     }
 
     #[tokio::test]
