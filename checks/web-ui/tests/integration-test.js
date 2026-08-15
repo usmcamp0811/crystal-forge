@@ -6565,9 +6565,18 @@ const steps = [
       // submit through the Playwright request context to avoid making CORS
       // preflight the behavior under test. The page still drives and validates
       // the complete requirement selection form before this real API write.
-      const csrfCookie = (await page.context().cookies(apiBaseUrl)).find((cookie) => cookie.name === "__Host-cf-csrf");
-      const createResponse = await page.context().request.post(`${apiBaseUrl}/api/v1/compliance/bundles`, {
-        data: {
+      const createResult = await page.evaluate(async ({ base, payload }) => {
+        const csrf = document.cookie.split(";").map((cookie) => cookie.trim()).find((cookie) => cookie.startsWith("__Host-cf-csrf="))?.slice("__Host-cf-csrf=".length);
+        const response = await fetch(`${base}/api/v1/compliance/bundles`, {
+          method: "POST",
+          credentials: "include",
+          headers: { Accept: "application/json", "Content-Type": "application/json", ...(csrf ? { "X-CSRF-Token": csrf } : {}) },
+          body: JSON.stringify(payload),
+        });
+        return { status: response.status, body: await response.text() };
+      }, {
+        base: apiBaseUrl,
+        payload: {
           name: requirementOnlyName,
           framework: "DISA STIG",
           version: "v1",
@@ -6577,10 +6586,9 @@ const steps = [
           policy_ids: [],
           requirement_version_ids: [requirementA.id, requirementB.id],
         },
-        headers: csrfCookie ? { "X-CSRF-Token": csrfCookie.value } : undefined,
       });
-      if (createResponse.status() !== 201) throw new Error(`Expected requirement-only create 201, got ${createResponse.status()}: ${await createResponse.text()}`);
-      const createdBundle = await createResponse.json();
+      if (createResult.status !== 201) throw new Error(`Expected requirement-only create 201, got ${createResult.status}: ${createResult.body}`);
+      const createdBundle = JSON.parse(createResult.body);
       const createPayload = {
         policy_ids: [],
         requirement_version_ids: [requirementA.id, requirementB.id],
@@ -6605,7 +6613,7 @@ const steps = [
       // Reload and edit: both requirements must be preselected. Add one policy
       // without changing the requirement set, proving independent membership.
       await page.reload({ waitUntil: "domcontentloaded" });
-      await page.getByText(requirementOnlyName, { exact: true }).click();
+      await page.getByRole("button", { name: requirementOnlyName }).click();
       await page.getByRole("button", { name: "Edit bundle", exact: true }).click();
       await page.getByRole("heading", { name: /Edit compliance bundle/i }).waitFor({ timeout: 10000 });
       await assertVisible(page.getByText("2 selected", { exact: true }), "Existing draft requirements were not preselected");
@@ -6655,7 +6663,7 @@ const steps = [
       // or policy-only baseline.
       await page.getByRole("button", { name: /New bundle/i }).first().click({ force: true });
       await page.getByRole("heading", { name: /New compliance bundle/i }).waitFor({ timeout: 10000 });
-      await page.getByLabel("Bundle name").fill(`UI empty baseline ${Date.now()}`);
+      await page.getByPlaceholder("e.g. DISA RHEL9 STIG (v1r5)").fill(`UI empty baseline ${Date.now()}`);
       await assertDisabled(page.getByRole("button", { name: /Create bundle/i }), "Empty baseline should remain blocked");
       await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
       await page.unroute(`${apiBaseUrl}/api/v1/compliance/bundles*`);
