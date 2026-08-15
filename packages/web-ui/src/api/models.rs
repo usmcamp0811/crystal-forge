@@ -3902,6 +3902,17 @@ pub struct BundleCoverageRow {
     pub parent_requirement_version_id: Option<Uuid>,
     pub coverage: RequirementCoverage,
     pub mapped_policy_version_ids: Vec<Uuid>,
+    pub mappings: Vec<BundleCoverageMapping>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BundleCoverageMapping {
+    pub policy_version_id: Uuid,
+    pub policy_name: String,
+    pub relationship: String,
+    pub coverage: String,
+    pub provenance: String,
+    pub rationale: Option<String>,
 }
 
 /// Aggregated requirement coverage for a bundle version.

@@ -4787,7 +4787,7 @@ fn RequirementCoverageCard(
     let unmapped = report.unmapped;
 
     rsx! {
-        div { class: "card", style: "display:flex;flex-direction:column;gap:10px;",
+         div { class: "card", "data-testid": "requirement-coverage-card", style: "display:flex;flex-direction:column;gap:10px;",
             // Header row with expand toggle.
             div { style: "display:flex;align-items:center;justify-content:space-between;",
                 div { style: "font-size:13px;font-weight:600;", "Requirement coverage" }
@@ -4804,16 +4804,16 @@ fn RequirementCoverageCard(
             // Summary chips.
             div { style: "display:flex;gap:8px;flex-wrap:wrap;",
                 div { style: "display:flex;align-items:center;gap:4px;",
-                    span { class: "chip chip-success", "{full}" }
-                    span { style: "font-size:11px;color:var(--cf-text-muted);", "full" }
+                                     span { class: "chip chip-success", "{full}" }
+                                     span { style: "font-size:11px;color:var(--cf-text-muted);", "Fully covered" }
                 }
                 div { style: "display:flex;align-items:center;gap:4px;",
                     span { class: "chip chip-warn", "{partial}" }
-                    span { style: "font-size:11px;color:var(--cf-text-muted);", "partial" }
+                                     span { style: "font-size:11px;color:var(--cf-text-muted);", "Partially covered" }
                 }
                 div { style: "display:flex;align-items:center;gap:4px;",
                     span { class: "chip chip-neutral", "{unmapped}" }
-                    span { style: "font-size:11px;color:var(--cf-text-muted);", "unmapped" }
+                                     span { style: "font-size:11px;color:var(--cf-text-muted);", "Unmapped" }
                 }
                 div { style: "display:flex;align-items:center;gap:4px;margin-left:auto;",
                     span { style: "font-size:11px;color:var(--cf-text-muted);", "{total} total" }
@@ -4836,14 +4836,19 @@ fn RequirementCoverageCard(
                                 RequirementCoverage::Unmapped => "Unmapped",
                             };
                             rsx! {
-                                div { key: "{row_id}",
+                                 div { key: "{row_id}", "data-testid": "requirement-coverage-row",
                                     style: "display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;padding:5px 8px;border-radius:6px;font-size:11px;background:var(--cf-subtle-bg);",
                                     span { class: "mono", style: "color:var(--cf-text-secondary);", "{row.external_id}" }
                                     span { style: "color:var(--cf-text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
                                         {row.title.as_deref().unwrap_or("-")}
                                     }
-                                    span { style: "color:{coverage_color};font-weight:600;white-space:nowrap;", "{coverage_label}" }
-                                }
+                                     div { style: "display:flex;flex-direction:column;align-items:flex-end;gap:3px;",
+                                         span { style: "color:{coverage_color};font-weight:600;white-space:nowrap;", "{coverage_label}" }
+                                         for mapping in row.mappings.iter() {
+                                             span { style: "font-size:10px;color:var(--cf-text-muted);white-space:nowrap;", "{mapping.policy_name} · {mapping.relationship} · {mapping.coverage}" }
+                                         }
+                                     }
+                                 }
                             }
                         }
                     }

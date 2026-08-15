@@ -119,6 +119,17 @@ pub struct BundleCoverageRow {
     pub coverage: RequirementCoverage,
     /// Policy version IDs mapped to this requirement that are also in the bundle.
     pub mapped_policy_version_ids: Vec<Uuid>,
+    pub mappings: Vec<BundleCoverageMapping>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BundleCoverageMapping {
+    pub policy_version_id: Uuid,
+    pub policy_name: String,
+    pub relationship: String,
+    pub coverage: String,
+    pub provenance: String,
+    pub rationale: Option<String>,
 }
 
 // ── Framework CRUD ────────────────────────────────────────────────────────────
@@ -615,7 +626,7 @@ pub async fn compute_bundle_requirement_coverage(
     let mut unmapped_count = 0i64;
     let total = rows.len() as i64;
 
-    let coverage_rows: Vec<BundleCoverageRow> = rows
+    let mut coverage_rows: Vec<BundleCoverageRow> = rows
         .into_iter()
         .map(|r| {
             let coverage = if r.has_full_coverage {
@@ -636,9 +647,66 @@ pub async fn compute_bundle_requirement_coverage(
                 parent_requirement_version_id: r.parent_requirement_version_id,
                 coverage,
                 mapped_policy_version_ids: r.mapped_policy_version_ids,
+                mappings: Vec::new(),
             }
         })
         .collect();
+
+    #[derive(Debug, sqlx::FromRow)]
+    struct RawMapping {
+        requirement_version_id: Uuid,
+        policy_version_id: Uuid,
+        policy_name: String,
+        relationship: String,
+        coverage: String,
+        provenance: String,
+        rationale: Option<String>,
+    }
+
+    let mappings = sqlx::query_as::<_, RawMapping>(
+        r#"
+        SELECT m.requirement_version_id,
+               m.policy_version_id,
+               pv.name AS policy_name,
+               m.relationship,
+               m.coverage,
+               m.provenance,
+               m.rationale
+        FROM policy_requirement_mappings m
+        JOIN compliance_bundle_version_policies bvp
+          ON bvp.policy_version_id = m.policy_version_id
+         AND bvp.bundle_version_id = $1
+         AND bvp.selected = true
+        JOIN deployment_policy_versions pv ON pv.id = m.policy_version_id
+        WHERE m.trust_state = 'trusted'
+          AND m.requirement_version_id IN (
+              SELECT requirement_version_id
+              FROM compliance_bundle_version_requirements
+              WHERE bundle_version_id = $1 AND selected = true
+          )
+        ORDER BY m.requirement_version_id, pv.name, m.relationship
+        "#,
+    )
+    .bind(bundle_version_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to load bundle requirement mapping evidence")?;
+
+    for mapping in mappings {
+        if let Some(row) = coverage_rows
+            .iter_mut()
+            .find(|row| row.requirement_version_id == mapping.requirement_version_id)
+        {
+            row.mappings.push(BundleCoverageMapping {
+                policy_version_id: mapping.policy_version_id,
+                policy_name: mapping.policy_name,
+                relationship: mapping.relationship,
+                coverage: mapping.coverage,
+                provenance: mapping.provenance,
+                rationale: mapping.rationale,
+            });
+        }
+    }
 
     Ok(BundleCoverageReport {
         bundle_version_id,

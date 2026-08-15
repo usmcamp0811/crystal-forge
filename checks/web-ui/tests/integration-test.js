@@ -6610,11 +6610,15 @@ const steps = [
       if (createdRequirements.status !== 200 || createdRequirements.body.length !== 2) throw new Error("Requirement-only baseline did not persist two requirements");
       if ((await readPolicies(createdBundle.current_draft_version_id)).body.length !== 0) throw new Error("Requirement-only baseline persisted policies");
 
-      // Reload and edit: both requirements must be preselected. Add one policy
-      // without changing the requirement set, proving independent membership.
-      await page.reload({ waitUntil: "domcontentloaded" });
-      await page.getByRole("button", { name: requirementOnlyName }).click();
-      await page.getByRole("button", { name: "Edit bundle", exact: true }).click();
+       // Reload and edit: both requirements must be preselected. Add one policy
+       // without changing the requirement set, proving independent membership.
+       await page.reload({ waitUntil: "domcontentloaded" });
+       await page.getByRole("button", { name: requirementOnlyName }).click();
+       const coverageCard = page.getByTestId("requirement-coverage-card");
+       await coverageCard.waitFor({ timeout: 15000 });
+       await coverageCard.getByRole("button", { name: "Expand", exact: true }).click();
+       await page.getByTestId("requirement-coverage-row").first().waitFor({ timeout: 10000 });
+       await page.getByRole("button", { name: "Edit bundle", exact: true }).click();
       await page.getByRole("heading", { name: /Edit compliance bundle/i }).waitFor({ timeout: 10000 });
       await assertVisible(page.getByText("2 selected", { exact: true }), "Existing draft requirements were not preselected");
       const policyButton = page.getByRole("button").filter({ hasText: fixture.policy.name });
@@ -6656,8 +6660,16 @@ const steps = [
       if (requirementEdit.status() !== 200) throw new Error(`Expected requirement edit 200, got ${requirementEdit.status()}`);
       const requirementEditPayload = requirementEdit.request().postDataJSON();
       if (requirementEditPayload.policy_ids.length !== 1 || requirementEditPayload.requirement_version_ids.length !== 1) throw new Error("Requirement-only edit did not preserve policy membership or replace the complete requirement set");
-      if ((await readPolicies(createdBundle.current_draft_version_id)).body.length !== 1) throw new Error("Requirement edit changed policy membership");
-      if ((await readMembership(createdBundle.current_draft_version_id)).body.length !== 1) throw new Error("Requirement edit did not replace the complete requirement set");
+       if ((await readPolicies(createdBundle.current_draft_version_id)).body.length !== 1) throw new Error("Requirement edit changed policy membership");
+       if ((await readMembership(createdBundle.current_draft_version_id)).body.length !== 1) throw new Error("Requirement edit did not replace the complete requirement set");
+
+       const coverageReport = await page.evaluate(async ({ base, versionId }) => {
+         const response = await fetch(`${base}/api/v1/compliance/bundle-versions/${versionId}/requirement-coverage`, { credentials: "include" });
+         return { status: response.status, body: await response.json() };
+       }, { base: apiBaseUrl, versionId: createdBundle.current_draft_version_id });
+       if (coverageReport.status !== 200) throw new Error(`Expected authoritative coverage 200, got ${coverageReport.status}`);
+       if (coverageReport.body.total_requirements !== coverageReport.body.full + coverageReport.body.partial + coverageReport.body.unmapped) throw new Error("Coverage counts do not reconcile");
+       if (coverageReport.body.rows.length !== 1 || coverageReport.body.rows[0].mappings === undefined) throw new Error("Coverage response omitted requirement mapping evidence");
 
       // Empty baseline validation remains distinct from a valid requirement-only
       // or policy-only baseline.
