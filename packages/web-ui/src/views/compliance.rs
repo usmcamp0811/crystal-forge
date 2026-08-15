@@ -2012,6 +2012,17 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
         .as_ref()
         .map(|reconciliation| reconciliation.shared_implementation_groups.clone())
         .unwrap_or_default();
+    let shared_group_proof = shared_groups
+        .iter()
+        .map(|group| {
+            format!(
+                "{} ({})",
+                shared_reconciliation_requirement_keys(&group.requirement_keys),
+                shared_reconciliation_action_label(&group.recommended_action),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
     let framework_reconciliation = foreign_reconciliation
         .as_ref()
         .map(|reconciliation| reconciliation.framework.clone());
@@ -2656,8 +2667,14 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                              Icon { name: IconName::Link, size: 14 }
                              "Reconciling {sel_count} requirements"
                          }
-                         p { "Deterministic implementation candidates are resolved from server-side requirement and policy evidence before review." }
-                     }
+                          p { "Deterministic implementation candidates are resolved from server-side requirement and policy evidence before review." }
+                          div {
+                              class: "sd-callout sd-callout-info",
+                              "data-testid": "xccdf-shared-implementation-groups",
+                              style: if shared_groups.is_empty() { "display:none;" } else { "" },
+                              "Shared implementation groups · {shared_groups.len()}: {shared_group_proof}"
+                          }
+                      }
                      div { class: "modal-body", style: "overflow-y:auto;",
                           if let Some(framework) = framework_reconciliation.as_ref() {
                               div { class: "card", style: "display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 12px;margin-bottom:12px;",
@@ -2689,29 +2706,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 Icon { name: IconName::Warn, size: 13 }
                                 div { style: "font-size:12px;", "This XCCDF source does not expose a stable DISA STIG identity. Review all selected controls before importing." }
                          }
-                          div {
-                              class: "field",
-                              "data-testid": "xccdf-shared-implementation-groups",
-                              style: if shared_groups.is_empty() { "display:none;" } else { "" },
-                                  label { "Shared implementation groups · {shared_groups.len()}" }
-                                  div { style: "display:flex;flex-direction:column;gap:7px;",
-                                      for group in shared_groups.iter() {
-                                         div { key: "shared-{group.group_id}", style: "padding:10px 12px;border:1px solid var(--cf-divider);border-radius:9px;background:var(--cf-subtle-bg);",
-                                             div { style: "display:flex;justify-content:space-between;gap:8px;align-items:center;",
-                                                 div { style: "font-size:12px;font-weight:650;", "{group.requirement_keys.len()} requirements share one technical implementation" }
-                                                 span { class: "chip chip-neutral", style: "font-size:9px;", "{shared_reconciliation_action_label(&group.recommended_action)}" }
-                                             }
-                                              div { class: "mono", style: "font-size:10.5px;color:var(--cf-text-muted);margin-top:4px;", "{shared_reconciliation_requirement_keys(&group.requirement_keys)}" }
-                                             if let Some(candidate) = group.existing_candidate.as_ref() {
-                                                 div { style: "font-size:10.5px;color:var(--cf-text-secondary);margin-top:5px;", "Candidate: {candidate.policy_name} · {candidate.confidence}% confidence" }
-                                             } else {
-                                                 div { style: "font-size:10.5px;color:var(--cf-text-muted);margin-top:5px;", "No common existing policy candidate; review or create one shared policy." }
-                                      }
-                                  }
-                              }
                          }
-                         }
-                        }
                         if !attention_rule_ids.is_empty() {
                             div { class: "field",
                                 label { "Requiring attention · {attention_rule_ids.len()}" }
