@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 19:25'
+updated_date: '2026-08-15 19:29'
 labels: []
 milestone: m-22
 dependencies:
@@ -240,6 +240,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15 v4 checkpoint committed/pushed as 8b7e445e. Framework canonicalization now includes complete group/rule content plus hierarchy edges; migration 0220 reopens cf-model-json-3 rows and permits pending requirement content reconstruction while the parent framework remains pending. Startup backfill reconstructs legacy DISA topology from persisted source artifacts, preserves XCCDF Rule external IDs, and uses the same complete requirement set for framework identity. Verification: cargo fmt --all --check, SQLX_OFFLINE=true cargo check -p cf-server, and git diff --check passed. Isolated DB legacy topology test passed after correcting the fixture to use XCCDF <version> element. The broader framework_requirements DB filter had 8/11 passing; 3 failures were RowNotFound because the isolated database lacked seeded users after an attempted reset. Untracked packages/web-ui/assets/tailwind.css was intentionally not staged.
 
 2026-08-15 hardening checkpoint committed/pushed as 537668d9. v4 backfill now classifies legacy DISA state by persisted publisher, rejects missing/unparseable/non-DISA artifacts, verifies parsed source/release identity before mutation, reconstructs absent rule versions, and verifies persisted node/edge topology before finalizing. Added 0221 to narrow 0220's pending-framework exception so structural identity fields remain immutable. Updated the topology DB test to use identify_framework()-derived key/release; it passed. cargo fmt, SQLX_OFFLINE cargo check, git diff check, nix build .#server, and nix build .#web-ui passed. nix flake check --keep-going exceeded the 10-minute execution limit while building VM checks, so no final flake-check result. Negative DB tests and properly seeded 11/11 framework suite remain outstanding; the current isolated database is unseeded after the prior reset attempt. tailwind.css remains intentionally untracked.
+
+2026-08-15 metadata-authority checkpoint committed/pushed as 15d1c6d3. Parsed DISA identity now repairs pending framework version/title and lineage publisher before v4 finalization; 0222 permits only those pending framework metadata fields alongside digest metadata. Framework lineage upsert now retains an authoritative non-null publisher on canonical-key reuse. The legacy topology DB test now proves stored version/title/publisher equal identify_framework() output and passed. SQLX_OFFLINE cargo check, cargo fmt, and git diff check passed. Full v3->0220/0221->v4->reimport and negative DB coverage still remain; no claim of 11/11 suite or flake-check completion. tailwind.css remains untracked.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
