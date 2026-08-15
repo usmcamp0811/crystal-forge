@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-08-15 17:41'
+updated_date: '2026-08-15 18:51'
 labels: []
 milestone: m-22
 dependencies:
@@ -13,6 +14,13 @@ dependencies:
 references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/315'
   - 23c88aba
+  - docs/design/CrystalForge/screens/compliance-redesign/cb-1.png
+  - docs/design/CrystalForge/screens/compliance-redesign/cb-2.png
+  - docs/design/CrystalForge/screens/compliance-redesign/cb-3.png
+  - docs/design/CrystalForge/screens/compliance-redesign/cb-4.png
+  - docs/design/CrystalForge/screens/compliance-redesign/cb-5.png
+  - docs/design/CrystalForge/screens/compliance-redesign/cb-6.png
+  - docs/design/CrystalForge/screens/compliance-redesign/cb-7.png
 documentation:
   - backlog/docs/doc-22 - Compliance-UI-Redesign-Spec-design-commit-23c88aba.md
   - docs/design/CrystalForge/components/ComplianceView.jsx
