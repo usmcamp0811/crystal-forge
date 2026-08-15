@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-15 23:24'
+updated_date: '2026-08-15 23:45'
 labels: []
 milestone: m-22
 dependencies:
@@ -124,6 +124,8 @@ Spec §9 contains the endpoint/URL table a reviewer uses to put the running desi
 
 <!-- SECTION:NOTES:BEGIN -->
 Implementation started after MR !315 was merged into dev. Dedicated worktree: /home/mcamp/code/crystal-forge/TASK-422-compliance-view-redesign; branch TASK-422-compliance-view-redesign from dev e04c4e71. Main and dev integration worktrees were clean at preflight. Following spec §10 phases.
+
+Phase 0 baseline command `nix build .#checks.x86_64-linux.web-ui -L` was started before code changes but did not complete within 20 minutes; it remained in the `vm-test-run-crystal-forge-web-ui-mega-integration` run and the tool terminated it. Output showed unrelated fixture evaluation/builder warnings before timeout; no baseline compliance result was produced. Proceeding with targeted implementation and will rerun focused checks later.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
