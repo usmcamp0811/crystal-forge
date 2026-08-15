@@ -3746,7 +3746,7 @@ pub struct UpdateAutomaticRetryPolicyRequest {
 }
 
 #[cfg(test)]
-mod tests {
+mod reconciliation_tests {
     use super::*;
 
     #[test]
@@ -3970,4 +3970,61 @@ pub struct UpdatePolicyMappingRequest {
     pub relationship: String,
     pub coverage: String,
     pub rationale: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::XccdfPreviewResponse;
+
+    #[test]
+    fn deserializes_20ac_shared_implementation_group() {
+        let preview: XccdfPreviewResponse = serde_json::from_value(serde_json::json!({
+            "sha256": "fixture-stig-import-sha256",
+            "rule_count": 2,
+            "profile_count": 0,
+            "foreign_stig_reconciliation": {
+                "framework": {
+                    "canonical_source_key": "disa-anduril-nixos-stig",
+                    "canonical_release_key": "v1r2",
+                    "state": "exact_release"
+                },
+                "requirements": [],
+                "shared_implementation_groups": [{
+                    "group_id": "fixture-shared-group",
+                    "requirement_keys": ["V-999001", "V-999002"],
+                    "recommended_action": "reuse_existing",
+                    "has_existing_candidate": true,
+                    "existing_candidate": {
+                        "policy_id": "11111111-1111-4111-8111-111111111111",
+                        "policy_version_id": "22222222-2222-4222-8222-222222222222",
+                        "policy_name": "Fixture authoritative policy",
+                        "confidence": 100
+                    },
+                    "member_proofs": {
+                        "V-999001": "exact_technical",
+                        "V-999002": "shared_implementation"
+                    }
+                }],
+                "removed_requirements": []
+            }
+        }))
+        .expect("20ac fixture should deserialize");
+
+        let reconciliation = preview
+            .foreign_stig_reconciliation
+            .expect("foreign reconciliation");
+        assert_eq!(reconciliation.shared_implementation_groups.len(), 1);
+
+        let group = &reconciliation.shared_implementation_groups[0];
+        assert_eq!(group.group_id, "fixture-shared-group");
+        assert_eq!(group.requirement_keys, ["V-999001", "V-999002"]);
+        assert_eq!(group.recommended_action, "reuse_existing");
+        assert!(group.has_existing_candidate);
+
+        let candidate = group.existing_candidate.as_ref().expect("candidate");
+        assert_eq!(candidate.policy_name, "Fixture authoritative policy");
+        assert_eq!(candidate.confidence, 100);
+        assert_eq!(group.member_proofs.get("V-999001").map(String::as_str), Some("exact_technical"));
+        assert_eq!(group.member_proofs.get("V-999002").map(String::as_str), Some("shared_implementation"));
+    }
 }

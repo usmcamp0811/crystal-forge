@@ -2012,6 +2012,20 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
         .and_then(|preview| preview.foreign_stig_reconciliation.as_ref())
         .map(|reconciliation| reconciliation.shared_implementation_groups.clone())
         .unwrap_or_default();
+    let framework_reconciliation = preview_response
+        .read()
+        .as_ref()
+        .and_then(|preview| preview.foreign_stig_reconciliation.as_ref())
+        .map(|reconciliation| reconciliation.framework.clone());
+    let framework_state_label = framework_reconciliation
+        .as_ref()
+        .map(|framework| {
+            if framework.state == "exact_release" {
+                "Exact release"
+            } else {
+                "Release requires review"
+            }
+        });
     let attention_rule_ids: Vec<String> = reconciliation_rows
         .iter()
         .filter(|row| !row.auto_resolvable || row.state == "identity_conflict")
@@ -2635,7 +2649,16 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                          p { "Deterministic implementation candidates are resolved from server-side requirement and policy evidence before review." }
                      }
                      div { class: "modal-body", style: "overflow-y:auto;",
-                         div { style: "display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;",
+                          if let Some(framework) = framework_reconciliation.as_ref() {
+                              div { class: "card", style: "display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 12px;margin-bottom:12px;",
+                                  div {
+                                      div { style: "font-size:11px;color:var(--cf-text-muted);", "Framework release" }
+                                      div { class: "mono", style: "font-size:12px;margin-top:3px;", "{framework.canonical_source_key} · {framework.canonical_release_key}" }
+                                  }
+                                  span { class: "chip chip-success", "{framework_state_label.unwrap_or(\"Release requires review\")}" }
+                              }
+                          }
+                          div { style: "display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;",
                               for (count, label, color) in [
                                  (authoritative_count, "authoritative mappings", "#34d399"),
                                  (inherited_count, "inherited mappings", "#34d399"),

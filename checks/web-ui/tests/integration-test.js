@@ -215,6 +215,131 @@ async function ensureAuthenticated(page) {
   }, apiBaseUrl, { timeout: 5000 });
 }
 
+async function routeStandaloneUiBootstrap(page) {
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const method = request.method();
+    const path = url.pathname;
+
+    if (path === "/api/auth/whoami" || path === "/api/auth/status") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          is_authenticated: true,
+          auth_mode: "local",
+          user: { id: "standalone-admin", email: "admin@example.com", display_name: "Standalone Admin" },
+          roles: ["Admin"],
+          is_admin: true,
+        }),
+      });
+      return;
+    }
+
+    if (path === "/api/v1/user/preferences" && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ preferences: null }),
+      });
+      return;
+    }
+
+    if (path === "/api/v1/compliance/bundles" && method === "GET") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      return;
+    }
+
+    if (path === "/api/v1/admin/setup-progress" && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ...mockSetupCoachProgress(), dismissed: true }),
+      });
+      return;
+    }
+
+    if (path === "/api/v1/navigation/badges" && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          observed_at: new Date().toISOString(),
+          systems_attention: 0,
+          systems_total: 0,
+          flakes_errored: 0,
+          flakes_total: 0,
+          environments_attention: 0,
+          environments_total: 0,
+          builds_failed_new: 0,
+          evals_failed_new: 0,
+          cves_critical_new: 0,
+        }),
+      });
+      return;
+    }
+
+    if (path === "/api/v1/admin/classification-config" && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ enabled: false, level: "", custom_text: "" }),
+      });
+      return;
+    }
+
+    if (path === "/api/v1/user/preferences/initialize" && method === "POST") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ preferences: null }),
+      });
+      return;
+    }
+
+    if (path === "/api/v1/commits/eval-queue" && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          active_count: 0,
+          completed_count: 0,
+          failed_count: 0,
+          domain_total: 0,
+          filtered_total: 0,
+          execution_mode: "standard",
+          timestamp: new Date().toISOString(),
+          items: [],
+        }),
+      });
+      return;
+    }
+
+    if (path === "/api/v1/policies" && method === "GET") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      return;
+    }
+
+    if (path === "/api/v1/environments" && method === "GET") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      return;
+    }
+
+    if (path === "/api/v1/admin/config-health" && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(mockConfigHealthResponse()),
+      });
+      return;
+    }
+
+    console.warn(`UNHANDLED STANDALONE API: ${method} ${path}`);
+    await route.fallback();
+  });
+}
+
 async function assertHidden(locator, message) {
   const visible = await locator.isVisible({ timeout: 1500 }).catch(() => false);
   if (visible) {
@@ -6277,21 +6402,50 @@ const steps = [
         },
       };
 
+      let previewCallCount = 0;
       await page.route("**/api/v1/compliance/xccdf/preview", async (route) => {
+        previewCallCount += 1;
+        console.log(`20ac preview request #${previewCallCount}: ${route.request().method()} ${route.request().url()}`);
+        console.log(`20ac fixture shared groups: ${preview.foreign_stig_reconciliation?.shared_implementation_groups?.length}`);
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(preview) });
       });
       try {
         await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
-        await page.getByRole("button", { name: /Import \/ Export/i }).click();
-        await page.getByText("Import STIG or XCCDF (.xml/.zip)", { exact: true }).click();
-        await page.getByRole("heading", { name: "Import STIG / XCCDF" }).waitFor({ timeout: 5000 });
-        await page.locator('input[type="file"]').setInputFiles({ name: "fixture-stig.xml", mimeType: "application/xml", buffer: Buffer.from("<Benchmark id=\"fixture-stig-benchmark\"/>", "utf8") });
-        await page.getByTestId("xccdf-reconciliation-stage").waitFor({ timeout: 10000 });
-        await assertVisible(page.getByText("Exact release", { exact: false }), "Expected exact framework release state");
-        await assertVisible(page.getByText("Exact technical match", { exact: true }), "Expected exact technical reconciliation candidate");
-        await assertVisible(page.getByText("Fixture authoritative policy", { exact: true }), "Expected server-provided candidate policy");
-        await assertVisible(page.getByTestId("xccdf-shared-implementation-groups"), "Expected shared implementation proof");
-        await assertVisible(page.getByText("V-999001, V-999002", { exact: true }), "Expected shared requirement keys");
+         await page.getByRole("button", { name: /Import \/ Export/i }).click();
+         await page.getByText("Import STIG or XCCDF (.xml/.zip)", { exact: true }).click();
+          await page.getByRole("heading", { name: "Import STIG / XCCDF" }).waitFor({ timeout: 5000 });
+         const previewResponsePromise = page.waitForResponse(
+           (response) => response.url().includes("/api/v1/compliance/xccdf/preview") && response.request().method() === "POST",
+         );
+         await page.locator('input[type="file"]').setInputFiles({ name: "fixture-stig.xml", mimeType: "application/xml", buffer: Buffer.from("<Benchmark id=\"fixture-stig-benchmark\"/>", "utf8") });
+         const previewResponse = await previewResponsePromise;
+         const previewBody = await previewResponse.json();
+         const receivedGroups = previewBody.foreign_stig_reconciliation?.shared_implementation_groups;
+         if (!Array.isArray(receivedGroups) || receivedGroups.length !== 1) {
+           throw new Error(`Browser received invalid shared groups: ${JSON.stringify(receivedGroups)}`);
+         }
+         if (receivedGroups[0].group_id !== "fixture-shared-group" || receivedGroups[0].requirement_keys.join(",") !== "V-999001,V-999002") {
+           throw new Error(`Unexpected shared group payload: ${JSON.stringify(receivedGroups[0])}`);
+         }
+         if (previewCallCount !== 1) {
+           throw new Error(`Expected exactly one XCCDF preview request, got ${previewCallCount}`);
+         }
+         await page.getByTestId("xccdf-review-reconcile-button").click();
+         await page.getByTestId("xccdf-reconciliation-stage").waitFor({ timeout: 10000 });
+         await page.getByText(/Show 2 auto-resolved requirements/).click();
+         await assertVisible(page.getByText("Exact release", { exact: false }), "Expected exact framework release state");
+         await assertVisible(page.getByText("exact technical matches", { exact: true }), "Expected exact technical reconciliation candidate");
+         await assertVisible(page.getByTestId("xccdf-reconciliation-resolved-row").first(), "Expected server-provided resolved requirement");
+         const sharedGroup = page.getByTestId("xccdf-shared-implementation-groups");
+         if (await sharedGroup.count() === 0) {
+           const reconciliationHtml = await page
+             .getByTestId("xccdf-reconciliation-stage")
+             .locator("..")
+             .evaluate((element) => element.parentElement?.innerHTML ?? element.innerHTML);
+           fs.writeFileSync(`${outputDir}/20ac-reconciliation-dom.html`, reconciliationHtml);
+           await page.screenshot({ path: `${outputDir}/20ac-shared-group-missing.png`, fullPage: true });
+           throw new Error("Expected shared implementation proof");
+         }
       } finally {
         await page.unroute("**/api/v1/compliance/xccdf/preview");
       }
@@ -8625,6 +8779,9 @@ const steps = [
     !requestedSteps.has("03-registration-submit") &&
     !requestedSteps.has("05-login-submit");
   if (needsAuthPreflight) {
+    if (process.env.CF_UI_TEST_STANDALONE === "1") {
+      await routeStandaloneUiBootstrap(page);
+    }
     await ensureAuthenticated(page);
   }
 
