@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-15 18:51'
+updated_date: '2026-08-15 19:34'
 labels: []
 milestone: m-22
 dependencies:
@@ -79,8 +79,8 @@ Spec §9 contains the endpoint/URL table a reviewer uses to put the running desi
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Bundle list renders as a full-width card table (5 columns: Bundle, Framework, Version, Score, action) replacing the 320px BundleCatalog rail, matching spec section 4 including colgroup widths, score dot, control/revision counts, framework chip, version + publication-state chip, score % + system count, and the icon-only row action
-- [ ] #2 Framework filter chips (All + one per distinct framework, each with a count, ordered by descending count) and a 'Search bundles…' input filter the table together with AND semantics; the clear button and '{matching} of {total}' count appear only while the query is non-empty
+- [x] #1 Bundle list renders as a full-width card table (5 columns: Bundle, Framework, Version, Score, action) replacing the 320px BundleCatalog rail, matching spec section 4 including colgroup widths, score dot, control/revision counts, framework chip, version + publication-state chip, score % + system count, and the icon-only row action
+- [x] #2 Framework filter chips (All + one per distinct framework, each with a count, ordered by descending count) and a 'Search bundles…' input filter the table together with AND semantics; the clear button and '{matching} of {total}' count appear only while the query is non-empty
 - [ ] #3 When filters match no bundle the table is replaced by the q-empty state reading 'No bundles match “{query}”.' and no bundle rows are rendered
 - [ ] #4 Clicking a bundle row or its action opens a right-hand drawer (fl-tray backdrop + aside, width min(900px,96vw)) in overview view; clicking the action does not double-fire the row handler; backdrop click and the header close button close the drawer
 - [ ] #5 Drawer overview renders, in order: card-less BundleHeader, a 5-column stat-strip-flush strip (Overall score, Pass, Warn, Fail, Waiver) using the section 4.4 colour thresholds, a collapsed-by-default Revisions disclosure shown only when the bundle has more than one version, the requirement-coverage summary row, and the Systems drilldown
