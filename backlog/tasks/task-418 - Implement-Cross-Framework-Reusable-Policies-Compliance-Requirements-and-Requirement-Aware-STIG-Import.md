@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 20:25'
+updated_date: '2026-08-15 20:29'
 labels: []
 milestone: m-22
 dependencies:
@@ -248,6 +248,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15 metadata-authority checkpoint committed/pushed as 15d1c6d3. Parsed DISA identity now repairs pending framework version/title and lineage publisher before v4 finalization; 0222 permits only those pending framework metadata fields alongside digest metadata. Framework lineage upsert now retains an authoritative non-null publisher on canonical-key reuse. The legacy topology DB test now proves stored version/title/publisher equal identify_framework() output and passed. SQLX_OFFLINE cargo check, cargo fmt, and git diff check passed. Full v3->0220/0221->v4->reimport and negative DB coverage still remain; no claim of 11/11 suite or flake-check completion. tailwind.css remains untracked.
 
 2026-08-15: Continued post-0223 recovery work. Commit 12ae625d validates explicit comparison framework versions as belonging to the target framework and finalized/non-pending before reconciliation. Pushed to MR !315.
+
+2026-08-15: Pushed c3be6ae5, excluding unresolved framework-release evidence from bundle coverage and authoritative/inherited/related candidate discovery. Pushed 971baebc, which runs each pending framework recovery in its own transaction; unexpected per-release failures roll back and are recorded as unresolved so later releases still proceed. Verified both checkpoints with cargo fmt --all --check, SQLX_OFFLINE=true cargo check -p cf-server, and git diff --check (existing repository warnings only).
 <!-- SECTION:NOTES:END -->
 
 ## Comments
