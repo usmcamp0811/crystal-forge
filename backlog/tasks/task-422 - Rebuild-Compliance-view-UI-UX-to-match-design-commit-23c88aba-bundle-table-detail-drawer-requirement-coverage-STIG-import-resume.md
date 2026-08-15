@@ -104,3 +104,12 @@ Spec §9 contains the endpoint/URL table a reviewer uses to put the running desi
 - [ ] #23 nix build .#web-ui passes; nix build .#server passes when server code changed; cargo fmt --all --check passes; git diff --check passes; SQLx offline metadata is regenerated when query shapes change; no println!/dbg!/eprintln! in production paths
 - [ ] #24 The merge request records the reviewer verification results from spec section 9: dark and light screenshots for the compared states and confirmation that the bundle table Score column is served by a single bundle list request
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+created: 2026-08-15 18:51
+---
+Captured design-example reference screenshots added under docs/design/CrystalForge/screens/compliance-redesign/cb-1.png .. cb-7.png (dark/light bundle list, drawer overview, revisions, coverage view/filters, systems drilldown). These are quick visual references for implementer and reviewer; the spec §9.4 state-by-state walkthrough against the live design example remains authoritative. See doc-22 §9.3 for the file-to-state mapping.
+---
+<!-- COMMENTS:END -->
