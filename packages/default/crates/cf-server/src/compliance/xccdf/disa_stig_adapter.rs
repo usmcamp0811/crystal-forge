@@ -338,6 +338,17 @@ pub fn canonical_requirements_for_framework(
         .collect()
 }
 
+/// Return every authoritative framework node, including structural groups.
+/// Callers that need leaf-only policy reconciliation should use
+/// `canonical_requirements_for_framework` instead.
+pub fn canonical_framework_requirements_for_framework(
+    parsed: &ParsedXccdf,
+) -> Vec<RequirementVersionCanonical> {
+    let mut requirements: Vec<_> = parsed.groups.iter().map(canonical_for_group).collect();
+    requirements.extend(canonical_requirements_for_framework(parsed));
+    requirements
+}
+
 /// Return the deterministic Group→Rule projection used in framework release
 /// identity. UUIDs are deliberately excluded; these are source identities.
 pub fn hierarchy_edges_for_framework(parsed: &ParsedXccdf) -> Vec<String> {

@@ -3893,11 +3893,15 @@ async fn compute_foreign_stig_reconciliation(
         return Ok(None);
     };
     let proposed_requirements = canonical_requirements_for_framework(parsed);
+    let proposed_framework_requirements =
+        crate::compliance::xccdf::disa_stig_adapter::canonical_framework_requirements_for_framework(
+            parsed,
+        );
     let framework = preview_framework_reconciliation_with_hierarchy(
         pool,
         &identity,
         source_sha256,
-        &proposed_requirements,
+        &proposed_framework_requirements,
         &crate::compliance::xccdf::disa_stig_adapter::hierarchy_edges_for_framework(parsed),
     )
     .await

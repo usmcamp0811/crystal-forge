@@ -1741,24 +1741,6 @@ pub mod tests {
                 .unwrap();
         let group_key = "group:V-268137";
         let rule_key = "V-268137";
-        let framework_version_id = insert_framework_version_with_requirement_digests_and_hierarchy(
-            &mut tx,
-            framework_id,
-            &canonical,
-            None,
-            None,
-            &[],
-            &[format!("{group_key}->{rule_key}")],
-        )
-        .await
-        .unwrap();
-
-        let group_id = upsert_requirement_lineage(&mut tx, framework_id, group_key)
-            .await
-            .unwrap();
-        let rule_id = upsert_requirement_lineage(&mut tx, framework_id, rule_key)
-            .await
-            .unwrap();
         let group = RequirementVersionCanonical {
             canonical_requirement_key: group_key.to_string(),
             external_id: "V-268137".to_string(),
@@ -1770,6 +1752,24 @@ pub mod tests {
             fix_text: None,
             metadata: serde_json::json!({}),
         };
+        let framework_version_id = insert_framework_version_with_requirement_digests_and_hierarchy(
+            &mut tx,
+            framework_id,
+            &canonical,
+            None,
+            None,
+            &[group.compute_digest()],
+            &[format!("{group_key}->{rule_key}")],
+        )
+        .await
+        .unwrap();
+
+        let group_id = upsert_requirement_lineage(&mut tx, framework_id, group_key)
+            .await
+            .unwrap();
+        let rule_id = upsert_requirement_lineage(&mut tx, framework_id, rule_key)
+            .await
+            .unwrap();
         let rule = RequirementVersionCanonical {
             canonical_requirement_key: rule_key.to_string(),
             external_id: "xccdf_rule_SV-268137r1".to_string(),
@@ -1813,7 +1813,11 @@ pub mod tests {
             &canonical,
             None,
             None,
-            &[],
+            &[{
+                let mut changed_group = group.clone();
+                changed_group.title = Some("Changed group".to_string());
+                changed_group.compute_digest()
+            }],
             &[format!("group:other->{rule_key}")],
         )
         .await;
@@ -1862,7 +1866,7 @@ pub mod tests {
         .await
         .unwrap();
         assert_ne!(row.0, "pending");
-        assert_eq!(row.1, "cf-model-json-3");
+        assert_eq!(row.1, "cf-model-json-4");
     }
 
     #[tokio::test]

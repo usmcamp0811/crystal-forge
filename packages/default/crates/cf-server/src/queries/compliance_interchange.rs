@@ -41,9 +41,8 @@ use crate::compliance::shared_implementation::{
     build_import_policy_resolution_plan,
 };
 use crate::compliance::xccdf::disa_stig_adapter::{
-    canonical_for_group, canonical_for_rule, canonical_key_for_rule,
-    canonical_requirements_for_framework, hierarchy_edges_for_framework, identify_framework,
-    is_disa_stig,
+    canonical_for_group, canonical_for_rule, canonical_framework_requirements_for_framework,
+    canonical_key_for_rule, hierarchy_edges_for_framework, identify_framework, is_disa_stig,
 };
 use crate::compliance::xccdf::exact_technical_match::RequirementTechnicalIdentity;
 use crate::compliance::xccdf::exact_technical_match::{
@@ -646,7 +645,8 @@ pub async fn commit_foreign_import(
         .fetch_optional(&mut *tx)
         .await
         .context("failed to load prior framework release for STIG reconciliation")?;
-        let authoritative_requirements = canonical_requirements_for_framework(&pkg.parsed);
+        let authoritative_requirements =
+            canonical_framework_requirements_for_framework(&pkg.parsed);
         let incoming_requirement_digests =
             requirement_semantic_digests(&authoritative_requirements);
         let hierarchy_edges = hierarchy_edges_for_framework(&pkg.parsed);
