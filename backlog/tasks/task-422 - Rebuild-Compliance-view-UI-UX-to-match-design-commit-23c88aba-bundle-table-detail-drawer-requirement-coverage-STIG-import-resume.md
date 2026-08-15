@@ -3,10 +3,11 @@ id: TASK-422
 title: >-
   Rebuild Compliance view UI/UX to match design commit 23c88aba (bundle table,
   detail drawer, requirement coverage, STIG import resume)
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-15 19:42'
+updated_date: '2026-08-15 23:23'
 labels: []
 milestone: m-22
 dependencies:
@@ -106,6 +107,12 @@ Spec §9 contains the endpoint/URL table a reviewer uses to put the running desi
 - [ ] #25 nix build .#web-ui passes; nix build .#server passes when server code changed; cargo fmt --all --check passes; git diff --check passes; SQLx offline metadata is regenerated when query shapes change; no println!/dbg!/eprintln! in production paths
 - [ ] #26 The merge request records the reviewer verification results from spec section 9: dark and light screenshots for the compared states and confirmation that the bundle table Score column is served by a single bundle list request
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implementation started after MR !315 was merged into dev. Dedicated worktree: /home/mcamp/code/crystal-forge/TASK-422-compliance-view-redesign; branch TASK-422-compliance-view-redesign from dev e04c4e71. Main and dev integration worktrees were clean at preflight. Following spec §10 phases.
+<!-- SECTION:NOTES:END -->
 
 ## Comments
 
