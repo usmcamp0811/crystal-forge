@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 03:03'
+updated_date: '2026-08-15 03:05'
 labels: []
 milestone: m-22
 dependencies:
@@ -385,6 +385,14 @@ Next checkpoint — bundle requirement-baseline UI: extend create/edit bundle re
 3. Update the Compliance view card to match the design hierarchy: framework/release context, full/partial/unmapped counts, expandable requirement-family grouping, and per-row policy mapping evidence. Keep this checkpoint read-only; do not add mapping mutation controls.
 4. Add focused backend coverage assertions for requirement-only, mixed, multi-policy, partial/evidence-only, and out-of-bundle mapping cases; add focused browser assertions for counts, expanded rows, and unmapped presentation.
 5. Verify with targeted DB tests, web-ui/server cargo checks, `nix build .#web-ui` when practical, formatting, diff check, then commit and push the checkpoint.
+
+## Next checkpoint — mapping mutation workflow (2026-08-15)
+
+1. Preserve the normalized mapping API contract and server-side coverage semantics; verify relationship/coverage validation, duplicate protection, rationale/provenance persistence, and immutable accepted/deprecated rejection.
+2. Complete the policy UI's persisted mapping editor with exact framework/version/requirement selection for adds, relationship/coverage/rationale editing, removal, and read-only treatment for immutable versions.
+3. Keep supports/provides_evidence_for from qualifying as full implementation coverage; only trusted `implements` + `full` yields Fully covered, while other trusted mappings remain Partial unless no trusted mapping exists.
+4. Extend focused browser coverage to add, edit, remove mappings and assert the resulting coverage report/card state; retain accepted-version immutability coverage in the server tests.
+5. Run targeted server tests, web UI/server checks, browser coverage, formatting, diff check, then commit and push.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -495,6 +503,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15 coverage presentation slice committed/pushed as 9034d55. Bundle coverage now returns trusted selected-policy mapping evidence (policy name/version ID, relationship, coverage, provenance, rationale) per requirement; Compliance card displays mapping evidence and design-aligned Fully covered/Partially covered/Unmapped labels with test IDs. Focused 20ab was extended with authoritative coverage response and expandable-card assertions. Static checks passed: node --check, git diff --check, cargo fmt --all --check, server/web cargo check, and nix build .#server. Focused browser rerun was not conclusive because the local UI navigation timed out at /login before the test began; retry against the newly built server before declaring this checkpoint complete.
 
 2026-08-15 coverage checkpoint browser proof completed. Built updated server with `nix build .#server -o /tmp/task418-server-new`; focused `20ab-compliance-bundle-requirement-baseline-roundtrip` passed 1/1 with dark/light screenshots after asserting authoritative coverage response shape, expandable coverage card, and release-scoped search. Test selector correction was pushed separately as 3c62dbad. Coverage implementation remains at 9034d55; branch is clean after removing generated Tailwind output.
+
+2026-08-15: User confirmed the read-side coverage checkpoint and requested mapping mutation as the next slice. Audit found persisted mapping add/delete already wired and server CRUD validation/immutability present, but the policy UI lacked persisted mapping edit controls.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
