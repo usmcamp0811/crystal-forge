@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 19:29'
+updated_date: '2026-08-15 19:56'
 labels: []
 milestone: m-22
 dependencies:
@@ -104,6 +104,8 @@ Final review remediation (2026-08-15):
 v4 upgrade hardening (2026-08-15): classify legacy DISA rows from persisted publisher rather than source-key spelling; fail closed for missing, corrupt, or mismatched artifacts before reconstruction. Rebuild every parsed group/rule requirement and verify persisted node/edge topology before finalizing the framework digest. Add a follow-up migration (do not edit already-applied 0220) to narrow its pending-framework trigger exception to the payload fields required for reconstruction. Replace the synthetic pending-row test with a real cf-model-json-3-to-v4 transition using identify_framework(), add negative DB coverage, seed the isolated database, then run all framework DB tests and required Nix builds/checks.
 
 v4 metadata authority remediation (2026-08-15): make parsed DISA identity authoritative for every framework digest field during legacy reconstruction; reconcile persisted framework metadata through a new narrowly scoped migration path and keep digest state consistent with stored rows. Ensure framework lineage publisher classification is updated by authoritative adapter imports so missing artifacts cannot bypass fail-closed recovery. Add a real v3-to-v4-to-identical-reimport DB test plus negative artifact/classification cases, then restore a seeded isolated DB suite and complete feasible Nix verification.
+
+Post-0223 recovery (user-approved): preserve migrations through 0223 byte-for-byte. Add a forward recovery-status field and migration that marks 0223-pending v5 rows as recoverable. Backfill individual rows transactionally; on missing/corrupt/wrong artifacts roll back, mark the row unresolved without fabricating a digest, and continue startup. Permit explicit future recovery when authoritative artifact data is attached.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
