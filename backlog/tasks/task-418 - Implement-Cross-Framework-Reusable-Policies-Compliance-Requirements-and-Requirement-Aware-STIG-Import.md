@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 03:05'
+updated_date: '2026-08-15 03:12'
 labels: []
 milestone: m-22
 dependencies:
@@ -505,6 +505,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15 coverage checkpoint browser proof completed. Built updated server with `nix build .#server -o /tmp/task418-server-new`; focused `20ab-compliance-bundle-requirement-baseline-roundtrip` passed 1/1 with dark/light screenshots after asserting authoritative coverage response shape, expandable coverage card, and release-scoped search. Test selector correction was pushed separately as 3c62dbad. Coverage implementation remains at 9034d55; branch is clean after removing generated Tailwind output.
 
 2026-08-15: User confirmed the read-side coverage checkpoint and requested mapping mutation as the next slice. Audit found persisted mapping add/delete already wired and server CRUD validation/immutability present, but the policy UI lacked persisted mapping edit controls.
+
+2026-08-15 mapping mutation checkpoint committed/pushed as 1c31d9d3. Policy Mappings UI now supports persisted mapping edit (relationship, coverage, rationale) and removal, with exact requirement selection retained and immutable rows remaining read-only. Added browser coverage to change Supports/Partial to Implements/Full and remove a second mapping; focused 20aa passed 1/1 with dark/light screenshots. Server validation already enforced allowed relationships/coverage, duplicate uniqueness, trusted manual provenance, and accepted/deprecated immutability. Web UI cargo check, server SQLX_OFFLINE cargo check, cargo fmt check, node --check, and git diff --check passed. Worktree clean.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
