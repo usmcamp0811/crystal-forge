@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 21:01'
+updated_date: '2026-08-15 21:30'
 labels: []
 milestone: m-22
 dependencies:
@@ -254,6 +254,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15: Review remediation pushed as 26d0eff6. P1 fix: coverage denominator now includes ALL selected baseline requirements regardless of framework recovery status; unresolved requirements appear as RecoveryRequired in the count and per-row coverage field. P2a fix: extracted recover_framework_version() as a single-release helper; attach_artifact_and_retry_framework_recovery() now calls it instead of the global backfill, and supports both unresolved-without-artifact (attach then recover) and unresolved-with-artifact (reset to pending then recover) paths. P2b fix: migration 0225 trigger narrowed to the exact NULL->value artifact transition with structural field identity verification; the general recovery-state mutation path is a separate guard. Commit-path alignment: insert_framework_version_with_requirement_digests_and_hierarchy() now returns FRAMEWORK_RELEASE_RECOVERY_REQUIRED for pending/unresolved releases instead of FRAMEWORK_RELEASE_CONFLICT. API exposure: list_framework_versions() now returns migration_recovery_status and migration_recovery_reason; web-UI ComplianceFrameworkVersionSummary carries those fields; BundleCoverageReport and RequirementCoverage carry the new recovery_required field; RequirementCoverageCard shows a recovery-required chip when count > 0. Verification: SQLX_OFFLINE cargo check -p cf-server passed, web-ui cargo check passed, cargo fmt --all --check passed, git diff --check passed.
 
 2026-08-15: Pushed 2cb78deb (HTTP admin recovery endpoint at POST /api/v1/compliance/framework-versions/:fv_id/recover, admin-only, supports both no-artifact attach and existing-artifact retry paths). Then ran all post-migration DB tests on isolated PostgreSQL 3042 after applying migrations 0211-0225 cleanly: framework_requirements 11/11, phase_22 8/8, cf_native 9/9, xccdf non-ignored 267/267 (2 ignored). One xccdf --ignored failure is expected: CF_TEST_ANDURIL_STIG_ZIP not set. Corrected the concurrent_backfills_finalize_once test to assert unresolved state (not finalized) for rows without publisher/artifact, pushed as 102f61df.
+
+2026-08-15 final cleanup: pushed ddeb50a8. Migration history verified: deployed 0225 checksum (sha384 95e026c6...) matches the current on-disk file — no split required. Recovery endpoint fixed: source_artifact_id is now optional (required only when no artifact is attached); response body returns actual {recovery_status, recovery_reason} from the database instead of a static ok. Model function returns RecoveryOutcome{status,reason}. Four ignored DB tests added and all pass (4/4): recovery_no_artifact_no_request_artifact_returns_required_error, recovery_existing_artifact_no_request_artifact_retries_and_succeeds, recovery_success_returns_finalized_status, recovery_failure_returns_unresolved_status_not_error. Upgrade tested: sqlx migrate run against 0225-already-applied DB produces no pending migrations. framework_requirements DB suite 11/11 passes. Nix server build reached compilation without errors before tool timeout; server Cargo check clean. Stub ComplianceFrameworkVersionSummary in policy_editor_modal.rs updated to include new fields.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
