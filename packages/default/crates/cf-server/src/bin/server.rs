@@ -149,11 +149,17 @@ async fn main() -> anyhow::Result<()> {
     let deployment_pool = pool.clone();
     let flake_init_pool = pool.clone();
 
-    // Backfill any compliance digest rows set to 'pending' by migrations.
-    // This runs once at startup and fails fast if any row cannot be computed.
-    crystal_forge::compliance::framework_model::backfill_pending_framework_version_digests(&pool)
+    // Framework releases reopened by migration may require an operator to
+    // supply historical source material. Do not let one unresolved release
+    // prevent the service from starting.
+    if let Err(error) =
+        crystal_forge::compliance::framework_model::backfill_pending_framework_version_digests(
+            &pool,
+        )
         .await
-        .context("Failed to backfill framework version semantic digests")?;
+    {
+        warn!(error = ?error, "framework version recovery remains unresolved");
+    }
     crystal_forge::compliance::digest::backfill_pending_digests(&pool)
         .await
         .context("Failed to backfill compliance semantic digests")?;

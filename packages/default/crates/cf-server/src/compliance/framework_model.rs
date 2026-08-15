@@ -278,17 +278,34 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
                         }
                     }
                     Err(error) => {
-                        bail!(
-                            "cannot parse legacy DISA framework source artifact for {id}: {error:?}"
-                        );
+                        sqlx::query(
+                            "UPDATE compliance_framework_versions
+                             SET migration_recovery_status = 'unresolved',
+                                 migration_recovery_reason = $1
+                             WHERE id = $2 AND semantic_digest = 'pending'",
+                        )
+                        .bind(format!("source artifact parsing failed: {error:?}"))
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await?;
+                        tx.commit().await?;
+                        continue;
                     }
                 }
             }
         }
         if parsed_stig.is_none() && (requires_stig_reconstruction || source_artifact_id.is_none()) {
-            bail!(
-                "cannot finalize framework version {id} without its authoritative source artifact"
-            );
+            sqlx::query(
+                "UPDATE compliance_framework_versions
+                 SET migration_recovery_status = 'unresolved',
+                     migration_recovery_reason = 'authoritative source artifact is unavailable'
+                 WHERE id = $1 AND semantic_digest = 'pending'",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            continue;
         }
 
         let requirement_rows: Vec<(
