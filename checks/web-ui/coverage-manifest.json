@@ -1506,6 +1506,20 @@
       "baseline": "advisory"
     },
     {
+      "name": "20ac-stig-import-reconciliation-fixture",
+      "description": "STIG import fixture renders server-authoritative reconciliation proof",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
       "name": "20b-policies-cve-gate-create-roundtrip",
       "description": "API: create require_cve_check policy and verify it round-trips correctly",
       "route": "/deployment-policies",
