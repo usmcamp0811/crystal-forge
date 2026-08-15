@@ -8,8 +8,10 @@ BEGIN
     IF OLD.publication_state IN ('accepted', 'deprecated')
        AND (OLD.semantic_digest = 'pending' OR OLD.requirement_digest = 'pending') THEN
         IF TG_OP = 'UPDATE'
-           AND (to_jsonb(NEW) - 'semantic_digest' - 'requirement_digest')
-               IS DISTINCT FROM (to_jsonb(OLD) - 'semantic_digest' - 'requirement_digest')
+           AND (to_jsonb(NEW) - 'semantic_digest' - 'requirement_digest'
+                - 'digest_algorithm' - 'canonicalization_version')
+               IS DISTINCT FROM (to_jsonb(OLD) - 'semantic_digest' - 'requirement_digest'
+                - 'digest_algorithm' - 'canonicalization_version')
         THEN
             RAISE EXCEPTION 'Digest backfill changed non-digest fields for bundle version %.', OLD.id;
         END IF;
@@ -48,8 +50,10 @@ BEGIN
     IF OLD.publication_state IN ('accepted', 'deprecated')
        AND (OLD.semantic_digest = 'pending' OR OLD.mapping_digest = 'pending') THEN
         IF TG_OP = 'UPDATE'
-           AND (to_jsonb(NEW) - 'semantic_digest' - 'mapping_digest')
-               IS DISTINCT FROM (to_jsonb(OLD) - 'semantic_digest' - 'mapping_digest')
+           AND (to_jsonb(NEW) - 'semantic_digest' - 'mapping_digest'
+                - 'digest_algorithm' - 'canonicalization_version')
+               IS DISTINCT FROM (to_jsonb(OLD) - 'semantic_digest' - 'mapping_digest'
+                - 'digest_algorithm' - 'canonicalization_version')
         THEN
             RAISE EXCEPTION 'Digest backfill changed non-digest fields for policy version %.', OLD.id;
         END IF;
