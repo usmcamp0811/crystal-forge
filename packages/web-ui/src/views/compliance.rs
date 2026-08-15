@@ -1992,10 +1992,12 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
     let can_advance = sel_count > 0
         && !bundle_name.read().trim().is_empty()
         && (props.environments.is_empty() || !selected_envs.read().is_empty());
-    let reconciliation_rows = preview_response
+    let foreign_reconciliation = preview_response
         .read()
         .as_ref()
-        .and_then(|preview| preview.foreign_stig_reconciliation.as_ref())
+        .and_then(|preview| preview.foreign_stig_reconciliation.clone());
+    let reconciliation_rows = foreign_reconciliation
+        .as_ref()
         .map(|reconciliation| reconciliation.requirements.clone())
         .unwrap_or_default();
     let selected_rule_ids: std::collections::HashSet<String> = selected_rules
@@ -2006,16 +2008,12 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
         .into_iter()
         .filter(|row| selected_rule_ids.contains(&row.rule_id))
         .collect();
-    let shared_groups = preview_response
-        .read()
+    let shared_groups = foreign_reconciliation
         .as_ref()
-        .and_then(|preview| preview.foreign_stig_reconciliation.as_ref())
         .map(|reconciliation| reconciliation.shared_implementation_groups.clone())
         .unwrap_or_default();
-    let framework_reconciliation = preview_response
-        .read()
+    let framework_reconciliation = foreign_reconciliation
         .as_ref()
-        .and_then(|preview| preview.foreign_stig_reconciliation.as_ref())
         .map(|reconciliation| reconciliation.framework.clone());
     let framework_state_label = framework_reconciliation
         .as_ref()
@@ -2151,7 +2149,15 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                  bench_ver.set(bm_ver);
                                                                  file_name.set(fname.clone());
                                                                  file_bytes.set(bytes_vec);
-                                                                  let foreign_reconciliation = resp.foreign_stig_reconciliation.clone();
+                                                                   let shared_group_count = resp
+                                                                       .foreign_stig_reconciliation
+                                                                       .as_ref()
+                                                                       .map(|reconciliation| reconciliation.shared_implementation_groups.len())
+                                                                       .unwrap_or(0);
+                                                                   web_sys::console::log_1(
+                                                                       &format!("20ac deserialized shared groups: {shared_group_count}").into(),
+                                                                   );
+                                                                   let foreign_reconciliation = resp.foreign_stig_reconciliation.clone();
                                                                   preview_response.set(Some(resp));
                                                                  previewing.set(false);
                                                                  
@@ -2641,7 +2647,11 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                 // STEP: reconcile (DISA STIG requirement reconciliation)
                 // ══════════════════════════════════════════════════════
                 if *step.read() == "reconcile" {
-                     div { class: "modal-head", "data-testid": "xccdf-reconciliation-stage",
+                     div {
+                         class: "modal-head",
+                         "data-testid": "xccdf-reconciliation-stage",
+                         "data-reconciliation-row-count": "{reconciliation_rows.len()}",
+                         "data-shared-group-count": "{shared_groups.len()}",
                          h2 { style: "display:flex;align-items:center;gap:8px;",
                              Icon { name: IconName::Link, size: 14 }
                              "Reconciling {sel_count} requirements"
@@ -2679,11 +2689,13 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 Icon { name: IconName::Warn, size: 13 }
                                 div { style: "font-size:12px;", "This XCCDF source does not expose a stable DISA STIG identity. Review all selected controls before importing." }
                          }
-                         if !shared_groups.is_empty() {
-                             div { class: "field", "data-testid": "xccdf-shared-implementation-groups",
-                                 label { "Shared implementation groups · {shared_groups.len()}" }
-                                 div { style: "display:flex;flex-direction:column;gap:7px;",
-                                     for group in shared_groups.iter() {
+                          div {
+                              class: "field",
+                              "data-testid": "xccdf-shared-implementation-groups",
+                              style: if shared_groups.is_empty() { "display:none;" } else { "" },
+                                  label { "Shared implementation groups · {shared_groups.len()}" }
+                                  div { style: "display:flex;flex-direction:column;gap:7px;",
+                                      for group in shared_groups.iter() {
                                          div { key: "shared-{group.group_id}", style: "padding:10px 12px;border:1px solid var(--cf-divider);border-radius:9px;background:var(--cf-subtle-bg);",
                                              div { style: "display:flex;justify-content:space-between;gap:8px;align-items:center;",
                                                  div { style: "font-size:12px;font-weight:650;", "{group.requirement_keys.len()} requirements share one technical implementation" }
@@ -2694,11 +2706,10 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                  div { style: "font-size:10.5px;color:var(--cf-text-secondary);margin-top:5px;", "Candidate: {candidate.policy_name} · {candidate.confidence}% confidence" }
                                              } else {
                                                  div { style: "font-size:10.5px;color:var(--cf-text-muted);margin-top:5px;", "No common existing policy candidate; review or create one shared policy." }
-                                             }
-                                         }
-                                     }
-                                 }
-                             }
+                                      }
+                                  }
+                              }
+                         }
                          }
                         }
                         if !attention_rule_ids.is_empty() {

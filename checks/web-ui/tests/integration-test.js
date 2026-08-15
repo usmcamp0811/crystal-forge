@@ -6430,9 +6430,14 @@ const steps = [
          if (previewCallCount !== 1) {
            throw new Error(`Expected exactly one XCCDF preview request, got ${previewCallCount}`);
          }
-         await page.getByTestId("xccdf-review-reconcile-button").click();
-         await page.getByTestId("xccdf-reconciliation-stage").waitFor({ timeout: 10000 });
-         await page.getByText(/Show 2 auto-resolved requirements/).click();
+          await page.getByTestId("xccdf-review-reconcile-button").click();
+          await page.getByTestId("xccdf-reconciliation-stage").waitFor({ timeout: 10000 });
+          const stage = page.getByTestId("xccdf-reconciliation-stage");
+          const rowCount = await stage.getAttribute("data-reconciliation-row-count");
+          const sharedGroupCount = await stage.getAttribute("data-shared-group-count");
+          console.log(`20ac Dioxus reconciliation rows: ${rowCount}`);
+          console.log(`20ac Dioxus shared groups: ${sharedGroupCount}`);
+          await page.getByText(/Show 2 auto-resolved requirements/).click();
          await assertVisible(page.getByText("Exact release", { exact: false }), "Expected exact framework release state");
          await assertVisible(page.getByText("exact technical matches", { exact: true }), "Expected exact technical reconciliation candidate");
          await assertVisible(page.getByTestId("xccdf-reconciliation-resolved-row").first(), "Expected server-provided resolved requirement");
@@ -6445,7 +6450,8 @@ const steps = [
            fs.writeFileSync(`${outputDir}/20ac-reconciliation-dom.html`, reconciliationHtml);
            await page.screenshot({ path: `${outputDir}/20ac-shared-group-missing.png`, fullPage: true });
            throw new Error("Expected shared implementation proof");
-         }
+          }
+          await assertVisible(sharedGroup, "Expected shared implementation proof");
       } finally {
         await page.unroute("**/api/v1/compliance/xccdf/preview");
       }
