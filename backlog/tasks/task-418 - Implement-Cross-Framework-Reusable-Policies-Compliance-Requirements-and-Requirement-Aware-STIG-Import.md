@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 03:01'
+updated_date: '2026-08-15 03:03'
 labels: []
 milestone: m-22
 dependencies:
@@ -493,6 +493,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15: User confirmed the bundle baseline checkpoint at db520f61 is complete and requested continuation. Existing coverage endpoint/card already exists but currently returns only mapped policy IDs and renders flat rows; the next slice will add read-only mapping evidence and design-aligned hierarchy/details without changing mapping CRUD.
 
 2026-08-15 coverage presentation slice committed/pushed as 9034d55. Bundle coverage now returns trusted selected-policy mapping evidence (policy name/version ID, relationship, coverage, provenance, rationale) per requirement; Compliance card displays mapping evidence and design-aligned Fully covered/Partially covered/Unmapped labels with test IDs. Focused 20ab was extended with authoritative coverage response and expandable-card assertions. Static checks passed: node --check, git diff --check, cargo fmt --all --check, server/web cargo check, and nix build .#server. Focused browser rerun was not conclusive because the local UI navigation timed out at /login before the test began; retry against the newly built server before declaring this checkpoint complete.
+
+2026-08-15 coverage checkpoint browser proof completed. Built updated server with `nix build .#server -o /tmp/task418-server-new`; focused `20ab-compliance-bundle-requirement-baseline-roundtrip` passed 1/1 with dark/light screenshots after asserting authoritative coverage response shape, expandable coverage card, and release-scoped search. Test selector correction was pushed separately as 3c62dbad. Coverage implementation remains at 9034d55; branch is clean after removing generated Tailwind output.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
