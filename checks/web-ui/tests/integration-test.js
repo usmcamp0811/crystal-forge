@@ -8775,5 +8775,5 @@ const steps = [
 })().catch((err) => {
   console.error(`Fatal error: ${err.message}`);
   console.error(err.stack);
-  process.exit(1);
+  fatal(`integration test aborted before results: ${err.message}`);
 });

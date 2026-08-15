@@ -23,6 +23,7 @@
 , testProfile ? "ci_fast"
 , testSteps ? null
 , runExportValidation ? true
+, playwrightResultTimeout ? 1800
 , ...
 }:
 let
@@ -511,16 +512,18 @@ in pkgs.testers.runNixOSTest {
     test_profile = "${testProfile}"
     test_steps = ${if testSteps == null then "None" else "\"${testSteps}\""}
     test_steps_env = f" CF_UI_TEST_STEPS={test_steps}" if test_steps else ""
+    result_timeout = ${toString playwrightResultTimeout}
 
     # Run the integration test script
+    machine.succeed("rm -f /tmp/web-ui-tests/integration.exit /tmp/screenshots/results.json /tmp/screenshots/fatal.json")
     machine.succeed(
-        f"nohup env CF_UI_TEST_PROFILE={test_profile}{test_steps_env} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
+        f"nohup sh -c 'env CF_UI_TEST_PROFILE={test_profile}{test_steps_env} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
           toString CF_TEST_SERVER_PORT
-        } /tmp/screenshots > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
+        } /tmp/screenshots; status=$?; printf \"%s\\n\" \"$status\" > /tmp/web-ui-tests/integration.exit' > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
     )
     machine.wait_until_succeeds(
-        "test -f /tmp/screenshots/results.json -o -f /tmp/screenshots/fatal.json",
-        timeout=1800,
+        "test -f /tmp/screenshots/results.json -o -f /tmp/screenshots/fatal.json -o -f /tmp/web-ui-tests/integration.exit",
+        timeout=result_timeout,
     )
     output = machine.succeed("cat /tmp/web-ui-tests/integration.log")
     print(output)
@@ -529,6 +532,13 @@ in pkgs.testers.runNixOSTest {
     if machine.execute("test -f /tmp/screenshots/fatal.json")[0] == 0:
         fatal_json = machine.succeed("cat /tmp/screenshots/fatal.json")
         raise Exception(f"Web UI check aborted: {json.loads(fatal_json)['error']}")
+
+    if machine.execute("test -f /tmp/screenshots/results.json")[0] != 0:
+        exit_code = machine.succeed("cat /tmp/web-ui-tests/integration.exit").strip()
+        raise Exception(
+            "integration process exited before producing results.json "
+            f"(exit code {exit_code})"
+        )
 
     # Read results
     results_json = machine.succeed("cat /tmp/screenshots/results.json")
