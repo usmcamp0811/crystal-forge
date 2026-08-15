@@ -1829,6 +1829,18 @@ fn reconciliation_match_class(match_type: &str) -> &'static str {
     }
 }
 
+fn shared_reconciliation_action_label(action: &str) -> &'static str {
+    match action {
+        "reuse_existing" => "Reuse existing",
+        "create_shared" => "Create one policy",
+        _ => "Review individually",
+    }
+}
+
+fn shared_reconciliation_requirement_keys(keys: &[String]) -> String {
+    keys.join(", ")
+}
+
 fn import_action_from_rule(rule: &StigRule) -> XccdfRuleImportAction {
     let customization = ImportedPolicyCustomization {
         policy_name: Some(rule.local_name.clone()),
@@ -1994,6 +2006,12 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
         .into_iter()
         .filter(|row| selected_rule_ids.contains(&row.rule_id))
         .collect();
+    let shared_groups = preview_response
+        .read()
+        .as_ref()
+        .and_then(|preview| preview.foreign_stig_reconciliation.as_ref())
+        .map(|reconciliation| reconciliation.shared_implementation_groups.clone())
+        .unwrap_or_default();
     let attention_rule_ids: Vec<String> = reconciliation_rows
         .iter()
         .filter(|row| !row.auto_resolvable || row.state == "identity_conflict")
@@ -2633,11 +2651,32 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                          if ready_count > 0 {
                              div { class: "sd-callout sd-callout-info", style: "font-size:11px;margin-bottom:12px;", "{ready_count} requirements have inferred enforcement and can be reviewed without a reusable policy candidate." }
                          }
-                        if reconciliation_rows.is_empty() {
+                         if reconciliation_rows.is_empty() {
                             div { class: "sd-callout sd-callout-warn",
                                 Icon { name: IconName::Warn, size: 13 }
                                 div { style: "font-size:12px;", "This XCCDF source does not expose a stable DISA STIG identity. Review all selected controls before importing." }
-                            }
+                         }
+                         if !shared_groups.is_empty() {
+                             div { class: "field", "data-testid": "xccdf-shared-implementation-groups",
+                                 label { "Shared implementation groups · {shared_groups.len()}" }
+                                 div { style: "display:flex;flex-direction:column;gap:7px;",
+                                     for group in shared_groups.iter() {
+                                         div { key: "shared-{group.group_id}", style: "padding:10px 12px;border:1px solid var(--cf-divider);border-radius:9px;background:var(--cf-subtle-bg);",
+                                             div { style: "display:flex;justify-content:space-between;gap:8px;align-items:center;",
+                                                 div { style: "font-size:12px;font-weight:650;", "{group.requirement_keys.len()} requirements share one technical implementation" }
+                                                 span { class: "chip chip-neutral", style: "font-size:9px;", "{shared_reconciliation_action_label(&group.recommended_action)}" }
+                                             }
+                                              div { class: "mono", style: "font-size:10.5px;color:var(--cf-text-muted);margin-top:4px;", "{shared_reconciliation_requirement_keys(&group.requirement_keys)}" }
+                                             if let Some(candidate) = group.existing_candidate.as_ref() {
+                                                 div { style: "font-size:10.5px;color:var(--cf-text-secondary);margin-top:5px;", "Candidate: {candidate.policy_name} · {candidate.confidence}% confidence" }
+                                             } else {
+                                                 div { style: "font-size:10.5px;color:var(--cf-text-muted);margin-top:5px;", "No common existing policy candidate; review or create one shared policy." }
+                                             }
+                                         }
+                                     }
+                                 }
+                             }
+                         }
                         }
                         if !attention_rule_ids.is_empty() {
                             div { class: "field",

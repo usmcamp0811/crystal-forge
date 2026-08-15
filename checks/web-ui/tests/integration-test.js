@@ -6200,6 +6200,53 @@ const steps = [
     },
   },
   {
+    name: "20ac-stig-import-reconciliation-fixture",
+    description: "STIG import fixture renders server-authoritative reconciliation proof",
+    action: async (page) => {
+      const policyId = "11111111-1111-4111-8111-111111111111";
+      const policyVersionId = "22222222-2222-4222-8222-222222222222";
+      const preview = {
+        sha256: "fixture-stig-import-sha256",
+        filename: "fixture-stig.xml",
+        document_class: "foreign_xccdf",
+        fidelity: "lossless",
+        fidelity_losses: [],
+        xccdf_version: "1.2",
+        benchmark: { id: "fixture-stig-benchmark", title: "Anduril NixOS STIG Fixture", description: "Deterministic browser fixture", version: "V1R2", status: "accepted", platforms: ["nixos"] },
+        profiles: [],
+        rules: [{ id: "xccdf_fixture_rule_001", title: "Configure the fixture control", description: "Fixture rule description", severity: "medium", is_native: false, version: "V-999001", group_id: "group-001", platforms: ["nixos"], identifiers: [{ system: "http://cyber.mil/cci", value: "CCI-000001" }], checks: [], fix: { content: "fixture remediation" }, inferred_assertions: [], references: [], has_opaque_xml: false }],
+        rule_count: 1,
+        profile_count: 0,
+        errors: [],
+        warnings: [],
+        foreign_stig_reconciliation: {
+          framework: { canonical_source_key: "disa-anduril-nixos-stig", canonical_release_key: "v1r2", state: "exact_release" },
+          requirements: [{ rule_id: "xccdf_fixture_rule_001", external_id: "V-999001", title: "Configure the fixture control", state: "authoritative_mapping", auto_resolvable: true, inferred_enforcement: false, candidates: [{ policy_id: policyId, policy_version_id: policyVersionId, policy_name: "Fixture authoritative policy", match_type: "exact_technical", confidence: 100, match_reasons: ["Exact technical enforcement identity"], related_evidence: null }] }],
+          shared_implementation_groups: [{ group_id: "fixture-shared-group", requirement_keys: ["V-999001", "V-999002"], recommended_action: "reuse_existing", has_existing_candidate: true, existing_candidate: { policy_id: policyId, policy_version_id: policyVersionId, policy_name: "Fixture authoritative policy", confidence: 100 }, member_proofs: { "V-999001": "exact_technical", "V-999002": "shared_implementation" } }],
+          removed_requirements: [],
+        },
+      };
+
+      await page.route("**/api/v1/compliance/xccdf/preview", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(preview) });
+      });
+      try {
+        await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+        await page.getByRole("button", { name: /Import STIG or XCCDF/i }).click();
+        await page.getByRole("heading", { name: "Import STIG / XCCDF" }).waitFor({ timeout: 5000 });
+        await page.locator('input[type="file"]').setInputFiles({ name: "fixture-stig.xml", mimeType: "application/xml", buffer: Buffer.from("<Benchmark id=\"fixture-stig-benchmark\"/>", "utf8") });
+        await page.getByTestId("xccdf-reconciliation-stage").waitFor({ timeout: 10000 });
+        await assertVisible(page.getByText("Exact release", { exact: false }), "Expected exact framework release state");
+        await assertVisible(page.getByText("Exact technical", { exact: false }), "Expected exact technical match proof");
+        await assertVisible(page.getByText("Fixture authoritative policy", { exact: true }), "Expected server-provided candidate policy");
+        await assertVisible(page.getByTestId("xccdf-shared-implementation-groups"), "Expected shared implementation proof");
+        await assertVisible(page.getByText("V-999001, V-999002", { exact: true }), "Expected shared requirement keys");
+      } finally {
+        await page.unroute("**/api/v1/compliance/xccdf/preview");
+      }
+    },
+  },
+  {
     name: "20aa-policies-new-modal-mappings-roundtrip",
     description: "Policies new modal persists two real requirement mappings and reloads them",
     action: async (page) => {

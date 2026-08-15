@@ -1547,9 +1547,32 @@ pub struct ForeignStigReconciliationPreview {
     pub framework: ForeignStigFrameworkReconciliation,
     #[serde(default)]
     pub requirements: Vec<ForeignStigRequirementReconciliation>,
+    #[serde(default)]
+    pub shared_implementation_groups: Vec<ForeignStigSharedImplementationGroup>,
     /// Requirements present in the previous release but absent from the upload.
     #[serde(default)]
     pub removed_requirements: Vec<ForeignStigRemovedRequirement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignStigSharedImplementationGroup {
+    pub group_id: String,
+    #[serde(default)]
+    pub requirement_keys: Vec<String>,
+    pub recommended_action: String,
+    pub has_existing_candidate: bool,
+    #[serde(default)]
+    pub existing_candidate: Option<ForeignStigSharedCandidate>,
+    #[serde(default)]
+    pub member_proofs: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignStigSharedCandidate {
+    pub policy_id: Uuid,
+    pub policy_version_id: Uuid,
+    pub policy_name: String,
+    pub confidence: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
