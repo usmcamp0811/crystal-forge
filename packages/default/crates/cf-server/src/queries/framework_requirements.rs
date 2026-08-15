@@ -907,8 +907,18 @@ pub async fn preview_requirement_reconciliation(
 
     // Batch: fetch existing requirement versions for the previous framework version
     // (to detect changes).
-    let comparison_fv_id = match framework_version_id {
-        Some(existing_fv_id) => Some(existing_fv_id),
+    let comparison_fv_id: Option<Uuid> = match framework_version_id {
+        Some(existing_fv_id) => sqlx::query_scalar(
+            "SELECT id FROM compliance_framework_versions
+             WHERE id = $1 AND framework_id = $2
+               AND semantic_digest <> 'pending'
+               AND migration_recovery_status = 'finalized'",
+        )
+        .bind(existing_fv_id)
+        .bind(framework_id)
+        .fetch_optional(pool)
+        .await
+        .context("failed to validate explicit comparison framework version")?,
         None => sqlx::query_scalar(
             "SELECT id FROM compliance_framework_versions \
               WHERE framework_id = $1 \
