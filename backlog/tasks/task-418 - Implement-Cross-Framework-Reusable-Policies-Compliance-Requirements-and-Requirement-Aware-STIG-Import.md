@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 03:12'
+updated_date: '2026-08-15 03:15'
 labels: []
 milestone: m-22
 dependencies:
@@ -393,6 +393,14 @@ Next checkpoint — bundle requirement-baseline UI: extend create/edit bundle re
 3. Keep supports/provides_evidence_for from qualifying as full implementation coverage; only trusted `implements` + `full` yields Fully covered, while other trusted mappings remain Partial unless no trusted mapping exists.
 4. Extend focused browser coverage to add, edit, remove mappings and assert the resulting coverage report/card state; retain accepted-version immutability coverage in the server tests.
 5. Run targeted server tests, web UI/server checks, browser coverage, formatting, diff check, then commit and push.
+
+## STIG import reconciliation UI checkpoint (2026-08-15)
+
+1. Use the existing server-computed foreign STIG reconciliation DTOs as the sole source for candidate/proof display; do not rediscover matches in WASM.
+2. Make the reconciliation stage requirement-oriented: distinguish authoritative, inherited, exact technical, related/review-only, inferred enforcement, and no-candidate/manual cases in the summary and rows.
+3. Show candidate policy name, proof type, confidence, and server-provided reasons while keeping proof type separate from compliance mapping relationship/coverage choices in Refine.
+4. Preserve the existing RefinePolicyStep for attention cases and refine-all; keep deterministic cases auto-resolved and avoid adding fuzzy/crosswalk behavior.
+5. Add focused browser assertions for reconciliation summary and candidate evidence if an existing import fixture is available; otherwise verify DTO/UI compilation and record the browser limitation explicitly. Commit and push the checkpoint.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -507,6 +515,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15: User confirmed the read-side coverage checkpoint and requested mapping mutation as the next slice. Audit found persisted mapping add/delete already wired and server CRUD validation/immutability present, but the policy UI lacked persisted mapping edit controls.
 
 2026-08-15 mapping mutation checkpoint committed/pushed as 1c31d9d3. Policy Mappings UI now supports persisted mapping edit (relationship, coverage, rationale) and removal, with exact requirement selection retained and immutable rows remaining read-only. Added browser coverage to change Supports/Partial to Implements/Full and remove a second mapping; focused 20aa passed 1/1 with dark/light screenshots. Server validation already enforced allowed relationships/coverage, duplicate uniqueness, trusted manual provenance, and accepted/deprecated immutability. Web UI cargo check, server SQLX_OFFLINE cargo check, cargo fmt check, node --check, and git diff --check passed. Worktree clean.
+
+2026-08-15: User requested the next checkpoint turn the existing STIG importer reconciliation data into a requirement-oriented deterministic reuse workflow. Audit found a reconciliation stage already exists, but its summary is generic, candidate evidence is sparse, and it does not distinguish authoritative/inherited/exact proof classes in the primary summary.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
