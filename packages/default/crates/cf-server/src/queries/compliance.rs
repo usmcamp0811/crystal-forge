@@ -770,7 +770,10 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
         LEFT JOIN LATERAL (
             SELECT count(*)::bigint AS requirement_count
             FROM compliance_bundle_version_requirements bvr
-            WHERE bvr.bundle_version_id = b.current_draft_version_id
+            WHERE bvr.bundle_version_id = COALESCE(
+                b.current_draft_version_id,
+                b.current_published_version_id
+            )
         ) r ON TRUE
         LEFT JOIN LATERAL (
             SELECT
@@ -1052,7 +1055,10 @@ pub async fn find_bundle(
         LEFT JOIN LATERAL (
             SELECT count(*)::bigint AS requirement_count
             FROM compliance_bundle_version_requirements bvr
-            WHERE bvr.bundle_version_id = b.current_draft_version_id
+            WHERE bvr.bundle_version_id = COALESCE(
+                b.current_draft_version_id,
+                b.current_published_version_id
+            )
         ) r ON TRUE
         LEFT JOIN LATERAL (
             SELECT
@@ -3140,6 +3146,9 @@ mod tests {
         .await
         .unwrap();
         publish_tx.commit().await.unwrap();
+
+        let published_summary = find_bundle(&pool, created.id).await.unwrap().unwrap();
+        assert_eq!(published_summary.requirement_count, 2);
 
         let derived = update_bundle(
             &pool,

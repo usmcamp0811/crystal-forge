@@ -808,13 +808,21 @@ pub async fn preview_framework_reconciliation(
             existing_framework_id: Some(fw_id),
             existing_framework_version_id: None,
         }),
-        Some((fv_id, _existing_digest)) => {
-            // Release key exists.  Check semantic content.
-            // For now: treat any existing release with the same key as
-            // ExistingRelease.  A future enhancement computes the proposed
-            // digest and compares to detect ReleaseConflict.
+        Some((fv_id, existing_digest)) => {
+            let proposed_digest = FrameworkVersionCanonical {
+                canonical_source_key: identity.canonical_source_key.clone(),
+                canonical_release_key: identity.canonical_release_key.clone(),
+                version: identity.version.clone(),
+                publisher: Some(identity.publisher.clone()),
+                title: identity.title.clone(),
+            }
+            .compute_digest();
             Ok(FrameworkReconciliation {
-                state: FrameworkReconciliationState::ExistingRelease,
+                state: if existing_digest == proposed_digest {
+                    FrameworkReconciliationState::ExistingRelease
+                } else {
+                    FrameworkReconciliationState::ReleaseConflict
+                },
                 canonical_source_key: identity.canonical_source_key.clone(),
                 canonical_release_key: identity.canonical_release_key.clone(),
                 existing_framework_id: Some(fw_id),
@@ -1268,7 +1276,9 @@ pub async fn upsert_framework_lineage(
 /// Insert a new framework version within an open transaction.
 ///
 /// Returns the new version ID and writes the semantic digest.
-/// Fails with `FRAMEWORK_RELEASE_CONFLICT` if the release key already exists.
+/// Reuses an existing immutable version when its semantic digest matches.
+/// Fails with `FRAMEWORK_RELEASE_CONFLICT` when the same release key has
+/// different semantic content.
 pub async fn insert_framework_version(
     tx: &mut Transaction<'_, Postgres>,
     framework_id: Uuid,
@@ -1276,9 +1286,17 @@ pub async fn insert_framework_version(
     source_artifact_id: Option<Uuid>,
     published_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<Uuid> {
-    // Check for conflict.
-    let existing: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM compliance_framework_versions \
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "compliance-framework-version:{framework_id}:{}",
+            canonical.canonical_release_key
+        ))
+        .execute(&mut **tx)
+        .await
+        .context("failed to acquire framework version lock")?;
+
+    let existing: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, semantic_digest FROM compliance_framework_versions \
          WHERE framework_id = $1 AND canonical_release_key = $2",
     )
     .bind(framework_id)
@@ -1287,11 +1305,13 @@ pub async fn insert_framework_version(
     .await
     .context("failed to check for existing framework version")?;
 
-    if let Some(existing_id) = existing {
+    if let Some((existing_id, existing_digest)) = existing {
+        if existing_digest == canonical.compute_digest() {
+            return Ok(existing_id);
+        }
         bail!(
-            "FRAMEWORK_RELEASE_CONFLICT: framework version with release key '{}' already exists \
-             for framework {} (existing ID: {}). \
-             Importing a different artifact for the same release key is not permitted.",
+            "FRAMEWORK_RELEASE_CONFLICT: framework version with release key '{}' has different \
+             semantic content for framework {} (existing ID: {}).",
             canonical.canonical_release_key,
             framework_id,
             existing_id
@@ -1366,23 +1386,47 @@ pub async fn insert_requirement_version(
     canonical: &RequirementVersionCanonical,
     parent_requirement_version_id: Option<Uuid>,
 ) -> Result<Uuid> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "compliance-requirement-version:{requirement_id}:{framework_version_id}"
+        ))
+        .execute(&mut **tx)
+        .await
+        .context("failed to acquire requirement version lock")?;
+
+    let proposed_digest = canonical.compute_digest();
+    let existing: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, semantic_digest \
+         FROM compliance_requirement_versions \
+         WHERE requirement_id = $1 AND framework_version_id = $2",
+    )
+    .bind(requirement_id)
+    .bind(framework_version_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .context("failed to check for existing requirement version")?;
+
+    if let Some((existing_id, existing_digest)) = existing {
+        if existing_digest == proposed_digest {
+            return Ok(existing_id);
+        }
+        bail!(
+            "REQUIREMENT_VERSION_CONFLICT: requirement version for lineage {} and framework \
+             version {} has different semantic content (existing ID: {}).",
+            requirement_id,
+            framework_version_id,
+            existing_id
+        );
+    }
+
     let id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO compliance_requirement_versions
             (requirement_id, framework_version_id, external_id, title, description,
              kind, parent_requirement_version_id, severity, check_text, fix_text,
              metadata, semantic_digest)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending')
-        ON CONFLICT (requirement_id, framework_version_id) DO UPDATE
-            SET external_id  = EXCLUDED.external_id,
-                title        = EXCLUDED.title,
-                description  = EXCLUDED.description,
-                kind         = EXCLUDED.kind,
-                severity     = EXCLUDED.severity,
-                check_text   = EXCLUDED.check_text,
-                fix_text     = EXCLUDED.fix_text,
-                metadata     = EXCLUDED.metadata
-        RETURNING id
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending')
+         RETURNING id
         "#,
     )
     .bind(requirement_id)
@@ -1398,7 +1442,7 @@ pub async fn insert_requirement_version(
     .bind(&canonical.metadata)
     .fetch_one(&mut **tx)
     .await
-    .context("failed to upsert requirement version")?;
+    .context("failed to insert requirement version")?;
 
     write_requirement_version_digest(tx, id, canonical)
         .await
@@ -1545,21 +1589,87 @@ pub mod tests {
             publisher: None,
             title: None,
         };
-        insert_framework_version(&mut tx, fw_id, &canonical, None, None)
+        let initial_id = insert_framework_version(&mut tx, fw_id, &canonical, None, None)
             .await
             .unwrap();
         tx.commit().await.unwrap();
 
-        // Second insert of same release key should fail.
+        // An identical canonical release is idempotent even when it came from
+        // another source artifact.
         let mut tx2 = pool.begin().await.unwrap();
-        let err = insert_framework_version(&mut tx2, fw_id, &canonical, None, None).await;
-        tx2.rollback().await.unwrap();
+        let reused_id =
+            insert_framework_version(&mut tx2, fw_id, &canonical, Some(Uuid::new_v4()), None)
+                .await
+                .unwrap();
+        tx2.commit().await.unwrap();
+        assert_eq!(reused_id, initial_id);
 
-        assert!(err.is_err(), "duplicate release key must be rejected");
+        let conflicting = FrameworkVersionCanonical {
+            title: Some("Changed content".to_string()),
+            ..canonical
+        };
+        let mut tx3 = pool.begin().await.unwrap();
+        let err = insert_framework_version(&mut tx3, fw_id, &conflicting, None, None).await;
+        tx3.rollback().await.unwrap();
+
+        assert!(err.is_err(), "conflicting release content must be rejected");
         let msg = err.unwrap_err().to_string();
         assert!(
             msg.contains("FRAMEWORK_RELEASE_CONFLICT"),
             "expected FRAMEWORK_RELEASE_CONFLICT in: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a database"]
+    async fn framework_preview_matches_commit_release_digest_semantics() {
+        let pool = test_pool().await;
+        let key = format!("test-fw-preview-{}", Uuid::new_v4());
+        let identity = DisaStigFrameworkIdentity {
+            canonical_source_key: key.clone(),
+            canonical_release_key: "V1R1".to_string(),
+            version: "V1R1".to_string(),
+            title: Some("Preview framework".to_string()),
+            publisher: "DISA".to_string(),
+        };
+        let canonical = FrameworkVersionCanonical {
+            canonical_source_key: key.clone(),
+            canonical_release_key: "V1R1".to_string(),
+            version: "V1R1".to_string(),
+            publisher: Some("DISA".to_string()),
+            title: Some("Preview framework".to_string()),
+        };
+
+        let mut tx = pool.begin().await.unwrap();
+        let framework_id = upsert_framework_lineage(&mut tx, "Preview framework", None, &key, None)
+            .await
+            .unwrap();
+        let version_id = insert_framework_version(&mut tx, framework_id, &canonical, None, None)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let preview =
+            preview_framework_reconciliation(&pool, &identity, &Uuid::new_v4().to_string())
+                .await
+                .unwrap();
+        assert_eq!(preview.state, FrameworkReconciliationState::ExistingRelease);
+        assert_eq!(preview.existing_framework_version_id, Some(version_id));
+
+        let conflicting_identity = DisaStigFrameworkIdentity {
+            title: Some("Different content".to_string()),
+            ..identity
+        };
+        let conflicting_preview = preview_framework_reconciliation(
+            &pool,
+            &conflicting_identity,
+            &Uuid::new_v4().to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            conflicting_preview.state,
+            FrameworkReconciliationState::ReleaseConflict
         );
     }
 
@@ -1592,6 +1702,97 @@ pub mod tests {
         tx2.commit().await.unwrap();
 
         assert_eq!(req_id1, req_id2, "same key must return same lineage id");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a database"]
+    async fn requirement_version_reuses_identical_content_and_rejects_changes() {
+        let pool = test_pool().await;
+        let framework_key = format!("test-fw-req-version-{}", Uuid::new_v4());
+        let requirement = RequirementVersionCanonical {
+            canonical_requirement_key: "V-immutable".to_string(),
+            external_id: "V-immutable".to_string(),
+            title: Some("Original title".to_string()),
+            description: Some("Original description".to_string()),
+            kind: "rule".to_string(),
+            severity: Some("medium".to_string()),
+            check_text: Some("original check".to_string()),
+            fix_text: Some("original fix".to_string()),
+            metadata: serde_json::json!({"cci_ids": ["CCI-1"]}),
+        };
+
+        let mut tx = pool.begin().await.unwrap();
+        let framework_id = upsert_framework_lineage(
+            &mut tx,
+            "Requirement version framework",
+            None,
+            &framework_key,
+            None,
+        )
+        .await
+        .unwrap();
+        let framework_version_id = insert_framework_version(
+            &mut tx,
+            framework_id,
+            &FrameworkVersionCanonical {
+                canonical_source_key: framework_key,
+                canonical_release_key: "V1R1".to_string(),
+                version: "V1R1".to_string(),
+                publisher: None,
+                title: None,
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let requirement_id = upsert_requirement_lineage(&mut tx, framework_id, "V-immutable")
+            .await
+            .unwrap();
+        let first_id = insert_requirement_version(
+            &mut tx,
+            requirement_id,
+            framework_version_id,
+            &requirement,
+            None,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx2 = pool.begin().await.unwrap();
+        let reused_id = insert_requirement_version(
+            &mut tx2,
+            requirement_id,
+            framework_version_id,
+            &requirement,
+            None,
+        )
+        .await
+        .unwrap();
+        tx2.commit().await.unwrap();
+        assert_eq!(first_id, reused_id);
+
+        let changed = RequirementVersionCanonical {
+            title: Some("Changed title".to_string()),
+            ..requirement
+        };
+        let mut tx3 = pool.begin().await.unwrap();
+        let err = insert_requirement_version(
+            &mut tx3,
+            requirement_id,
+            framework_version_id,
+            &changed,
+            None,
+        )
+        .await;
+        tx3.rollback().await.unwrap();
+        assert!(err.is_err());
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("REQUIREMENT_VERSION_CONFLICT")
+        );
     }
 
     #[tokio::test]
