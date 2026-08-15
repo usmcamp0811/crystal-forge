@@ -1194,6 +1194,17 @@ pub async fn fetch_bundle_version_policy_membership(
     fetch_json(&url).await
 }
 
+pub async fn fetch_bundle_version_requirement_membership(
+    version_id: &Uuid,
+) -> Result<Vec<BundleVersionRequirementMembership>, ApiClientError> {
+    let url = format!(
+        "{}/compliance/bundle-versions/{}/requirements",
+        base_url(),
+        version_id
+    );
+    fetch_json(&url).await
+}
+
 pub async fn fetch_compliance_bundle_systems(
     bundle_id: &Uuid,
     version_id: Option<&Uuid>,

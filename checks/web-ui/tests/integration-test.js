@@ -139,7 +139,7 @@ const TEST_USER = {
 };
 
 // Timeout for page loads (don't use networkidle as it can hang)
-const LOAD_TIMEOUT = 10000;
+const LOAD_TIMEOUT = Number(process.env.CF_UI_LOAD_TIMEOUT_MS || 10000);
 
 const VIEWPORTS = {
   desktop: { width: 1440, height: 900 },
@@ -159,7 +159,7 @@ async function assertVisible(locator, message, timeoutMs = 5000) {
 }
 
 async function ensureAuthenticated(page) {
-  await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT });
+  await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT, waitUntil: "domcontentloaded" });
   await page.locator('input[type="text"]').fill(TEST_USER.username);
   await page.locator('input[type="password"]').fill(TEST_USER.password);
   await page.locator('button[type="submit"]').click();
@@ -6218,7 +6218,7 @@ const steps = [
         const frameworksResponse = await fetch(`${base}/api/v1/compliance/frameworks`, requestOptions);
         if (!frameworksResponse.ok) throw new Error(`framework list failed: ${frameworksResponse.status}`);
         const frameworks = await frameworksResponse.json();
-        const framework = frameworks.find((item) => item.canonical_source_key === "web-ui-mapping-roundtrip");
+         const framework = frameworks.find((item) => item.canonical_source_key === "disa-web-ui-mapping-roundtrip");
         if (!framework) throw new Error("Mapping round-trip framework fixture missing");
         const versionsResponse = await fetch(`${base}/api/v1/compliance/frameworks/${framework.id}/versions`, requestOptions);
         if (!versionsResponse.ok) throw new Error(`framework versions failed: ${versionsResponse.status}`);
@@ -6486,6 +6486,151 @@ const steps = [
           credentials: "include",
         });
       }, { base: baseUrl, id: createdId });
+    },
+  },
+  {
+    name: "20ab-compliance-bundle-requirement-baseline-roundtrip",
+    description: "Compliance bundle requirement and policy memberships remain independent across create, edit, reload, and release changes",
+    action: async (page) => {
+      await page.evaluate(() => localStorage.setItem("cf_backend_origin", "http://127.0.0.1:3445"));
+      await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT, waitUntil: "domcontentloaded" });
+      await page.getByRole("button", { name: /New bundle/i }).first().click({ force: true });
+      await page.getByRole("heading", { name: /New compliance bundle/i }).waitFor({ timeout: 10000 });
+
+      const fixture = await page.evaluate(async (base) => {
+        const options = { credentials: "include" };
+        const frameworksResponse = await fetch(`${base}/api/v1/compliance/frameworks`, options);
+        if (!frameworksResponse.ok) throw new Error(`framework list failed: ${frameworksResponse.status}`);
+        const frameworks = await frameworksResponse.json();
+        const framework = frameworks.find((item) => item.canonical_source_key === "disa-web-ui-mapping-roundtrip");
+        if (!framework) throw new Error("Bundle baseline framework fixture missing");
+        const versionsResponse = await fetch(`${base}/api/v1/compliance/frameworks/${framework.id}/versions`, options);
+        if (!versionsResponse.ok) throw new Error(`framework versions failed: ${versionsResponse.status}`);
+        const versions = await versionsResponse.json();
+        const requirements = {};
+        for (const version of versions) {
+          const response = await fetch(`${base}/api/v1/compliance/framework-versions/${version.id}/requirements?limit=50&offset=0`, options);
+          if (!response.ok) throw new Error(`requirements failed: ${response.status}`);
+          requirements[version.canonical_release_key] = await response.json();
+        }
+        const policiesResponse = await fetch(`${base}/api/v1/policies`, options);
+        if (!policiesResponse.ok) throw new Error(`policy list failed: ${policiesResponse.status}`);
+        const policies = await policiesResponse.json();
+        const policy = policies.find((item) => item.version_id);
+        if (!policy) throw new Error("No versioned policy fixture available for mixed bundle coverage");
+        return { framework, versions, requirements, policy };
+      }, apiBaseUrl);
+
+      const frameworkSelect = page.getByRole("combobox").filter({ hasText: "DISA STIG" }).last();
+      await frameworkSelect.selectOption("DISA STIG");
+      const v1 = fixture.versions.find((version) => version.canonical_release_key === "web-ui-mapping-roundtrip-v1");
+      const v2 = fixture.versions.find((version) => version.canonical_release_key === "web-ui-mapping-roundtrip-v2");
+      if (!v1 || !v2) throw new Error("Expected two framework release fixtures for release-switch coverage");
+      const requirementsV1 = fixture.requirements[v1.canonical_release_key];
+      const requirementsV2 = fixture.requirements[v2.canonical_release_key];
+      const requirementA = requirementsV1.find((item) => item.external_id === "MAP-1");
+      const requirementB = requirementsV1.find((item) => item.external_id === "MAP-2");
+      if (!requirementA || !requirementB) throw new Error("Expected v1 requirement fixtures");
+
+      const releaseSelect = page.getByRole("combobox").filter({ hasText: /v1|v2/ }).last();
+      await releaseSelect.locator(`option[value="${v1.id}"]`).waitFor({ state: "attached", timeout: 10000 });
+      await releaseSelect.selectOption(v1.id);
+      const requirementSearch = page.getByPlaceholder("Search requirement ID or title…");
+      const requirementButton = (externalId) => page.getByRole("button", { name: new RegExp(`^${externalId}\\b`, "i") });
+      await requirementSearch.fill(requirementA.external_id);
+      await requirementButton(requirementA.external_id).click();
+      await requirementSearch.fill(requirementB.external_id);
+      await requirementButton(requirementB.external_id).click();
+      await assertVisible(page.getByText("2 selected", { exact: true }), "Expected two selected baseline requirements");
+
+      // Requirement-only creation must be accepted and must send the complete
+      // desired requirement set while leaving policy_ids empty.
+      const createResponsePromise = page.waitForResponse(
+        (response) => response.url().includes("/api/v1/compliance/bundles") && response.request().method() === "POST",
+      );
+      const requirementOnlyName = `UI requirement-only baseline ${Date.now()}`;
+      await page.getByLabel("Bundle name").fill(requirementOnlyName);
+      await page.getByLabel("Version / revision").fill("v1");
+      const createButton = page.getByRole("button", { name: /Create bundle/i });
+      await assertEnabled(createButton, "Requirement-only bundle should be saveable");
+      await createButton.click();
+      const createResponse = await createResponsePromise;
+      if (createResponse.status() !== 201) throw new Error(`Expected requirement-only create 201, got ${createResponse.status()}`);
+      const createdBundle = await createResponse.json();
+      const createPayload = createResponse.request().postDataJSON();
+      if (createPayload.policy_ids.length !== 0) throw new Error("Requirement-only create unexpectedly selected policies");
+      if (createPayload.requirement_version_ids.length !== 2) throw new Error("Requirement-only create did not send both requirement IDs");
+      if (!createdBundle.current_draft_version_id) throw new Error("Created bundle did not return a draft version");
+      await page.getByRole("heading", { name: /New compliance bundle/i }).waitFor({ state: "hidden", timeout: 10000 });
+
+      const readMembership = async (versionId) => page.evaluate(async ({ base, versionId }) => {
+        const response = await fetch(`${base}/api/v1/compliance/bundle-versions/${versionId}/requirements`, { credentials: "include" });
+        return { status: response.status, body: await response.json() };
+      }, { base: apiBaseUrl, versionId });
+      const readPolicies = async (versionId) => page.evaluate(async ({ base, versionId }) => {
+        const response = await fetch(`${base}/api/v1/compliance/bundle-versions/${versionId}/policies`, { credentials: "include" });
+        return { status: response.status, body: await response.json() };
+      }, { base: apiBaseUrl, versionId });
+      const createdRequirements = await readMembership(createdBundle.current_draft_version_id);
+      if (createdRequirements.status !== 200 || createdRequirements.body.length !== 2) throw new Error("Requirement-only baseline did not persist two requirements");
+      if ((await readPolicies(createdBundle.current_draft_version_id)).body.length !== 0) throw new Error("Requirement-only baseline persisted policies");
+
+      // Reload and edit: both requirements must be preselected. Add one policy
+      // without changing the requirement set, proving independent membership.
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.getByText(requirementOnlyName, { exact: true }).click();
+      await page.getByRole("button", { name: "Edit bundle", exact: true }).click();
+      await page.getByRole("heading", { name: /Edit compliance bundle/i }).waitFor({ timeout: 10000 });
+      await assertVisible(page.getByText("2 selected", { exact: true }), "Existing draft requirements were not preselected");
+      const policyButton = page.getByRole("button").filter({ hasText: fixture.policy.name });
+      await policyButton.first().click();
+      const mixedSavePromise = page.waitForResponse(
+        (response) => response.url().includes(`/api/v1/compliance/bundles/${createdBundle.id}`) && response.request().method() === "PUT",
+      );
+      await page.getByRole("button", { name: /Save changes/i }).click();
+      const mixedSave = await mixedSavePromise;
+      if (mixedSave.status() !== 200) throw new Error(`Expected mixed bundle update 200, got ${mixedSave.status()}`);
+      const mixedPayload = mixedSave.request().postDataJSON();
+      if (mixedPayload.requirement_version_ids.length !== 2 || mixedPayload.policy_ids.length !== 1) throw new Error("Mixed bundle update coupled requirement and policy memberships");
+      const mixedPolicies = await readPolicies(createdBundle.current_draft_version_id);
+      if (mixedPolicies.body.length !== 1) throw new Error("Mixed bundle policy membership did not persist");
+
+      // Switching releases must clear release-specific IDs. Search must also
+      // remain scoped to the selected framework version.
+      await page.getByRole("button", { name: "Edit bundle", exact: true }).click();
+      await page.getByRole("heading", { name: /Edit compliance bundle/i }).waitFor({ timeout: 10000 });
+      const editReleaseSelect = page.getByRole("combobox").filter({ hasText: /v1|v2/ }).last();
+      await editReleaseSelect.selectOption(v2.id);
+      await assertVisible(page.getByText("0 selected", { exact: true }), "Switching framework releases retained incompatible requirement IDs");
+      await page.getByPlaceholder("Search requirement ID or title…").fill("MAP-1");
+      await assertVisible(requirementButton("MAP-1-V2"), "Requirement search did not return the selected release's requirement");
+      if (await page.getByText("MAP-1", { exact: true }).count() !== 0) throw new Error("Requirement search leaked the previous framework release");
+      await requirementButton("MAP-1-V2").click();
+
+      // Requirement-only edit: remove the second requirement while retaining
+      // the policy membership; the next save must send the complete set.
+      await page.getByPlaceholder("Search requirement ID or title…").fill("MAP-1-V2");
+      await requirementButton("MAP-1-V2").click();
+      await assertVisible(page.getByText("0 selected", { exact: true }), "Requirement removal did not clear the selected set");
+      await requirementButton("MAP-1-V2").click();
+      const requirementEditPromise = page.waitForResponse(
+        (response) => response.url().includes(`/api/v1/compliance/bundles/${createdBundle.id}`) && response.request().method() === "PUT",
+      );
+      await page.getByRole("button", { name: /Save changes/i }).click();
+      const requirementEdit = await requirementEditPromise;
+      if (requirementEdit.status() !== 200) throw new Error(`Expected requirement edit 200, got ${requirementEdit.status()}`);
+      const requirementEditPayload = requirementEdit.request().postDataJSON();
+      if (requirementEditPayload.policy_ids.length !== 1 || requirementEditPayload.requirement_version_ids.length !== 1) throw new Error("Requirement-only edit did not preserve policy membership or replace the complete requirement set");
+      if ((await readPolicies(createdBundle.current_draft_version_id)).body.length !== 1) throw new Error("Requirement edit changed policy membership");
+      if ((await readMembership(createdBundle.current_draft_version_id)).body.length !== 1) throw new Error("Requirement edit did not replace the complete requirement set");
+
+      // Empty baseline validation remains distinct from a valid requirement-only
+      // or policy-only baseline.
+      await page.getByRole("button", { name: /New bundle/i }).first().click({ force: true });
+      await page.getByRole("heading", { name: /New compliance bundle/i }).waitFor({ timeout: 10000 });
+      await page.getByLabel("Bundle name").fill(`UI empty baseline ${Date.now()}`);
+      await assertDisabled(page.getByRole("button", { name: /Create bundle/i }), "Empty baseline should remain blocked");
+      await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
     },
   },
   {
@@ -8282,7 +8427,14 @@ const steps = [
   console.log(`  Visual themes: ${visualThemes.join(", ")}`);
   console.log("");
 
-  const browser = await chromium.launch();
+  const browser = await chromium.launch({
+    ...(process.env.PLAYWRIGHT_EXECUTABLE_PATH
+      ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH }
+      : {}),
+    ...(process.env.PLAYWRIGHT_DISABLE_WEB_SECURITY === "1"
+      ? { args: ["--disable-web-security"] }
+      : {}),
+  });
   // Use a single browser context to maintain session/cookies across steps.
   // Timezone and locale are pinned by the manifest so rendered timestamps and
   // number formats are reproducible across local Nix and CI runs.

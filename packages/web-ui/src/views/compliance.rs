@@ -3,16 +3,18 @@ use dioxus::prelude::*;
 use crate::api::client::{
     create_bundle_draft, create_compliance_assignment, create_compliance_bundle,
     delete_compliance_bundle, fetch_bundle_requirement_coverage,
-    fetch_bundle_version_policy_membership,
+    fetch_bundle_version_policy_membership, fetch_bundle_version_requirement_membership,
     fetch_compliance_bundle_systems, fetch_compliance_bundles, fetch_compliance_system_evidence,
-    fetch_compliance_frameworks, fetch_environments, fetch_framework_mapped_policy_versions,
+    fetch_compliance_framework_versions, fetch_compliance_frameworks, fetch_environments,
+    fetch_framework_mapped_policy_versions, search_requirements,
     fetch_policies, fetch_systems, import_xccdf, preview_compliance_assignment, preview_xccdf,
     publish_bundle_version, trust_bundle_version, update_compliance_bundle,
 };
 use crate::api::models::{
     BundleCoverageReport, BundleCoverageRow, ComplianceBundleSummary, ComplianceBundleSystemsResponse,
     ComplianceEvidenceResponse, CreateAssignmentRequest, CreateBundleDraftRequest,
-    CreateComplianceBundleRequest, DeploymentPolicySummary, EnvironmentSummary,
+    CreateComplianceBundleRequest, ComplianceFrameworkSummary, ComplianceFrameworkVersionSummary,
+    DeploymentPolicySummary, EnvironmentSummary, RequirementVersionSummary,
     ImportedBundlePlan, ImportedCustomCheck, ImportedCustomCheckRule, ImportedEvidenceRequirement,
     ImportedPolicyCustomization, PolicyValueOverride, PublishBundleVersionRequest,
     RequirementCoverage, SortOrder, SystemSummary, SystemsListParams,
@@ -3576,6 +3578,8 @@ struct BundleFrameworkFieldProps {
 #[component]
 fn BundleFrameworkField(props: BundleFrameworkFieldProps) -> Element {
     let mut framework = props.framework;
+    let mut normalized_frameworks = use_signal(Vec::<ComplianceFrameworkSummary>::new);
+    let mut normalized_frameworks_loading = use_signal(|| false);
     let mut defining_new = use_signal(|| false);
     let mut new_framework = use_signal(String::new);
     let mut accepted_frameworks = use_signal(Vec::<String>::new);
@@ -3585,6 +3589,21 @@ fn BundleFrameworkField(props: BundleFrameworkFieldProps) -> Element {
         .eq_ignore_ascii_case("CMMC")
         .then_some(current_framework.clone());
     let mut custom_frameworks = props.custom_frameworks.clone();
+    if normalized_frameworks.read().is_empty() && !*normalized_frameworks_loading.read() {
+        normalized_frameworks_loading.set(true);
+        spawn(async move {
+            if let Ok(value) = fetch_compliance_frameworks().await {
+                normalized_frameworks.set(value);
+            }
+            normalized_frameworks_loading.set(false);
+        });
+    }
+    custom_frameworks.extend(
+        normalized_frameworks
+            .read()
+            .iter()
+            .map(|item| item.name.clone()),
+    );
     custom_frameworks.extend(accepted_frameworks.read().iter().cloned());
     custom_frameworks.sort_by_key(|framework| framework.to_ascii_lowercase());
     custom_frameworks.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
@@ -3826,6 +3845,191 @@ fn BundlePolicyPickerSection(mut props: BundlePolicyPickerSectionProps) -> Eleme
 }
 
 #[derive(Props, Clone, PartialEq)]
+struct BundleRequirementPickerProps {
+    framework: Signal<String>,
+    selected_requirement_ids: Signal<Vec<uuid::Uuid>>,
+    baseline_version_id: Option<uuid::Uuid>,
+}
+
+/// Selects the exact normalized requirement versions that form a bundle's
+/// baseline. This is intentionally independent from policy selection so a
+/// bundle may contain requirements with no implementation yet.
+#[component]
+fn BundleRequirementPicker(mut props: BundleRequirementPickerProps) -> Element {
+    let mut frameworks = use_signal(Vec::<ComplianceFrameworkSummary>::new);
+    let mut versions = use_signal(Vec::<ComplianceFrameworkVersionSummary>::new);
+    let mut results = use_signal(Vec::<RequirementVersionSummary>::new);
+    let mut query = use_signal(String::new);
+    let mut loading = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+    let mut loaded_framework = use_signal(|| None::<String>);
+    let mut loaded_baseline = use_signal(|| false);
+    let mut selected_version_id = use_signal(|| None::<uuid::Uuid>);
+    let framework_name = props.framework.read().trim().to_string();
+
+    if !*loaded_baseline.read() {
+        loaded_baseline.set(true);
+        if let Some(version_id) = props.baseline_version_id {
+            let mut selected_requirement_ids = props.selected_requirement_ids;
+            spawn(async move {
+                if let Ok(members) = fetch_bundle_version_requirement_membership(&version_id).await {
+                    selected_requirement_ids.set(
+                        members.into_iter().filter(|member| member.selected).map(|member| member.requirement_version_id).collect(),
+                    );
+                }
+            });
+        }
+    }
+
+    if *loaded_framework.read() != Some(framework_name.clone()) {
+        loaded_framework.set(Some(framework_name.clone()));
+        versions.set(Vec::new());
+        results.set(Vec::new());
+        error.set(None);
+        let framework_name_for_request = framework_name.clone();
+        spawn(async move {
+            let loaded = if frameworks.read().is_empty() {
+                match fetch_compliance_frameworks().await {
+                    Ok(value) => {
+                        frameworks.set(value.clone());
+                        value
+                    }
+                    Err(err) => {
+                        error.set(Some(err.to_string()));
+                        return;
+                    }
+                }
+            } else {
+                frameworks.read().clone()
+            };
+            if let Some(framework) = loaded.iter().find(|candidate| {
+                candidate.name.eq_ignore_ascii_case(&framework_name_for_request)
+                    || (framework_name_for_request.eq_ignore_ascii_case("DISA STIG")
+                        && candidate.canonical_source_key.to_ascii_lowercase().starts_with("disa-"))
+            }) {
+                match fetch_compliance_framework_versions(&framework.id).await {
+                    Ok(value) => {
+                        let first_version_id = value.first().map(|version| version.id);
+                        selected_version_id.set(first_version_id);
+                        versions.set(value);
+                        if let Some(version_id) = first_version_id {
+                            match search_requirements(&version_id, None, None, 50, 0).await {
+                                Ok(value) => results.set(value),
+                                Err(err) => error.set(Some(err.to_string())),
+                            }
+                        }
+                    }
+                    Err(err) => error.set(Some(err.to_string())),
+                }
+            }
+        });
+    }
+
+    let version_id = *selected_version_id.read();
+    let selected_ids = props.selected_requirement_ids.read().clone();
+    let selected_count = selected_ids.len();
+    let visible_results = results.read().clone();
+
+    rsx! {
+        div { style: "margin-top:14px;padding:14px;border:1px solid var(--cf-divider);border-radius:10px;background:color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg));",
+            div { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;",
+                div {
+                    div { style: "font-size:13px;font-weight:600;", "Requirement baseline" }
+                    div { style: "font-size:10.5px;color:var(--cf-text-muted);margin-top:2px;", "Select exact requirements independently of the policies in this bundle." }
+                }
+                span { class: "chip chip-info", style: "font-size:10px;", "{selected_count} selected" }
+            }
+            if let Some(message) = error.read().as_ref() {
+                div { class: "sd-callout sd-callout-danger", style: "font-size:11px;margin-bottom:8px;", "{message}" }
+            }
+            if versions.read().is_empty() {
+                div { style: "font-size:11px;color:var(--cf-text-muted);padding:6px 0;", "Loading normalized framework releases…" }
+            } else {
+                div { class: "field", style: "margin-top:0;",
+                    label { "Framework release" }
+                    select {
+                        class: "input focus-ring mono",
+                        value: version_id.map(|id| id.to_string()).unwrap_or_default(),
+                        onchange: move |event| {
+                            let selected = event.value().parse::<uuid::Uuid>().ok();
+                            selected_version_id.set(selected);
+                            // Requirement-version IDs are release-specific. Do not
+                            // silently carry a baseline from the previous release.
+                            props.selected_requirement_ids.set(Vec::new());
+                            results.set(Vec::new());
+                            if let Some(id) = selected {
+                                let q = query.read().clone();
+                                loading.set(true);
+                                spawn(async move {
+                                    match search_requirements(&id, (!q.trim().is_empty()).then_some(q.as_str()), None, 50, 0).await {
+                                        Ok(value) => results.set(value),
+                                        Err(err) => error.set(Some(err.to_string())),
+                                    }
+                                    loading.set(false);
+                                });
+                            }
+                        },
+                        for version in versions.read().iter() {
+                            option { value: "{version.id}", "{version.version}" }
+                        }
+                    }
+                }
+                div { class: "filter-search", style: "max-width:none;margin:8px 0 6px;",
+                    Icon { name: IconName::Search, size: 14 }
+                    input {
+                        class: "input focus-ring",
+                        placeholder: "Search requirement ID or title…",
+                        value: "{query}",
+                        oninput: move |event| {
+                            let value = event.value();
+                            query.set(value.clone());
+                            if let Some(id) = version_id {
+                                loading.set(true);
+                                spawn(async move {
+                                    match search_requirements(&id, (!value.trim().is_empty()).then_some(value.as_str()), None, 50, 0).await {
+                                        Ok(found) => results.set(found),
+                                        Err(err) => error.set(Some(err.to_string())),
+                                    }
+                                    loading.set(false);
+                                });
+                            }
+                        }
+                    }
+                }
+                if *loading.read() { div { style: "font-size:10.5px;color:var(--cf-text-muted);", "Searching…" } }
+                div { style: "display:flex;flex-direction:column;gap:4px;max-height:180px;overflow-y:auto;",
+                    for requirement in visible_results {
+                        {
+                            let requirement_id = requirement.id;
+                            let selected = selected_ids.contains(&requirement_id);
+                            let external_id = requirement.external_id.clone();
+                            let title = requirement.title.clone().unwrap_or_default();
+                            rsx! {
+                                button {
+                                    key: "{requirement_id}", class: "focus-ring",
+                                    style: if selected { "all:unset;cursor:pointer;padding:7px 9px;border-radius:7px;border:1px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 9%,var(--cf-card-bg));" } else { "all:unset;cursor:pointer;padding:7px 9px;border-radius:7px;border:1px solid var(--cf-divider);background:var(--cf-card-bg);" },
+                                    onclick: move |_| {
+                                        let mut ids = props.selected_requirement_ids.write();
+                                        if let Some(position) = ids.iter().position(|id| *id == requirement_id) { ids.remove(position); } else { ids.push(requirement_id); }
+                                    },
+                                    div { style: "display:flex;align-items:center;gap:7px;",
+                                        span { class: "mono", style: "font-size:11px;font-weight:600;", "{external_id}" }
+                                        if selected { span { class: "chip chip-info", style: "font-size:9px;", "Selected" } }
+                                    }
+                                    if !title.is_empty() { div { style: "font-size:10.5px;color:var(--cf-text-secondary);margin-top:2px;", "{title}" } }
+                                }
+                            }
+                        }
+                    }
+                }
+                if selected_count == 0 { div { style: "font-size:10.5px;color:var(--cf-text-muted);margin-top:7px;", "No requirement baseline selected. This is valid for a custom policy-only bundle." } }
+                if selected_count > 0 { div { style: "font-size:10px;color:var(--cf-text-muted);margin-top:7px;", "Changing the framework release clears the selected requirement versions." } }
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
 struct NewBundleModalProps {
     policies: Vec<DeploymentPolicySummary>,
     bundles: Vec<ComplianceBundleSummary>,
@@ -3842,12 +4046,14 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
     let mut description = use_signal(String::new);
     let mut selected_env_ids = use_signal(Vec::<uuid::Uuid>::new);
     let mut selected_policy_ids = use_signal(Vec::<uuid::Uuid>::new);
+    let selected_requirement_ids = use_signal(Vec::<uuid::Uuid>::new);
     let mut query = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
     let mut saving = use_signal(|| false);
     let framework_options = custom_bundle_frameworks(&props.bundles, &props.policies);
 
-    let can_save = !name.read().trim().is_empty() && !selected_policy_ids.read().is_empty();
+    let can_save = !name.read().trim().is_empty()
+        && (!selected_policy_ids.read().is_empty() || !selected_requirement_ids.read().is_empty());
 
     let filtered_policies: Vec<_> = props
         .policies
@@ -3955,11 +4161,12 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
                     }
 
                     BundlePolicyPicker { framework, policies: props.policies.clone(), selected_policy_ids }
+                    BundleRequirementPicker { framework, selected_requirement_ids, baseline_version_id: None }
 
                     if !can_save && !name.read().trim().is_empty() {
                         div { class: "help", style: "color:#fbbf24;margin-top:8px;",
                             Icon { name: IconName::Warn, size: 10 }
-                            " Select at least one policy. A bundle is a collection of policies that together represent a standard."
+                            " Select at least one policy or requirement. A requirement-only baseline is valid."
                         }
                     }
                 }
@@ -3986,6 +4193,7 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
                                 layer: Some("fleet".to_string()),
                                 required_envs: selected_env_ids.read().clone(),
                                 policy_ids: selected_policy_ids.read().clone(),
+                                requirement_version_ids: selected_requirement_ids.read().clone(),
                             };
                             saving.set(true);
                             spawn(async move {
@@ -4032,6 +4240,7 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
     let initial_policy_ids: Vec<uuid::Uuid> = props.bundle.policy_ids.clone();
     let mut selected_env_ids = use_signal(|| initial_env_ids);
     let mut selected_policy_ids = use_signal(|| initial_policy_ids);
+    let selected_requirement_ids = use_signal(Vec::<uuid::Uuid>::new);
     let mut query = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
     let mut saving = use_signal(|| false);
@@ -4052,7 +4261,8 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
     });
     let assigned_count = props.bundle.active_assignment_count;
 
-    let can_save = !name.read().trim().is_empty() && !selected_policy_ids.read().is_empty();
+    let can_save = !name.read().trim().is_empty()
+        && (!selected_policy_ids.read().is_empty() || !selected_requirement_ids.read().is_empty());
 
     let filtered_policies: Vec<_> = props
         .policies
@@ -4197,11 +4407,12 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                     }
 
                     BundlePolicyPicker { framework, policies: props.policies.clone(), selected_policy_ids }
+                    BundleRequirementPicker { framework, selected_requirement_ids, baseline_version_id: props.bundle.current_draft_version_id }
 
                     if selected_policy_ids.read().is_empty() {
                         div { class: "help", style: "color:#fbbf24;margin-top:8px;",
                             Icon { name: IconName::Warn, size: 10 }
-                            " Select at least one policy. A bundle is a collection of policies that together represent a standard."
+                            " Select at least one policy or requirement. A requirement-only baseline is valid."
                         }
                     }
 
@@ -4335,6 +4546,7 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                                 },
                                 required_envs: selected_env_ids.read().clone(),
                                 policy_ids: selected_policy_ids.read().clone(),
+                                requirement_version_ids: selected_requirement_ids.read().clone(),
                             };
                             saving.set(true);
                             spawn(async move {

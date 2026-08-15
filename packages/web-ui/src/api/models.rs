@@ -1226,6 +1226,8 @@ pub struct CreateComplianceBundleRequest {
     pub layer: Option<String>,
     pub required_envs: Vec<Uuid>,
     pub policy_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub requirement_version_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1236,6 +1238,8 @@ pub struct UpdateComplianceBundleRequest {
     pub description: Option<String>,
     pub required_envs: Vec<Uuid>,
     pub policy_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub requirement_version_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3828,6 +3832,21 @@ pub struct ComplianceFrameworkVersionSummary {
 pub struct FrameworkMappedPolicyVersionsResponse {
     #[serde(default)]
     pub policy_version_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BundleVersionRequirementMembership {
+    pub requirement_version_id: Uuid,
+    pub requirement_id: Uuid,
+    pub framework_id: Uuid,
+    pub framework_version_id: Uuid,
+    pub framework_name: String,
+    pub framework_version: String,
+    pub external_id: String,
+    pub title: Option<String>,
+    pub kind: String,
+    pub selected: bool,
+    pub requirement_order: i32,
 }
 
 /// A single requirement version row from a search or list.

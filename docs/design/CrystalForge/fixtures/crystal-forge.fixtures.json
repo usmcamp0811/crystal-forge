@@ -17676,8 +17676,8 @@
       "digest": "sha256:cis0001"
     },
     {
-      "canonicalSourceKey": "web-ui-mapping-roundtrip",
-      "name": "Web UI Mapping Round-Trip Framework",
+      "canonicalSourceKey": "disa-web-ui-mapping-roundtrip",
+      "name": "DISA STIG",
       "publisher": "Crystal Forge Test Fixtures",
       "description": "Minimal normalized framework fixture for focused policy mapping browser coverage.",
       "versions": [
@@ -17700,6 +17700,31 @@
               "externalId": "MAP-2",
               "title": "Record mapping rationale",
               "description": "A policy mapping can include rationale for reviewers.",
+              "kind": "control",
+              "severity": "low",
+              "metadata": { "cci_ids": ["CCI-000002"] }
+            }
+          ]
+        },
+        {
+          "version": "v2",
+          "canonicalReleaseKey": "web-ui-mapping-roundtrip-v2",
+          "title": "Web UI Mapping Round-Trip v2",
+          "requirements": [
+            {
+              "canonicalRequirementKey": "MAP-1-V2",
+              "externalId": "MAP-1-V2",
+              "title": "Protect the mapping editor in v2",
+              "description": "The v2 mapping editor must preserve a selected requirement.",
+              "kind": "control",
+              "severity": "medium",
+              "metadata": { "cci_ids": ["CCI-000001"] }
+            },
+            {
+              "canonicalRequirementKey": "MAP-2-V2",
+              "externalId": "MAP-2-V2",
+              "title": "Record mapping rationale in v2",
+              "description": "A v2 policy mapping can include rationale for reviewers.",
               "kind": "control",
               "severity": "low",
               "metadata": { "cci_ids": ["CCI-000002"] }

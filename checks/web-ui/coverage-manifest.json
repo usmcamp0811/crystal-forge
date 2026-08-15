@@ -1520,6 +1520,20 @@
       "baseline": "advisory"
     },
     {
+      "name": "20ab-compliance-bundle-requirement-baseline-roundtrip",
+      "description": "Compliance bundle requirement and policy memberships remain independent across create, edit, reload, and release changes",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
       "name": "20c-policies-multirule-create-roundtrip",
       "description": "API: create multi-rule custom_check (mode=any) and verify rules[] round-trips",
       "route": "/deployment-policies",
