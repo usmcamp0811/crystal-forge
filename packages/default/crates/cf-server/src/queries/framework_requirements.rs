@@ -840,8 +840,8 @@ pub async fn preview_framework_reconciliation_with_hierarchy(
     };
 
     // 3. Look up the framework version by release key.
-    let existing_fv: Option<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, semantic_digest \
+    let existing_fv: Option<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT id, semantic_digest, migration_recovery_status \
          FROM compliance_framework_versions \
          WHERE framework_id = $1 AND canonical_release_key = $2",
     )
@@ -859,7 +859,7 @@ pub async fn preview_framework_reconciliation_with_hierarchy(
             existing_framework_id: Some(fw_id),
             existing_framework_version_id: None,
         }),
-        Some((fv_id, existing_digest)) => {
+        Some((fv_id, existing_digest, recovery_status)) => {
             let proposed_digest = FrameworkVersionCanonical {
                 canonical_source_key: identity.canonical_source_key.clone(),
                 canonical_release_key: identity.canonical_release_key.clone(),
@@ -872,7 +872,9 @@ pub async fn preview_framework_reconciliation_with_hierarchy(
                 hierarchy_edges,
             );
             Ok(FrameworkReconciliation {
-                state: if existing_digest == proposed_digest {
+                state: if recovery_status != "finalized" || existing_digest == "pending" {
+                    FrameworkReconciliationState::RecoveryRequired
+                } else if existing_digest == proposed_digest {
                     FrameworkReconciliationState::ExistingRelease
                 } else {
                     FrameworkReconciliationState::ReleaseConflict

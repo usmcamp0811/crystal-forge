@@ -4126,6 +4126,7 @@ async fn compute_foreign_stig_reconciliation(
                 crate::compliance::requirement_model::FrameworkReconciliationState::ExistingRelease => "existing_release",
                 crate::compliance::requirement_model::FrameworkReconciliationState::NewRelease => "new_release",
                 crate::compliance::requirement_model::FrameworkReconciliationState::ReleaseConflict => "release_conflict",
+                crate::compliance::requirement_model::FrameworkReconciliationState::RecoveryRequired => "recovery_required",
                 crate::compliance::requirement_model::FrameworkReconciliationState::NewFramework => "new_framework",
             },
         },

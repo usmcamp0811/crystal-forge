@@ -184,6 +184,9 @@ pub enum FrameworkReconciliationState {
     NewRelease,
     /// Same canonical_release_key but different semantic content — conflict.
     ReleaseConflict,
+    /// A historical release exists but its authoritative identity has not been
+    /// recovered, so it cannot be reused or reconciled.
+    RecoveryRequired,
     /// This framework lineage has never been imported.
     NewFramework,
 }
