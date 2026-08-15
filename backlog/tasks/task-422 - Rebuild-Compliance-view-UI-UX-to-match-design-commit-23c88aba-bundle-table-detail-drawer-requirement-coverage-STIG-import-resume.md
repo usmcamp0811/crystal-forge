@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-15 23:23'
+updated_date: '2026-08-15 23:24'
 labels: []
 milestone: m-22
 dependencies:
@@ -107,6 +107,18 @@ Spec §9 contains the endpoint/URL table a reviewer uses to put the running desi
 - [ ] #25 nix build .#web-ui passes; nix build .#server passes when server code changed; cargo fmt --all --check passes; git diff --check passes; SQLx offline metadata is regenerated when query shapes change; no println!/dbg!/eprintln! in production paths
 - [ ] #26 The merge request records the reviewer verification results from spec section 9: dark and light screenshots for the compared states and confirmation that the bundle table Score column is served by a single bundle list request
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Phase 0 baseline: verify the merged TASK-418 API/model state in this worktree and run the existing compliance browser steps 29 through 29e if the focused web-ui harness is available; retain baseline failures as evidence before UI changes.
+2. Phase 1 server contract: add `applicable_system_count` and optional `aggregate_score` to bundle summaries and compute them from the existing version-specific systems rollup path without per-bundle queries; add `policy_id` to coverage mappings and mirror both contracts in web-ui models. Add focused server tests for score/count selection semantics and coverage serialization; regenerate SQLx metadata only if query shapes require it.
+3. Phase 2 shared policy/version foundations: extract the existing PolicyDrawer and its helper dependencies into a reusable policy component without changing PoliciesView behavior; make PoliciesView consume it; rename the existing `selected_export_version_id` signal to `selected_bundle_version_id` and route all version-sensitive systems, evidence, coverage, export, and lifecycle actions through it.
+4. Phase 3 compliance surface: replace the 320px BundleCatalog layout with the full-width searchable/framework-filtered bundle table, add deterministic filters and empty state, build the right-hand overview drawer, revisions disclosure, relocated existing version/assignment controls, and dense systems drilldown while preserving loading/error/admin/stale-response behavior.
+5. Phase 4 coverage: move coverage into the drawer, add exact-version generation-guarded loading, summary and grouped/filterable requirement rows, and lazy shared-policy-library drill-in with loading and unresolved-policy error states; restore the bundle drawer state on close.
+6. Phase 5 STIG pause/resume: wrap the existing TASK-418 upload/native-review/review/reconcile/refine/final-review/committing workflow with versioned browser-local metadata persistence, a 2 MiB payload guard, no raw bytes, source-file SHA reattachment before commit, corrupt/oversize recovery, paused callout, discard, and non-backdrop pause close.
+7. Phase 6 verification: add the specified CSS utilities, update compliance integration steps and coverage manifests, add/extend a focused NixOS web-ui check for table/drawer/coverage/paused-import states, run dark/light screenshots where the harness supports them, then run cargo fmt, git diff check, web-ui/server builds as applicable, and record objective results in TASK-422.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
