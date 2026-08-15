@@ -23,7 +23,7 @@ use uuid::Uuid;
 use super::canonical::semantic_digest;
 use super::requirement_model::RequirementVersionCanonical;
 
-pub const FRAMEWORK_CANONICALIZATION_VERSION: &str = "cf-model-json-2";
+pub const FRAMEWORK_CANONICALIZATION_VERSION: &str = "cf-model-json-3";
 
 pub fn requirement_semantic_digests(requirements: &[RequirementVersionCanonical]) -> Vec<String> {
     let mut digests: Vec<String> = requirements
@@ -72,19 +72,34 @@ impl FrameworkVersionCanonical {
     where
         I: IntoIterator<Item = &'a String>,
     {
+        self.compute_digest_with_requirement_digests_and_hierarchy(requirement_digests, [])
+    }
+
+    pub fn compute_digest_with_requirement_digests_and_hierarchy<'a, I, H>(
+        &self,
+        requirement_digests: I,
+        hierarchy_edges: H,
+    ) -> String
+    where
+        I: IntoIterator<Item = &'a String>,
+        H: IntoIterator<Item = &'a String>,
+    {
         let mut value = self.to_digest_value();
         let digests: BTreeSet<&str> = requirement_digests
             .into_iter()
             .map(String::as_str)
             .collect();
+        let hierarchy_edges: BTreeSet<&str> =
+            hierarchy_edges.into_iter().map(String::as_str).collect();
         value["requirement_semantic_digests"] = json!(digests.into_iter().collect::<Vec<_>>());
+        value["hierarchy_edges"] = json!(hierarchy_edges.into_iter().collect::<Vec<_>>());
         semantic_digest(&value)
     }
 }
 
 // ── DB writer ─────────────────────────────────────────────────────────────────
 
-/// Write the `cf-model-json-1` digest for a framework version within `tx`.
+/// Write the current framework semantic digest for a framework version within `tx`.
 ///
 /// Must be called immediately after the `INSERT` while the transaction is still
 /// open.  Fails if the row is not found (which would indicate a logic error in
@@ -94,8 +109,14 @@ pub async fn write_framework_version_digest(
     framework_version_id: Uuid,
     canonical: &FrameworkVersionCanonical,
 ) -> Result<()> {
-    write_framework_version_digest_with_requirement_digests(tx, framework_version_id, canonical, [])
-        .await
+    write_framework_version_digest_with_requirement_digests_and_hierarchy(
+        tx,
+        framework_version_id,
+        canonical,
+        [],
+        [],
+    )
+    .await
 }
 
 pub async fn write_framework_version_digest_with_requirement_digests<'a, I>(
@@ -107,7 +128,31 @@ pub async fn write_framework_version_digest_with_requirement_digests<'a, I>(
 where
     I: IntoIterator<Item = &'a String>,
 {
-    let digest = canonical.compute_digest_with_requirement_digests(requirement_digests);
+    write_framework_version_digest_with_requirement_digests_and_hierarchy(
+        tx,
+        framework_version_id,
+        canonical,
+        requirement_digests,
+        [],
+    )
+    .await
+}
+
+pub async fn write_framework_version_digest_with_requirement_digests_and_hierarchy<'a, I, H>(
+    tx: &mut Transaction<'_, Postgres>,
+    framework_version_id: Uuid,
+    canonical: &FrameworkVersionCanonical,
+    requirement_digests: I,
+    hierarchy_edges: H,
+) -> Result<()>
+where
+    I: IntoIterator<Item = &'a String>,
+    H: IntoIterator<Item = &'a String>,
+{
+    let digest = canonical.compute_digest_with_requirement_digests_and_hierarchy(
+        requirement_digests,
+        hierarchy_edges,
+    );
     sqlx::query(
         "UPDATE compliance_framework_versions \
          SET semantic_digest = $1, digest_algorithm = 'sha-256', \
@@ -133,27 +178,48 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
 
     for id in ids {
         let mut tx = pool.begin().await?;
-        let (framework_id, source_key, release_key, version, publisher, title): (
-            Uuid,
+        let row: Option<(
             String,
             String,
             String,
             Option<String>,
             Option<String>,
-        ) = sqlx::query_as(
-            "SELECT fv.framework_id, f.canonical_source_key, fv.canonical_release_key,
-                    fv.version, f.publisher, fv.title
+            String,
+        )> = sqlx::query_as(
+            "SELECT f.canonical_source_key, fv.canonical_release_key,
+                    fv.version, f.publisher, fv.title, fv.semantic_digest
              FROM compliance_framework_versions fv
              JOIN compliance_frameworks f ON f.id = fv.framework_id
              WHERE fv.id = $1
              FOR UPDATE",
         )
         .bind(id)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
+        let Some((source_key, release_key, version, publisher, title, semantic_digest)) = row
+        else {
+            continue;
+        };
+        if semantic_digest != "pending" {
+            tx.commit().await?;
+            continue;
+        }
         let requirements: Vec<String> = sqlx::query_scalar(
-            "SELECT semantic_digest FROM compliance_requirement_versions
-             WHERE framework_version_id = $1 ORDER BY semantic_digest, id",
+            "SELECT rv.semantic_digest FROM compliance_requirement_versions rv
+             WHERE rv.framework_version_id = $1 AND rv.kind <> 'group'
+             ORDER BY rv.semantic_digest, rv.id",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let hierarchy_edges: Vec<String> = sqlx::query_scalar(
+            "SELECT parent_req.canonical_requirement_key || '->' || child_req.canonical_requirement_key
+             FROM compliance_requirement_versions child
+             JOIN compliance_requirements child_req ON child_req.id = child.requirement_id
+             JOIN compliance_requirement_versions parent ON parent.id = child.parent_requirement_version_id
+             JOIN compliance_requirements parent_req ON parent_req.id = parent.requirement_id
+             WHERE child.framework_version_id = $1
+             ORDER BY parent_req.canonical_requirement_key, child_req.canonical_requirement_key",
         )
         .bind(id)
         .fetch_all(&mut *tx)
@@ -165,14 +231,14 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
             publisher,
             title,
         };
-        write_framework_version_digest_with_requirement_digests(
+        write_framework_version_digest_with_requirement_digests_and_hierarchy(
             &mut tx,
             id,
             &canonical,
             &requirements,
+            &hierarchy_edges,
         )
         .await?;
-        let _ = framework_id;
         tx.commit().await?;
     }
     Ok(())

@@ -25,7 +25,7 @@ use uuid::Uuid;
 use crate::compliance::digest::{refresh_bundle_requirement_digest, refresh_policy_mapping_digest};
 use crate::compliance::framework_model::{
     FrameworkVersionCanonical, requirement_semantic_digests,
-    write_framework_version_digest_with_requirement_digests,
+    write_framework_version_digest_with_requirement_digests_and_hierarchy,
 };
 use crate::compliance::requirement_model::{
     FrameworkReconciliation, FrameworkReconciliationState, PolicyCandidate,
@@ -726,6 +726,23 @@ pub async fn preview_framework_reconciliation(
     source_sha256: &str,
     proposed_requirements: &[RequirementVersionCanonical],
 ) -> Result<FrameworkReconciliation> {
+    preview_framework_reconciliation_with_hierarchy(
+        pool,
+        identity,
+        source_sha256,
+        proposed_requirements,
+        &[],
+    )
+    .await
+}
+
+pub async fn preview_framework_reconciliation_with_hierarchy(
+    pool: &PgPool,
+    identity: &DisaStigFrameworkIdentity,
+    source_sha256: &str,
+    proposed_requirements: &[RequirementVersionCanonical],
+    hierarchy_edges: &[String],
+) -> Result<FrameworkReconciliation> {
     // 1. Check for exact artifact reuse.
     let artifact_exists: Option<Uuid> =
         sqlx::query_scalar("SELECT id FROM compliance_source_artifacts WHERE sha256 = $1")
@@ -810,9 +827,10 @@ pub async fn preview_framework_reconciliation(
                 publisher: Some(identity.publisher.clone()),
                 title: identity.title.clone(),
             }
-            .compute_digest_with_requirement_digests(&requirement_semantic_digests(
-                proposed_requirements,
-            ));
+            .compute_digest_with_requirement_digests_and_hierarchy(
+                &requirement_semantic_digests(proposed_requirements),
+                hierarchy_edges,
+            );
             Ok(FrameworkReconciliation {
                 state: if existing_digest == proposed_digest {
                     FrameworkReconciliationState::ExistingRelease
@@ -1304,7 +1322,33 @@ pub async fn insert_framework_version_with_requirement_digests<'a, I>(
 where
     I: IntoIterator<Item = &'a String>,
 {
+    insert_framework_version_with_requirement_digests_and_hierarchy(
+        tx,
+        framework_id,
+        canonical,
+        source_artifact_id,
+        published_at,
+        requirement_digests,
+        std::iter::empty(),
+    )
+    .await
+}
+
+pub async fn insert_framework_version_with_requirement_digests_and_hierarchy<'a, I, H>(
+    tx: &mut Transaction<'_, Postgres>,
+    framework_id: Uuid,
+    canonical: &FrameworkVersionCanonical,
+    source_artifact_id: Option<Uuid>,
+    published_at: Option<chrono::DateTime<chrono::Utc>>,
+    requirement_digests: I,
+    hierarchy_edges: H,
+) -> Result<Uuid>
+where
+    I: IntoIterator<Item = &'a String>,
+    H: IntoIterator<Item = &'a String>,
+{
     let requirement_digests: Vec<String> = requirement_digests.into_iter().cloned().collect();
+    let hierarchy_edges: Vec<String> = hierarchy_edges.into_iter().cloned().collect();
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!(
             "compliance-framework-version:{framework_id}:{}",
@@ -1326,7 +1370,10 @@ where
 
     if let Some((existing_id, existing_digest)) = existing {
         if existing_digest
-            == canonical.compute_digest_with_requirement_digests(&requirement_digests)
+            == canonical.compute_digest_with_requirement_digests_and_hierarchy(
+                &requirement_digests,
+                &hierarchy_edges,
+            )
         {
             return Ok(existing_id);
         }
@@ -1358,11 +1405,12 @@ where
     .await
     .context("failed to insert framework version")?;
 
-    write_framework_version_digest_with_requirement_digests(
+    write_framework_version_digest_with_requirement_digests_and_hierarchy(
         tx,
         id,
         canonical,
         &requirement_digests,
+        &hierarchy_edges,
     )
     .await
     .context("failed to write framework version digest")?;
@@ -1671,6 +1719,150 @@ pub mod tests {
             msg.contains("FRAMEWORK_RELEASE_CONFLICT"),
             "expected FRAMEWORK_RELEASE_CONFLICT in: {msg}"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a database"]
+    async fn hierarchy_identity_is_typed_and_edge_sensitive() {
+        let pool = test_pool().await;
+        let key = format!("test-fw-hierarchy-{}", Uuid::new_v4());
+        let canonical = FrameworkVersionCanonical {
+            canonical_source_key: key.clone(),
+            canonical_release_key: "V1R1".to_string(),
+            version: "V1R1".to_string(),
+            publisher: Some("DISA".to_string()),
+            title: Some("Hierarchy test".to_string()),
+        };
+
+        let mut tx = pool.begin().await.unwrap();
+        let framework_id =
+            upsert_framework_lineage(&mut tx, "Hierarchy test", Some("DISA"), &key, None)
+                .await
+                .unwrap();
+        let group_key = "group:V-268137";
+        let rule_key = "V-268137";
+        let framework_version_id = insert_framework_version_with_requirement_digests_and_hierarchy(
+            &mut tx,
+            framework_id,
+            &canonical,
+            None,
+            None,
+            &[],
+            &[format!("{group_key}->{rule_key}")],
+        )
+        .await
+        .unwrap();
+
+        let group_id = upsert_requirement_lineage(&mut tx, framework_id, group_key)
+            .await
+            .unwrap();
+        let rule_id = upsert_requirement_lineage(&mut tx, framework_id, rule_key)
+            .await
+            .unwrap();
+        let group = RequirementVersionCanonical {
+            canonical_requirement_key: group_key.to_string(),
+            external_id: "V-268137".to_string(),
+            title: Some("Group".to_string()),
+            description: None,
+            kind: "group".to_string(),
+            severity: None,
+            check_text: None,
+            fix_text: None,
+            metadata: serde_json::json!({}),
+        };
+        let rule = RequirementVersionCanonical {
+            canonical_requirement_key: rule_key.to_string(),
+            external_id: "xccdf_rule_SV-268137r1".to_string(),
+            title: Some("Rule".to_string()),
+            description: None,
+            kind: "rule".to_string(),
+            severity: None,
+            check_text: None,
+            fix_text: None,
+            metadata: serde_json::json!({}),
+        };
+        let group_version_id =
+            insert_requirement_version(&mut tx, group_id, framework_version_id, &group, None)
+                .await
+                .unwrap();
+        let rule_version_id = insert_requirement_version(
+            &mut tx,
+            rule_id,
+            framework_version_id,
+            &rule,
+            Some(group_version_id),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_ne!(group_id, rule_id);
+        let parent: Option<Uuid> = sqlx::query_scalar(
+            "SELECT parent_requirement_version_id FROM compliance_requirement_versions WHERE id = $1",
+        )
+        .bind(rule_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(parent, Some(group_version_id));
+
+        let mut conflict_tx = pool.begin().await.unwrap();
+        let err = insert_framework_version_with_requirement_digests_and_hierarchy(
+            &mut conflict_tx,
+            framework_id,
+            &canonical,
+            None,
+            None,
+            &[],
+            &[format!("group:other->{rule_key}")],
+        )
+        .await;
+        conflict_tx.rollback().await.unwrap();
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("FRAMEWORK_RELEASE_CONFLICT")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a database"]
+    async fn concurrent_framework_backfills_finalize_once() {
+        let pool = test_pool().await;
+        let key = format!("test-fw-backfill-concurrent-{}", Uuid::new_v4());
+        let mut tx = pool.begin().await.unwrap();
+        let framework_id =
+            upsert_framework_lineage(&mut tx, "Concurrent backfill", None, &key, None)
+                .await
+                .unwrap();
+        let version_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_framework_versions
+                (framework_id, version, canonical_release_key, title, semantic_digest)
+             VALUES ($1, 'V1R1', 'V1R1', 'Concurrent backfill', 'pending')
+             RETURNING id",
+        )
+        .bind(framework_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        let (first, second) = tokio::join!(
+            crate::compliance::framework_model::backfill_pending_framework_version_digests(&pool),
+            crate::compliance::framework_model::backfill_pending_framework_version_digests(&pool),
+        );
+        first.unwrap();
+        second.unwrap();
+        let row: (String, String) = sqlx::query_as(
+            "SELECT semantic_digest, canonicalization_version
+             FROM compliance_framework_versions WHERE id = $1",
+        )
+        .bind(version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_ne!(row.0, "pending");
+        assert_eq!(row.1, "cf-model-json-3");
     }
 
     #[tokio::test]

@@ -35,13 +35,15 @@ use crate::compliance::digest::{
     refresh_bundle_requirement_digest, write_bundle_version_digest, write_policy_version_digest,
 };
 use crate::compliance::framework_model::{FrameworkVersionCanonical, requirement_semantic_digests};
+use crate::compliance::requirement_model::write_requirement_version_digest;
 use crate::compliance::shared_implementation::{
     SharedImplementationId, SharedValidationError, ValidatedSharedCreation,
     build_import_policy_resolution_plan,
 };
 use crate::compliance::xccdf::disa_stig_adapter::{
-    canonical_for_rule, canonical_key_for_rule, canonical_requirements_for_framework,
-    identify_framework, is_disa_stig,
+    canonical_for_group, canonical_for_rule, canonical_key_for_rule,
+    canonical_requirements_for_framework, hierarchy_edges_for_framework, identify_framework,
+    is_disa_stig,
 };
 use crate::compliance::xccdf::exact_technical_match::RequirementTechnicalIdentity;
 use crate::compliance::xccdf::exact_technical_match::{
@@ -60,8 +62,9 @@ use crate::compliance::xccdf::reconciliation::{
 use crate::queries::compliance::{PolicyDraftIntent, ensure_policy_draft};
 use crate::queries::framework_requirements::{
     insert_bundle_version_requirement, insert_framework_version,
-    insert_framework_version_with_requirement_digests, insert_policy_mapping_in_tx,
-    insert_requirement_version, upsert_framework_lineage, upsert_requirement_lineage,
+    insert_framework_version_with_requirement_digests_and_hierarchy, insert_policy_mapping_in_tx,
+    insert_requirement_version, insert_requirement_version_pending, upsert_framework_lineage,
+    upsert_requirement_lineage,
 };
 
 async fn revalidate_reviewed_related_candidate(
@@ -646,7 +649,8 @@ pub async fn commit_foreign_import(
         let authoritative_requirements = canonical_requirements_for_framework(&pkg.parsed);
         let incoming_requirement_digests =
             requirement_semantic_digests(&authoritative_requirements);
-        let framework_version_id = insert_framework_version_with_requirement_digests(
+        let hierarchy_edges = hierarchy_edges_for_framework(&pkg.parsed);
+        let framework_version_id = insert_framework_version_with_requirement_digests_and_hierarchy(
             &mut tx,
             framework_id,
             &FrameworkVersionCanonical {
@@ -659,10 +663,28 @@ pub async fn commit_foreign_import(
             Some(source_artifact_id),
             None,
             &incoming_requirement_digests,
+            &hierarchy_edges,
         )
         .await?;
 
+        let mut group_versions = std::collections::HashMap::new();
+        for group in &pkg.parsed.groups {
+            let group_key = format!("group:{}", group.id);
+            let requirement_id =
+                upsert_requirement_lineage(&mut tx, framework_id, &group_key).await?;
+            let group_version = insert_requirement_version(
+                &mut tx,
+                requirement_id,
+                framework_version_id,
+                &canonical_for_group(group),
+                None,
+            )
+            .await?;
+            group_versions.insert(group.id.clone(), group_version);
+        }
+
         let mut requirement_versions = std::collections::HashMap::new();
+        let mut pending_rule_digests = Vec::new();
         for rule in &pkg.parsed.rules {
             let canonical_key = canonical_key_for_rule(rule);
             let requirement_id =
@@ -682,14 +704,19 @@ pub async fn commit_foreign_import(
                 } else {
                     None
                 };
-            let requirement_version_id = insert_requirement_version(
+            let parent_requirement_version_id = rule
+                .group_id
+                .as_ref()
+                .and_then(|group_id| group_versions.get(group_id).copied());
+            let requirement_version_id = insert_requirement_version_pending(
                 &mut tx,
                 requirement_id,
                 framework_version_id,
                 &canonical,
-                None,
+                parent_requirement_version_id,
             )
             .await?;
+            pending_rule_digests.push((requirement_version_id, canonical.clone()));
             let (previous_requirement_version_id, unchanged_from_previous_release) =
                 previous_requirement_version
                     .map(|(id, digest)| (Some(id), digest == canonical.compute_digest()))
@@ -702,6 +729,18 @@ pub async fn commit_foreign_import(
                     unchanged_from_previous_release,
                 },
             );
+        }
+        for (requirement_version_id, canonical) in pending_rule_digests {
+            let pending: bool = sqlx::query_scalar(
+                "SELECT semantic_digest = 'pending' FROM compliance_requirement_versions WHERE id = $1",
+            )
+            .bind(requirement_version_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if pending {
+                write_requirement_version_digest(&mut tx, requirement_version_id, &canonical)
+                    .await?;
+            }
         }
         for (requirement_order, record) in policy_records.iter().enumerate() {
             let normalized = requirement_versions

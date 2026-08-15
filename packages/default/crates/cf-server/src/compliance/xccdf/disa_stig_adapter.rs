@@ -13,7 +13,7 @@
 
 use serde_json::{Value, json};
 
-use super::models::{BenchmarkMeta, ParsedRule, ParsedXccdf, StandardIdentifier};
+use super::models::{BenchmarkMeta, ParsedGroup, ParsedRule, ParsedXccdf, StandardIdentifier};
 use crate::compliance::requirement_model::{
     FrameworkReconciliation, FrameworkReconciliationState, RequirementVersionCanonical,
 };
@@ -288,7 +288,7 @@ pub fn canonical_for_rule(
 ) -> RequirementVersionCanonical {
     RequirementVersionCanonical {
         canonical_requirement_key: canonical_requirement_key.to_string(),
-        external_id: canonical_requirement_key.to_string(),
+        external_id: rule.id.clone(),
         title: rule.title.clone(),
         description: rule.description.clone(),
         kind: "rule".to_string(),
@@ -307,6 +307,21 @@ pub fn canonical_for_rule(
     }
 }
 
+/// Build the canonical requirement version for a DISA STIG group node.
+pub fn canonical_for_group(group: &ParsedGroup) -> RequirementVersionCanonical {
+    RequirementVersionCanonical {
+        canonical_requirement_key: format!("group:{}", group.id),
+        external_id: group.id.clone(),
+        title: group.title.clone(),
+        description: group.description.clone(),
+        kind: "group".to_string(),
+        severity: None,
+        check_text: None,
+        fix_text: None,
+        metadata: json!({}),
+    }
+}
+
 /// Return the complete authoritative requirement set represented by a parsed
 /// DISA framework source. This intentionally does not depend on policy import
 /// decisions or selected implementation records.
@@ -321,6 +336,23 @@ pub fn canonical_requirements_for_framework(
             canonical_for_rule(rule, &key)
         })
         .collect()
+}
+
+/// Return the deterministic Group→Rule projection used in framework release
+/// identity. UUIDs are deliberately excluded; these are source identities.
+pub fn hierarchy_edges_for_framework(parsed: &ParsedXccdf) -> Vec<String> {
+    let mut edges: Vec<String> = parsed
+        .rules
+        .iter()
+        .filter_map(|rule| {
+            rule.group_id
+                .as_ref()
+                .map(|group_id| format!("group:{}->{}", group_id, canonical_key_for_rule(rule)))
+        })
+        .collect();
+    edges.sort();
+    edges.dedup();
+    edges
 }
 
 /// Requirement hierarchy node produced by the adapter for a single rule.
@@ -357,7 +389,7 @@ pub fn hierarchy_nodes_for_rule(
         // This function does not have access to the full ParsedXccdf, so the
         // caller is expected to pass a title through `StigHierarchyContext`.
         nodes.push(StigHierarchyNode {
-            canonical_key: gk.clone(),
+            canonical_key: format!("group:{gk}"),
             kind: "group".to_string(),
             title: None, // caller fills this in from parsed.groups
             parent_canonical_key: None,
@@ -368,7 +400,7 @@ pub fn hierarchy_nodes_for_rule(
         canonical_key: rule_canonical_key.to_string(),
         kind: "rule".to_string(),
         title: rule.title.clone(),
-        parent_canonical_key: group_key,
+        parent_canonical_key: group_key.map(|key| format!("group:{key}")),
     });
 
     nodes
@@ -451,6 +483,12 @@ mod tests {
             preserved_xml: None,
         };
         assert_eq!(canonical_key_for_rule(&rule), "V-268137");
+        let rule_canonical = canonical_for_rule(&rule, &canonical_key_for_rule(&rule));
+        assert_eq!(rule_canonical.external_id, rule.id);
+        let nodes = hierarchy_nodes_for_rule(&rule, &rule_canonical.canonical_requirement_key);
+        assert_eq!(nodes[0].canonical_key, "group:V-268137");
+        assert_eq!(nodes[1].canonical_key, "V-268137");
+        assert_ne!(nodes[0].canonical_key, nodes[1].canonical_key);
     }
 
     #[test]

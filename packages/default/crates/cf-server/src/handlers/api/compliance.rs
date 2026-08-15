@@ -54,7 +54,8 @@ use crate::queries::compliance::{
 };
 use crate::queries::compliance_interchange;
 use crate::queries::framework_requirements::{
-    find_policy_candidates, preview_framework_reconciliation, preview_requirement_reconciliation,
+    find_policy_candidates, preview_framework_reconciliation_with_hierarchy,
+    preview_requirement_reconciliation,
 };
 
 const MAX_GROUPING_SCHEME_NAME_BYTES: usize = 255;
@@ -3892,10 +3893,15 @@ async fn compute_foreign_stig_reconciliation(
         return Ok(None);
     };
     let proposed_requirements = canonical_requirements_for_framework(parsed);
-    let framework =
-        preview_framework_reconciliation(pool, &identity, source_sha256, &proposed_requirements)
-            .await
-            .map_err(|error| format!("failed to reconcile framework release: {error}"))?;
+    let framework = preview_framework_reconciliation_with_hierarchy(
+        pool,
+        &identity,
+        source_sha256,
+        &proposed_requirements,
+        &crate::compliance::xccdf::disa_stig_adapter::hierarchy_edges_for_framework(parsed),
+    )
+    .await
+    .map_err(|error| format!("failed to reconcile framework release: {error}"))?;
     let reconciliation = match framework.existing_framework_id {
         Some(framework_id) => preview_requirement_reconciliation(
             pool,
