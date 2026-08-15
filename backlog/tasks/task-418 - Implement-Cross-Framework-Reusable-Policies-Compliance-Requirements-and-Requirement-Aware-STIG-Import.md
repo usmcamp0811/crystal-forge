@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 01:39'
+updated_date: '2026-08-15 02:25'
 labels: []
 milestone: m-22
 dependencies:
@@ -477,6 +477,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15 bundle baseline UI slice implemented in the dedicated worktree: create/edit request models now send requirement_version_ids; new framework-release/search picker selects exact normalized requirement versions independently from policies; edit loads existing draft requirement membership; zero-policy requirement-only bundles are allowed while empty requests remain blocked. Verified web-ui cargo check, server cargo check, cargo fmt --manifest-path packages/default/Cargo.toml --all -- --check, git diff --check, and nix build .#web-ui (171 tests passed, 1 ignored). Changes remain uncommitted by instruction. Focused browser proof for create/edit baseline persistence is still pending.
 
 2026-08-15 browser coverage slice added as 20ab-compliance-bundle-requirement-baseline-roundtrip. It exercises requirement-only creation, reload/policy independence, mixed edit, complete update payloads, release switching with clearing, release-scoped search, requirement edit preserving policies, and empty-baseline blocking. Added v2 normalized fixture release and exposed normalized framework names in bundle framework selection. Static checks and web-ui build pass. Browser verification is incomplete: the authoritative web-ui VM check exceeded the 20-minute command timeout before a final result; local focused run was blocked because run-ui-dev --dev invokes a missing `crystal-forge-server` binary from the `server` flake output. No commit made because browser proof is not green.
+
+2026-08-15 checkpoint committed and pushed as 14f8d962 (feat(web-ui): add bundle requirement baseline editing). Includes 20ab browser coverage, v2 release fixture, Nix-compatible Playwright executable override, and load-time override. Static checks, web-ui cargo check, and nix build .#web-ui pass. Focused local browser execution reached the new test but remains blocked at the cross-origin bundle POST in the local Dioxus/API setup; the authoritative VM check was previously timeout-limited. Branch is pushed for review.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
