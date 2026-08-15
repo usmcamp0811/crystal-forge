@@ -3,10 +3,10 @@ id: TASK-422
 title: >-
   Rebuild Compliance view UI/UX to match design commit 23c88aba (bundle table,
   detail drawer, requirement coverage, STIG import resume)
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-15 19:36'
+updated_date: '2026-08-15 19:42'
 labels: []
 milestone: m-22
 dependencies:
