@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-14 21:31'
+updated_date: '2026-08-15 00:50'
 labels: []
 milestone: m-22
 dependencies:
@@ -375,6 +375,8 @@ Next slice: persist create-mode queued requirement mappings atomically with new 
 2026-08-14 P0 closure slice approved by user: preserve verified browser proof first (test-only commit 3ff724b6 pushed); then implement policy-version mapping-inclusive canonical digests and same-transaction draft mutation recomputation with immutable-version guards; extend bundle canonical digests and ensure_bundle_draft to preserve exact requirement memberships; add manual bundle create/update API support for independent requirement_version_ids including zero-policy baselines; add minimal baseline UI using existing framework/version/requirement search; harden framework-release and requirement-version reimport identity conflicts and remove mutable semantic upserts; add targeted DB acceptance coverage for all invariants. Sequence checkpoints: mapping digest, bundle digest/draft, API/server baseline, UI baseline, immutable import conflicts, regression coverage. Verification gates: isolated PostgreSQL on 3042 targeted tests, cargo fmt --all --check, git diff --check, SQLX_OFFLINE=true cargo check -p cf-server, cargo check -p web-ui, nix build .#server, nix build .#web-ui. Do not start fuzzy matching or unrelated UI.
 
 2026-08-14 derived policy draft mapping inheritance: in ensure_policy_draft, copy all policy_requirement_mappings immediately after inserting the new draft, then compute the draft digest with copied mappings present. Add one ignored DB lifecycle test covering three mappings, semantic/mapping digest parity, distinct mapping IDs, draft-only mutation, and accepted-source mutation rejection. Verify fmt, diff check, SQLX_OFFLINE cargo check, and targeted DB test on port 3042.
+
+Next checkpoint — bundle requirement-baseline UI: extend create/edit bundle request models with requirement_version_ids; add a framework/version-scoped requirement selector using existing framework/version/search APIs; allow zero-policy requirement-only bundles while preserving existing policy selection; submit exact requirement IDs and display selected baseline count. Verify web-ui cargo check, server cargo check, focused browser coverage if available, then authoritative web-ui build.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -469,6 +471,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-14 derived mapping inheritance verified and pushed as 06b1392e. `cargo fmt --all --check`, `git diff --check`, `SQLX_OFFLINE=true cargo check -p cf-server`, and ignored DB test `queries::deployment_policies::tests::derived_policy_draft_inherits_mappings_and_digests` on PostgreSQL 127.0.0.1:3042 passed. No UI/API/bundle files changed.
 
 2026-08-14 manual bundle requirement baseline server slice implemented in the dedicated worktree from 06b1392e. Added serde-default requirement_version_ids to create/update requests; requirement-only baselines are accepted while completely empty requests retain PolicyRequired validation; exact duplicate/missing requirement IDs are rejected transactionally; requirement membership is written in request order and refreshed via requirement_digest without changing semantic_digest; derived bundle drafts copy and refresh requirement membership; added version-scoped requirement membership query/API; preserved policy membership tables. Added unit validation and ignored DB lifecycle coverage. Verified isolated DB 3042: exact_technical_match_end_to_end 3/3, phase_22 8/8, reviewed_related_stig 2/2, requirement_baseline_lifecycle 1/1. cargo fmt check, git diff check, SQLX_OFFLINE cargo check, and focused validation unit test passed. nix build .#server --no-link was attempted twice and exceeded tool timeouts; no commit or push made. Worktree remains modified and HEAD remains 06b1392e.
+
+2026-08-14 continuation: server baseline API and lifecycle are committed at 209fb0f3/309664b2. Starting the minimal Dioxus bundle baseline selector on the dedicated TASK-418 worktree. Keep policy picker unchanged; use normalized framework/version/search APIs and send exact requirement_version_ids for create/update.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
