@@ -580,6 +580,10 @@ async fn main() -> anyhow::Result<()> {
             get(framework_requirements::search_framework_requirements),
         )
         .route(
+            "/api/v1/compliance/framework-versions/:fv_id/recover",
+            post(framework_requirements::recover_framework_version),
+        )
+        .route(
             "/api/v1/compliance/requirement-versions/:rv_id/children",
             get(framework_requirements::list_requirement_version_children),
         )

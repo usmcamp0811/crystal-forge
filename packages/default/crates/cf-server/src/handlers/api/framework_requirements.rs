@@ -11,6 +11,8 @@
 //! GET  /api/v1/compliance/requirement-versions/:rv_id/children
 //! GET  /api/v1/compliance/bundle-versions/:bv_id/requirement-coverage
 //!
+//! POST /api/v1/compliance/framework-versions/:fv_id/recover
+//!
 //! GET    /api/v1/policy-versions/:pv_id/requirement-mappings
 //! POST   /api/v1/policy-versions/:pv_id/requirement-mappings
 //! PUT    /api/v1/policy-versions/:pv_id/requirement-mappings/:m_id
@@ -20,6 +22,7 @@
 //! Authorization:
 //! - Read endpoints: any authenticated user.
 //! - Write endpoints (mapping CRUD): admin or operator role.
+//! - Recovery endpoint: admin role only.
 
 use axum::{
     Json,
@@ -32,7 +35,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::api::models::ApiError;
-use crate::handlers::api::rbac::{authenticated_user_roles, has_operator_or_admin_role};
+use crate::compliance::framework_model::attach_artifact_and_retry_framework_recovery;
+use crate::handlers::api::rbac::{
+    authenticated_user_roles, has_admin_role, has_operator_or_admin_role,
+};
 use crate::queries::framework_requirements::{
     BundleCoverageReport, FrameworkSummary, FrameworkVersionSummary, PolicyMappingRow,
     RequirementVersionSummary, compute_bundle_requirement_coverage, create_policy_mapping,
@@ -415,6 +421,77 @@ pub async fn update_policy_requirement_mapping(
             } else {
                 tracing::error!(error = %e, mapping_id = %mapping_id, "failed to update policy requirement mapping");
                 internal_error("Failed to update policy requirement mapping")
+            }
+        }
+    }
+}
+
+// ── Framework recovery ────────────────────────────────────────────────────────
+
+/// `POST /api/v1/compliance/framework-versions/:fv_id/recover`
+///
+/// Attach a verified DISA source artifact to an unresolved framework release and
+/// retry recovery.  If the release already has an artifact attached from a prior
+/// failed attempt, omit `source_artifact_id` to retry without re-attaching.
+///
+/// Requires admin role.
+pub async fn recover_framework_version(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(framework_version_id): Path<Uuid>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !has_admin_role(&roles) {
+        return forbidden();
+    }
+
+    let source_artifact_id = match body
+        .get("source_artifact_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.parse::<Uuid>())
+    {
+        Some(Ok(id)) => id,
+        Some(Err(_)) => return bad_request("source_artifact_id must be a valid UUID"),
+        None => {
+            return bad_request("source_artifact_id is required");
+        }
+    };
+
+    match attach_artifact_and_retry_framework_recovery(
+        &pool,
+        framework_version_id,
+        source_artifact_id,
+    )
+    .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ok", "framework_version_id": framework_version_id})),
+        )
+            .into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not pending recovery")
+                || msg.contains("not in unresolved state")
+                || msg.contains("not eligible")
+            {
+                bad_request(&msg)
+            } else if msg.contains("does not exist")
+                || msg.contains("identity does not match")
+                || msg.contains("not a DISA STIG")
+                || msg.contains("cannot be parsed")
+            {
+                bad_request(&msg)
+            } else {
+                tracing::error!(
+                    error = %e,
+                    framework_version_id = %framework_version_id,
+                    "failed to recover framework version"
+                );
+                internal_error("Failed to recover framework version")
             }
         }
     }
