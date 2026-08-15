@@ -208,9 +208,9 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
         let Some((
             source_key,
             release_key,
-            version,
-            publisher,
-            title,
+            mut version,
+            mut publisher,
+            mut title,
             semantic_digest,
             source_artifact_id,
         )) = row
@@ -248,6 +248,26 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
                                     "legacy DISA framework source artifact identity does not match framework version {id}"
                                 );
                             }
+                            sqlx::query(
+                                "UPDATE compliance_framework_versions
+                                 SET version = $1, title = $2
+                                 WHERE id = $3 AND semantic_digest = 'pending'",
+                            )
+                            .bind(&source_identity.version)
+                            .bind(source_identity.title.as_deref())
+                            .bind(id)
+                            .execute(&mut *tx)
+                            .await?;
+                            sqlx::query(
+                                "UPDATE compliance_frameworks SET publisher = $1 WHERE canonical_source_key = $2",
+                            )
+                            .bind(&source_identity.publisher)
+                            .bind(&source_identity.canonical_source_key)
+                            .execute(&mut *tx)
+                            .await?;
+                            version = source_identity.version;
+                            publisher = Some(source_identity.publisher);
+                            title = source_identity.title;
                             persist_legacy_stig_topology(&mut tx, id, &package.parsed).await?;
                             parsed_stig = Some(package.parsed);
                         } else if requires_stig_reconstruction {
@@ -564,7 +584,7 @@ mod tests {
             .unwrap();
         let key = format!("disa-legacy-upgrade-{}", Uuid::new_v4());
         let xml = format!(
-            r#"<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="xccdf_mil.disa.stig_benchmark_Test"><title>Legacy STIG {key}</title><version>V1R1</version><Group id="V-1"><title>Authentication</title><Rule id="xccdf_mil.disa.stig_rule_SV-1r1_rule" severity="medium"><title>Rule</title><ident system="http://cyber.mil/stigs/stig">V-1</ident></Rule></Group></Benchmark>"#
+            r#"<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="xccdf_mil.disa.stig_benchmark_Test_{key}"><title>Legacy STIG {key}</title><version>V1R1</version><Group id="V-1"><title>Authentication</title><Rule id="xccdf_mil.disa.stig_rule_SV-1r1_rule" severity="medium"><title>Rule</title><ident system="http://cyber.mil/stigs/stig">V-1</ident></Rule></Group></Benchmark>"#
         );
         let package = process_xccdf_bytes(
             xml.as_bytes().to_vec(),
@@ -576,16 +596,15 @@ mod tests {
         let identity = identify_framework(&package.parsed).unwrap();
 
         let mut tx = pool.begin().await.unwrap();
-        let framework_id =
-            upsert_framework_lineage(
-                &mut tx,
-                "Legacy STIG",
-                Some("DISA"),
-                &identity.canonical_source_key,
-                None,
-            )
-            .await
-            .unwrap();
+        let framework_id = upsert_framework_lineage(
+            &mut tx,
+            "Legacy STIG",
+            Some("DISA"),
+            &identity.canonical_source_key,
+            None,
+        )
+        .await
+        .unwrap();
         let artifact_id: Uuid = sqlx::query_scalar(
             "INSERT INTO compliance_source_artifacts
                 (content, filename, media_type, sha256, parser_version)
@@ -630,9 +649,11 @@ mod tests {
             .await
             .unwrap();
 
-        let version: (String, String) = sqlx::query_as(
-            "SELECT semantic_digest, canonicalization_version
-             FROM compliance_framework_versions WHERE id = $1",
+        let version: (String, String, String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT fv.semantic_digest, fv.canonicalization_version, fv.version, fv.title, f.publisher
+             FROM compliance_framework_versions fv
+             JOIN compliance_frameworks f ON f.id = fv.framework_id
+             WHERE fv.id = $1",
         )
         .bind(framework_version_id)
         .fetch_one(&pool)
@@ -640,6 +661,9 @@ mod tests {
         .unwrap();
         assert_ne!(version.0, "pending");
         assert_eq!(version.1, "cf-model-json-4");
+        assert_eq!(version.2, identity.version);
+        assert_eq!(version.3, identity.title);
+        assert_eq!(version.4.as_deref(), Some(identity.publisher.as_str()));
         let (group_version_id, parent, external_id): (Uuid, Option<Uuid>, String) =
             sqlx::query_as(
                 "SELECT group_version.id, rule_version.parent_requirement_version_id,

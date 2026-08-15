@@ -1272,7 +1272,8 @@ pub async fn upsert_framework_lineage(
             (name, publisher, canonical_source_key, description)
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (canonical_source_key) DO UPDATE
-            SET name = EXCLUDED.name
+            SET name = EXCLUDED.name,
+                publisher = COALESCE(EXCLUDED.publisher, compliance_frameworks.publisher)
         RETURNING id
         "#,
     )
