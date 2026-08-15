@@ -186,6 +186,7 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
     .context("failed to list pending framework version digests")?;
 
     for id in ids {
+        let recovery: Result<()> = async {
         let mut tx = pool.begin().await?;
         let row: Option<(
             String,
@@ -217,11 +218,11 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
             source_artifact_id,
         )) = row
         else {
-            continue;
+            return Ok(());
         };
         if semantic_digest != "pending" {
             tx.commit().await?;
-            continue;
+            return Ok(());
         }
         let requires_stig_reconstruction = publisher
             .as_deref()
@@ -291,7 +292,7 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
                         .execute(&mut *tx)
                         .await?;
                         tx.commit().await?;
-                        continue;
+                        return Ok(());
                     }
                 }
             }
@@ -307,7 +308,7 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
             .execute(&mut *tx)
             .await?;
             tx.commit().await?;
-            continue;
+            return Ok(());
         }
 
         let requirement_rows: Vec<(
@@ -411,6 +412,25 @@ pub async fn backfill_pending_framework_version_digests(pool: &PgPool) -> Result
         )
         .await?;
         tx.commit().await?;
+        Ok(())
+        }
+        .await;
+
+        if let Err(error) = recovery {
+            tracing::warn!(framework_version_id = %id, error = ?error,
+                "framework release recovery failed; marking release unresolved");
+            sqlx::query(
+                "UPDATE compliance_framework_versions
+                 SET migration_recovery_status = 'unresolved',
+                     migration_recovery_reason = $1
+                 WHERE id = $2 AND semantic_digest = 'pending'",
+            )
+            .bind(error.to_string())
+            .bind(id)
+            .execute(pool)
+            .await
+            .with_context(|| format!("failed to mark framework version {id} unresolved"))?;
+        }
     }
     Ok(())
 }
