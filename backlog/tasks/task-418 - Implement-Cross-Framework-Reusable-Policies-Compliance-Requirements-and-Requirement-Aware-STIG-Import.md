@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@agent'
 created_date: '2026-08-11 17:37'
-updated_date: '2026-08-15 20:29'
+updated_date: '2026-08-15 20:52'
 labels: []
 milestone: m-22
 dependencies:
@@ -250,6 +250,8 @@ Starting the derived policy draft mapping inheritance slice from clean 192a150d 
 2026-08-15: Continued post-0223 recovery work. Commit 12ae625d validates explicit comparison framework versions as belonging to the target framework and finalized/non-pending before reconciliation. Pushed to MR !315.
 
 2026-08-15: Pushed c3be6ae5, excluding unresolved framework-release evidence from bundle coverage and authoritative/inherited/related candidate discovery. Pushed 971baebc, which runs each pending framework recovery in its own transaction; unexpected per-release failures roll back and are recorded as unresolved so later releases still proceed. Verified both checkpoints with cargo fmt --all --check, SQLX_OFFLINE=true cargo check -p cf-server, and git diff --check (existing repository warnings only).
+
+2026-08-15: Review remediation pushed as 26d0eff6. P1 fix: coverage denominator now includes ALL selected baseline requirements regardless of framework recovery status; unresolved requirements appear as RecoveryRequired in the count and per-row coverage field. P2a fix: extracted recover_framework_version() as a single-release helper; attach_artifact_and_retry_framework_recovery() now calls it instead of the global backfill, and supports both unresolved-without-artifact (attach then recover) and unresolved-with-artifact (reset to pending then recover) paths. P2b fix: migration 0225 trigger narrowed to the exact NULL->value artifact transition with structural field identity verification; the general recovery-state mutation path is a separate guard. Commit-path alignment: insert_framework_version_with_requirement_digests_and_hierarchy() now returns FRAMEWORK_RELEASE_RECOVERY_REQUIRED for pending/unresolved releases instead of FRAMEWORK_RELEASE_CONFLICT. API exposure: list_framework_versions() now returns migration_recovery_status and migration_recovery_reason; web-UI ComplianceFrameworkVersionSummary carries those fields; BundleCoverageReport and RequirementCoverage carry the new recovery_required field; RequirementCoverageCard shows a recovery-required chip when count > 0. Verification: SQLX_OFFLINE cargo check -p cf-server passed, web-ui cargo check passed, cargo fmt --all --check passed, git diff --check passed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
