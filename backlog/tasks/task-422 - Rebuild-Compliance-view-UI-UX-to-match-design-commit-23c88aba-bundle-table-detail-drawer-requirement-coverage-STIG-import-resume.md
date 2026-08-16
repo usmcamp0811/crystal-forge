@@ -7,7 +7,7 @@ status: Review
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-16 18:28'
+updated_date: '2026-08-16 18:58'
 labels: []
 milestone: m-22
 dependencies:
@@ -187,5 +187,10 @@ MR !316 is blocked by TASK-423 and TASK-424. Backend review found two coupled as
 created: 2026-08-16 18:28
 ---
 Continued remediation verification in /home/mcamp/code/crystal-forge/TASK-422-compliance-view-redesign. `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all --check`, `node --check checks/web-ui/tests/integration-test.js`, `git diff --check`, `nix build .#server --no-link -L`, and `nix build .#web-ui -L` completed successfully (only Nix deprecation warnings). The latest remediation changes remain uncommitted in the task worktree. The focused NixOS browser check still has no confirmed result after the previous timeout, and `list_bundle_summary_aggregates` still calls the detailed exact-version systems path once per bundle, so the required no-per-bundle-query batching criterion remains unresolved.
+---
+
+created: 2026-08-16 18:58
+---
+Pushed remediation commit `e085460d` to `TASK-422-compliance-view-redesign` / MR !316. The MR description was corrected: it no longer claims completed set-based aggregate verification, and now records the focused browser timeout and remaining request-change status. Server build passed with 1139 tests; web-ui build, formatting, Node syntax, and diff checks passed. The aggregate path now batches bundle/version membership and effective-policy resolution, but the evidence path still needs focused query-count proof before this finding is considered resolved.
 ---
 <!-- COMMENTS:END -->
