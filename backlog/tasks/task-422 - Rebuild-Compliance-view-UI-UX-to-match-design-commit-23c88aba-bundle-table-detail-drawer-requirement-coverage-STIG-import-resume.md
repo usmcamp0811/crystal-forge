@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-15 23:45'
+updated_date: '2026-08-16 00:16'
 labels: []
 milestone: m-22
 dependencies:
@@ -126,6 +126,10 @@ Spec §9 contains the endpoint/URL table a reviewer uses to put the running desi
 Implementation started after MR !315 was merged into dev. Dedicated worktree: /home/mcamp/code/crystal-forge/TASK-422-compliance-view-redesign; branch TASK-422-compliance-view-redesign from dev e04c4e71. Main and dev integration worktrees were clean at preflight. Following spec §10 phases.
 
 Phase 0 baseline command `nix build .#checks.x86_64-linux.web-ui -L` was started before code changes but did not complete within 20 minutes; it remained in the `vm-test-run-crystal-forge-web-ui-mega-integration` run and the tool terminated it. Output showed unrelated fixture evaluation/builder warnings before timeout; no baseline compliance result was produced. Proceeding with targeted implementation and will rerun focused checks later.
+
+Current implementation progress: web-ui bundle rail is now a full-width searchable/framework-filtered table; selected bundle opens a fl-tray overview; selected_export_version_id was renamed to selected_bundle_version_id; coverage has generation-guarded loading, filter/search controls, policy-link buttons, and a coverage view; dense systems table/CSS utilities were added; PolicyDrawer is public and wired for lazy policy resolution; STIG draft metadata persistence/callout/pause controls were started. Web-ui cargo check passes in the task worktree; server cargo check passes in `nix develop`.
+
+Known follow-up before Phase 1 STOP: aggregate bundle summary fields currently reuse `list_bundle_systems_for_version()` once per bundle, preserving exact score semantics but not yet satisfying the required set-based/no-per-bundle-query implementation. This must be replaced before finalizing the server contract.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
