@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude-opus-5'
 created_date: '2026-08-16 15:17'
-updated_date: '2026-08-16 18:44'
+updated_date: '2026-08-16 19:08'
 labels:
   - cli
   - nixos
@@ -224,3 +224,25 @@ produces `stig-hardening/` with `default.nix`, `manifest.json`, and `policies/*.
 - The `cf-compliance` extraction is the largest and riskiest part; it is a pure code move plus re-exports, verified by `cargo check` on unchanged `cf-server` call sites.
 - Eligible-policy coverage depends entirely on how many real policies use the strict `config.<path> == <literal>` shape. If coverage is low, the honest outcome is many explicit skip diagnostics, not looser inference.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+**Phase 1 complete — `cf-compliance` extraction.**
+
+Created `packages/default/crates/cf-compliance` (DB-free) and moved from `cf-server`:
+
+- `compliance/canonical.rs`, `compliance/interchange.rs` (whole files)
+- `compliance/digest.rs` — split: the `*Canonical` DTOs + their pure `compute_digest` + all 22 digest tests moved; the transactional `write_*`/`refresh_*`/`backfill_*` helpers stay in `cf-server`.
+- `compliance/xccdf/`: `models`, `parser`, `package`, `zip_extractor`, `inference`, `reconciliation`, `importer`, `import_models` (whole files); `exact_technical_match.rs` split so the pure `RequirementTechnicalIdentity` moved and the two `sqlx` query fns stayed behind in a new `exact_technical_match_db.rs`.
+- `handlers/api/compliance.rs` — the private policy-document parser (`NormalizedPolicyImport`, `normalize_policy_import`, `parse_policy_interchange_upload{,_with_source}`, `validate_policy_interchange_document`, `generate_compatibility_policy_uuid`) moved into a new `cf_compliance::policy_document` module. The handler now keeps only two thin `MultipartUpload` wrappers over `parse_policy_document`.
+
+`cf-server` re-exports everything under the original `crate::compliance::*` paths, so no existing call site changed. Moving `importer.rs` was deliberate: it gives the CLI the authoritative `validate_cf_native_document`, which already performs per-rule and whole-bundle semantic-digest verification and membership ordering, so AC #18 and #15 are satisfied by reuse rather than reimplementation.
+
+Verified (all actually run in `nix develop`):
+- `SQLX_OFFLINE=true cargo check -p cf-server --all-targets` — no errors, no new warnings.
+- `SQLX_OFFLINE=true cargo test -p cf-compliance` — 198 passed, 0 failed, 1 ignored.
+- `SQLX_OFFLINE=true cargo test -p cf-server --lib policy_interchange` — 4 passed, 9 ignored (pre-existing `requires live database connection`).
+
+Note: the one remaining `cf-compliance` warning (`unused variable: xml_filename` in `xccdf/package.rs`) is pre-existing and was carried over unchanged by the file move.
+<!-- SECTION:NOTES:END -->
