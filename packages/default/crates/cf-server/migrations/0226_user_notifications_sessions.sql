@@ -84,32 +84,41 @@ STABLE
 AS $$
     SELECT EXISTS (
         SELECT 1
-        FROM user_role_assignments ura
-        WHERE ura.user_id = p_user_id
-          AND ura.role = 'admin'
+        FROM users u
+        JOIN user_role_assignments ura ON ura.user_id = u.id
+        WHERE u.id = p_user_id
+          AND u.is_active = TRUE
+          AND p_source_type IN ('builds', 'evals', 'cves')
     )
-    OR p_source_type NOT IN ('systems', 'system_event')
     OR (
         p_source_type = 'systems'
         AND EXISTS (
             SELECT 1
-            FROM systems s
-            JOIN user_environment_memberships uem
+            FROM users u
+            JOIN user_role_assignments ura ON ura.user_id = u.id
+            JOIN systems s ON s.id::text = p_source_id
+            LEFT JOIN user_environment_memberships uem
               ON uem.environment_id = s.environment_id
              AND uem.user_id = p_user_id
-            WHERE s.id::text = p_source_id
+            WHERE u.id = p_user_id
+              AND u.is_active = TRUE
+              AND (ura.role = 'admin' OR uem.user_id IS NOT NULL)
         )
     )
     OR (
         p_source_type = 'system_event'
         AND EXISTS (
             SELECT 1
-            FROM system_events se
+            FROM users u
+            JOIN user_role_assignments ura ON ura.user_id = u.id
+            JOIN system_events se ON se.id::text = p_source_id
             JOIN systems s ON s.id = se.system_id
-            JOIN user_environment_memberships uem
+            LEFT JOIN user_environment_memberships uem
               ON uem.environment_id = s.environment_id
              AND uem.user_id = p_user_id
-            WHERE se.id::text = p_source_id
+            WHERE u.id = p_user_id
+              AND u.is_active = TRUE
+              AND (ura.role = 'admin' OR uem.user_id IS NOT NULL)
         )
     );
 $$;

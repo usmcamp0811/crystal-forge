@@ -14,11 +14,6 @@ pub async fn materialize_attention_notifications_for_user(
             VALUES ($1)
             ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id
             RETURNING *
-        ), authz AS (
-            SELECT EXISTS (
-                SELECT 1 FROM user_role_assignments
-                WHERE user_id = $1 AND role = 'admin'
-            ) AS is_admin
         ), attention_eligible AS (
             SELECT
                 ao.id AS source_occurrence_id,
@@ -62,10 +57,6 @@ pub async fn materialize_attention_notifications_for_user(
                 END AS route
             FROM attention_occurrences ao
             CROSS JOIN prefs p
-            CROSS JOIN authz a
-            LEFT JOIN systems scoped_system
-              ON ao.category = 'systems'
-             AND scoped_system.id::text = ao.subject_id
             WHERE ao.opened_at >= p.initialized_at
               AND ao.category IN ('builds', 'evals', 'cves', 'systems')
                AND p.delivery_channel IN ('in_app', 'email', 'both')
@@ -95,16 +86,7 @@ pub async fn materialize_attention_notifications_for_user(
                         END
                     )
               )
-              AND (
-                    a.is_admin
-                 OR ao.category <> 'systems'
-                 OR EXISTS (
-                    SELECT 1
-                    FROM user_environment_memberships uem
-                    WHERE uem.user_id = $1
-                      AND uem.environment_id = scoped_system.environment_id
-                 )
-              )
+               AND notification_visible_to_user($1, ao.category, ao.subject_id)
         ), deployment_eligible AS (
             SELECT
                 NULL::uuid AS source_occurrence_id,
@@ -121,7 +103,6 @@ pub async fn materialize_attention_notifications_for_user(
             FROM system_events se
             JOIN systems scoped_system ON scoped_system.id = se.system_id
             CROSS JOIN prefs p
-            CROSS JOIN authz a
             WHERE se.event_type = 'cf_deployment_failed'
               AND se.occurred_at >= p.initialized_at
               AND p.delivery_channel IN ('in_app', 'email', 'both')
@@ -130,15 +111,7 @@ pub async fn materialize_attention_notifications_for_user(
                     (p.delivery_channel IN ('in_app', 'both') AND se.occurred_at >= p.deploy_failures_in_app_enabled_at)
                  OR (p.delivery_channel IN ('email', 'both') AND se.occurred_at >= p.deploy_failures_email_enabled_at)
               )
-              AND (
-                    a.is_admin
-                 OR EXISTS (
-                    SELECT 1
-                    FROM user_environment_memberships uem
-                    WHERE uem.user_id = $1
-                      AND uem.environment_id = scoped_system.environment_id
-                 )
-              )
+               AND notification_visible_to_user($1, 'system_event', se.id::text)
         ), eligible AS (
             SELECT * FROM attention_eligible
             UNION ALL
@@ -166,11 +139,6 @@ pub async fn materialize_attention_notifications_for_user(
             VALUES ($1)
             ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id
             RETURNING *
-        ), authz AS (
-            SELECT EXISTS (
-                SELECT 1 FROM user_role_assignments
-                WHERE user_id = $1 AND role = 'admin'
-            ) AS is_admin
         ), attention_eligible AS (
             SELECT
                 ao.id AS source_occurrence_id,
@@ -193,10 +161,6 @@ pub async fn materialize_attention_notifications_for_user(
                 END AS email_enabled_at
             FROM attention_occurrences ao
             CROSS JOIN prefs p
-            CROSS JOIN authz a
-            LEFT JOIN systems scoped_system
-              ON ao.category = 'systems'
-             AND scoped_system.id::text = ao.subject_id
             WHERE ao.opened_at >= p.initialized_at
               AND ao.category IN ('builds', 'evals', 'cves', 'systems')
               AND p.delivery_channel IN ('email', 'both')
@@ -206,16 +170,7 @@ pub async fn materialize_attention_notifications_for_user(
                  OR (ao.category = 'cves' AND p.critical_cves)
                  OR (ao.category = 'systems' AND p.heartbeat_lost)
               )
-              AND (
-                    a.is_admin
-                 OR ao.category <> 'systems'
-                 OR EXISTS (
-                    SELECT 1
-                    FROM user_environment_memberships uem
-                    WHERE uem.user_id = $1
-                      AND uem.environment_id = scoped_system.environment_id
-                 )
-              )
+               AND notification_visible_to_user($1, ao.category, ao.subject_id)
         ), deployment_eligible AS (
             SELECT
                 NULL::uuid AS source_occurrence_id,
@@ -229,20 +184,11 @@ pub async fn materialize_attention_notifications_for_user(
             FROM system_events se
             JOIN systems scoped_system ON scoped_system.id = se.system_id
             CROSS JOIN prefs p
-            CROSS JOIN authz a
             WHERE se.event_type = 'cf_deployment_failed'
               AND se.occurred_at >= p.initialized_at
               AND p.delivery_channel IN ('email', 'both')
               AND p.deploy_failures
-              AND (
-                    a.is_admin
-                 OR EXISTS (
-                    SELECT 1
-                    FROM user_environment_memberships uem
-                    WHERE uem.user_id = $1
-                      AND uem.environment_id = scoped_system.environment_id
-                 )
-              )
+               AND notification_visible_to_user($1, 'system_event', se.id::text)
         ), eligible AS (
             SELECT * FROM attention_eligible
             UNION ALL
@@ -282,10 +228,14 @@ pub async fn materialize_attention_notifications_for_user(
 }
 
 pub async fn materialize_all_user_notifications(pool: &PgPool) -> Result<u64, sqlx::Error> {
-    let users: Vec<(Uuid,)> =
-        sqlx::query_as("SELECT DISTINCT user_id FROM user_notification_preferences")
-            .fetch_all(pool)
-            .await?;
+    let users: Vec<(Uuid,)> = sqlx::query_as(
+        "SELECT DISTINCT p.user_id
+                        FROM user_notification_preferences p
+                        JOIN users u ON u.id = p.user_id
+                        WHERE u.is_active = TRUE",
+    )
+    .fetch_all(pool)
+    .await?;
 
     let mut total = 0;
     for (user_id,) in users {
@@ -308,12 +258,14 @@ pub async fn enqueue_due_weekly_digest_deliveries(
         .fetch_one(pool)
         .await?;
     let users: Vec<(Uuid,)> = sqlx::query_as(
-        "SELECT user_id
-         FROM user_notification_preferences
-         WHERE weekly_digest = TRUE
-           AND delivery_channel IN ('email', 'both')
-           AND weekly_digest_enabled_at IS NOT NULL
-           AND weekly_digest_enabled_at < $1",
+        "SELECT p.user_id
+         FROM user_notification_preferences p
+         JOIN users u ON u.id = p.user_id
+         WHERE u.is_active = TRUE
+           AND p.weekly_digest = TRUE
+           AND p.delivery_channel IN ('email', 'both')
+           AND p.weekly_digest_enabled_at IS NOT NULL
+           AND p.weekly_digest_enabled_at < $1",
     )
     .bind(period_end)
     .fetch_all(pool)
@@ -634,11 +586,12 @@ mod tests {
 
     async fn create_test_user(pool: &PgPool, label: &str) -> Uuid {
         let user_id = Uuid::new_v4();
+        let short_id = user_id.simple().to_string();
         crate::queries::users::create_user(
             pool,
             User {
                 id: user_id,
-                username: format!("notifications-{label}-{user_id}"),
+                username: format!("n-{label}-{}", &short_id[..8]),
                 first_name: Some("Notification".to_string()),
                 last_name: Some("Tester".to_string()),
                 email: format!("notifications-{label}-{user_id}@example.test"),
@@ -649,7 +602,13 @@ mod tests {
             },
         )
         .await
-        .expect("create test user")
+        .expect("create test user");
+        sqlx::query("INSERT INTO user_role_assignments (user_id, role) VALUES ($1, 'viewer')")
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .expect("assign viewer role");
+        user_id
     }
 
     #[tokio::test]
@@ -657,6 +616,9 @@ mod tests {
     async fn user_notifications_materialize_event_after_user_creation_before_api_touch() {
         let pool = test_pool().await;
         let user_id = create_test_user(&pool, "preference-init").await;
+        get_or_create_notification_preferences(&pool, user_id)
+            .await
+            .expect("initialize notification preferences");
         let occurrence_id = Uuid::new_v4();
         let subject_id = Uuid::new_v4().to_string();
 
@@ -724,5 +686,53 @@ mod tests {
         assert_eq!(second_page.len(), 1);
         assert!(!first_page.iter().any(|row| row.id == second_page[0].id));
         assert!(ids.contains(&second_page[0].id));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn notification_authorization_fails_closed_after_role_removal_and_deactivation() {
+        let pool = test_pool().await;
+        let user_id = create_test_user(&pool, "authorization").await;
+        let build_visible: (bool,) =
+            sqlx::query_as("SELECT notification_visible_to_user($1, 'builds', 'build-1')")
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .expect("check build authorization");
+        assert!(build_visible.0);
+
+        let unknown_visible: (bool,) =
+            sqlx::query_as("SELECT notification_visible_to_user($1, 'future_source', 'source-1')")
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .expect("check unknown authorization");
+        assert!(!unknown_visible.0);
+
+        sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("remove role");
+        let role_removed: (bool,) =
+            sqlx::query_as("SELECT notification_visible_to_user($1, 'builds', 'build-1')")
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .expect("check authorization after role removal");
+        assert!(!role_removed.0);
+
+        sqlx::query("UPDATE users SET is_active = FALSE WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("deactivate user");
+        let inactive: (bool,) =
+            sqlx::query_as("SELECT notification_visible_to_user($1, 'builds', 'build-1')")
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .expect("check inactive authorization");
+        assert!(!inactive.0);
     }
 }

@@ -24,8 +24,8 @@ use std::sync::Arc;
 use crate::auth::oidc::{
     ClaimExtractor, JwksCache, JwtValidator, OidcProviderMetadata, OidcSession, OidcSessionStore,
 };
-use crate::config::OidcConfig;
-use crate::handlers::api::auth_session::establish_user_session;
+use crate::config::{OidcConfig, ServerConfig};
+use crate::handlers::api::auth_session::{establish_user_session, resolve_client_ip};
 use crate::models::auth_identity::AuthRole;
 use crate::queries::auth_identity::{
     AuthIdentityRepository, OidcMappingMatchRow, assign_role_to_user,
@@ -156,6 +156,7 @@ pub struct OidcCallbackParams {
 pub async fn oidc_callback(
     Extension(oidc_state): Extension<Arc<OidcClientState>>,
     State(pool): State<PgPool>,
+    State(server_config): State<ServerConfig>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(params): Query<OidcCallbackParams>,
@@ -403,7 +404,11 @@ pub async fn oidc_callback(
         .and_then(|v| v.to_str().ok())
         .map(ToString::to_string);
 
-    let ip_address = Some(addr.ip().to_string());
+    let ip_address = Some(resolve_client_ip(
+        addr,
+        &headers,
+        &server_config.trusted_proxy_cidrs,
+    ));
 
     // Extract and normalize OIDC groups from user claims
     let groups = normalize_oidc_groups(&user_info.roles);

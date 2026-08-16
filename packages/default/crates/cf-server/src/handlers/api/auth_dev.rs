@@ -12,7 +12,8 @@ use std::net::SocketAddr;
 use tracing::error;
 
 use crate::auth::dev_mode::{find_dev_user_by_email, is_valid_dev_user_email};
-use crate::handlers::api::auth_session::establish_user_session;
+use crate::config::ServerConfig;
+use crate::handlers::api::auth_session::{establish_user_session, resolve_client_ip};
 
 #[derive(Debug, Deserialize)]
 pub struct DevLoginRequest {
@@ -38,6 +39,7 @@ pub struct ApiError {
 /// This endpoint should only be available when AUTH_MODE=dev.
 pub async fn dev_login(
     State(pool): State<PgPool>,
+    State(server_config): State<ServerConfig>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(payload): Json<DevLoginRequest>,
@@ -66,7 +68,11 @@ pub async fn dev_login(
                 .and_then(|v| v.to_str().ok())
                 .map(ToString::to_string);
 
-            let ip_address = Some(addr.ip().to_string());
+            let ip_address = Some(resolve_client_ip(
+                addr,
+                &headers,
+                &server_config.trusted_proxy_cidrs,
+            ));
 
             // Establish session cookies
             let session_cookies =

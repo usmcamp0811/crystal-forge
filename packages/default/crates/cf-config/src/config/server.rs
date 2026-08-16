@@ -222,6 +222,11 @@ pub struct ServerConfig {
     /// Retention period for expired/revoked session rows.
     #[serde(default = "default_session_retention_days")]
     pub session_retention_days: i32,
+
+    /// CIDR ranges for reverse proxies whose X-Forwarded-For header may be
+    /// used to resolve the client IP. Empty by default: record the direct peer.
+    #[serde(default)]
+    pub trusted_proxy_cidrs: Vec<String>,
 }
 
 fn default_remote_build_execution_strategy() -> RemoteBuildExecutionStrategy {
@@ -344,6 +349,7 @@ impl Default for ServerConfig {
             notification_email_digest_schedule: default_notification_email_digest_schedule(),
             session_last_seen_throttle_seconds: default_session_last_seen_throttle_seconds(),
             session_retention_days: default_session_retention_days(),
+            trusted_proxy_cidrs: Vec::new(),
         }
     }
 }

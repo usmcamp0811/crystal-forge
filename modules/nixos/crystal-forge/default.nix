@@ -63,7 +63,8 @@
           notification_email_digest_schedule = cfg.server.notificationEmail.digestSchedule;
           session_last_seen_throttle_seconds =
             cfg.server.sessionLastSeenThrottleSeconds;
-          session_retention_days = cfg.server.sessionRetentionDays;
+           session_retention_days = cfg.server.sessionRetentionDays;
+           trusted_proxy_cidrs = cfg.server.trustedProxyCidrs;
           remote_build_execution_strategy = cfg.build.remote_execution_strategy;
           source_delivery_mode = cfg.build.source_delivery_mode;
           source_archive_root = toString cfg.build.source_archive_root;
@@ -1883,6 +1884,17 @@ in {
         type = lib.types.ints.positive;
         default = 30;
         description = "Retention period for expired or revoked account session records.";
+      };
+
+      trustedProxyCidrs = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [];
+        description = lib.mdDoc ''
+          CIDR ranges of trusted reverse proxies. X-Forwarded-For is used only
+          when the direct peer is in one of these ranges; otherwise the direct
+          peer address is recorded for active sessions.
+        '';
+        example = [ "127.0.0.1/32" "10.0.0.0/8" ];
       };
 
       role_mapping = lib.mkOption {

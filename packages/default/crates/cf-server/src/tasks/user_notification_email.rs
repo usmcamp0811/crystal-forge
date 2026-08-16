@@ -289,7 +289,7 @@ async fn load_email_recipient(
         SELECT u.email, p.delivery_channel::text AS delivery_channel, p.weekly_digest
         FROM users u
         JOIN user_notification_preferences p ON p.user_id = u.id
-        WHERE u.id = $1 AND btrim(u.email) <> ''
+        WHERE u.id = $1 AND u.is_active = TRUE AND btrim(u.email) <> ''
         "#,
     )
     .bind(user_id)
@@ -585,6 +585,29 @@ async fn fail_delivery_for_retry(
     .bind(reason)
     .execute(&mut *tx)
     .await?;
+    if terminal {
+        sqlx::query(
+            r#"
+            INSERT INTO admin_audit_events (
+                actor_user_id, actor_identifier, action, target, request_origin, metadata
+            )
+            VALUES ($1, $2, 'notification_email_delivery_failed',
+                    'user_notification_email_delivery', $3, $4)
+            "#,
+        )
+        .bind(delivery.user_id)
+        .bind(delivery.user_id.to_string())
+        .bind(delivery.idempotency_key.clone())
+        .bind(serde_json::json!({
+            "delivery_id": delivery.id,
+            "delivery_type": delivery.delivery_type,
+            "attempt_count": delivery.attempt_count,
+            "result": "failed",
+            "correlation_id": delivery.idempotency_key,
+        }))
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -846,9 +869,16 @@ mod tests {
         .await
         .expect("insert test user");
 
+        sqlx::query("INSERT INTO user_role_assignments (user_id, role) VALUES ($1, 'viewer')")
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .expect("assign test user role");
+
         sqlx::query(
-            "INSERT INTO user_notification_preferences (user_id, delivery_channel)
-             VALUES ($1, 'email')",
+            "INSERT INTO user_notification_preferences
+                (user_id, delivery_channel, build_failures_email_enabled_at)
+             VALUES ($1, 'email', NOW() - INTERVAL '1 minute')",
         )
         .bind(user_id)
         .execute(pool)
@@ -902,9 +932,17 @@ mod tests {
         .await
         .expect("insert test user");
 
+        sqlx::query("INSERT INTO user_role_assignments (user_id, role) VALUES ($1, 'viewer')")
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .expect("assign test user role");
+
         sqlx::query(
-            "INSERT INTO user_notification_preferences (user_id, weekly_digest, delivery_channel)
-             VALUES ($1, TRUE, 'email')",
+            "INSERT INTO user_notification_preferences
+                (user_id, weekly_digest, delivery_channel, weekly_digest_enabled_at,
+                 build_failures_email_enabled_at)
+             VALUES ($1, TRUE, 'email', NOW() - INTERVAL '8 days', NOW() - INTERVAL '8 days')",
         )
         .bind(user_id)
         .execute(pool)

@@ -14,7 +14,7 @@ use crate::api::models::{
     UserNotificationDto, UserNotificationsResponse, decode_notification_cursor,
     encode_notification_cursor,
 };
-use crate::auth::extractors::AuthenticatedUser;
+use crate::auth::extractors::RequireAuth;
 use crate::config::ServerConfig;
 use crate::handlers::api::auth_session::validate_csrf;
 use crate::queries::admin::insert_admin_audit_event;
@@ -38,7 +38,7 @@ pub struct ListNotificationsParams {
 }
 
 pub async fn get_notification_preferences(
-    user: AuthenticatedUser,
+    RequireAuth(user): RequireAuth,
     State(pool): State<PgPool>,
     State(server_config): State<ServerConfig>,
 ) -> impl IntoResponse {
@@ -58,7 +58,7 @@ pub async fn get_notification_preferences(
 }
 
 pub async fn patch_notification_preferences(
-    user: AuthenticatedUser,
+    RequireAuth(user): RequireAuth,
     State(pool): State<PgPool>,
     State(server_config): State<ServerConfig>,
     headers: HeaderMap,
@@ -131,7 +131,7 @@ pub async fn patch_notification_preferences(
 }
 
 pub async fn get_notifications(
-    user: AuthenticatedUser,
+    RequireAuth(user): RequireAuth,
     State(pool): State<PgPool>,
     Query(params): Query<ListNotificationsParams>,
 ) -> impl IntoResponse {
@@ -191,7 +191,7 @@ pub async fn get_notifications(
 }
 
 pub async fn read_notification(
-    user: AuthenticatedUser,
+    RequireAuth(user): RequireAuth,
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(notification_id): Path<Uuid>,
@@ -208,7 +208,7 @@ pub async fn read_notification(
 }
 
 pub async fn read_all_notifications(
-    user: AuthenticatedUser,
+    RequireAuth(user): RequireAuth,
     State(pool): State<PgPool>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
@@ -223,7 +223,7 @@ pub async fn read_all_notifications(
 }
 
 pub async fn delete_notification(
-    user: AuthenticatedUser,
+    RequireAuth(user): RequireAuth,
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(notification_id): Path<Uuid>,
