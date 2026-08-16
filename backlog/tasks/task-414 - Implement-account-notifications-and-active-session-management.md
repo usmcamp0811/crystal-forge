@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-16 18:15'
+updated_date: '2026-08-16 19:13'
 labels:
   - frontend
   - web-ui
@@ -1354,6 +1354,8 @@ Remaining unverified items: DB-backed ignored tests still require a migrated iso
 MR !314 pipeline status checked with `nix run nixpkgs#glab -- mr view 314 --output json`: pipeline `2724530884` for commit `58961c1a66a62f4402f99c67d967e7c65125c21e` is currently `running` at https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2724530884.
 
 Rebased worktree branch TASK-414-account-notifications-sessions onto freshly fetched origin/dev (40566459). Resolved the server import conflict by retaining framework_requirements alongside user_notifications/user_sessions. Rebase completed cleanly; worktree is clean. Local branch now needs a force-with-lease push if the remote MR branch should be updated; no push performed because the user requested the worktree rebase only.
+
+Implemented and verified the current-dev review fixes: migration renamed to 0226 after rebasing onto dev through 0225; notification authorization now uses RequireAuth and fail-closed destination/source checks for builds, evals, CVEs, systems, and system events; inactive users are excluded from materialization, digest discovery, and send-time recipient lookup; terminal delivery failures insert an audit event atomically only for the winning claim; trusted proxy CIDR configuration and bounded X-Forwarded-For resolution default to the direct peer. Added isolated PostgreSQL regressions for role removal, deactivation, unknown source types, materialization, queue acceptance/retry/terminal failure, digest period handling, and proxy resolution. Verification: migration 0226 applied successfully; 7 targeted ignored PostgreSQL notification tests passed; `cargo sqlx prepare --workspace --check` passed; `nix build .#server -L` passed; `nix build .#web-ui -L` passed; `nix flake check -L` passed. Commit was pushed with force-with-lease; branch must be rebased once more if this task-note update advances origin/dev.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
