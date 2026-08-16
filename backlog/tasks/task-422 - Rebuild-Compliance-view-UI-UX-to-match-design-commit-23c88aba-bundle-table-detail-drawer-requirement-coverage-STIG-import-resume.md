@@ -3,11 +3,11 @@ id: TASK-422
 title: >-
   Rebuild Compliance view UI/UX to match design commit 23c88aba (bundle table,
   detail drawer, requirement coverage, STIG import resume)
-status: Review
+status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-16 14:16'
+updated_date: '2026-08-16 14:44'
 labels: []
 milestone: m-22
 dependencies:
@@ -160,5 +160,11 @@ created: 2026-08-16 14:16
 Merge request created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/316
 
 Verification summary: server Nix build passed with 1138 tests; web UI Nix build passed; focused aggregate score tests passed; formatting, Node syntax, and diff checks passed. Focused browser execution remains for deployment validation because the local development ports were occupied by the TASK-418 process-compose instance.
+---
+
+author: OpenAI
+created: 2026-08-16 14:44
+---
+P0 remediation after MR review: fixed self-triggering coverage use_effect by using non-reactive peek() bookkeeping reads, added explicit coverage loading/error state, aligned BundleCatalog revision/publication display with the published-first summary revision, and added an initial coverage-request count assertion to the focused browser step. Will commit and push remediation before re-review.
 ---
 <!-- COMMENTS:END -->
