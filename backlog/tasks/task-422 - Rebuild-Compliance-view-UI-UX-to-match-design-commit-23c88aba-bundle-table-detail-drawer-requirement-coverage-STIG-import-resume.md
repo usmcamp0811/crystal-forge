@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-16 02:04'
+updated_date: '2026-08-16 02:10'
 labels: []
 milestone: m-22
 dependencies:
@@ -134,6 +134,8 @@ Known follow-up before Phase 1 STOP: aggregate bundle summary fields currently r
 Verification update: `nix build .#web-ui -L` passed; packaged web-ui unit tests passed 172/172 (1 ignored). `cargo check` for web-ui and Nix-based SQLX-offline `cargo check -p cf-server` pass. `node --check checks/web-ui/tests/integration-test.js` and `git diff --check` pass. The focused browser/NixOS check has not yet been completed. The server aggregate implementation remains semantically correct but temporarily per-bundle and must be refactored to satisfy the no-N+1 acceptance criterion.
 
 Checkpoint pushed as commit `2e3fa301` on `origin/TASK-422-compliance-view-redesign`. `nix build .#server --no-link -L` passed; server unit tests reported 1135 passed, 355 ignored. Worktree is clean after the push.
+
+Added and pushed commit `0994a8e9` with focused populated-compliance browser assertions: bundle list score/system fields, selected bundle version, coverage API fixture with 6 full + 2 partial + 2 unmapped requirements, drawer coverage counts, and total partition assertions. JavaScript syntax remains valid.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
