@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-16 18:12'
+updated_date: '2026-08-16 18:15'
 labels:
   - frontend
   - web-ui
@@ -1126,6 +1126,8 @@ Run database-backed ignored tests explicitly against the migrated isolated test 
 - Run `node --check checks/web-ui/tests/integration-test.js` after integration-test edits.
 - Run DB-backed ignored tests against an isolated migrated database when available.
 - Run `nix build .#checks.x86_64-linux.web-ui --no-link` before review or report exact environment limitation if it cannot complete.
+
+Review-fix plan after current-dev review: (1) rename the feature migration to 0226 after confirming current dev ends at 0225; (2) replace notification authorization default-allow SQL with fail-closed destination-equivalent checks and use RequireAuth for notification APIs; (3) require active users at materialization, digest enqueue, and send-time recipient/render queries; (4) audit only winning terminal email-failure transitions with delivery correlation metadata; (5) add configured trusted-proxy CIDRs and bounded X-Forwarded-For resolution for session IP capture, defaulting to the direct peer; (6) add focused authorization, inactive-user, audit, and proxy resolver tests, then run full Nix/server/web verification and PostgreSQL tests if an isolated database is available.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
