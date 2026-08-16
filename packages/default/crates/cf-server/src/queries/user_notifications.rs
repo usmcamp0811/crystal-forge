@@ -746,6 +746,15 @@ mod tests {
         .await
         .expect("count policy-boundary notifications");
         assert_eq!(notification_count.0, 2);
+        sqlx::query(
+            "UPDATE user_notification_email_deliveries
+             SET state = 'cancelled'
+             WHERE user_id = $1 AND delivery_type = 'immediate'",
+        )
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .expect("clean up immediate delivery");
     }
 
     #[tokio::test]
@@ -756,10 +765,12 @@ mod tests {
         let period_start = chrono::Utc::now() - chrono::Duration::days(7);
         let period_end = chrono::Utc::now();
         sqlx::query(
-            "INSERT INTO user_notification_preferences
-                (user_id, weekly_digest, delivery_channel, weekly_digest_enabled_at,
-                 build_failures_email_enabled_at)
-             VALUES ($1, TRUE, 'email', $2, $2)",
+            "UPDATE user_notification_preferences
+             SET weekly_digest = TRUE,
+                 delivery_channel = 'email',
+                 weekly_digest_enabled_at = $2,
+                 build_failures_email_enabled_at = $2
+             WHERE user_id = $1",
         )
         .bind(user_id)
         .bind(period_start)
@@ -813,6 +824,15 @@ mod tests {
         .await
         .expect("count digest deliveries");
         assert_eq!(delivery_count, 1);
+        sqlx::query(
+            "UPDATE user_notification_email_deliveries
+             SET state = 'cancelled'
+             WHERE user_id = $1 AND delivery_type = 'weekly_digest'",
+        )
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .expect("clean up digest delivery");
     }
 
     #[tokio::test]

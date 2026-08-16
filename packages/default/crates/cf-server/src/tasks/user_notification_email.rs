@@ -945,8 +945,8 @@ mod tests {
             .await
             .expect("run prohibited producer pass");
 
-        let (eligible,): (bool,) = sqlx::query_as(
-            "SELECT email_delivery_eligible FROM user_notifications
+        let (in_app_visible, eligible): (bool, bool) = sqlx::query_as(
+            "SELECT in_app_visible, email_delivery_eligible FROM user_notifications
              WHERE user_id = $1 AND source_occurrence_id = $2",
         )
         .bind(user_id)
@@ -954,9 +954,12 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("load prohibited notification");
+        assert!(in_app_visible);
         assert!(!eligible);
 
-        run_user_notification_email_producer_pass(&pool, &email_config(3))
+        let mut permitted_config = email_config(3);
+        permitted_config.notification_email_endpoint = None;
+        run_user_notification_email_producer_pass(&pool, &permitted_config)
             .await
             .expect("run permitted producer pass");
         let (delivery_count,): (i64,) = sqlx::query_as(
