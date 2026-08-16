@@ -3,11 +3,11 @@ id: TASK-425
 title: >-
   Generate Standalone NixOS Modules from Exported Crystal Forge Policies and
   Compliance Bundles
-status: In Progress
+status: Review
 assignee:
   - '@claude-opus-5'
 created_date: '2026-08-16 15:17'
-updated_date: '2026-08-16 19:08'
+updated_date: '2026-08-16 20:01'
 labels:
   - cli
   - nixos
@@ -17,10 +17,59 @@ labels:
   - generator
 dependencies:
   - TASK-412
+references:
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/317'
+  - docs/operator/nixos-module-generation.md
+  - checks/nixos-module-generation/default.nix
 documentation:
   - >-
     docs/design/CrystalForge/docs/crystal-forge-xccdf-interchange-profile-v0.1.md
   - packages/default/crates/cf-server/src/compliance/interchange.rs
+modified_files:
+  - checks/nixos-module-generation/default.nix
+  - docs/operator/nixos-module-generation.md
+  - flake.nix
+  - packages/default/Cargo.lock
+  - packages/default/Cargo.toml
+  - packages/default/default.nix
+  - packages/default/crates/cf-compliance/Cargo.toml
+  - packages/default/crates/cf-compliance/src/canonical.rs
+  - packages/default/crates/cf-compliance/src/digest.rs
+  - packages/default/crates/cf-compliance/src/interchange.rs
+  - packages/default/crates/cf-compliance/src/lib.rs
+  - packages/default/crates/cf-compliance/src/policy_document.rs
+  - packages/default/crates/cf-compliance/src/xccdf/mod.rs
+  - packages/default/crates/cf-compliance/src/xccdf/exact_technical_match.rs
+  - packages/default/crates/cf-compliance/src/xccdf/export_models.rs
+  - packages/default/crates/cf-compliance/src/xccdf/import_models.rs
+  - packages/default/crates/cf-compliance/src/xccdf/importer.rs
+  - packages/default/crates/cf-compliance/src/xccdf/inference.rs
+  - packages/default/crates/cf-compliance/src/xccdf/models.rs
+  - packages/default/crates/cf-compliance/src/xccdf/package.rs
+  - packages/default/crates/cf-compliance/src/xccdf/parser.rs
+  - packages/default/crates/cf-compliance/src/xccdf/reconciliation.rs
+  - packages/default/crates/cf-compliance/src/xccdf/xml_writer.rs
+  - packages/default/crates/cf-compliance/src/xccdf/zip_extractor.rs
+  - packages/default/crates/cf-nixos-module/Cargo.toml
+  - packages/default/crates/cf-nixos-module/src/lib.rs
+  - packages/default/crates/cf-nixos-module/src/model.rs
+  - packages/default/crates/cf-nixos-module/src/input.rs
+  - packages/default/crates/cf-nixos-module/src/select.rs
+  - packages/default/crates/cf-nixos-module/src/extract.rs
+  - packages/default/crates/cf-nixos-module/src/generate.rs
+  - packages/default/crates/cf-nixos-module/src/nix.rs
+  - packages/default/crates/cf-nixos-module/src/fixture.rs
+  - packages/default/crates/cf-nixos-module/src/bin/cf-nixos-module.rs
+  - packages/default/crates/cf-nixos-module/src/bin/cf-nixos-module-fixture.rs
+  - packages/default/crates/cf-nixos-module/tests/export_to_module.rs
+  - packages/default/crates/cf-server/Cargo.toml
+  - packages/default/crates/cf-server/src/compliance/canonical.rs
+  - packages/default/crates/cf-server/src/compliance/digest.rs
+  - packages/default/crates/cf-server/src/compliance/interchange.rs
+  - packages/default/crates/cf-server/src/compliance/xccdf/mod.rs
+  - >-
+    packages/default/crates/cf-server/src/compliance/xccdf/exact_technical_match_db.rs
+  - packages/default/crates/cf-server/src/handlers/api/compliance.rs
 priority: high
 type: feature
 ordinal: 324000
@@ -149,31 +198,31 @@ produces `stig-hardening/` with `default.nix`, `manifest.json`, and `policies/*.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A new Crystal Forge binary can generate a NixOS module from an exported Crystal Forge policy
-- [ ] #2 The binary can accept multiple policy exports
-- [ ] #3 The binary can accept an exported compliance bundle and generate modules for its selected policies
-- [ ] #4 Multiple inputs can be combined in one generation operation
-- [ ] #5 Duplicate policy versions are deduplicated deterministically
-- [ ] #6 Conflicting definitions for the same immutable identity are rejected
-- [ ] #7 Policies with supported NixOS implementations generate valid NixOS modules
-- [ ] #8 Manual-only and otherwise unsupported policies produce explicit diagnostics
-- [ ] #9 Unsupported policies are never silently represented as implemented
-- [ ] #10 Conflicting NixOS implementations are detected and reported
-- [ ] #11 Generated modules can be imported into an ordinary existing NixOS flake
-- [ ] #12 Generated modules do not require a running Crystal Forge server
-- [ ] #13 Generated modules preserve policy identity and version information
-- [ ] #14 Compliance mappings are preserved as metadata without duplicating technical implementations
-- [ ] #15 Bundle generation uses the exact immutable policy versions selected by the exported bundle version
-- [ ] #16 Generated output is deterministic
-- [ ] #17 A manifest records the exact policy and bundle versions used for generation
-- [ ] #18 Export digests are validated when present
-- [ ] #19 Generated Nix is tested through actual NixOS module evaluation
-- [ ] #20 Unit tests cover policy selection, deduplication, unsupported policy handling, and conflicts
-- [ ] #21 Integration tests cover policy export to generated module to NixOS evaluation
-- [ ] #22 Existing Crystal Forge interchange and policy-resolution semantics are reused rather than reimplemented with incompatible behavior
-- [ ] #23 cargo fmt --all --check passes
-- [ ] #24 SQLX_OFFLINE=true cargo check passes for affected Rust packages
-- [ ] #25 Relevant Nix builds and flake checks pass
+- [x] #1 A new Crystal Forge binary can generate a NixOS module from an exported Crystal Forge policy
+- [x] #2 The binary can accept multiple policy exports
+- [x] #3 The binary can accept an exported compliance bundle and generate modules for its selected policies
+- [x] #4 Multiple inputs can be combined in one generation operation
+- [x] #5 Duplicate policy versions are deduplicated deterministically
+- [x] #6 Conflicting definitions for the same immutable identity are rejected
+- [x] #7 Policies with supported NixOS implementations generate valid NixOS modules
+- [x] #8 Manual-only and otherwise unsupported policies produce explicit diagnostics
+- [x] #9 Unsupported policies are never silently represented as implemented
+- [x] #10 Conflicting NixOS implementations are detected and reported
+- [x] #11 Generated modules can be imported into an ordinary existing NixOS flake
+- [x] #12 Generated modules do not require a running Crystal Forge server
+- [x] #13 Generated modules preserve policy identity and version information
+- [x] #14 Compliance mappings are preserved as metadata without duplicating technical implementations
+- [x] #15 Bundle generation uses the exact immutable policy versions selected by the exported bundle version
+- [x] #16 Generated output is deterministic
+- [x] #17 A manifest records the exact policy and bundle versions used for generation
+- [x] #18 Export digests are validated when present
+- [x] #19 Generated Nix is tested through actual NixOS module evaluation
+- [x] #20 Unit tests cover policy selection, deduplication, unsupported policy handling, and conflicts
+- [x] #21 Integration tests cover policy export to generated module to NixOS evaluation
+- [x] #22 Existing Crystal Forge interchange and policy-resolution semantics are reused rather than reimplemented with incompatible behavior
+- [x] #23 cargo fmt --all --check passes
+- [x] #24 SQLX_OFFLINE=true cargo check passes for affected Rust packages
+- [x] #25 Relevant Nix builds and flake checks pass
 <!-- AC:END -->
 
 ## Definition of Done
@@ -246,3 +295,77 @@ Verified (all actually run in `nix develop`):
 
 Note: the one remaining `cf-compliance` warning (`unused variable: xml_filename` in `xccdf/package.rs`) is pre-existing and was carried over unchanged by the file move.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+## Summary
+
+Added `cf-nixos-module`, a fully offline CLI that converts exported Crystal Forge policies and CF-native compliance bundle exports into ordinary NixOS modules importable into any existing flake. After export, no Crystal Forge server, database, or agent is required.
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/317 (branch `TASK-425-cf-nixos-module` -> `dev`)
+
+## Corrections to the task's stated assumptions
+
+Verified against `dev`; three assumptions in the task description were wrong and shaped the implementation:
+
+1. `cf-server/src/compliance/interchange.rs` (named as "the existing interchange parsing layer") contains only frozen v0.1 constants and `InterchangeLimits` — no parsers. The policy-export parser was private in `handlers/api/compliance.rs`; XCCDF parsing is in `compliance/xccdf/`.
+2. **There is no JSON compliance-bundle export.** Bundles export as XCCDF 1.2 XML only; policies export as JSON/TOML. The CLI accepts both families.
+3. **No persisted field stores NixOS option assignments.** Policies store assertion expressions, so generation had to invert them rather than read a stored implementation.
+
+## What was built
+
+### `cf-compliance` crate extraction
+
+To satisfy AC #22 while keeping the binary free of database/HTTP dependencies, the database-free half of the interchange layer moved out of `cf-server`:
+
+- `canonical.rs`, `interchange.rs` (whole files)
+- `digest.rs` split — canonical DTOs and pure `compute_digest` moved; transactional `write_*`/`refresh_*`/`backfill_*` stayed
+- `xccdf/`: `models`, `parser`, `package`, `zip_extractor`, `inference`, `reconciliation`, `importer`, `import_models`, `export_models`, `xml_writer`
+- `exact_technical_match.rs` split — pure `RequirementTechnicalIdentity` moved; its two `sqlx` queries stayed in new `exact_technical_match_db.rs`
+- the private policy-document parser became `cf_compliance::policy_document`; the handler keeps two thin `MultipartUpload` wrappers
+
+`cf-server` re-exports everything under the original `crate::compliance::*` paths, so no existing call site changed. Git recorded all of these as renames.
+
+### Generator
+
+Layered library (`input` -> `select` -> `extract` -> `generate` -> `nix`) plus a thin CLI, so server/web-UI flows can reuse it without shelling out.
+
+- Selection, dedup, and identity conflicts reuse `plan_policy_reconciliation` — the same planner the server uses for CF-native import.
+- Eligibility inverts assertion expressions only: `native` `custom_check` whose rules are exactly `config.<path> == <literal>` in `all` mode, using the existing `xccdf::inference` grammar (made `pub` so the two cannot drift).
+- Manual/external/unbound/opaque, operational policy types, `require_packages`, `any` mode, self-contradictory policies, and arbitrary Nix are reported with explicit diagnostics and never implemented. A partially-representable policy is skipped entirely.
+
+## Verification (all commands actually run)
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --all --check` | clean |
+| `SQLX_OFFLINE=true cargo check -p cf-compliance -p cf-nixos-module -p cf-server --all-targets` | no errors, no new warnings |
+| `cargo test -p cf-compliance` | 294 passed, 1 ignored |
+| `cargo test -p cf-nixos-module` | 71 passed (54 lib + 7 CLI + 10 integration) |
+| `cargo test -p cf-server --lib` | 848 passed, 354 ignored (pre-existing, need a live DB) |
+| `nix build .#{cf-nixos-module,server,agent,builder,cf-keygen,test-agent}` | all pass |
+| `nix build .#checks.x86_64-linux.nixos-module-generation` | pass |
+| `nix build .#checks.x86_64-linux.xccdf-schema` | pass |
+| `nix build .#checks.x86_64-linux.stig` | pass |
+| `nix build .#checks.x86_64-linux.oscal-export` | pass |
+| `nix flake check --no-build` | all outputs evaluate |
+
+**Not run locally:** `web-ui`, `web-ui-reconciliation`, `ui-screenshots`, `integration`, `oidc-auth`. This change touches zero files under `packages/web-ui` (verified against the branch diff), and the server/agent/builder packages all build. CI is authoritative for these. `nix flake check --keep-going` was therefore not run to completion; the affected checks were built individually instead.
+
+### AC #19/#21 evidence
+
+`checks/nixos-module-generation` evaluates the generated directory through `nixos/lib/eval-config.nix` — the real NixOS module system with real option types — and asserts option values, rather than comparing strings:
+
+```
+{ "allowNullPassword": false, "fail2ban": false, "firewall": true,
+  "passwordAuthentication": false, "permitRootLogin": "no", "timesyncd": true }
+```
+
+`fail2ban` remaining at its NixOS default proves a policy version deselected by the exported bundle version is genuinely not applied (AC #15). The check also proves determinism across repeated and reordered inputs, that skipped policies never leak into the Nix, manifest identity/digest recording, digest rejection of tampered exports, both conflict classes, and `--check`/`--strict`/`--single-file` behavior.
+
+## Follow-ups (not in scope, no task created without approval)
+
+- Eligible-policy coverage depends on how many real policies use the strict `config.<path> == <literal>` shape. If real-world coverage proves low, a future task could consider a richer stored NixOS-implementation representation on the policy model — which would be a genuine product decision, not a generator change.
+- `--server` / `--bundle-id` retrieval from a running Crystal Forge is explicitly a non-goal here and remains available as future work.
+<!-- SECTION:FINAL_SUMMARY:END -->
