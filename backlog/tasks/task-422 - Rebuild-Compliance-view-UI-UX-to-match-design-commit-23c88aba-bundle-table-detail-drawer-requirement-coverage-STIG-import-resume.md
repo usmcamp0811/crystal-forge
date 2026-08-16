@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-16 02:10'
+updated_date: '2026-08-16 02:12'
 labels: []
 milestone: m-22
 dependencies:
@@ -118,6 +118,8 @@ Spec §9 contains the endpoint/URL table a reviewer uses to put the running desi
 5. Phase 4 coverage: move coverage into the drawer, add exact-version generation-guarded loading, summary and grouped/filterable requirement rows, and lazy shared-policy-library drill-in with loading and unresolved-policy error states; restore the bundle drawer state on close.
 6. Phase 5 STIG pause/resume: wrap the existing TASK-418 upload/native-review/review/reconcile/refine/final-review/committing workflow with versioned browser-local metadata persistence, a 2 MiB payload guard, no raw bytes, source-file SHA reattachment before commit, corrupt/oversize recovery, paused callout, discard, and non-backdrop pause close.
 7. Phase 6 verification: add the specified CSS utilities, update compliance integration steps and coverage manifests, add/extend a focused NixOS web-ui check for table/drawer/coverage/paused-import states, run dark/light screenshots where the harness supports them, then run cargo fmt, git diff check, web-ui/server builds as applicable, and record objective results in TASK-422.
+
+P1 correctness refinement before browser proof: canonicalize each bundle's summary version as published-first then draft; make exact-version policy/requirement/control counts use that target. Replace the per-bundle `list_bundle_systems_for_version` aggregate loop with a dedicated batch summary path that loads exact-version membership, applicable assignment scope, and status-level inputs without constructing detailed evidence. Add published+draft, draft-only, multi-bundle, zero-evaluated, and no-system regression coverage while retaining commit 0994a8e9's 6/2/2 requirement-coverage browser fixture.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -144,5 +146,11 @@ Added and pushed commit `0994a8e9` with focused populated-compliance browser ass
 created: 2026-08-15 18:51
 ---
 Captured design-example reference screenshots added under docs/design/CrystalForge/screens/compliance-redesign/cb-1.png .. cb-7.png (dark/light bundle list, drawer overview, revisions, coverage view/filters, systems drilldown). These are quick visual references for implementer and reviewer; the spec §9.4 state-by-state walkthrough against the live design example remains authoritative. See doc-22 §9.3 for the file-to-state mapping.
+---
+
+author: Matt Camp
+created: 2026-08-16 02:12
+---
+P1 aggregate rewrite accepted as the next implementation slice: summary fields must use one published-first canonical version and the catalog must not call the detailed systems/evidence endpoint per bundle.
 ---
 <!-- COMMENTS:END -->
