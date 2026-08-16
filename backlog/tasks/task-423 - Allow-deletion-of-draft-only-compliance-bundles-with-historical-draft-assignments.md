@@ -3,9 +3,11 @@ id: TASK-423
 title: >-
   Allow deletion of draft-only compliance bundles with historical draft
   assignments
-status: Backlog
-assignee: []
+status: In Progress
+assignee:
+  - '@Matt Camp'
 created_date: '2026-08-16 15:13'
+updated_date: '2026-08-16 15:17'
 labels: []
 dependencies: []
 references:
@@ -34,3 +36,13 @@ Compliance bundle deletion currently blocks permanently whenever any compliance_
 - [ ] #5 Deletion UI distinguishes active assignments from historical assignment blockers
 - [ ] #6 Regression tests cover inactive draft assignment history and accepted assignment history
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: OpenAI
+created: 2026-08-16 15:17
+---
+Implementation authorized by user alongside TASK-424; this bug blocks MR !316. Work will be coordinated with TASK-424 in one focused compliance backend change set.
+---
+<!-- COMMENTS:END -->
