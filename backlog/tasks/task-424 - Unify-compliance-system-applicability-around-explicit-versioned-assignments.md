@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-16 15:17'
-updated_date: '2026-08-16 15:18'
+updated_date: '2026-08-16 15:38'
 labels: []
 dependencies: []
 references:
@@ -47,6 +47,8 @@ The TASK-422 compliance view can report every system as applicable when a curren
 4. Remove remaining compliance applicability predicates that treat no legacy environment rows as fleet-wide.
 5. Add regression coverage for zero assignments, environment assignments, explicit system assignments, inactive history, and draft/published version consistency.
 6. Run formatting and targeted/server verification in the dedicated worktree.
+
+Approved scope addition: inspect design commit 68bde218 and align the shared web-ui PolicyCard description rendering with the design example using a two-line clamp and full-description title tooltip. Verify the policy UI build after the change.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
