@@ -351,9 +351,9 @@ impl DeploymentPolicy {
         match self {
             DeploymentPolicy::RequireCrystalForgeAgent { .. } => (
                 "cfAgentEnabled".to_string(),
-                "(cfg.config.systemd.services.crystal-forge-agent.enable or false) || \
-                 ((cfg.config.services.crystal-forge.enable or false) && \
-                  (cfg.config.services.crystal-forge.client.enable or false))"
+                "(config.systemd.services.crystal-forge-agent.enable or false) || \
+                 ((config.services.crystal-forge.enable or false) && \
+                  (config.services.crystal-forge.client.enable or false))"
                     .to_string(),
             ),
             DeploymentPolicy::RequirePackages { packages, .. } => {
@@ -369,9 +369,9 @@ impl DeploymentPolicy {
                     format!("hasRequiredPackages_{index}"),
                     format!(
                         "builtins.all \
-                         (required: builtins.any \
-                           (pkg: (pkg.pname or (pkg.name or \"\")) == required) \
-                           cfg.config.environment.systemPackages) \
+                          (required: builtins.any \
+                            (pkg: (pkg.pname or (pkg.name or \"\")) == required) \
+                            config.environment.systemPackages) \
                          [ {} ]",
                         package_list
                     ),
@@ -1197,7 +1197,7 @@ fn build_policy_fields_for_config_indented(
             } if rules.is_empty() => {
                 // Legacy single-expression custom check: emit under the configured
                 // field_name so the parser can find it. The expression is inserted
-                // verbatim and must use the `cfg.config.*` lexical contract.
+                // verbatim and must use the `config.*` lexical contract.
                 if is_reserved_policy_result_field(field_name) {
                     warn!(
                         policy_id = %ap.policy_id,
@@ -1216,7 +1216,7 @@ fn build_policy_fields_for_config_indented(
             DeploymentPolicy::CustomCheck { rules, .. } => {
                 // Multi-rule: emit one line per rule using the rule's own field_name
                 // (existing convention; rules predate stable-ID keys).
-                // Expressions are expected to use `cfg.config.*` per the documented
+                // Expressions are expected to use `config.*` per the documented
                 // policy fragment lexical contract.
                 for rule in rules {
                     if is_reserved_policy_result_field(&rule.field_name) {
@@ -1237,9 +1237,8 @@ fn build_policy_fields_for_config_indented(
             }
             _ => {
                 // All built-in Nix-evaluated policies (require_cf_agent,
-                // require_packages) use `cfg.config.*` in their expression
-                // fragments because the checker function receives the full
-                // nixosConfigurations.<name> object as `cfg`.
+                // require_packages) use `config.*` in their expression fragments
+                // because the checker function receives the configuration object.
                 let (_, expr) = ap.policy.to_nix_expression_with_index(idx);
                 lines.push(format!("{}{} = {};", indent, key, expr));
             }
@@ -1262,14 +1261,14 @@ fn build_policy_fields_for_config_indented(
 /// let
 ///   flake = builtins.getFlake "<flakeRef>";
 ///   policyCheckers = {
-///     "<config>" = cfg: { policy_<id> = <expr>; ... };
+///     "<config>" = config: { policy_<id> = <expr>; ... };
 ///     ...
 ///   };
 /// in builtins.mapAttrs (name: cfg:
 ///   let
 ///     drv = cfg.config.system.build.toplevel;
 ///     checker = policyCheckers.${name} or (_: {});
-///   in drv // { meta = (drv.meta or {}) // { policies = (checker cfg) // { cfAgentEnabled = cfAgentEnabledExpr cfg; }; }; }
+///   in drv // { meta = (drv.meta or {}) // { policies = (checker cfg.config) // { cfAgentEnabled = cfAgentEnabledExpr cfg.config; }; }; }
 /// ) flake.nixosConfigurations
 /// ```
 pub fn build_nix_eval_expression(
@@ -1301,10 +1300,10 @@ pub fn build_nix_eval_expression(
 let
   flake = builtins.getFlake {flake_ref};
   policyCheckers = {checkers};
-  cfAgentEnabledExpr = cfg:
-    (cfg.config.systemd.services.crystal-forge-agent.enable or false)
-    || ((cfg.config.services.crystal-forge.enable or false)
-        && (cfg.config.services.crystal-forge.client.enable or false));
+  cfAgentEnabledExpr = config:
+    (config.systemd.services.crystal-forge-agent.enable or false)
+    || ((config.services.crystal-forge.enable or false)
+        && (config.services.crystal-forge.client.enable or false));
 in
   builtins.mapAttrs (name: cfg:
     let
@@ -1313,7 +1312,7 @@ in
     in
       drv // {{
         meta = (drv.meta or {{}}) // {{
-          policies = (checker cfg) // {{ cfAgentEnabled = cfAgentEnabledExpr cfg; }};
+          policies = (checker cfg.config) // {{ cfAgentEnabled = cfAgentEnabledExpr cfg.config; }};
         }};
       }}
   ) flake.nixosConfigurations

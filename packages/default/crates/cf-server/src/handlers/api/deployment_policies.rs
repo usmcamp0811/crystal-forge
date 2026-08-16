@@ -100,10 +100,8 @@ fn normalize_required_packages(packages: &[Value]) -> Result<Vec<String>, (Statu
 
 /// Validate and normalize a Nix expression for custom policy checks.
 ///
-/// This function ensures expressions use the correct variable scope by:
-/// 1. Replacing standalone `config.` with `cfg.config.` (the correct scope in policy evaluation)
-/// 2. Preserving `cfg.config.` if already correct
-/// 3. Warning about potential issues
+/// This function ensures expressions use the canonical `config.` variable scope.
+/// Legacy `cfg.config.` expressions are normalized for compatibility.
 ///
 /// Returns the normalized expression or an error if validation fails.
 fn validate_and_normalize_nix_expression(expr: &str) -> Result<String, (StatusCode, String)> {
@@ -116,41 +114,14 @@ fn validate_and_normalize_nix_expression(expr: &str) -> Result<String, (StatusCo
         ));
     }
 
-    // Check for common mistakes and auto-fix them
-    let normalized = if trimmed.contains("config.") && !trimmed.contains("cfg.config.") {
-        // Replace `config.` with `cfg.config.` but be careful not to replace `cfg.config.`
-        // Use a simple regex-like replacement: replace `config.` with `cfg.config.` only when not preceded by `cfg.`
-        let mut result = String::new();
-        let mut chars = trimmed.chars().peekable();
-        let mut last_three = String::new();
-
-        while let Some(c) = chars.next() {
-            result.push(c);
-            last_three.push(c);
-            if last_three.len() > 3 {
-                last_three.remove(0);
-            }
-
-            // Check if we just wrote "config" and next char is "."
-            if result.ends_with("config") && chars.peek() == Some(&'.') {
-                // Check if it's preceded by "cfg."
-                if !result.ends_with("cfg.config") {
-                    // Insert "cfg." before "config"
-                    let len = result.len();
-                    result.insert_str(len - 6, "cfg.");
-                }
-            }
-        }
-
+    let normalized = trimmed.replace("cfg.config.", "config.");
+    if normalized != trimmed {
         tracing::warn!(
-            "Auto-corrected policy expression from 'config.' to 'cfg.config.': {} -> {}",
+            "Normalized legacy policy expression from 'cfg.config.' to 'config.': {} -> {}",
             trimmed,
-            result
+            normalized
         );
-        result
-    } else {
-        trimmed.to_string()
-    };
+    }
 
     Ok(normalized)
 }

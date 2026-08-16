@@ -56,7 +56,7 @@ pub enum ComparisonOperator {
     LessOrEqual,
 }
 impl ComparisonOperator {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Equal => "==",
             Self::NotEqual => "!=",
@@ -109,7 +109,7 @@ pub enum PolicyAssertionDraft {
 }
 
 impl PolicyAssertionDraft {
-    fn to_rule(&self, index: usize) -> ImportedCustomCheckRule {
+    pub(crate) fn to_rule(&self, index: usize) -> ImportedCustomCheckRule {
         match self {
             Self::NixosOption {
                 path,
@@ -120,7 +120,7 @@ impl PolicyAssertionDraft {
             } => ImportedCustomCheckRule {
                 field_name: format!("nixosOption{index}"),
                 expression: format!(
-                    "cfg.config.{path} {} {}",
+                    "config.{path} {} {}",
                     operator.as_str(),
                     expected_value.as_nix()
                 ),
@@ -140,7 +140,7 @@ impl PolicyAssertionDraft {
                 ImportedCustomCheckRule {
                     field_name: format!("packagesInstalled{index}"),
                     expression: format!(
-                        "builtins.all (required: builtins.any (package: (package.pname or (package.name or \"\")) == required) cfg.config.environment.systemPackages) [ {required} ]"
+                        "builtins.all (required: builtins.any (package: (package.pname or (package.name or \"\")) == required) config.environment.systemPackages) [ {required} ]"
                     ),
                     description: failure_message.clone(),
                     strict: *strict,
@@ -803,6 +803,7 @@ fn set_action(rule: &mut RefinedStigRule, key: &str) {
 #[component]
 fn AssertionSection(rules: Signal<Vec<RefinedStigRule>>, index: usize) -> Element {
     let count = rules.read()[index].draft.assertions.len();
+    let mut selected_kind_signal = use_signal(String::new);
     rsx! {
         section { class: "refine-section",
             div { class: "refine-section-label", "Enforcement rules" span { class: "refine-eval-badge", "CHECKED AT BUILD TIME" } }
@@ -812,23 +813,23 @@ fn AssertionSection(rules: Signal<Vec<RefinedStigRule>>, index: usize) -> Elemen
                 AssertionEditor { rules, index, assertion_index, assertion }
             }
             select {
-                key: "add-assertion-{count}",
                 class: "input focus-ring refine-add-assertion",
                 "data-testid": "xccdf-add-assertion",
-                value: "",
+                value: "{selected_kind_signal}",
                 onchange: move |e| {
                     let selected_kind = e.value();
                     if selected_kind.is_empty() {
                         return;
                     }
                     let draft = match selected_kind.as_str() {
-                        "option" => PolicyAssertionDraft::NixosOption { path: String::new(), operator: ComparisonOperator::Equal, expected_value: TypedPolicyValue::String(String::new()), failure_message: "Option assertion failed".into(), strict: true },
+                        "option" => PolicyAssertionDraft::NixosOption { path: String::new(), operator: ComparisonOperator::Equal, expected_value: TypedPolicyValue::Boolean(false), failure_message: "Option assertion failed".into(), strict: true },
                         "packages" => PolicyAssertionDraft::PackagesInstalled { packages: vec![], failure_message: "Required package is not installed".into(), strict: true },
                         _ => PolicyAssertionDraft::CustomExpression { field_name: format!("customAssertion{}", count + 1), expression: String::new(), failure_message: "Custom assertion failed".into(), strict: true },
                     };
                     let mut all_rules = rules.write();
                     all_rules[index].draft.action = RefinedRuleAction::Native;
                     all_rules[index].draft.assertions.push(draft);
+                    selected_kind_signal.set(String::new());
                 },
                 option { value: "", "＋ Add rule…" }
                 option { value: "option", "Check a NixOS option value" }
@@ -907,12 +908,18 @@ fn AssertionEditor(props: AssertionEditorProps) -> Element {
             div { class: "refine-inferred-badge", "user-authored" }
             div { class: "refine-editor-row",
             div { class: "refine-editor-content", match props.assertion.clone() {
-                PolicyAssertionDraft::NixosOption { path, operator, expected_value, .. } => rsx! {
-                    div { class: "refine-editor-title", Icon { name: IconName::File, size: 11 } " Assert a NixOS option value" }
-                    div { class: "refine-option-row", input { class: "input focus-ring mono", placeholder: "services.openssh.settings.PermitRootLogin", value: "{path}", oninput: move |e| { if let PolicyAssertionDraft::NixosOption { path, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *path = e.value(); } } } select { class: "input focus-ring mono refine-operator", value: "{operator.as_str()}", onchange: move |e| { if let PolicyAssertionDraft::NixosOption { operator, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *operator = match e.value().as_str() { "!=" => ComparisonOperator::NotEqual, ">=" => ComparisonOperator::GreaterOrEqual, "<=" => ComparisonOperator::LessOrEqual, _ => ComparisonOperator::Equal }; } }, option { value: "==", "==" } option { value: "!=", "!=" } option { value: ">=", "≥" } option { value: "<=", "≤" } } input { class: "input focus-ring mono refine-expected", placeholder: "true", value: "{typed_value_text(&expected_value)}", oninput: move |e| { if let PolicyAssertionDraft::NixosOption { expected_value, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expected_value = TypedPolicyValue::String(e.value()); } } } }
-                    div { class: "mono refine-expression-hint", "→ config.{path} {operator.as_str()} {typed_value_text(&expected_value)}" }
-                    input { class: "input focus-ring refine-failure", placeholder: "Failure message shown when assertion fails", value: "{failure}", oninput: move |e| { set_assertion_failure(&mut rules, index, assertion_index, e.value()); } }
-                },
+                 PolicyAssertionDraft::NixosOption { path, operator, expected_value, .. } => {
+                     let value_kind = typed_value_kind(&expected_value);
+                     let value_text = typed_value_text(&expected_value);
+                     let value_input_type = if value_kind == "integer" { "number" } else { "text" };
+                     let value_placeholder = if value_kind == "integer" { "4" } else { "value" };
+                     rsx! {
+                     div { class: "refine-editor-title", Icon { name: IconName::File, size: 11 } " Assert a NixOS option value" }
+                     div { class: "refine-option-row", input { class: "input focus-ring mono", placeholder: "services.openssh.settings.PermitRootLogin", value: "{path}", oninput: move |e| { if let PolicyAssertionDraft::NixosOption { path, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *path = e.value(); } } } select { class: "input focus-ring mono refine-operator", value: "{operator.as_str()}", onchange: move |e| { if let PolicyAssertionDraft::NixosOption { operator, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *operator = match e.value().as_str() { "!=" => ComparisonOperator::NotEqual, ">=" => ComparisonOperator::GreaterOrEqual, "<=" => ComparisonOperator::LessOrEqual, _ => ComparisonOperator::Equal }; } }, option { value: "==", "==" } option { value: "!=", "!=" } option { value: ">=", "≥" } option { value: "<=", "≤" } } select { class: "input focus-ring mono refine-value-kind", value: "{value_kind}", onchange: move |e| { let current = typed_value_text(&rules.read()[index].draft.assertions[assertion_index].expected_value()); if let PolicyAssertionDraft::NixosOption { expected_value, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expected_value = typed_policy_value(e.value().as_str(), &current); } }, option { value: "boolean", "Boolean" } option { value: "integer", "Integer" } option { value: "string", "String" } }, if value_kind == "boolean" { select { class: "input focus-ring mono refine-expected", value: "{value_text}", onchange: move |e| { if let PolicyAssertionDraft::NixosOption { expected_value, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expected_value = TypedPolicyValue::Boolean(e.value() == "true"); } }, option { value: "true", "true" } option { value: "false", "false" } } } else { input { class: "input focus-ring mono refine-expected", r#type: value_input_type, placeholder: value_placeholder, value: "{value_text}", oninput: move |e| { if let PolicyAssertionDraft::NixosOption { expected_value, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expected_value = typed_policy_value(value_kind, &e.value()); } } } } }
+                     div { class: "mono refine-expression-hint", "→ config.{path} {operator.as_str()} {typed_value_text(&expected_value)}" }
+                     input { class: "input focus-ring refine-failure", placeholder: "Failure message shown when assertion fails", value: "{failure}", oninput: move |e| { set_assertion_failure(&mut rules, index, assertion_index, e.value()); } }
+                     }
+                 },
                 PolicyAssertionDraft::PackagesInstalled { packages, .. } => {
                     let packages_text = packages.join(", ");
                     rsx! {
@@ -924,7 +931,7 @@ fn AssertionEditor(props: AssertionEditorProps) -> Element {
                 },
                 PolicyAssertionDraft::CustomExpression { expression, .. } => rsx! {
                     div { class: "refine-editor-title", Icon { name: IconName::Terminal, size: 11 } " Custom nix expression (must evaluate to " span { class: "mono", "true" } ")" }
-                    textarea { class: "input focus-ring mono code-editor", rows: 3, placeholder: "cfg.config.networking.firewall.enable == true", value: "{expression}", oninput: move |e| { if let PolicyAssertionDraft::CustomExpression { expression, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expression = e.value(); } } }
+                    textarea { class: "input focus-ring mono code-editor", rows: 3, placeholder: "config.networking.firewall.enable == true", value: "{expression}", oninput: move |e| { if let PolicyAssertionDraft::CustomExpression { expression, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expression = e.value(); } } }
                     input { class: "input focus-ring refine-failure", placeholder: "Failure message shown when assertion fails", value: "{failure}", oninput: move |e| { set_assertion_failure(&mut rules, index, assertion_index, e.value()); } }
                 },
             } }
@@ -1004,6 +1011,35 @@ fn typed_value_text(value: &TypedPolicyValue) -> String {
     }
 }
 
+fn typed_value_kind(value: &TypedPolicyValue) -> &'static str {
+    match value {
+        TypedPolicyValue::Boolean(_) => "boolean",
+        TypedPolicyValue::Integer(_) => "integer",
+        _ => "string",
+    }
+}
+
+fn typed_policy_value(kind: &str, value: &str) -> TypedPolicyValue {
+    match kind {
+        "boolean" => TypedPolicyValue::Boolean(value == "true"),
+        "integer" => TypedPolicyValue::Integer(value.to_string()),
+        _ => TypedPolicyValue::String(value.to_string()),
+    }
+}
+
+trait NixosAssertionValue {
+    fn expected_value(&self) -> &TypedPolicyValue;
+}
+
+impl NixosAssertionValue for PolicyAssertionDraft {
+    fn expected_value(&self) -> &TypedPolicyValue {
+        match self {
+            PolicyAssertionDraft::NixosOption { expected_value, .. } => expected_value,
+            _ => unreachable!("value editor only renders NixOS option assertions"),
+        }
+    }
+}
+
 fn slugify(value: &str) -> String {
     let mut out = String::new();
     for c in value.chars() {
@@ -1019,6 +1055,29 @@ fn slugify(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_nixos_values_preserve_editor_kind_and_text() {
+        let boolean = typed_policy_value("boolean", "true");
+        let integer = typed_policy_value("integer", "4");
+        let string = typed_policy_value("string", "enabled");
+
+        assert_eq!(typed_value_kind(&boolean), "boolean");
+        assert_eq!(typed_value_text(&boolean), "true");
+        assert_eq!(typed_value_kind(&integer), "integer");
+        assert_eq!(typed_value_text(&integer), "4");
+        assert_eq!(typed_value_kind(&string), "string");
+        assert_eq!(typed_value_text(&string), "enabled");
+    }
+
+    #[test]
+    fn invalid_boolean_editor_text_fails_closed_to_false() {
+        assert_eq!(
+            typed_policy_value("boolean", "not-a-boolean"),
+            TypedPolicyValue::Boolean(false)
+        );
+    }
+
     #[test]
     fn source_and_local_fields_are_independent() {
         let rule = RefinedStigRule {

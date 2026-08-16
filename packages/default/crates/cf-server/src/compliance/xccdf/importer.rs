@@ -386,10 +386,12 @@ pub fn validate_import_plan(
                         "assertion field_name, expression, and description are required",
                     ));
                 }
-                if !assertion.expression.contains("cfg.config") {
+                if !assertion.expression.contains("config.")
+                    || assertion.expression.contains("cfg.config.")
+                {
                     return Err(ImportPlanError::native_check_invalid(
                         rule_id,
-                        "assertion expression must use the cfg.config binding",
+                        "assertion expression must use the canonical config binding",
                     ));
                 }
             }
