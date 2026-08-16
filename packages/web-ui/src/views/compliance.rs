@@ -4336,7 +4336,6 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
             "accepted" | "deprecated"
         )
     });
-    let assigned_count = props.bundle.active_assignment_count;
 
     let can_save = !name.read().trim().is_empty()
         && (!selected_policy_ids.read().is_empty() || !selected_requirement_ids.read().is_empty());
@@ -4540,7 +4539,7 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                                             p { style: "margin:0 0 4px;", "{blocker.message}" }
                                         }
                                         p { style: "margin:4px 0 0;color:var(--cf-text-muted);font-size:11px;",
-                                            "To stop using this bundle, deactivate active assignments and deprecate published versions. Historical records are retained for auditability."
+                                            "This bundle has historical assignment records tied to an accepted or deprecated version. Deactivate active assignments and deprecate the bundle instead; historical records are retained for auditability."
                                         }
                                     }
                                 }
@@ -4567,15 +4566,6 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                             div { style: "font-size:12px;color:var(--cf-text-muted);",
                                 "This bundle has published compliance history (accepted or deprecated versions). "
                                 "Permanent deletion is unavailable. Deactivate assignments and deprecate the bundle to stop using it; historical records remain for auditability."
-                            }
-                        } else if assigned_count > 0 {
-                            // An active assignment already implies immutable assignment
-                            // history (the server reports `immutable_assignment_history`),
-                            // so permanent deletion is unavailable; no preflight needed.
-                            div { style: "font-size:12px;color:var(--cf-text-muted);",
-                                "This bundle has active assignments and therefore has immutable assignment history. "
-                                "Permanent deletion is unavailable. Deactivate assignments to stop using the bundle; "
-                                "historical assignment records are retained for auditability."
                             }
                         } else {
                             // No local blockers detected — fetch authoritative check.

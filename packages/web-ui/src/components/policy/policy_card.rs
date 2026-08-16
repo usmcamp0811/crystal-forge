@@ -71,7 +71,11 @@ pub fn PolicyCard(
                         }
                         span { "{policy.name}" }
                     }
-                    div { class: "text-[11px] text-gray-400 line-clamp-2", "{policy.description}" }
+                    div {
+                        style: "font-size:11px;color:var(--cf-text-secondary);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;",
+                        title: "{policy.description}",
+                        "{policy.description}"
+                    }
                 }
                 div { style: "display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex-shrink:0;",
                     span { class: "{type_chip}", "{type_label}" }

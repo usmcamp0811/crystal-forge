@@ -1427,7 +1427,7 @@ async fn bundle_deletion_eligibility_in_transaction(
     .await
     .context("Failed to check compliance bundle immutable history")?;
     let immutable_assignment_history: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM compliance_bundle_assignment_versions av JOIN compliance_bundle_assignments a ON a.id = av.assignment_id WHERE a.bundle_id = $1",
+        "SELECT COUNT(*) FROM compliance_bundle_assignment_versions av JOIN compliance_bundle_assignments a ON a.id = av.assignment_id JOIN compliance_bundle_versions bv ON bv.id = av.bundle_version_id WHERE a.bundle_id = $1 AND bv.publication_state IN ('accepted', 'deprecated')",
     )
     .bind(bundle_id)
     .fetch_one(&mut **tx)
@@ -1531,6 +1531,25 @@ pub async fn delete_bundle(pool: &PgPool, bundle_id: Uuid) -> Result<BundleDelet
 
     sqlx::query("DELETE FROM compliance_source_object_mappings m USING compliance_bundle_versions bv WHERE m.bundle_version_id = bv.id AND bv.bundle_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim') AND NOT EXISTS (SELECT 1 FROM deployment_policy_versions pv WHERE pv.id = m.policy_version_id AND pv.publication_state IN ('accepted', 'deprecated'))")
         .bind(bundle_id).execute(&mut *tx).await.context("Failed to remove disposable bundle source mappings")?;
+    let assignment_version_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT av.id FROM compliance_bundle_assignment_versions av JOIN compliance_bundle_assignments a ON a.id = av.assignment_id JOIN compliance_bundle_versions bv ON bv.id = av.bundle_version_id WHERE a.bundle_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim') ORDER BY av.assignment_id, av.version_number DESC, av.id DESC",
+    )
+    .bind(bundle_id)
+    .fetch_all(&mut *tx)
+    .await
+    .context("Failed to list disposable assignment history")?;
+    for assignment_version_id in assignment_version_ids {
+        sqlx::query("DELETE FROM compliance_bundle_assignment_versions WHERE id = $1")
+            .bind(assignment_version_id)
+            .execute(&mut *tx)
+            .await
+            .context("Failed to remove disposable assignment history")?;
+    }
+    sqlx::query("DELETE FROM compliance_bundle_assignments WHERE bundle_id = $1")
+        .bind(bundle_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to remove disposable bundle assignments")?;
     sqlx::query("DELETE FROM compliance_bundle_version_policies bvp USING compliance_bundle_versions bv WHERE bvp.bundle_version_id = bv.id AND bv.bundle_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim')")
         .bind(bundle_id).execute(&mut *tx).await.context("Failed to remove mutable draft bundle memberships")?;
 
@@ -1569,20 +1588,11 @@ pub async fn list_bundle_systems(
     {
         return list_bundle_systems_for_version(pool, bundle_id, version_id).await;
     }
-    let policies = list_bundle_policies(pool, bundle_id).await?;
-    let systems = list_applicable_system_rows(pool, bundle_id).await?;
-
-    let mut rollups = Vec::with_capacity(systems.len());
-    for system in systems {
-        rollups.push(system_rollup_with_evidence(pool, system, &policies).await?);
-    }
-    let totals = totals_for_rollups(&rollups);
-
     Ok(Some(ComplianceBundleSystemsResponse {
         bundle_id: bundle.id,
         bundle_version_id: None,
-        systems: rollups,
-        totals,
+        systems: Vec::new(),
+        totals: totals_for_rollups(&[]),
     }))
 }
 
@@ -1645,18 +1655,8 @@ pub async fn list_bundle_systems_for_version(
     .bind(bundle_id)
     .fetch_all(pool)
     .await?;
-    let is_current_published: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM compliance_bundles WHERE id = $1 AND current_published_version_id = $2)",
-    )
-    .bind(bundle_id)
-    .bind(bundle_version_id)
-    .fetch_one(pool)
-    .await?;
-    let systems = if is_current_published {
-        list_applicable_system_rows(pool, bundle_id).await?
-    } else {
-        list_explicit_bundle_version_system_rows(pool, bundle_id, bundle_version_id).await?
-    };
+    let systems =
+        list_explicit_bundle_version_system_rows(pool, bundle_id, bundle_version_id).await?;
     let system_ids: Vec<Uuid> = systems.iter().map(|system| system.id).collect();
     let effective = resolve_systems_effective_policies_for_bundle_version_batch(
         pool,
@@ -1779,8 +1779,7 @@ pub async fn list_system_bundles(
     // Get all bundles (one query)
     let all_bundles = list_bundles(pool).await?;
 
-    // Determine which bundles apply to this system using set-based query
-    // This replaces N individual applicability checks
+    // Determine which canonical bundle versions explicitly apply to this system.
     let applicable_bundle_ids_vec: Vec<Uuid> = if all_bundles.is_empty() {
         Vec::new()
     } else {
@@ -1788,22 +1787,19 @@ pub async fn list_system_bundles(
             r#"
         SELECT DISTINCT b.id
         FROM compliance_bundles b
+        JOIN compliance_bundle_versions bv
+          ON bv.id = COALESCE(b.current_published_version_id, b.current_draft_version_id)
+        JOIN compliance_bundle_assignments a
+          ON a.bundle_version_id = bv.id AND a.active
         LEFT JOIN environments e ON e.name = $2
         WHERE b.id = ANY($1)
-          AND (
-            NOT EXISTS (
-                SELECT 1 FROM compliance_bundle_environments cbe
-                WHERE cbe.bundle_id = b.id
-            )
-            OR EXISTS (
-                SELECT 1 FROM compliance_bundle_environments cbe
-                WHERE cbe.bundle_id = b.id AND cbe.environment_id = e.id
-            )
-          )
+          AND ((a.scope_type = 'system' AND a.system_id = $3)
+            OR (a.scope_type = 'environment' AND a.environment_id = e.id))
         "#,
         )
         .bind(all_bundles.iter().map(|b| b.id).collect::<Vec<_>>())
         .bind(&system.environment)
+        .bind(system_id)
         .fetch_all(pool)
         .await?
     };
@@ -1943,15 +1939,27 @@ pub async fn get_system_evidence(
         return Ok(None);
     };
 
-    // Use the same environment predicate as list_applicable_system_rows so that
-    // requesting evidence for a system outside the bundle's environment scope
-    // returns None (→ 404) rather than fabricated out-of-scope compliance data.
+    // Use the same explicit assignment predicate as the systems endpoint so that
+    // requesting evidence for an unassigned system returns None (→ 404).
     let system = match bundle_version_id {
         Some(version_id) => list_explicit_bundle_version_system_rows(pool, bundle_id, version_id)
             .await?
             .into_iter()
             .find(|row| row.id == system_id),
-        None => find_applicable_system_row(pool, bundle_id, system_id).await?,
+        None => {
+            let version_id = bundle
+                .current_published_version_id
+                .or(bundle.current_draft_version_id);
+            match version_id {
+                Some(version_id) => {
+                    list_explicit_bundle_version_system_rows(pool, bundle_id, version_id)
+                        .await?
+                        .into_iter()
+                        .find(|row| row.id == system_id)
+                }
+                None => None,
+            }
+        }
     };
 
     let Some(system) = system else {
@@ -2031,44 +2039,6 @@ pub async fn get_system_evidence(
     }))
 }
 
-/// Fetch a single system row only if it is within the bundle's environment scope.
-/// Uses the identical predicate as [`list_applicable_system_rows`] so the two
-/// functions can never diverge in which systems they consider applicable.
-async fn find_applicable_system_row(
-    pool: &PgPool,
-    bundle_id: Uuid,
-    system_id: Uuid,
-) -> Result<Option<SystemRow>> {
-    Ok(sqlx::query_as::<_, SystemRow>(
-        r#"
-        SELECT
-            v.id,
-            v.hostname,
-            v.environment,
-            v.health_status,
-            v.critical_cve_count,
-            v.high_cve_count
-        FROM view_system_list v
-        LEFT JOIN environments e ON e.name = v.environment
-        WHERE v.id = $2
-          AND (
-            NOT EXISTS (
-                SELECT 1 FROM compliance_bundle_environments cbe
-                WHERE cbe.bundle_id = $1
-            )
-            OR EXISTS (
-                SELECT 1 FROM compliance_bundle_environments cbe
-                WHERE cbe.bundle_id = $1 AND cbe.environment_id = e.id
-            )
-          )
-        "#,
-    )
-    .bind(bundle_id)
-    .bind(system_id)
-    .fetch_optional(pool)
-    .await?)
-}
-
 async fn list_bundle_policies(pool: &PgPool, bundle_id: Uuid) -> Result<Vec<PolicyRow>> {
     Ok(sqlx::query_as::<_, PolicyRow>(
         r#"
@@ -2077,34 +2047,6 @@ async fn list_bundle_policies(pool: &PgPool, bundle_id: Uuid) -> Result<Vec<Poli
         JOIN deployment_policies dp ON dp.id = cbp.policy_id
         WHERE cbp.bundle_id = $1
         ORDER BY dp.name ASC
-        "#,
-    )
-    .bind(bundle_id)
-    .fetch_all(pool)
-    .await?)
-}
-
-async fn list_applicable_system_rows(pool: &PgPool, bundle_id: Uuid) -> Result<Vec<SystemRow>> {
-    Ok(sqlx::query_as::<_, SystemRow>(
-        r#"
-        SELECT
-            v.id,
-            v.hostname,
-            v.environment,
-            v.health_status,
-            v.critical_cve_count,
-            v.high_cve_count
-        FROM view_system_list v
-        LEFT JOIN environments e ON e.name = v.environment
-        WHERE NOT EXISTS (
-            SELECT 1 FROM compliance_bundle_environments cbe
-            WHERE cbe.bundle_id = $1
-        )
-        OR EXISTS (
-            SELECT 1 FROM compliance_bundle_environments cbe
-            WHERE cbe.bundle_id = $1 AND cbe.environment_id = e.id
-        )
-        ORDER BY v.hostname ASC
         "#,
     )
     .bind(bundle_id)

@@ -336,36 +336,50 @@ async fn deletion_lifecycle_database_matrix() {
         "bundle_immutable_history",
     );
 
-    // ── Active assigned bundle: blocked by immutable assignment history ────────
+    // ── Draft-only assignment history: disposable ─────────────────────────────
     //
-    // An active assignment always carries an immutable version row (created by
-    // the assignment API).  The eligibility query counts
-    // compliance_bundle_assignment_versions rows; without them the FK
-    // ON DELETE RESTRICT on bundle_id would surface as a raw DB error rather
-    // than a clean Blocked outcome.  assigned_bundle() creates the version row
-    // to match the production assignment state.
-    let active_bundle_id = assigned_bundle(&pool).await;
-    assert_bundle_blocked_by(
-        compliance::delete_bundle(&pool, active_bundle_id)
+    // Assignment snapshots attached only to draft bundle versions are
+    // temporary lineage state and must not make a bundle undeletable.
+    let draft_assigned_bundle_id = assigned_bundle(&pool).await;
+    assert_eq!(
+        compliance::delete_bundle(&pool, draft_assigned_bundle_id)
             .await
             .unwrap(),
-        "immutable_assignment_history",
+        BundleDeleteOutcome::Deleted
     );
 
-    // ── Inactive assigned bundle: still blocked after deactivation ────────────
-    //
-    // Deactivating an assignment does not remove the immutable version rows,
-    // so the bundle remains permanently non-deletable.
+    // ── Inactive draft assignment history: disposable ─────────────────────────
     let inactive_bundle_id = assigned_bundle(&pool).await;
     sqlx::query("UPDATE compliance_bundle_assignments SET active = false WHERE bundle_id = $1")
         .bind(inactive_bundle_id)
         .execute(&pool)
         .await
         .unwrap();
-    assert_bundle_blocked_by(
+    assert_eq!(
         compliance::delete_bundle(&pool, inactive_bundle_id)
             .await
             .unwrap(),
-        "immutable_assignment_history",
+        BundleDeleteOutcome::Deleted
+    );
+
+    // ── Accepted assignment history: permanently retained ────────────────────
+    let accepted_assigned_bundle_id = assigned_bundle(&pool).await;
+    let accepted_assigned_version_id: Uuid =
+        sqlx::query_scalar("SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1")
+            .bind(accepted_assigned_bundle_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    accept_bundle(
+        &pool,
+        accepted_assigned_bundle_id,
+        accepted_assigned_version_id,
+    )
+    .await;
+    assert_bundle_blocked_by(
+        compliance::delete_bundle(&pool, accepted_assigned_bundle_id)
+            .await
+            .unwrap(),
+        "bundle_immutable_history",
     );
 }
