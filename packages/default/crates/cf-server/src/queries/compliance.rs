@@ -735,6 +735,157 @@ fn bundle_from_row(row: BundleRow) -> ComplianceBundleSummary {
     }
 }
 
+async fn list_bundle_summary_aggregates(
+    pool: &PgPool,
+    bundles: &[ComplianceBundleSummary],
+) -> Result<std::collections::HashMap<Uuid, (i64, Option<i64>)>> {
+    let targets: Vec<(Uuid, Uuid, bool)> = bundles
+        .iter()
+        .filter_map(|bundle| {
+            bundle
+                .current_published_version_id
+                .or(bundle.current_draft_version_id)
+                .map(|version_id| {
+                    (
+                        bundle.id,
+                        version_id,
+                        bundle.current_published_version_id == Some(version_id),
+                    )
+                })
+        })
+        .collect();
+    if targets.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let bundle_ids: Vec<Uuid> = targets.iter().map(|target| target.0).collect();
+    let version_ids: Vec<Uuid> = targets.iter().map(|target| target.1).collect();
+    let published: Vec<bool> = targets.iter().map(|target| target.2).collect();
+
+    let policy_rows =
+        sqlx::query_as::<_, (Uuid, Uuid, String, Option<String>, String, Value, bool)>(
+            r#"
+        SELECT t.bundle_id, pv.policy_id, pv.name, pv.description, pv.policy_type,
+               pv.config, (dp.enabled AND pv.publication_state IN ('accepted', 'deprecated'))
+        FROM unnest($1::uuid[], $2::uuid[]) AS t(bundle_id, bundle_version_id)
+        JOIN compliance_bundle_version_policies cbvp
+          ON cbvp.bundle_version_id = t.bundle_version_id AND cbvp.selected = true
+        JOIN deployment_policy_versions pv ON pv.id = cbvp.policy_version_id
+        JOIN deployment_policies dp ON dp.id = pv.policy_id
+        ORDER BY t.bundle_id, cbvp.policy_order
+        "#,
+        )
+        .bind(&bundle_ids)
+        .bind(&version_ids)
+        .fetch_all(pool)
+        .await?;
+
+    let mut policies_by_bundle: std::collections::HashMap<Uuid, Vec<PolicyRow>> =
+        std::collections::HashMap::new();
+    for (bundle_id, policy_id, name, description, policy_type, config, enabled) in policy_rows {
+        policies_by_bundle
+            .entry(bundle_id)
+            .or_default()
+            .push(PolicyRow {
+                id: policy_id,
+                bundle_id,
+                name,
+                description,
+                policy_type,
+                config,
+                enabled,
+                compliance_metadata: Value::Object(Default::default()),
+            });
+    }
+
+    let system_rows =
+        sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, Option<String>, String, i32, i32)>(
+            r#"
+        WITH targets AS (
+            SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::bool[])
+                AS t(bundle_id, bundle_version_id, is_published)
+        )
+        SELECT t.bundle_id, t.bundle_version_id,
+               v.id, v.hostname, v.environment, v.health_status,
+               v.critical_cve_count, v.high_cve_count
+        FROM targets t
+        JOIN view_system_list v ON
+            (t.is_published AND (
+                NOT EXISTS (
+                    SELECT 1 FROM compliance_bundle_environments cbe
+                    WHERE cbe.bundle_id = t.bundle_id
+                ) OR EXISTS (
+                    SELECT 1 FROM compliance_bundle_environments cbe
+                    JOIN environments e ON e.id = cbe.environment_id
+                    WHERE cbe.bundle_id = t.bundle_id AND e.name = v.environment
+                )
+            )) OR
+            (NOT t.is_published AND EXISTS (
+                SELECT 1
+                FROM compliance_bundle_assignments a
+                LEFT JOIN environments e ON e.id = a.environment_id
+                WHERE a.bundle_id = t.bundle_id
+                  AND a.bundle_version_id = t.bundle_version_id
+                  AND a.active
+                  AND ((a.scope_type = 'system' AND a.system_id = v.id)
+                    OR (a.scope_type = 'environment' AND a.environment_id = e.id))
+            ))
+        "#,
+        )
+        .bind(&bundle_ids)
+        .bind(&version_ids)
+        .bind(&published)
+        .fetch_all(pool)
+        .await?;
+
+    let mut totals_by_bundle: std::collections::HashMap<Uuid, ComplianceRollupTotals> =
+        std::collections::HashMap::new();
+    for (
+        bundle_id,
+        _version_id,
+        id,
+        hostname,
+        environment,
+        health_status,
+        critical_cve_count,
+        high_cve_count,
+    ) in system_rows
+    {
+        let policies = policies_by_bundle
+            .get(&bundle_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let rollup = system_rollup(
+            SystemRow {
+                id,
+                hostname,
+                environment,
+                health_status,
+                critical_cve_count,
+                high_cve_count,
+            },
+            policies,
+        );
+        let totals = totals_by_bundle.entry(bundle_id).or_default();
+        totals.system_count += 1;
+        totals.total_controls += rollup.total;
+        totals.evaluated_controls += rollup.evaluated_total;
+        totals.pass += rollup.pass;
+        totals.warn += rollup.warn;
+        totals.fail += rollup.fail;
+        totals.waiver += rollup.waiver;
+    }
+
+    Ok(totals_by_bundle
+        .into_iter()
+        .map(|(bundle_id, totals)| {
+            let score = (totals.evaluated_controls > 0)
+                .then_some((totals.pass * 100) / totals.evaluated_controls);
+            (bundle_id, (totals.system_count, score))
+        })
+        .collect())
+}
+
 pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>> {
     let rows = sqlx::query_as::<_, BundleRow>(
         r#"
@@ -763,19 +914,24 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
         FROM compliance_bundles b
         LEFT JOIN LATERAL (
             SELECT
-                array_agg(cbp.policy_id ORDER BY dp.name) AS policy_ids,
+                array_agg(pv.policy_id ORDER BY pv.name) AS policy_ids,
                 count(*)::bigint AS policy_count
-            FROM compliance_bundle_policies cbp
-            JOIN deployment_policies dp ON dp.id = cbp.policy_id
-            WHERE cbp.bundle_id = b.id
+            FROM compliance_bundle_version_policies cbvp
+            JOIN deployment_policy_versions pv ON pv.id = cbvp.policy_version_id
+            WHERE cbvp.bundle_version_id = COALESCE(
+                b.current_published_version_id,
+                b.current_draft_version_id
+            )
+              AND cbvp.selected = true
         ) p ON TRUE
         LEFT JOIN LATERAL (
             SELECT count(*)::bigint AS requirement_count
             FROM compliance_bundle_version_requirements bvr
             WHERE bvr.bundle_version_id = COALESCE(
-                b.current_draft_version_id,
-                b.current_published_version_id
+                b.current_published_version_id,
+                b.current_draft_version_id
             )
+              AND bvr.selected = true
         ) r ON TRUE
         LEFT JOIN LATERAL (
             SELECT
@@ -867,18 +1023,11 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
             .collect();
     }
 
+    let aggregates = list_bundle_summary_aggregates(pool, &bundles).await?;
     for bundle in &mut bundles {
-        let Some(version_id) = bundle
-            .current_published_version_id
-            .or(bundle.current_draft_version_id)
-        else {
-            continue;
-        };
-        if let Some(response) = list_bundle_systems_for_version(pool, bundle.id, version_id).await?
-        {
-            bundle.applicable_system_count = response.totals.system_count;
-            bundle.aggregate_score =
-                (response.totals.evaluated_controls > 0).then_some(response.totals.overall_score);
+        if let Some((system_count, score)) = aggregates.get(&bundle.id) {
+            bundle.applicable_system_count = *system_count;
+            bundle.aggregate_score = *score;
         }
     }
 
