@@ -6790,6 +6790,148 @@ const steps = [
        await assertVisible(page.getByText("Mappings · 1", { exact: true }), "Expected one mapping after removal");
     },
   },
+  {
+    name: "20ad-stig-nixos-assertion-roundtrip",
+    description: "STIG auditd assertions remain structured through refinement and import serialization",
+    action: async (page) => {
+      const preview = {
+        sha256: "fixture-task-426-auditd-sha256",
+        filename: "task-426-auditd.xml",
+        document_class: "foreign_xccdf",
+        fidelity: "lossless",
+        fidelity_losses: [],
+        xccdf_version: "1.2",
+        benchmark: {
+          id: "task-426-auditd-benchmark",
+          title: "TASK-426 auditd fixture",
+          description: "Focused structured assertion fixture",
+          version: "V1R1",
+          status: "accepted",
+          platforms: ["nixos"],
+        },
+        profiles: [],
+        rules: [
+          {
+            id: "task-426-auditd-rule",
+            title: "Enable audit logging",
+            description: "The audit daemon must be enabled.",
+            severity: "high",
+            is_native: false,
+            version: "V-426001",
+            group_id: "task-426-auditd-group",
+            platforms: ["nixos"],
+            identifiers: [],
+            checks: [],
+            fix: { content: "Configure audit logging." },
+            inferred_assertions: [
+              {
+                option_path: "security.auditd.enable",
+                expected_value: { type: "boolean", value: true },
+                nix_expression: "config.security.auditd.enable == true",
+                description: "auditd must be enabled",
+              },
+              {
+                option_path: "security.audit.enable",
+                expected_value: { type: "boolean", value: true },
+                nix_expression: "config.security.audit.enable == true",
+                description: "audit must be enabled",
+              },
+            ],
+            references: [],
+            has_opaque_xml: false,
+          },
+        ],
+        rule_count: 1,
+        profile_count: 0,
+        errors: [],
+        warnings: [],
+        foreign_stig_reconciliation: null,
+      };
+
+      let previewCallCount = 0;
+      let importCallCount = 0;
+      let importPlan = null;
+      await page.route("**/api/v1/compliance/xccdf/preview", async (route) => {
+        previewCallCount += 1;
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(preview) });
+      });
+      await page.route("**/api/v1/compliance/xccdf/import", async (route) => {
+        importCallCount += 1;
+        const raw = route.request().postDataBuffer()?.toString("utf8") || "";
+        const match = raw.match(/name="plan"\r\n\r\n([\s\S]*?)\r\n--/);
+        if (!match) throw new Error("TASK-426 import request did not contain a plan multipart field");
+        importPlan = JSON.parse(match[1]);
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ bundle_version_id: null, created_policy_count: 1, reused_policy_versions: 0, errors: [] }),
+        });
+      });
+
+      try {
+        await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+        await page.getByRole("button", { name: /Import \/ Export/i }).click();
+        await page.getByText("Import STIG or XCCDF (.xml/.zip)", { exact: true }).click();
+        await page.getByRole("heading", { name: "Import STIG / XCCDF" }).waitFor({ timeout: 5000 });
+        const previewResponsePromise = page.waitForResponse(
+          (response) => response.url().includes("/api/v1/compliance/xccdf/preview") && response.request().method() === "POST",
+        );
+        await page.locator('input[type="file"]').setInputFiles({
+          name: "task-426-auditd.xml",
+          mimeType: "application/xml",
+          buffer: Buffer.from("<Benchmark id=\"task-426-auditd-benchmark\"/>", "utf8"),
+        });
+        const previewResponse = await previewResponsePromise;
+        const previewBody = await previewResponse.json();
+        const inferred = previewBody.rules?.[0]?.inferred_assertions;
+        if (previewCallCount !== 1) throw new Error(`Expected one preview call, got ${previewCallCount}`);
+        if (!Array.isArray(inferred) || inferred.length !== 2) throw new Error(`Expected two inferred assertions: ${JSON.stringify(inferred)}`);
+        for (const [index, assertion] of inferred.entries()) {
+          if (!assertion.option_path || assertion.expected_value?.type !== "boolean" || assertion.expected_value?.value !== true) {
+            throw new Error(`Inference ${index} was not a typed Boolean option assertion: ${JSON.stringify(assertion)}`);
+          }
+          if (!assertion.nix_expression.startsWith("config.") || assertion.nix_expression.includes("cfg.config.")) {
+            throw new Error(`Inference ${index} was not canonical: ${assertion.nix_expression}`);
+          }
+        }
+
+        await page.getByTestId("xccdf-review-reconcile-button").click();
+        await page.getByRole("button", { name: "Refine all instead" }).click();
+        const assertionCards = page.locator(".refine-assertion-card");
+        if (await assertionCards.count() !== 2) throw new Error("Expected two structured assertion editors");
+        if (await page.getByText(/Custom nix expression/).count() !== 0) throw new Error("Inferred assertions became CustomExpression editors");
+        const inferredPaths = await assertionCards.locator(".refine-option-row input").evaluateAll((inputs) => inputs.map((input) => input.value));
+        if (inferredPaths.join(",") !== "security.auditd.enable,security.audit.enable") throw new Error(`Unexpected inferred editor order: ${inferredPaths.join(",")}`);
+
+        await page.getByTestId("xccdf-add-assertion").selectOption("option");
+        if (await assertionCards.count() !== 3) throw new Error("Expected exactly one independently added assertion");
+        const manualCard = assertionCards.nth(2);
+        await manualCard.locator(".refine-option-row input").fill("security.audit.manual");
+        await manualCard.locator(".refine-expected").selectOption("true");
+        await assertionCards.first().getByTitle("Remove").click();
+        if (await assertionCards.count() !== 2) throw new Error("Expected one assertion removal");
+        const remainingPaths = await assertionCards.locator(".refine-option-row input").evaluateAll((inputs) => inputs.map((input) => input.value));
+        if (remainingPaths.join(",") !== "security.audit.enable,security.audit.manual") throw new Error(`Removal changed source order: ${remainingPaths.join(",")}`);
+
+        await page.getByRole("button", { name: "Review import" }).click();
+        await page.getByRole("button", { name: "Create draft bundle" }).click();
+        if (importCallCount !== 1 || !importPlan) throw new Error("Expected exactly one captured import request");
+        const action = importPlan.rule_actions?.[0];
+        const serializedRules = action?.custom_check?.rules || [];
+        if (action?.action !== "create_native_custom" || action.custom_check.mode !== "all" || serializedRules.length !== 2) {
+          throw new Error(`Unexpected import assertion shape: ${JSON.stringify(action)}`);
+        }
+        const expressions = serializedRules.map((rule) => rule.expression);
+        if (expressions.join(",") !== "config.security.audit.enable == true,config.security.audit.manual == true") {
+          throw new Error(`Import did not serialize remaining assertions exactly once and in order: ${expressions.join(",")}`);
+        }
+        if (expressions.some((expression) => expression.includes('"true"'))) throw new Error("Boolean assertion was quoted in import serialization");
+      } finally {
+        await page.unroute("**/api/v1/compliance/xccdf/preview");
+        await page.unroute("**/api/v1/compliance/xccdf/import");
+      }
+    },
+  },
   // ── CVE policy API round-trip checks ────────────────────────────────────
   // These tests exercise the new policy types introduced in TASK-176 through
   // the real server API to verify the full create → parse → list round-trip.

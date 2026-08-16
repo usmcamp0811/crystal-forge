@@ -1520,6 +1520,20 @@
       "baseline": "advisory"
     },
     {
+      "name": "20ad-stig-nixos-assertion-roundtrip",
+      "description": "STIG auditd assertions remain structured through refinement and import serialization",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
       "name": "20b-policies-cve-gate-create-roundtrip",
       "description": "API: create require_cve_check policy and verify it round-trips correctly",
       "route": "/deployment-policies",

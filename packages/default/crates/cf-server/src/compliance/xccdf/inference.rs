@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(a.expected_value, NixosLiteralValue::Boolean(true));
         assert_eq!(
             a.nix_expression,
-            "cfg.config.networking.firewall.enable == true"
+            "config.networking.firewall.enable == true"
         );
     }
 
@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(assertions[0].expected_value, NixosLiteralValue::Integer(4));
         assert_eq!(
             assertions[0].nix_expression,
-            "cfg.config.services.openssh.maxAuthTries == 4"
+            "config.services.openssh.maxAuthTries == 4"
         );
     }
 
@@ -373,7 +373,7 @@ mod tests {
         assert_eq!(a.expected_value, NixosLiteralValue::Boolean(true));
         assert_eq!(
             a.nix_expression,
-            "cfg.config.networking.firewall.enable == true"
+            "config.networking.firewall.enable == true"
         );
     }
 
