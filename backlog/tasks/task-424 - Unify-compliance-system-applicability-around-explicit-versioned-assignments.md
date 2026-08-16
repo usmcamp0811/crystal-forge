@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-16 15:17'
-updated_date: '2026-08-16 15:38'
+updated_date: '2026-08-16 15:48'
 labels: []
 dependencies: []
 references:
@@ -55,6 +55,8 @@ Approved scope addition: inspect design commit 68bde218 and align the shared web
 
 <!-- SECTION:NOTES:BEGIN -->
 Preflight completed: TASK-423 and TASK-424 are being implemented together because both correct the mixed legacy/versioned assignment model and both block MR !316. Dedicated worktree is /home/mcamp/code/crystal-forge/TASK-423-424-compliance-assignment-corrections on branch TASK-423-424-compliance-assignment-corrections from dev.
+
+Implemented and pushed commit 11836d03 on origin/TASK-423-424-compliance-assignment-corrections. Current and exact-version applicability now use active explicit assignments; empty legacy environment membership no longer means fleet-wide; system bundles and evidence use the same assignment scope. PolicyCard now matches design commit 68bde218 with two-line clamping and a full-description title. Server build passed; web-ui build passed with 172 tests; cargo fmt and git diff checks passed. Focused database/browser validation remains.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
