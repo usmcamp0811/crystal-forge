@@ -315,6 +315,7 @@ pub async fn enqueue_weekly_digest_delivery(
             SELECT 1
             FROM user_notifications
             WHERE user_id = $1
+              AND email_delivery_eligible
               AND dismissed_at IS NULL
               AND created_at >= GREATEST($2, (SELECT weekly_digest_enabled_at FROM prefs))
               AND created_at < $3
@@ -745,6 +746,73 @@ mod tests {
         .await
         .expect("count policy-boundary notifications");
         assert_eq!(notification_count.0, 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn weekly_digest_excludes_prohibited_notifications() {
+        let pool = test_pool().await;
+        let user_id = create_test_user(&pool, "digest-email-policy").await;
+        let period_start = chrono::Utc::now() - chrono::Duration::days(7);
+        let period_end = chrono::Utc::now();
+        sqlx::query(
+            "INSERT INTO user_notification_preferences
+                (user_id, weekly_digest, delivery_channel, weekly_digest_enabled_at,
+                 build_failures_email_enabled_at)
+             VALUES ($1, TRUE, 'email', $2, $2)",
+        )
+        .bind(user_id)
+        .bind(period_start)
+        .execute(&pool)
+        .await
+        .expect("enable weekly digest");
+
+        sqlx::query(
+            "INSERT INTO user_notifications
+                (user_id, category, source_type, source_id, title, summary, route,
+                 email_delivery_eligible, created_at)
+             VALUES ($1, 'build_failures', 'builds', $2, 'Suppressed', 'Suppressed', '/builds', FALSE, $3)",
+        )
+        .bind(user_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(period_start + chrono::Duration::hours(1))
+        .execute(&pool)
+        .await
+        .expect("insert suppressed digest notification");
+
+        assert!(
+            !enqueue_weekly_digest_delivery(&pool, user_id, period_start, period_end)
+                .await
+                .expect("enqueue suppressed-only digest")
+        );
+
+        sqlx::query(
+            "INSERT INTO user_notifications
+                (user_id, category, source_type, source_id, title, summary, route,
+                 email_delivery_eligible, created_at)
+             VALUES ($1, 'build_failures', 'builds', $2, 'Allowed', 'Allowed', '/builds', TRUE, $3)",
+        )
+        .bind(user_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(period_start + chrono::Duration::hours(2))
+        .execute(&pool)
+        .await
+        .expect("insert allowed digest notification");
+
+        assert!(
+            enqueue_weekly_digest_delivery(&pool, user_id, period_start, period_end)
+                .await
+                .expect("enqueue mixed digest")
+        );
+        let (delivery_count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM user_notification_email_deliveries
+             WHERE user_id = $1 AND delivery_type = 'weekly_digest'",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count digest deliveries");
+        assert_eq!(delivery_count, 1);
     }
 
     #[tokio::test]

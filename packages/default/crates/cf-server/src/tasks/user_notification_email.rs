@@ -424,7 +424,8 @@ async fn render_digest_delivery(
         JOIN user_notification_preferences p
           ON p.user_id = user_notifications.user_id
         WHERE user_notifications.user_id = $1
-          AND user_notifications.dismissed_at IS NULL
+           AND user_notifications.email_delivery_eligible
+           AND user_notifications.dismissed_at IS NULL
           AND user_notifications.created_at >= $2
           AND user_notifications.created_at < $3
           AND notification_visible_to_user($1, user_notifications.source_type, user_notifications.source_id)
@@ -461,7 +462,8 @@ async fn render_digest_delivery(
         JOIN user_notification_preferences p
           ON p.user_id = user_notifications.user_id
         WHERE user_notifications.user_id = $1
-          AND user_notifications.dismissed_at IS NULL
+           AND user_notifications.email_delivery_eligible
+           AND user_notifications.dismissed_at IS NULL
           AND user_notifications.created_at >= $2
           AND user_notifications.created_at < $3
           AND notification_visible_to_user($1, user_notifications.source_type, user_notifications.source_id)
@@ -960,6 +962,7 @@ mod tests {
     async fn insert_queued_weekly_digest_delivery(pool: &PgPool) -> Uuid {
         let user_id = Uuid::new_v4();
         let in_period_id = Uuid::new_v4();
+        let suppressed_period_id = Uuid::new_v4();
         let outside_period_id = Uuid::new_v4();
         let period_start = Utc::now() - chrono::Duration::days(7);
         let period_end = Utc::now();
@@ -994,15 +997,20 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO user_notifications
-                (id, user_id, category, source_type, source_id, title, summary, route, created_at)
+                (id, user_id, category, source_type, source_id, title, summary, route,
+                 email_delivery_eligible, created_at)
              VALUES
-                ($1, $2, 'build_failures', 'builds', $3, 'Included digest item', 'Inside period.', '/builds', $4),
-                ($5, $2, 'build_failures', 'builds', $6, 'Excluded digest item', 'Outside period.', '/builds', $7)",
+                ($1, $2, 'build_failures', 'builds', $3, 'Included digest item', 'Inside period.', '/builds', TRUE, $4),
+                ($5, $2, 'build_failures', 'builds', $6, 'Suppressed digest item', 'Prohibited period.', '/builds', FALSE, $7),
+                ($8, $2, 'build_failures', 'builds', $9, 'Excluded digest item', 'Outside period.', '/builds', TRUE, $10)",
         )
         .bind(in_period_id)
         .bind(user_id)
         .bind(Uuid::new_v4().to_string())
         .bind(period_start + chrono::Duration::hours(1))
+        .bind(suppressed_period_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(period_start + chrono::Duration::hours(2))
         .bind(outside_period_id)
         .bind(Uuid::new_v4().to_string())
         .bind(period_start - chrono::Duration::hours(1))
@@ -1162,6 +1170,7 @@ mod tests {
         let bodies = transport.text_bodies();
         assert_eq!(bodies.len(), 1);
         assert!(bodies[0].contains("Included digest item"));
+        assert!(!bodies[0].contains("Suppressed digest item"));
         assert!(!bodies[0].contains("Excluded digest item"));
         let (delivery_state, run_status): (String, String) = sqlx::query_as(
             "SELECT d.state, r.status
