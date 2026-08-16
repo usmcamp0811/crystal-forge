@@ -760,7 +760,7 @@ pub fn PoliciesView() -> Element {
 }
 
 #[component]
-fn PolicyDrawer(
+pub fn PolicyDrawer(
     policy: PolicyDefinition,
     is_admin: bool,
     initial_revisions: bool,
@@ -1361,7 +1361,10 @@ fn grouped_policies(
             .collect();
     }
 
-    if let Some(scheme_id) = grouping.strip_prefix("custom:").and_then(|id| Uuid::parse_str(id).ok()) {
+    if let Some(scheme_id) = grouping
+        .strip_prefix("custom:")
+        .and_then(|id| Uuid::parse_str(id).ok())
+    {
         if let Some(scheme) = custom_schemes.iter().find(|scheme| scheme.id == scheme_id) {
             return grouped_by_custom_scheme(policies, scheme);
         }
@@ -1402,7 +1405,10 @@ fn grouped_by_custom_scheme(
         if !items.is_empty() {
             groups.push(PolicyGroup {
                 label: group.name.clone(),
-                blurb: group.description.clone().unwrap_or_else(|| "Custom grouping scheme.".to_string()),
+                blurb: group
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| "Custom grouping scheme.".to_string()),
                 color: PolicyCategory::Security.color(),
                 items,
             });
@@ -1719,10 +1725,7 @@ fn DeleteConfirmModal(
     on_cancel: EventHandler<()>,
 ) -> Element {
     let _ = policy_id;
-    let can_delete = eligibility
-        .as_ref()
-        .map(|e| e.eligible)
-        .unwrap_or(false);
+    let can_delete = eligibility.as_ref().map(|e| e.eligible).unwrap_or(false);
     let permanently_blocked = eligibility
         .as_ref()
         .map(|e| e.permanently_blocked())

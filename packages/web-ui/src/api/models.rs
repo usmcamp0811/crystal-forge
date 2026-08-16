@@ -1028,6 +1028,14 @@ pub struct ComplianceBundleSummary {
     pub current_published_version: Option<String>,
     #[serde(default)]
     pub versions: Vec<ComplianceBundleVersionSummary>,
+    #[serde(default)]
+    pub policy_count: i64,
+    #[serde(default)]
+    pub requirement_count: i64,
+    #[serde(default)]
+    pub applicable_system_count: i64,
+    #[serde(default)]
+    pub aggregate_score: Option<i64>,
 }
 
 /// A server-backed arrangement of Security-domain policy controls.
@@ -1877,7 +1885,10 @@ mod xccdf_mapping_contract_tests {
             }),
         };
         let value = serde_json::to_value(semantics).expect("serialize reviewed semantics");
-        assert_eq!(value["reviewed_related_candidate"]["shared_cci_ids"][0], "CCI-000770");
+        assert_eq!(
+            value["reviewed_related_candidate"]["shared_cci_ids"][0],
+            "CCI-000770"
+        );
         assert_eq!(value["coverage"], "partial");
     }
 }
@@ -4029,6 +4040,7 @@ pub struct BundleCoverageRow {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BundleCoverageMapping {
+    pub policy_id: Uuid,
     pub policy_version_id: Uuid,
     pub policy_name: String,
     pub relationship: String,
@@ -4125,7 +4137,13 @@ mod tests {
         let candidate = group.existing_candidate.as_ref().expect("candidate");
         assert_eq!(candidate.policy_name, "Fixture authoritative policy");
         assert_eq!(candidate.confidence, 100);
-        assert_eq!(group.member_proofs.get("V-999001").map(String::as_str), Some("exact_technical"));
-        assert_eq!(group.member_proofs.get("V-999002").map(String::as_str), Some("shared_implementation"));
+        assert_eq!(
+            group.member_proofs.get("V-999001").map(String::as_str),
+            Some("exact_technical")
+        );
+        assert_eq!(
+            group.member_proofs.get("V-999002").map(String::as_str),
+            Some("shared_implementation")
+        );
     }
 }

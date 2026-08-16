@@ -1522,6 +1522,10 @@ pub struct ComplianceBundleSummary {
     /// Immutable revisions belonging to this bundle lineage, ordered newest first.
     #[serde(default)]
     pub versions: Vec<ComplianceBundleVersionSummary>,
+    #[serde(default)]
+    pub applicable_system_count: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate_score: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

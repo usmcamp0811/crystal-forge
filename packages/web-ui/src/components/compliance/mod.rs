@@ -13,7 +13,7 @@ pub use refine_policy::{
     SourceStigRule, action_to_import, mapping_semantics_for,
 };
 
-// ─── Bundle catalog left rail ────────────────────────────────────────────────
+// ─── Bundle catalog table ────────────────────────────────────────────────────
 
 #[derive(Props, Clone, PartialEq)]
 pub struct BundleCatalogProps {
@@ -28,71 +28,100 @@ pub struct BundleCatalogProps {
 
 #[component]
 pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
+    let mut query = use_signal(String::new);
+    let mut framework = use_signal(|| "all".to_string());
+    let query_value = query.read().trim().to_ascii_lowercase();
+    let frameworks = {
+        let mut counts = std::collections::BTreeMap::<String, usize>::new();
+        for bundle in props.bundles.iter() {
+            *counts.entry(bundle.framework.clone()).or_default() += 1;
+        }
+        let mut values: Vec<_> = counts.into_iter().collect();
+        values.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        values
+    };
+    let active_framework = framework.read().clone();
+    let visible: Vec<_> = props
+        .bundles
+        .iter()
+        .filter(|bundle| {
+            (active_framework == "all" || bundle.framework == active_framework)
+                && (query_value.is_empty()
+                    || bundle.name.to_ascii_lowercase().contains(&query_value)
+                    || bundle.framework.to_ascii_lowercase().contains(&query_value)
+                    || bundle.version.to_ascii_lowercase().contains(&query_value))
+        })
+        .collect();
+
     rsx! {
-        div {
-            class: "card",
-            style: "padding:0;position:sticky;top:16px;max-height:calc(100vh - 160px);overflow:auto;",
             div {
-                style: "padding:12px 14px;border-bottom:1px solid var(--cf-divider);font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);font-weight:600;",
-                "Compliance bundles"
-            }
-            for bundle in props.bundles.iter() {
-                {
-                    let id = bundle.id;
-                    let selected = props.selected_id == Some(id);
-                    let env_count = bundle.environment_count;
-                    let control_count = bundle.control_count;
-                    let layer = bundle.layer.clone();
-                    let framework = bundle.framework.clone();
-                    let version = bundle.version.clone();
-                    let name = bundle.name.clone();
-                    let revisions = bundle.versions.clone();
-                    rsx! {
-                        button {
-                            class: "focus-ring",
-                            style: if selected {
-                                "all:unset;cursor:pointer;display:block;padding:12px 14px;width:100%;box-sizing:border-box;border-left:3px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 8%,transparent);border-bottom:1px solid var(--cf-divider);"
-                            } else {
-                                "all:unset;cursor:pointer;display:block;padding:12px 14px;width:100%;box-sizing:border-box;border-left:3px solid transparent;background:transparent;border-bottom:1px solid var(--cf-divider);"
-                            },
-                            onclick: move |_| props.on_select.call(id),
-                            div {
-                                style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px;",
-                                span {
-                                    style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);",
-                                    "{name}"
-                                }
-                                span { class: "chip chip-unknown", style: "font-size:9px;padding:1px 6px;", "{layer}" }
-                            }
-                            div { style: "font-size:11px;color:var(--cf-text-muted);", "{framework} · {version}" }
-                            div {
-                                style: "font-size:11px;color:var(--cf-text-muted);margin-top:4px;",
-                                "{control_count} controls · {env_count} env{env_count_suffix(env_count)}"
-                                if revisions.len() > 1 { " · {revisions.len()} revisions" }
-                            }
-                            if revisions.len() > 1 && selected {
-                                div { style: "display:flex;flex-direction:column;gap:4px;margin-top:8px;padding-top:8px;border-top:1px solid var(--cf-divider);",
-                                    for revision in revisions.iter() {
-                                        {
-                                            let revision_id = revision.id;
-                                            let version = revision.version.clone();
-                                            let state = revision.publication_state.clone();
-                                            let is_selected = props.selected_version_id == Some(revision_id);
-                                            rsx! {
-                                                button {
-                                                    class: "focus-ring",
-                                                    onclick: move |event| { event.stop_propagation(); props.on_select_version.call(revision_id); },
-                                                    style: if is_selected { "all:unset;cursor:pointer;padding:5px 7px;border-radius:6px;background:color-mix(in oklab,var(--cf-brand-purple) 14%,transparent);border:1px solid var(--cf-brand-purple);font-size:10px;text-align:left;" } else { "all:unset;cursor:pointer;padding:5px 7px;border-radius:6px;background:var(--cf-subtle-bg);font-size:10px;text-align:left;" },
-                                                    "{version} · {state}"
-                                                    if revision.is_current_published { " · Current" }
-                                                    if revision.is_current_draft { " · Draft" }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                class: "card",
+                style: "padding:0;overflow:hidden;",
+                div { style: "padding:10px 16px;border-bottom:1px solid var(--cf-card-border);display:flex;flex-direction:column;gap:10px;",
+                    div { style: "display:flex;gap:6px;flex-wrap:nowrap;overflow-x:auto;",
+                        button { class: if active_framework == "all" { "cf-fw-chip active" } else { "cf-fw-chip" }, onclick: move |_| framework.set("all".to_string()), "All ", span { "{props.bundles.len()}" } }
+                        for (name, count) in frameworks.iter() {
+                            {
+                                let name = name.clone();
+                                let active = active_framework == name;
+                                rsx! { button { class: if active { "cf-fw-chip active" } else { "cf-fw-chip" }, onclick: move |_| framework.set(name.clone()), "{name} ", span { "{count}" } } }
                             }
                         }
+                    }
+                    div { class: "q-search", style: "margin-left:0;width:100%;box-sizing:border-box;",
+                        Icon { name: IconName::Search, size: 13 }
+                        input { class: "q-search-input", placeholder: "Search bundles…", value: "{query}", oninput: move |event| query.set(event.value()) }
+                        if !query.read().is_empty() {
+                            span { class: "q-search-count", "{visible.len()} of {props.bundles.len()}" }
+                            button { class: "btn-icon xs focus-ring", title: "Clear search", onclick: move |_| query.set(String::new()), Icon { name: IconName::X, size: 13 } }
+                        }
+                    }
+                }
+                if visible.is_empty() {
+                    div { class: "q-empty", Icon { name: IconName::Search, size: 20 }, div { "No bundles match “{query}”." } }
+                } else {
+                table { class: "sys-table sys-table-fixed",
+                    colgroup {
+                        col { style: "width:38%;" }
+                        col { style: "width:16%;" }
+                        col { style: "width:18%;" }
+                        col { style: "width:18%;" }
+                        col { style: "width:10%;" }
+                    }
+                    thead { tr { th { "Bundle" } th { "Framework" } th { "Version" } th { "Score" } th { "" } } }
+                    tbody {
+                for bundle in visible.iter() {
+                    {
+                        let id = bundle.id;
+                        let selected = props.selected_id == Some(id);
+                        let framework = bundle.framework.clone();
+                        let version = bundle.version.clone();
+                        let name = bundle.name.clone();
+                        let revisions = bundle.versions.clone();
+                        let score = bundle.aggregate_score;
+                        let score_color = score.map_or("var(--cf-text-muted)", |score| if score >= 90 { "#34d399" } else if score >= 70 { "#fbbf24" } else { "#f87171" });
+                        let score_label = score.map_or_else(|| "—".to_string(), |score| format!("{score}%"));
+                        let system_count_label = format!("{} system{}", bundle.applicable_system_count, if bundle.applicable_system_count == 1 { "" } else { "s" });
+                        rsx! {
+                            tr { class: if selected { "selected" } else { "" }, onclick: move |_| props.on_select.call(id),
+                                td {
+                                    div { style: "display:flex;align-items:center;gap:8px;min-width:0;",
+                                        span { style: "width:7px;height:7px;border-radius:50%;flex-shrink:0;background:{score_color};" }
+                                        span { style: "font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;", "{name}" }
+                                    }
+                                    div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;",
+                                        "{bundle.requirement_count} requirements · {bundle.policy_count} policies"
+                                        if revisions.len() > 1 { " · {revisions.len()} revisions" }
+                                    }
+                                }
+                                td { span { class: "chip chip-info", "{framework}" } }
+                                td { div { class: "mono", style: "font-size:12px;", "{version}" } div { style: "margin-top:3px;", span { class: "chip", style: "font-size:9px;padding:1px 6px;", "{revisions.first().map(|v| v.publication_state.as_str()).unwrap_or(\"draft\")}" } } }
+                                td { span { class: "mono", style: "font-size:13px;font-weight:600;color:{score_color};", "{score_label}" } div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{system_count_label}" } }
+                                td { style: "text-align:right;", div { class: "row-actions", style: "opacity:1;justify-content:flex-end;", button { class: "btn-icon focus-ring", title: "View bundle", onclick: move |event| { event.stop_propagation(); props.on_select.call(id); }, Icon { name: IconName::ArrowRight, size: 14 } } } }
+                            }
+                        }
+                    }
+                }
                     }
                 }
             }
@@ -113,6 +142,8 @@ pub struct BundleHeaderProps {
     /// When false the Edit button is hidden — non-admin users get a read-only view.
     #[props(default = false)]
     pub is_admin: bool,
+    #[props(default = false)]
+    pub cardless: bool,
 }
 
 #[component]
@@ -131,8 +162,8 @@ pub fn BundleHeader(props: BundleHeaderProps) -> Element {
 
     rsx! {
         div {
-            class: "card",
-            style: "padding:18px;display:flex;flex-direction:column;gap:10px;",
+            class: if props.cardless { "" } else { "card" },
+            style: if props.cardless { "display:flex;flex-direction:column;gap:10px;" } else { "padding:18px;display:flex;flex-direction:column;gap:10px;" },
             div {
                 style: "display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;",
                 div {
@@ -273,7 +304,7 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
         .collect();
 
     rsx! {
-        div { class: "card", style: "overflow:hidden;",
+        div { style: "overflow:hidden;border-top:1px solid var(--cf-divider);",
             // Header row: title + seg filter + host count
             div {
                 style: "padding:12px 16px;border-bottom:1px solid var(--cf-divider);display:flex;gap:10px;align-items:center;flex-wrap:wrap;",
@@ -308,15 +339,27 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
                 }
             }
             // Systems table
-            table { class: "sys-table",
+            table { class: "sys-table compact sys-table-dense sys-table-fixed",
+                colgroup {
+                    col { style: "width:22%;" }
+                    col { style: "width:90px;" }
+                    col { style: "width:120px;" }
+                    col { style: "width:110px;" }
+                    col { style: "width:60px;" }
+                    col { style: "width:70px;" }
+                    col { style: "width:60px;" }
+                    col { style: "width:76px;" }
+                    col { style: "width:52px;" }
+                }
                 thead { tr {
                     th { "Host" }
                     th { "Env" }
+                    th { "Assignment" }
                     th { "Score" }
-                    th { "Pass" }
-                    th { "Warn" }
-                    th { "Fail" }
-                    th { "Waiver" }
+                    th { style: "text-align:right;", "Pass" }
+                    th { style: "text-align:right;", "Warn" }
+                    th { style: "text-align:right;", "Fail" }
+                    th { style: "text-align:right;", "Waiver" }
                     th { style: "text-align:right;" }
                 } }
                 tbody {
@@ -336,7 +379,7 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
                                 tr {
                                     style: "cursor:pointer;",
                                     onclick: move |_| props.on_evidence.call(system_id),
-                                    td {
+                                     td {
                                         div { style: "display:flex;align-items:center;gap:8px;",
                                             span {
                                                 class: "status-dot",
@@ -344,8 +387,9 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
                                             }
                                             span { class: "mono", style: "font-weight:600;font-size:13px;", "{hostname}" }
                                         }
-                                    }
-                                    td {
+                                     }
+                                     td { style: "font-size:11px;color:var(--cf-text-muted);", "—" }
+                                     td {
                                         span {
                                             style: "padding:2px 8px;border-radius:99px;font-size:11px;border:1px solid {env_color};background:color-mix(in oklab,{env_color} 14%,var(--cf-card-bg));color:{env_color};",
                                             "{env}"
@@ -362,29 +406,29 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
                                             span { class: "mono", style: "font-size:12px;font-weight:600;color:{score_color};", "{score}%" }
                                         }
                                     }
-                                    td { class: "mono", style: "color:#34d399;font-weight:600;", "{pass}" }
+                                     td { class: "mono", style: "text-align:right;color:#34d399;font-weight:600;", "{pass}" }
                                     td {
                                         class: "mono",
-                                        style: if warn > 0 { "color:#fbbf24;font-weight:600;" } else { "color:var(--cf-text-muted);" },
+                                         style: if warn > 0 { "text-align:right;color:#fbbf24;font-weight:600;" } else { "text-align:right;color:var(--cf-text-muted);" },
                                         "{warn}"
                                     }
                                     td {
                                         class: "mono",
-                                        style: if fail > 0 { "color:#f87171;font-weight:700;" } else { "color:var(--cf-text-muted);" },
+                                         style: if fail > 0 { "text-align:right;color:#f87171;font-weight:700;" } else { "text-align:right;color:var(--cf-text-muted);" },
                                         "{fail}"
                                     }
                                     td {
                                         class: "mono",
-                                        style: if waiver > 0 { "color:#a78bfa;" } else { "color:var(--cf-text-muted);" },
+                                         style: if waiver > 0 { "text-align:right;color:#a78bfa;" } else { "text-align:right;color:var(--cf-text-muted);" },
                                         "{waiver}"
                                     }
-                                    td { style: "text-align:right;",
-                                        button {
-                                            class: "btn btn-ghost focus-ring xs",
-                                            onclick: move |e| { e.stop_propagation(); props.on_evidence.call(system_id); },
-                                            "View evidence "
-                                            Icon { name: IconName::ArrowRight, size: 11 }
-                                        }
+                                     td { style: "text-align:right;",
+                                         button {
+                                             class: "btn-icon focus-ring",
+                                             title: "View evidence",
+                                             onclick: move |e| { e.stop_propagation(); props.on_evidence.call(system_id); },
+                                             Icon { name: IconName::ArrowRight, size: 14 }
+                                         }
                                     }
                                 }
                             }

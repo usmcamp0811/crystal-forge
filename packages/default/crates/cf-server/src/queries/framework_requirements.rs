@@ -133,6 +133,7 @@ pub struct BundleCoverageRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BundleCoverageMapping {
+    pub policy_id: Uuid,
     pub policy_version_id: Uuid,
     pub policy_name: String,
     pub relationship: String,
@@ -700,6 +701,7 @@ pub async fn compute_bundle_requirement_coverage(
     #[derive(Debug, sqlx::FromRow)]
     struct RawMapping {
         requirement_version_id: Uuid,
+        policy_id: Uuid,
         policy_version_id: Uuid,
         policy_name: String,
         relationship: String,
@@ -710,7 +712,8 @@ pub async fn compute_bundle_requirement_coverage(
 
     let mappings = sqlx::query_as::<_, RawMapping>(
         r#"
-        SELECT m.requirement_version_id,
+            SELECT m.requirement_version_id,
+               pv.policy_id,
                m.policy_version_id,
                pv.name AS policy_name,
                m.relationship,
@@ -754,6 +757,7 @@ pub async fn compute_bundle_requirement_coverage(
             .find(|row| row.requirement_version_id == mapping.requirement_version_id)
         {
             row.mappings.push(BundleCoverageMapping {
+                policy_id: mapping.policy_id,
                 policy_version_id: mapping.policy_version_id,
                 policy_name: mapping.policy_name,
                 relationship: mapping.relationship,

@@ -730,6 +730,8 @@ fn bundle_from_row(row: BundleRow) -> ComplianceBundleSummary {
         current_draft_version: row.current_draft_version,
         current_published_version: row.current_published_version,
         versions: Vec::new(),
+        applicable_system_count: 0,
+        aggregate_score: None,
     }
 }
 
@@ -863,6 +865,21 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
                 is_current_draft: bundle.current_draft_version_id == Some(row.0),
             })
             .collect();
+    }
+
+    for bundle in &mut bundles {
+        let Some(version_id) = bundle
+            .current_published_version_id
+            .or(bundle.current_draft_version_id)
+        else {
+            continue;
+        };
+        if let Some(response) = list_bundle_systems_for_version(pool, bundle.id, version_id).await?
+        {
+            bundle.applicable_system_count = response.totals.system_count;
+            bundle.aggregate_score =
+                (response.totals.evaluated_controls > 0).then_some(response.totals.overall_score);
+        }
     }
 
     Ok(bundles)
@@ -3368,6 +3385,8 @@ mod tests {
             current_draft_version: None,
             current_published_version: None,
             versions: vec![],
+            applicable_system_count: 0,
+            aggregate_score: None,
         }
     }
 

@@ -8279,6 +8279,10 @@ const steps = [
         policy_ids: [policyId],
         required_envs: [{ id: envId, name: "production", color_hex: "#3b82f6" }],
         control_count: 1,
+        policy_count: 1,
+        requirement_count: 1,
+        applicable_system_count: 1,
+        aggregate_score: 100,
         environment_count: 1,
       };
 
@@ -8337,15 +8341,18 @@ const steps = [
         "Expected Compliance page heading",
       );
 
-      // Bundle catalog
+      // Bundle table
       await assertVisible(
         page.getByText("NIST 800-53 High").first(),
-        "Expected bundle name in catalog",
+        "Expected bundle name in bundle table",
       );
       await assertVisible(
-        page.getByText(/fleet/i).first(),
-        "Expected layer chip in bundle catalog",
+        page.getByText("NIST 800-53").first(),
+        "Expected framework chip in bundle table",
       );
+
+      await page.getByText("NIST 800-53 High").first().click();
+      await page.waitForTimeout(400);
 
       // Bundle header card
       await assertVisible(
@@ -8465,6 +8472,9 @@ const steps = [
 
       await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
+
+      await page.getByText("NIST 800-53 High").first().click();
+      await page.waitForTimeout(400);
 
       // Click "View evidence" to open the drawer
       const evidenceBtn = page.getByRole("button", { name: /View evidence/i }).first();
