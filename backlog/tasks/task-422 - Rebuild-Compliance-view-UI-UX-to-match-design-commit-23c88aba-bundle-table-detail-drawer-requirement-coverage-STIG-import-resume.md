@@ -7,7 +7,7 @@ status: Review
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-16 18:58'
+updated_date: '2026-08-16 19:34'
 labels: []
 milestone: m-22
 dependencies:
@@ -192,5 +192,10 @@ Continued remediation verification in /home/mcamp/code/crystal-forge/TASK-422-co
 created: 2026-08-16 18:58
 ---
 Pushed remediation commit `e085460d` to `TASK-422-compliance-view-redesign` / MR !316. The MR description was corrected: it no longer claims completed set-based aggregate verification, and now records the focused browser timeout and remaining request-change status. Server build passed with 1139 tests; web-ui build, formatting, Node syntax, and diff checks passed. The aggregate path now batches bundle/version membership and effective-policy resolution, but the evidence path still needs focused query-count proof before this finding is considered resolved.
+---
+
+created: 2026-08-16 19:34
+---
+Pushed follow-up remediation `c0268db1` after review. Import plans now carry environment IDs; the foreign import validates IDs and persists bundle/environment links transactionally. Resume preserves saved environment selection and user-edited bundle names. The focused browser fixture reuses identical bytes for successful resume and adds an intentional SHA mismatch rejection. Draft save now returns errors and does not close on failed persistence. Nix normalization now processes interpolation bodies and escaped interpolation. Aggregate evidence inputs are batch-loaded across systems, including policy metadata, assessment contexts, and CVE scans. Server test compilation, WASM cargo check, formatting, Node syntax, and diff checks passed. Confirmed focused browser pass and query-count regression remain outstanding; MR !316 remains request-changes.
 ---
 <!-- COMMENTS:END -->
