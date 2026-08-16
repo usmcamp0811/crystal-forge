@@ -3,11 +3,11 @@ id: TASK-422
 title: >-
   Rebuild Compliance view UI/UX to match design commit 23c88aba (bundle table,
   detail drawer, requirement coverage, STIG import resume)
-status: In Progress
+status: Review
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-16 02:12'
+updated_date: '2026-08-16 14:16'
 labels: []
 milestone: m-22
 dependencies:
@@ -152,5 +152,13 @@ author: Matt Camp
 created: 2026-08-16 02:12
 ---
 P1 aggregate rewrite accepted as the next implementation slice: summary fields must use one published-first canonical version and the catalog must not call the detailed systems/evidence endpoint per bundle.
+---
+
+author: OpenAI
+created: 2026-08-16 14:16
+---
+Merge request created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/316
+
+Verification summary: server Nix build passed with 1138 tests; web UI Nix build passed; focused aggregate score tests passed; formatting, Node syntax, and diff checks passed. Focused browser execution remains for deployment validation because the local development ports were occupied by the TASK-418 process-compose instance.
 ---
 <!-- COMMENTS:END -->
