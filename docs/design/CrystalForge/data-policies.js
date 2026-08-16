@@ -536,6 +536,32 @@ const POLICY_CUSTOM = [
     createdAt: "5mo ago",
     lastModified: "4mo ago",
   },
+  {
+    id: "stig-ssh-pam",
+    lineageId: "stig-ssh-pam",
+    revision: 1,
+    publicationState: "draft",
+    publishedDate: "2026-08-16",
+    srgIds: [],
+    cciIds: ["CCI-000877"],
+    name: "NixOS must employ strong authenticators in the establishment of nonlocal maintenance and diagnostic sessions.",
+    category: "security",
+    controlFamily: "IA",
+    description: "If maintenance tools are used by unauthorized personnel, they may accidentally or intentionally damage or compromise the system. The act of managing systems and applications includes the ability to access sensitive application information, such as system configuration details, diagnostic information, user information, and potentially sensitive application data.\n\nSome maintenance and test tools are either standalone devices with their own operating systems or are applications bundled with an operating system.\n\nNonlocal maintenance and diagnostic activities are those activities conducted by individuals communicating through a network, either an external network (e.g., the internet) or an internal network. Local maintenance and diagnostic activities are those activities carried out by individuals physically present at the information system or information system component and not communicating across a network connection. Typically, strong authentication requires authenticators that are resistant to replay attacks and employ multifactor authentication. Strong authenticators include, for example, PKI where certificates are stored on a token protected by a password, passphrase, or biometric.",
+    type: "custom",
+    severity: "high",
+    enabled: false,
+    rules: [
+      { kind:"nixos_option", path:"services.openssh.settings.UsePAM", op:"==", value:"\"yes\"" },
+    ],
+    rationale: "Configure the NixOS operating system to use strong authentication when establishing nonlocal maintenance and diagnostic sessions. Add or modify the following line to /etc/nixos/configuration.nix: openssh.settings.UsePAM = \"yes\"; then rebuild with `sudo nixos-rebuild switch`.",
+    evidence: [
+      { kind:"command", cmd:"sudo /run/current-system/sw/bin/sshd -G | grep pam", expect:"usepam yes" },
+    ],
+    createdBy: "imported",
+    createdAt: "just now",
+    lastModified: "just now",
+  },
 ];
 
 // Group policies by lineage (bundle-independent revision history) — newest revision first.
