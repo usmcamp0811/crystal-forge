@@ -7,7 +7,7 @@ status: Review
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-16 19:34'
+updated_date: '2026-08-16 19:54'
 labels: []
 milestone: m-22
 dependencies:
@@ -197,5 +197,10 @@ Pushed remediation commit `e085460d` to `TASK-422-compliance-view-redesign` / MR
 created: 2026-08-16 19:34
 ---
 Pushed follow-up remediation `c0268db1` after review. Import plans now carry environment IDs; the foreign import validates IDs and persists bundle/environment links transactionally. Resume preserves saved environment selection and user-edited bundle names. The focused browser fixture reuses identical bytes for successful resume and adds an intentional SHA mismatch rejection. Draft save now returns errors and does not close on failed persistence. Nix normalization now processes interpolation bodies and escaped interpolation. Aggregate evidence inputs are batch-loaded across systems, including policy metadata, assessment contexts, and CVE scans. Server test compilation, WASM cargo check, formatting, Node syntax, and diff checks passed. Confirmed focused browser pass and query-count regression remain outstanding; MR !316 remains request-changes.
+---
+
+created: 2026-08-16 19:54
+---
+Continued TASK-422 only; MR !314 was disregarded. Pushed `add57c5d` to MR !316. Fixed the focused browser fixture scope/dead preview object, preserved per-system effective runtime configuration in aggregate evidence, aligned policy-card styling with the latest design example, and corrected quoted/indented Nix interpolation escaping with regressions. WASM cargo check, focused normalizer tests, formatting, Node syntax, and diff checks pass. The cross-version resolver batch/query-count regression and confirmed focused browser pass remain outstanding; MR description was updated honestly and TASK-422 remains request-changes.
 ---
 <!-- COMMENTS:END -->
