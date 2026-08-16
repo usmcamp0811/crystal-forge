@@ -7,7 +7,7 @@ status: Review
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-16 17:41'
+updated_date: '2026-08-16 17:46'
 labels: []
 milestone: m-22
 dependencies:
@@ -120,6 +120,8 @@ Spec §9 contains the endpoint/URL table a reviewer uses to put the running desi
 7. Phase 6 verification: add the specified CSS utilities, update compliance integration steps and coverage manifests, add/extend a focused NixOS web-ui check for table/drawer/coverage/paused-import states, run dark/light screenshots where the harness supports them, then run cargo fmt, git diff check, web-ui/server builds as applicable, and record objective results in TASK-422.
 
 P1 correctness refinement before browser proof: canonicalize each bundle's summary version as published-first then draft; make exact-version policy/requirement/control counts use that target. Replace the per-bundle `list_bundle_systems_for_version` aggregate loop with a dedicated batch summary path that loads exact-version membership, applicable assignment scope, and status-level inputs without constructing detailed evidence. Add published+draft, draft-only, multi-bundle, zero-evaluated, and no-system regression coverage while retaining commit 0994a8e9's 6/2/2 requirement-coverage browser fixture.
+
+MR !316 review remediation sequence: (1) persist and restore complete STIG refined-rule state after source SHA verification, (2) make catalog aggregate score use the same effective resolver/evidence semantics as bundle detail via batching rather than simplified pure rollup, (3) carry exact coverage policy_version_id into a direct non-paginated policy/version drill-in and initialize the drawer to that version, (4) replace blind cfg.config normalization with lexical-safe reference normalization and update all stale tests, (5) run real non-mocked preview/import browser coverage plus full server/web verification and refresh MR evidence.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
