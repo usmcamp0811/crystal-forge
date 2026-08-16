@@ -3,9 +3,10 @@ id: TASK-425
 title: >-
   Generate Standalone NixOS Modules from Exported Crystal Forge Policies and
   Compliance Bundles
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-08-16 15:17'
+updated_date: '2026-08-16 18:27'
 labels:
   - cli
   - nixos
@@ -21,7 +22,7 @@ documentation:
   - packages/default/crates/cf-server/src/compliance/interchange.rs
 priority: high
 type: feature
-ordinal: 420000
+ordinal: 324000
 ---
 
 ## Description
