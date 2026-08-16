@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-16 15:13'
-updated_date: '2026-08-16 15:17'
+updated_date: '2026-08-16 15:18'
 labels: []
 dependencies: []
 references:
@@ -36,6 +36,23 @@ Compliance bundle deletion currently blocks permanently whenever any compliance_
 - [ ] #5 Deletion UI distinguishes active assignments from historical assignment blockers
 - [ ] #6 Regression tests cover inactive draft assignment history and accepted assignment history
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Update deletion eligibility to treat assignment history attached to accepted or deprecated bundle versions as the only assignment-history blocker.
+2. Add a narrow migration guard allowing deletion of assignment versions only when their referenced bundle versions are mutable draft lineage; preserve immutability for accepted/deprecated history.
+3. In the deletion transaction remove draft-only assignment versions in reverse version order, then draft-only assignment lineages and existing disposable memberships/mappings before deleting the bundle.
+4. Add database-backed regression coverage for draft-only inactive assignment history and accepted/deprecated assignment history.
+5. Update deletion blocker text/API detail so historical assignment blockers are distinguished from active assignments.
+6. Run formatting and targeted/server verification in the dedicated worktree.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Preflight completed: TASK-423 and TASK-424 are being implemented together because both correct the mixed legacy/versioned assignment model and both block MR !316. Dedicated worktree is /home/mcamp/code/crystal-forge/TASK-423-424-compliance-assignment-corrections on branch TASK-423-424-compliance-assignment-corrections from dev.
+<!-- SECTION:NOTES:END -->
 
 ## Comments
 
