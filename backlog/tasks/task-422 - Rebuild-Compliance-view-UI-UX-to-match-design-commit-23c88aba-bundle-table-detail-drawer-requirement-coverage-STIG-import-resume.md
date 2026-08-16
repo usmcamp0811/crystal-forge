@@ -3,11 +3,11 @@ id: TASK-422
 title: >-
   Rebuild Compliance view UI/UX to match design commit 23c88aba (bundle table,
   detail drawer, requirement coverage, STIG import resume)
-status: In Progress
+status: Review
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-16 14:44'
+updated_date: '2026-08-16 14:49'
 labels: []
 milestone: m-22
 dependencies:
@@ -166,5 +166,11 @@ author: OpenAI
 created: 2026-08-16 14:44
 ---
 P0 remediation after MR review: fixed self-triggering coverage use_effect by using non-reactive peek() bookkeeping reads, added explicit coverage loading/error state, aligned BundleCatalog revision/publication display with the published-first summary revision, and added an initial coverage-request count assertion to the focused browser step. Will commit and push remediation before re-review.
+---
+
+author: OpenAI
+created: 2026-08-16 14:49
+---
+P0 remediation pushed as 82ae4804 and added to MR !316: coverage effect now uses peek() for bookkeeping, explicit coverage loading/error/empty states were added, BundleCatalog uses the exact published-first summary revision for version/state display, and 29a asserts one initial coverage request. web-ui build and hygiene checks pass.
 ---
 <!-- COMMENTS:END -->
