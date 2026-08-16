@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-16 15:13'
-updated_date: '2026-08-16 15:18'
+updated_date: '2026-08-16 15:48'
 labels: []
 dependencies: []
 references:
@@ -52,6 +52,8 @@ Compliance bundle deletion currently blocks permanently whenever any compliance_
 
 <!-- SECTION:NOTES:BEGIN -->
 Preflight completed: TASK-423 and TASK-424 are being implemented together because both correct the mixed legacy/versioned assignment model and both block MR !316. Dedicated worktree is /home/mcamp/code/crystal-forge/TASK-423-424-compliance-assignment-corrections on branch TASK-423-424-compliance-assignment-corrections from dev.
+
+Implemented and pushed commit 11836d03 on origin/TASK-423-424-compliance-assignment-corrections. Draft-only assignment history is now disposable and cleaned in reverse version order; accepted/deprecated assignment history remains protected; migration 0226 narrows immutable triggers for draft cleanup. Server build and offline cargo check passed. Database-backed deletion lifecycle tests remain to be run against the isolated disposable PostgreSQL database.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
