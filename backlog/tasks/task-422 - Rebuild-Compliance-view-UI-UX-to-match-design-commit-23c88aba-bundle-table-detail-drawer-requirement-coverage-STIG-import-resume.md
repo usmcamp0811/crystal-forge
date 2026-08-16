@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-16 00:16'
+updated_date: '2026-08-16 01:51'
 labels: []
 milestone: m-22
 dependencies:
@@ -130,6 +130,8 @@ Phase 0 baseline command `nix build .#checks.x86_64-linux.web-ui -L` was started
 Current implementation progress: web-ui bundle rail is now a full-width searchable/framework-filtered table; selected bundle opens a fl-tray overview; selected_export_version_id was renamed to selected_bundle_version_id; coverage has generation-guarded loading, filter/search controls, policy-link buttons, and a coverage view; dense systems table/CSS utilities were added; PolicyDrawer is public and wired for lazy policy resolution; STIG draft metadata persistence/callout/pause controls were started. Web-ui cargo check passes in the task worktree; server cargo check passes in `nix develop`.
 
 Known follow-up before Phase 1 STOP: aggregate bundle summary fields currently reuse `list_bundle_systems_for_version()` once per bundle, preserving exact score semantics but not yet satisfying the required set-based/no-per-bundle-query implementation. This must be replaced before finalizing the server contract.
+
+Verification update: `nix build .#web-ui -L` passed; packaged web-ui unit tests passed 172/172 (1 ignored). `cargo check` for web-ui and Nix-based SQLX-offline `cargo check -p cf-server` pass. `node --check checks/web-ui/tests/integration-test.js` and `git diff --check` pass. The focused browser/NixOS check has not yet been completed. The server aggregate implementation remains semantically correct but temporarily per-bundle and must be refactored to satisfy the no-N+1 acceptance criterion.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
