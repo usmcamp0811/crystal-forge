@@ -1,9 +1,11 @@
 ---
 id: TASK-426
 title: Fix STIG refinement NixOS assertion handling
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@Matt Camp'
 created_date: '2026-08-16 15:51'
+updated_date: '2026-08-16 15:51'
 labels: []
 dependencies: []
 references:
@@ -35,3 +37,13 @@ Preserve structured inferred NixOS option assertions from STIG preview through r
 - [ ] #9 Rust regression tests cover inference conversion editing and round-trip serialization
 - [ ] #10 Focused browser coverage proves the auditd two-assertion case and manual third assertion
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: OpenAI
+created: 2026-08-16 15:51
+---
+Implementation authorized by the user. This task will use a dedicated worktree from dev and remain narrowly scoped to STIG NixOS assertion inference editing and serialization.
+---
+<!-- COMMENTS:END -->
