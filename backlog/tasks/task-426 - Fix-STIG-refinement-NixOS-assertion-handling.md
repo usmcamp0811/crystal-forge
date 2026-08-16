@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-16 15:51'
-updated_date: '2026-08-16 15:51'
+updated_date: '2026-08-16 16:33'
 labels: []
 dependencies: []
 references:
@@ -13,6 +13,16 @@ references:
   - packages/web-ui/src/components/compliance/refine_policy.rs
   - packages/web-ui/src/components/compliance/stig_import.rs
   - checks/web-ui/tests/integration-test.js
+modified_files:
+  - packages/default/crates/cf-server/src/compliance/xccdf/importer.rs
+  - packages/default/crates/cf-server/src/compliance/xccdf/inference.rs
+  - packages/default/crates/cf-server/src/handlers/api/deployment_policies.rs
+  - packages/default/crates/cf-server/src/models/deployment_policies.rs
+  - packages/default/crates/cf-server/src/models/evaluate_with_policies.rs
+  - packages/default/crates/cf-server/src/server/mod.rs
+  - packages/web-ui/src/components/compliance/mod.rs
+  - packages/web-ui/src/components/compliance/refine_policy.rs
+  - packages/web-ui/src/views/compliance.rs
 priority: high
 type: bug
 ordinal: 421000
@@ -37,6 +47,12 @@ Preserve structured inferred NixOS option assertions from STIG preview through r
 - [ ] #9 Rust regression tests cover inference conversion editing and round-trip serialization
 - [ ] #10 Focused browser coverage proves the auditd two-assertion case and manual third assertion
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented and pushed as commit 057d5bda on remote branch task-426-stig-nixos-assertion-handling. Web UI build passed with 174 tests. Server inference test command was blocked by unavailable PostgreSQL/SQLx connection on the local environment.
+<!-- SECTION:NOTES:END -->
 
 ## Comments
 
