@@ -879,8 +879,11 @@ async fn list_bundle_summary_aggregates(
     Ok(totals_by_bundle
         .into_iter()
         .map(|(bundle_id, totals)| {
-            let score = (totals.evaluated_controls > 0)
-                .then_some((totals.pass * 100) / totals.evaluated_controls);
+            let score = if totals.evaluated_controls > 0 {
+                Some((totals.pass * 100) / totals.evaluated_controls)
+            } else {
+                None
+            };
             (bundle_id, (totals.system_count, score))
         })
         .collect())
