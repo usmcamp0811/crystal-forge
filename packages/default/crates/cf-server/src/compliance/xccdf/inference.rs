@@ -42,7 +42,7 @@ pub struct NixosOptionAssertionDraft {
     /// The expected value.
     pub expected_value: NixosLiteralValue,
     /// The Nix expression that should evaluate to `true` when the option
-    /// matches the expected value.  E.g. `cfg.config.networking.firewall.enable == true`.
+    /// matches the expected value.  E.g. `config.networking.firewall.enable == true`.
     pub nix_expression: String,
     /// A human-readable label for the assertion.
     pub description: String,
@@ -118,7 +118,7 @@ pub fn infer_nixos_assertions(fix_text: &str) -> Vec<NixosOptionAssertionDraft> 
 
         let nix_repr = value.nix_repr();
         let nix_expression = format!(
-            "cfg.config.{} {} {}",
+            "config.{} {} {}",
             path,
             value.comparison_operator(),
             nix_repr,

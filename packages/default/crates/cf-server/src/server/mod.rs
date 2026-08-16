@@ -100,32 +100,8 @@ fn custom_field_name(name: &str, id: uuid::Uuid) -> String {
 }
 
 fn normalize_custom_policy_expression(expression: &str) -> (String, bool) {
-    let mut cursor = 0usize;
-    let mut changed = false;
-    let mut normalized = String::with_capacity(expression.len() + 16);
-
-    while let Some(rel_idx) = expression[cursor..].find("config.") {
-        let idx = cursor + rel_idx;
-        let prev_char = expression[..idx].chars().next_back();
-        let has_safe_boundary = prev_char
-            .map(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
-            .unwrap_or(true);
-        let already_cfg_prefixed = idx >= 4 && expression.get(idx - 4..idx) == Some("cfg.");
-
-        normalized.push_str(&expression[cursor..idx]);
-
-        if has_safe_boundary && !already_cfg_prefixed {
-            normalized.push_str("cfg.config.");
-            changed = true;
-        } else {
-            normalized.push_str("config.");
-        }
-
-        cursor = idx + "config.".len();
-    }
-
-    normalized.push_str(&expression[cursor..]);
-    (normalized, changed)
+    let normalized = expression.replace("cfg.config.", "config.");
+    (normalized.clone(), normalized != expression)
 }
 
 async fn run_post_finalize_derivation_side_effects(
@@ -439,7 +415,7 @@ fn parse_deployment_policy_record(
                         }
                     };
                     let expression = match rule_obj.get("expression").and_then(|v| v.as_str()) {
-                        Some(e) => e.to_string(),
+                        Some(e) => normalize_custom_policy_expression(e).0,
                         None => {
                             warn!(
                                 "Skipping custom_check policy '{}' ({}): rules[{}] missing expression",
@@ -496,7 +472,7 @@ fn parse_deployment_policy_record(
                     normalize_custom_policy_expression(&raw_expression);
                 if normalized_legacy_ref {
                     warn!(
-                        "Auto-normalized legacy custom_check expression for policy '{}' ({}): replaced `config.` with `cfg.config.`",
+                        "Normalized legacy custom_check expression for policy '{}' ({}): replaced `cfg.config.` with `config.`",
                         record.name, record.id
                     );
                 }

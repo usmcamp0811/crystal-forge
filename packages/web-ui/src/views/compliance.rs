@@ -15,7 +15,7 @@ use crate::api::models::{
     ComplianceEvidenceResponse, CreateAssignmentRequest, CreateBundleDraftRequest,
     CreateComplianceBundleRequest, ComplianceFrameworkSummary, ComplianceFrameworkVersionSummary,
     DeploymentPolicySummary, EnvironmentSummary, RequirementVersionSummary,
-    ImportedBundlePlan, ImportedCustomCheck, ImportedCustomCheckRule, ImportedEvidenceRequirement,
+    ImportedBundlePlan, ImportedCustomCheck, ImportedEvidenceRequirement,
     ImportedPolicyCustomization, PolicyValueOverride, PublishBundleVersionRequest,
     RequirementCoverage, SortOrder, SystemSummary, SystemsListParams,
     TrustBundleVersionRequest, UpdateAssignmentRequest, UpdateComplianceBundleRequest,
@@ -24,7 +24,8 @@ use crate::api::models::{
 use crate::components::compliance::{
     BundleCatalog, BundleHeader, EvidenceDrawer, ImportReview, RefinePolicyStep,
     RefinedPolicyDraft, RefinedRuleAction, RefinedStigRule, ScoreStrip, SourceCheck,
-    SourceCheckBodyPart, SourceStigRule, SystemsMatrix, action_to_import, mapping_semantics_for,
+    SourceCheckBodyPart, SourceStigRule, SystemsMatrix, TypedPolicyValue, ComparisonOperator,
+    PolicyAssertionDraft, action_to_import, mapping_semantics_for,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::components::io_menu::{IOMenu, IOMenuItem};
@@ -1580,7 +1581,7 @@ struct StigRule {
     local_description: String,
     implementation_note: String,
     assertion_mode: String,
-    assertions: Vec<ImportedCustomCheckRule>,
+    assertions: Vec<PolicyAssertionDraft>,
     evidence_requirements: Vec<ImportedEvidenceRequirement>,
     mapped_policy_version_id: Option<uuid::Uuid>,
 }
@@ -1622,6 +1623,34 @@ fn source_check_body_parts(check: &serde_json::Value) -> Vec<SourceCheckBodyPart
             },
         )
         .collect()
+}
+
+fn inferred_assertion_from_json(value: &serde_json::Value) -> Option<PolicyAssertionDraft> {
+    let path = value.get("option_path")?.as_str()?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let expected = value.get("expected_value")?;
+    let value_type = expected.get("type")?.as_str()?;
+    let typed_value = match value_type {
+        "boolean" => TypedPolicyValue::Boolean(expected.get("value")?.as_bool()?),
+        "integer" => TypedPolicyValue::Integer(expected.get("value")?.as_i64()?.to_string()),
+        "string_literal" => {
+            TypedPolicyValue::String(expected.get("value")?.as_str()?.to_string())
+        }
+        _ => return None,
+    };
+    Some(PolicyAssertionDraft::NixosOption {
+        path: path.to_string(),
+        operator: ComparisonOperator::Equal,
+        expected_value: typed_value,
+        failure_message: value
+            .get("description")
+            .and_then(|description| description.as_str())
+            .unwrap_or("Inferred from official fix; review before importing.")
+            .to_string(),
+        strict: true,
+    })
 }
 
 fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
@@ -1707,21 +1736,10 @@ fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
 
             // Foreign source remains non-executable. The server may provide
             // conservative structured suggestions from recognized fix literals.
-            let assertions: Vec<ImportedCustomCheckRule> = r
+            let assertions: Vec<PolicyAssertionDraft> = r
                 .inferred_assertions
                 .iter()
-                .filter_map(|a| {
-                    Some(ImportedCustomCheckRule {
-                        field_name: a.get("option_path")?.as_str()?.replace('.', "_"),
-                        expression: a.get("nix_expression")?.as_str()?.to_string(),
-                        description: a
-                            .get("description")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Inferred from official fix; review before importing.")
-                            .to_string(),
-                        strict: true,
-                    })
-                })
+                .filter_map(inferred_assertion_from_json)
                 .collect();
             let default_action = if r.is_native || !assertions.is_empty() {
                 "native"
@@ -1856,7 +1874,12 @@ fn import_action_from_rule(rule: &StigRule) -> XccdfRuleImportAction {
             customization,
             custom_check: ImportedCustomCheck {
                 mode: rule.assertion_mode.clone(),
-                rules: rule.assertions.clone(),
+                rules: rule
+                    .assertions
+                    .iter()
+                    .enumerate()
+                    .map(|(index, assertion)| assertion.to_rule(index + 1))
+                    .collect(),
             },
             evidence_requirements: rule.evidence_requirements.clone(),
         },
@@ -1911,7 +1934,7 @@ fn refined_rules_from_rules(rules: &[StigRule]) -> Vec<RefinedStigRule> {
             implementation_note: rule.implementation_note.clone(),
             action: match rule.action.as_str() { "native" => RefinedRuleAction::Native, "manual" => RefinedRuleAction::Manual, "opaque" => RefinedRuleAction::Opaque, _ => RefinedRuleAction::Unbound },
             assertion_mode: rule.assertion_mode.clone(),
-            assertions: rule.assertions.iter().map(|assertion| crate::components::compliance::refine_policy::PolicyAssertionDraft::CustomExpression { field_name: assertion.field_name.clone(), expression: assertion.expression.clone(), failure_message: assertion.description.clone(), strict: assertion.strict }).collect(),
+            assertions: rule.assertions.clone(),
             evidence_requirements: rule.evidence_requirements.iter().filter_map(|evidence| match evidence { ImportedEvidenceRequirement::Command { command, expected_output } => Some(crate::components::compliance::refine_policy::EvidenceRequirementDraft::Command { command: command.clone(), expected_output: expected_output.clone() }), ImportedEvidenceRequirement::Attestation { description } => Some(crate::components::compliance::refine_policy::EvidenceRequirementDraft::Attestation { description: description.clone() }), _ => None }).collect(),
         },
         selected: rule.selected,
