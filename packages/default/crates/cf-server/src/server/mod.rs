@@ -188,8 +188,109 @@ pub(crate) fn normalize_custom_policy_expression(expression: &str) -> (String, b
         }
     }
 
+    let output = normalize_string_interpolations(&output);
     let changed = output != expression;
     (output, changed)
+}
+
+/// Normalize legacy references inside Nix string interpolations. The main
+/// scanner intentionally treats string bodies as opaque, but `${...}` is an
+/// embedded Nix expression and must be scanned as code. Escaped `\${` remains
+/// literal; indented strings use the same rule for their interpolation body.
+fn normalize_string_interpolations(expression: &str) -> String {
+    let chars: Vec<char> = expression.chars().collect();
+    let mut output = String::with_capacity(expression.len());
+    let mut index = 0;
+    let mut string_kind = None::<bool>; // false = double quoted, true = indented
+    while index < chars.len() {
+        if string_kind.is_none() {
+            if chars[index] == '"' {
+                string_kind = Some(false);
+                output.push(chars[index]);
+                index += 1;
+                continue;
+            }
+            if chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
+                string_kind = Some(true);
+                output.push('\'');
+                output.push('\'');
+                index += 2;
+                continue;
+            }
+            output.push(chars[index]);
+            index += 1;
+            continue;
+        }
+
+        let indented = string_kind == Some(true);
+        if !indented && chars[index] == '\\' {
+            output.push(chars[index]);
+            if let Some(next) = chars.get(index + 1) {
+                output.push(*next);
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if indented && chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
+            output.push('\'');
+            output.push('\'');
+            index += 2;
+            string_kind = None;
+            continue;
+        }
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+            let start = index + 2;
+            if let Some(end) = interpolation_end(&chars, start) {
+                let inner: String = chars[start..end].iter().collect();
+                let (normalized, _) = normalize_custom_policy_expression(&inner);
+                output.push_str("${");
+                output.push_str(&normalized);
+                output.push('}');
+                index = end + 1;
+                continue;
+            }
+        }
+        if !indented && chars[index] == '"' {
+            output.push(chars[index]);
+            index += 1;
+            string_kind = None;
+        } else {
+            output.push(chars[index]);
+            index += 1;
+        }
+    }
+    output
+}
+
+fn interpolation_end(chars: &[char], mut index: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut quote = false;
+    while index < chars.len() {
+        if quote {
+            if chars[index] == '\\' {
+                index += 2;
+                continue;
+            }
+            quote = chars[index] != '"';
+            index += 1;
+            continue;
+        }
+        match chars[index] {
+            '"' => quote = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
 }
 
 #[derive(Clone, Copy)]
@@ -2086,7 +2187,9 @@ mod tests {
             && mycfg.config.not_a_reference
             && ''cfg.config.in_an_indented_string''
             && /* cfg.config.block_comment */ cfg.config.services.audit.enable
-            && ${cfg.config.interpolated}"##;
+            && "${cfg.config.interpolated}"
+            && ''${cfg.config.indented_interpolated}''
+            && "\\${cfg.config.literal_interpolated}""##;
         let (normalized, changed) = normalize_custom_policy_expression(expression);
 
         assert!(changed);
@@ -2097,7 +2200,9 @@ mod tests {
         assert!(normalized.contains("''cfg.config.in_an_indented_string''"));
         assert!(normalized.contains("/* cfg.config.block_comment */"));
         assert!(normalized.contains("config.services.audit.enable"));
-        assert!(normalized.contains("${config.interpolated}"));
+        assert!(normalized.contains("\"${config.interpolated}\""));
+        assert!(normalized.contains("''${config.indented_interpolated}''"));
+        assert!(normalized.contains("\"\\${cfg.config.literal_interpolated}\""));
     }
 
     #[test]

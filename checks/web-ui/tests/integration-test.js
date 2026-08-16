@@ -2412,6 +2412,23 @@ const steps = [
     description: "Dashboard loading spinner remains visible while dashboard data is pending",
     action: async (page) => {
       await routeDashboardLoadingState(page);
+      const auditdXccdf = Buffer.from(`<?xml version="1.0" encoding="utf-8"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.1" id="task-426-auditd-benchmark">
+  <status>accepted</status>
+  <title>TASK-426 auditd fixture</title>
+  <version>V1R1</version>
+  <Group id="V-426001">
+    <title>Audit logging</title>
+    <Rule id="SV-426001r1_rule" severity="high">
+      <title>Enable audit logging</title>
+      <description>The audit daemon must be enabled.</description>
+      <fixtext fixref="F-426001">Configure the following:
+security.auditd.enable = true;
+security.audit.enable = true;</fixtext>
+    </Rule>
+  </Group>
+</Benchmark>`, "utf8");
+
       try {
         await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
         await assertVisible(
@@ -6870,22 +6887,7 @@ const steps = [
         await page.locator('input[type="file"]').setInputFiles({
           name: "task-426-auditd.xml",
           mimeType: "application/xml",
-          buffer: Buffer.from(`<?xml version="1.0" encoding="utf-8"?>
-<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.1" id="task-426-auditd-benchmark">
-  <status>accepted</status>
-  <title>TASK-426 auditd fixture</title>
-  <version>V1R1</version>
-  <Group id="V-426001">
-    <title>Audit logging</title>
-    <Rule id="SV-426001r1_rule" severity="high">
-      <title>Enable audit logging</title>
-      <description>The audit daemon must be enabled.</description>
-      <fixtext fixref="F-426001">Configure the following:
-security.auditd.enable = true;
-security.audit.enable = true;</fixtext>
-    </Rule>
-  </Group>
-</Benchmark>`, "utf8"),
+           buffer: auditdXccdf,
         });
         const previewResponse = await previewResponsePromise;
         const previewBody = await previewResponse.json();
@@ -6928,15 +6930,19 @@ security.audit.enable = true;</fixtext>
         await page.locator('input[type="file"]').setInputFiles({
           name: "task-426-auditd.xml",
           mimeType: "application/xml",
-          buffer: Buffer.from(`<?xml version="1.0" encoding="utf-8"?>
-<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.1" id="task-426-auditd-benchmark">
-  <status>accepted</status><title>TASK-426 auditd fixture</title><version>V1R1</version>
-  <Group id="V-426001"><title>Audit logging</title><Rule id="SV-426001r1_rule" severity="high"><title>Enable audit logging</title><description>The audit daemon must be enabled.</description><fixtext fixref="F-426001">Configure the following:
-security.auditd.enable = true;
-security.audit.enable = true;</fixtext></Rule></Group>
-</Benchmark>`, "utf8"),
+          buffer: Buffer.concat([auditdXccdf, Buffer.from("\n", "utf8")]),
         });
         await resumedPreviewResponsePromise;
+        await page.getByText(/does not match the paused import artifact/i).waitFor({ timeout: 5000 });
+        const matchingPreviewResponsePromise = page.waitForResponse(
+          (response) => response.url().includes("/api/v1/compliance/xccdf/preview") && response.request().method() === "POST",
+        );
+        await page.locator('input[type="file"]').setInputFiles({
+          name: "task-426-auditd.xml",
+          mimeType: "application/xml",
+           buffer: auditdXccdf,
+        });
+        await matchingPreviewResponsePromise;
         await page.getByTestId("xccdf-review-reconcile-button").click();
         await page.getByRole("button", { name: "Refine all instead" }).click();
         const restoredCards = page.locator(".refine-assertion-card");

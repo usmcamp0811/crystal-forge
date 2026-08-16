@@ -1688,7 +1688,8 @@ struct StigImportDraftMetadata {
     original_filename: String,
     expected_sha256: Option<String>,
     bundle_name: String,
-    environments: Vec<String>,
+    #[serde(default)]
+    environment_ids: Vec<uuid::Uuid>,
     refine_cursor: usize,
     selected_rule_ids: Vec<String>,
     refined_rule_ids: Vec<String>,
@@ -1715,18 +1716,43 @@ fn clear_stig_import_draft() {
     }
 }
 
-fn save_stig_import_draft(draft: &StigImportDraftMetadata) {
-    let Ok(raw) = serde_json::to_string(draft) else {
-        return;
-    };
+fn save_stig_import_draft(draft: &StigImportDraftMetadata) -> Result<(), String> {
+    let raw = serde_json::to_string(draft)
+        .map_err(|error| format!("Could not serialize paused STIG import: {error}"))?;
     if raw.len() > MAX_STIG_IMPORT_DRAFT_BYTES {
-        return;
+        return Err(format!(
+            "Paused STIG import is too large to save ({:.1} MiB; limit is 2 MiB).",
+            raw.len() as f64 / (1024.0 * 1024.0)
+        ));
     }
-    if let Some(storage) =
-        web_sys::window().and_then(|window| window.local_storage().ok().flatten())
-    {
-        let _ = storage.set_item(STIG_IMPORT_DRAFT_KEY, &raw);
-    }
+    let storage = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .ok_or_else(|| "Browser local storage is unavailable.".to_string())?;
+    storage
+        .set_item(STIG_IMPORT_DRAFT_KEY, &raw)
+        .map_err(|_| "Browser storage rejected the paused STIG import.".to_string())
+}
+
+fn environment_ids_for_names(
+    environments: &[EnvironmentSummary],
+    selected_names: &[String],
+) -> Vec<uuid::Uuid> {
+    environments
+        .iter()
+        .filter(|environment| selected_names.iter().any(|name| name == &environment.name))
+        .map(|environment| environment.id)
+        .collect()
+}
+
+fn environment_names_for_ids(
+    environments: &[EnvironmentSummary],
+    selected_ids: &[uuid::Uuid],
+) -> Vec<String> {
+    environments
+        .iter()
+        .filter(|environment| selected_ids.contains(&environment.id))
+        .map(|environment| environment.name.clone())
+        .collect()
 }
 
 fn restore_refined_rules(
@@ -2160,9 +2186,11 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
     let mut committing = use_signal(|| false);
     let mut import_error = use_signal(|| None::<String>);
     let mut draft_loaded = use_signal(|| false);
+    let mut draft_save_error = use_signal(|| Option::<String>::None);
 
     let all_env_names: Vec<String> = props.environments.iter().map(|e| e.name.clone()).collect();
 
+    let draft_environments = props.environments.clone();
     use_effect(move || {
         if *draft_loaded.read() {
             return;
@@ -2173,7 +2201,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
         };
         bundle_name.set(draft.bundle_name);
         file_name.set(draft.original_filename);
-        selected_envs.set(draft.environments);
+        selected_envs.set(environment_names_for_ids(&draft_environments, &draft.environment_ids));
         cursor.set(draft.refine_cursor);
         parse_error.set(Some("Paused import found. Re-select the original source file to restore and continue.".to_string()));
     });
@@ -2295,9 +2323,10 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
         .map(|rule| rule.rule_id.clone())
         .collect();
     let fallback_review_rule_ids = refine_all_rule_ids.clone();
-    let save_draft = move || {
+    let save_environments = props.environments.clone();
+    let save_draft = move || -> Result<(), String> {
         if step.read().as_str() == "upload" || step.read().as_str() == "done" {
-            return;
+            return Ok(());
         }
         save_stig_import_draft(&StigImportDraftMetadata {
             version: 1,
@@ -2308,7 +2337,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                 .as_ref()
                 .map(|preview| preview.sha256.clone()),
             bundle_name: bundle_name.read().clone(),
-            environments: selected_envs.read().clone(),
+            environment_ids: environment_ids_for_names(&save_environments, &selected_envs.read()),
             refine_cursor: *cursor.read(),
             selected_rule_ids: rules
                 .read()
@@ -2328,8 +2357,11 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                     .filter(|payload| payload.len() <= MAX_STIG_IMPORT_DRAFT_BYTES)
                     .map(|_| preview.clone())
             }),
-        });
+        })
     };
+    let native_plan_environments = props.environments.clone();
+    let reconcile_plan_environments = props.environments.clone();
+    let final_plan_environments = props.environments.clone();
 
     rsx! {
         div {
@@ -2340,10 +2372,18 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                 style: "width:min(720px,97vw);max-height:92vh;display:flex;flex-direction:column;",
                  onclick: move |e| e.stop_propagation(),
 
-                 if *step.read() != "upload" && *step.read() != "done" {
-                     div { style: "display:flex;justify-content:flex-end;padding:8px 12px 0;gap:10px;",
-                         button { class: "btn btn-ghost xs focus-ring", onclick: move |_| { clear_stig_import_draft(); step.set("upload".to_string()); rules.set(Vec::new()); preview_response.set(None); }, "Discard draft" }
-                         button { class: "btn-icon focus-ring", title: "Pause — your progress is saved", onclick: move |_| { save_draft(); props.on_close.call(()); }, Icon { name: IconName::X, size: 16 } }
+                  if *step.read() != "upload" && *step.read() != "done" {
+                      if let Some(error) = draft_save_error.read().as_ref() {
+                          div { class: "sd-callout sd-callout-danger", style: "margin:8px 12px 0;", Icon { name: IconName::Warn, size: 13 } "{error}" }
+                      }
+                      div { style: "display:flex;justify-content:flex-end;padding:8px 12px 0;gap:10px;",
+                          button { class: "btn btn-ghost xs focus-ring", onclick: move |_| { clear_stig_import_draft(); step.set("upload".to_string()); rules.set(Vec::new()); preview_response.set(None); }, "Discard draft" }
+                          button { class: "btn-icon focus-ring", title: "Pause — your progress is saved", onclick: move |_| {
+                              match save_draft() {
+                                  Ok(()) => props.on_close.call(()),
+                                  Err(error) => draft_save_error.set(Some(error)),
+                              }
+                          }, Icon { name: IconName::X, size: 16 } }
                      }
                  }
 
@@ -2430,7 +2470,9 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                  // Branch on document class
                                                                  let is_cf_native = resp.document_class.as_deref().unwrap_or("") == "cfnativeexact";
 
-                                                                 bundle_name.set(bm_title.clone());
+                                                                  if paused_draft.is_none() || bundle_name.read().trim().is_empty() {
+                                                                      bundle_name.set(bm_title.clone());
+                                                                  }
                                                                  bench_title.set(bm_title);
                                                                  bench_ver.set(bm_ver);
                                                                  file_name.set(fname.clone());
@@ -2488,7 +2530,9 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                           })
                                                                           .collect(),
                                                                   );
-                                                                      selected_envs.set(all_env_names.clone());
+                                                                       if paused_draft.is_none() && selected_envs.read().is_empty() {
+                                                                           selected_envs.set(all_env_names.clone());
+                                                                       }
                                                                       if let Some(draft) = paused_draft.as_ref() {
                                                                           refine_rule_ids.set(draft.refined_rule_ids.clone());
                                                                           step.set(match draft.step.as_str() {
@@ -2583,9 +2627,10 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 }
                                 button {
                                     class: "btn btn-primary focus-ring",
-                                    disabled: recon.has_blocking_conflicts,
-                                    onclick: move |_| {
-                                        let mut step = step;
+                                     disabled: recon.has_blocking_conflicts,
+                                     onclick: move |_| {
+                                         let plan_environments = native_plan_environments.clone();
+                                         let mut step = step;
                                         let mut committing = committing;
                                         let mut file_bytes = file_bytes;
                                         let mut preview_response = preview_response;
@@ -2608,6 +2653,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                         layer: None,
                                                         owner: None,
                                                         description: None,
+                                                        environment_ids: environment_ids_for_names(&plan_environments, &selected_envs.read()),
                                                     },
                                                 };
                                                 match import_xccdf(&file_bytes.read(), "import.xccdf", &plan).await {
@@ -2857,8 +2903,9 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 class: "btn btn-ghost focus-ring",
                                 disabled: !can_advance || *committing.read(),
                                 style: if !can_advance || *committing.read() { "opacity:0.5;cursor:not-allowed;" } else { "" },
-                                onclick: move |_| {
-                                    if !can_advance || *committing.read() { return; }
+                                 onclick: move |_| {
+                                     if !can_advance || *committing.read() { return; }
+                                     let plan_environments = reconcile_plan_environments.clone();
                                     let selected_rule_ids: Vec<String> = rules
                                         .read()
                                         .iter()
@@ -2901,10 +2948,11 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         bundle: ImportedBundlePlan {
                                             name: bundle_name.read().trim().to_string(),
                                             framework: "xccdf".to_string(),
-                                            version: bench_ver.read().clone(),
-                                            layer: None,
-                                            owner: None,
-                                            description: None,
+                                             version: bench_ver.read().clone(),
+                                             layer: None,
+                                             owner: None,
+                                             description: None,
+                                             environment_ids: environment_ids_for_names(&plan_environments, &selected_envs.read()),
                                         },
                                     };
                                     let bytes = file_bytes.read().clone();
@@ -3101,8 +3149,9 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                     ImportReview {
                         rules: refined_rules,
                         on_back: move |_| step.set("refine".to_string()),
-                        on_confirm: move |_| {
-                                if *committing.read() { return; }
+                         on_confirm: move |_| {
+                                 let plan_environments = final_plan_environments.clone();
+                                 if *committing.read() { return; }
                                 let selected_rule_ids = refined_rules.read().iter().filter(|rule| rule.selected).map(|rule| rule.source.rule_id.clone()).collect::<Vec<_>>();
                                 let rule_actions = refined_rules.read().iter().filter(|rule| rule.selected).map(action_to_import).collect::<Vec<_>>();
                                  let plan = XccdfImportPlan {
@@ -3127,7 +3176,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                              })
                                          })
                                          .collect(),
-                                    bundle: ImportedBundlePlan { name: bundle_name.read().trim().to_string(), framework: "xccdf".into(), version: bench_ver.read().clone(), layer: None, owner: None, description: None },
+                                     bundle: ImportedBundlePlan { name: bundle_name.read().trim().to_string(), framework: "xccdf".into(), version: bench_ver.read().clone(), layer: None, owner: None, description: None, environment_ids: environment_ids_for_names(&plan_environments, &selected_envs.read()) },
                                 };
                                 let bytes = file_bytes.read().clone();
                                 let filename = file_name.read().clone();

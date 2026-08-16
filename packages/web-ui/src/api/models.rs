@@ -1823,6 +1823,8 @@ pub struct ImportedBundlePlan {
     pub layer: Option<String>,
     pub owner: Option<String>,
     pub description: Option<String>,
+    #[serde(default)]
+    pub environment_ids: Vec<Uuid>,
 }
 
 /// Import plan submitted to `POST /api/v1/compliance/xccdf/import`.

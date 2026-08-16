@@ -857,33 +857,59 @@ async fn list_bundle_summary_aggregates(
         );
     }
 
-    let mut aggregates = std::collections::HashMap::new();
+    let mut evidence_work = Vec::new();
+    let mut unresolved_by_pair =
+        std::collections::HashMap::<(Uuid, Uuid), Vec<ComplianceSystemRollup>>::new();
     for (bundle_id, version_id) in pairs {
         let Some(systems) = systems_by_pair.get(&(bundle_id, version_id)) else {
-            aggregates.insert(bundle_id, (0, None));
+            unresolved_by_pair.insert((bundle_id, version_id), Vec::new());
             continue;
         };
         let effective = effective_by_version
             .get(&version_id)
             .context("missing batch policy resolution for bundle summary")?;
-        let mut rollups = Vec::with_capacity(systems.len());
         for system in systems {
             let rollup = match effective.get(&system.id) {
                 Some(ResolutionOutcome::Resolved(set)) if set.bundle_version_id == version_id => {
-                    effective_policy_rollup_with_evidence(pool, system, &set.policies).await?
+                    evidence_work.push((
+                        (bundle_id, version_id),
+                        system.clone(),
+                        set.policies.clone(),
+                    ));
+                    None
                 }
-                Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup(
+                Some(ResolutionOutcome::Conflict(conflicts)) => Some(unresolved_system_rollup(
                     system.clone(),
                     0,
                     conflicts
                         .first()
                         .map(|conflict| conflict.code.as_str())
                         .unwrap_or("conflict"),
-                ),
-                _ => unresolved_system_rollup(system.clone(), 0, "not_applicable"),
+                )),
+                _ => Some(unresolved_system_rollup(
+                    system.clone(),
+                    0,
+                    "not_applicable",
+                )),
             };
-            rollups.push(rollup);
+            if let Some(rollup) = rollup {
+                unresolved_by_pair
+                    .entry((bundle_id, version_id))
+                    .or_default()
+                    .push(rollup);
+            }
         }
+    }
+
+    let batched_rollups =
+        effective_policy_rollups_with_evidence_batch(pool, &evidence_work).await?;
+    let mut rollups_by_pair = unresolved_by_pair;
+    for (pair, rollup) in batched_rollups {
+        rollups_by_pair.entry(pair).or_default().push(rollup);
+    }
+
+    let mut aggregates = std::collections::HashMap::new();
+    for ((bundle_id, version_id), rollups) in rollups_by_pair {
         let totals = totals_for_rollups(&rollups);
         aggregates.insert(
             bundle_id,
@@ -2558,6 +2584,168 @@ pub(crate) async fn effective_policy_rollup_with_evidence(
         statuses.push(resolve_control_evidence(pool, system, policy).await?.status);
     }
     Ok(rollup_from_statuses(system.clone(), &statuses, report_only))
+}
+
+/// Batch the evidence inputs needed by catalog aggregates. The detail path is
+/// intentionally unchanged, while this path loads policy metadata, deployed
+/// assessment contexts, and latest completed CVE scans once for the complete
+/// set of `(bundle version, system)` work.
+async fn effective_policy_rollups_with_evidence_batch(
+    pool: &PgPool,
+    work: &[(
+        (Uuid, Uuid),
+        SystemRow,
+        Vec<crate::compliance::resolver::EffectivePolicy>,
+    )],
+) -> Result<Vec<((Uuid, Uuid), ComplianceSystemRollup)>> {
+    if work.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let effective_policies: Vec<_> = work
+        .iter()
+        .flat_map(|(_, _, policies)| policies.iter().cloned())
+        .collect();
+    let materialized = materialize_effective_policies(pool, &effective_policies).await?;
+    let policies_by_version = materialized
+        .into_iter()
+        .zip(
+            effective_policies
+                .iter()
+                .map(|policy| policy.policy_version_id),
+        )
+        .map(|(policy, version_id)| (version_id, policy))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    let system_ids: Vec<Uuid> = work
+        .iter()
+        .map(|(_, system, _)| system.id)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let context_rows: Vec<(Uuid, i32, Value)> = sqlx::query_as(
+        r#"
+        SELECT s.id, d.id AS derivation_id, d.policy_results
+        FROM systems s
+        JOIN LATERAL (
+            SELECT ss.derivation_path
+            FROM system_states ss
+            WHERE ss.hostname = s.hostname
+            ORDER BY ss.timestamp DESC, ss.id DESC
+            LIMIT 1
+        ) deployed ON true
+        JOIN derivations d ON d.derivation_path = deployed.derivation_path
+        WHERE s.id = ANY($1)
+          AND d.derivation_type = 'nixos'
+        ORDER BY s.id, d.completed_at DESC NULLS LAST, d.id DESC
+        "#,
+    )
+    .bind(&system_ids)
+    .fetch_all(pool)
+    .await?;
+    let contexts = context_rows.into_iter().fold(
+        std::collections::HashMap::<Uuid, AssessmentContext>::new(),
+        |mut contexts, (system_id, derivation_id, policy_results)| {
+            contexts.entry(system_id).or_insert(AssessmentContext {
+                derivation_id,
+                policy_results,
+            });
+            contexts
+        },
+    );
+    let derivation_ids: Vec<i32> = contexts
+        .values()
+        .map(|context| context.derivation_id)
+        .collect();
+    let scans: std::collections::HashMap<i32, (Uuid, i32, i32)> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT ON (derivation_id) id, derivation_id, critical_count, high_count
+        FROM cve_scans
+        WHERE derivation_id = ANY($1) AND status = 'completed'
+        ORDER BY derivation_id, completed_at DESC NULLS LAST, id DESC
+        "#,
+    )
+    .bind(&derivation_ids)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|(id, derivation_id, critical, high)| (derivation_id, (id, critical, high)))
+    .collect();
+
+    let mut result = Vec::with_capacity(work.len());
+    for (pair, system, policies) in work {
+        let context = contexts.get(&system.id);
+        let mut statuses = Vec::with_capacity(policies.len());
+        let report_only = policies
+            .iter()
+            .filter(|policy| {
+                matches!(
+                    policy.effective_mode,
+                    crate::compliance::resolver::AssignmentMode::ReportOnly
+                )
+            })
+            .count() as i64;
+        for effective in policies {
+            let policy = policies_by_version
+                .get(&effective.policy_version_id)
+                .context("missing materialized effective policy in batch evidence")?;
+            statuses.push(batch_evidence_status(
+                policy,
+                context,
+                context.and_then(|context| scans.get(&context.derivation_id)),
+            ));
+        }
+        result.push((
+            *pair,
+            rollup_from_statuses(system.clone(), &statuses, report_only),
+        ));
+    }
+    Ok(result)
+}
+
+fn batch_evidence_status(
+    policy: &PolicyRow,
+    context: Option<&AssessmentContext>,
+    scan: Option<&(Uuid, i32, i32)>,
+) -> ComplianceControlStatus {
+    if !policy.enabled {
+        return ComplianceControlStatus::NotChecked;
+    }
+    match policy.policy_type.as_str() {
+        "require_cf_agent" | "require_packages" | "custom_check" => context
+            .and_then(|context| {
+                nix_policy_result(&context.policy_results, policy.id)
+                    .ok()
+                    .flatten()
+            })
+            .map(|(passed, _)| {
+                if passed {
+                    ComplianceControlStatus::Pass
+                } else {
+                    ComplianceControlStatus::Fail
+                }
+            })
+            .unwrap_or(ComplianceControlStatus::NotChecked),
+        "require_cve_check" => {
+            let Some((_, critical_count, high_count)) = scan else {
+                return ComplianceControlStatus::NotChecked;
+            };
+            let max_critical = policy
+                .config
+                .get("max_critical")
+                .and_then(Value::as_i64)
+                .unwrap_or(i64::MAX);
+            let max_high = policy.config.get("max_high").and_then(Value::as_i64);
+            if i64::from(*critical_count) > max_critical
+                || max_high.is_some_and(|max| i64::from(*high_count) > max)
+            {
+                ComplianceControlStatus::Fail
+            } else {
+                ComplianceControlStatus::Pass
+            }
+        }
+        _ => ComplianceControlStatus::NotChecked,
+    }
 }
 
 /// Materialize an assignment resolver output for evidence. `PolicyRow::id` is

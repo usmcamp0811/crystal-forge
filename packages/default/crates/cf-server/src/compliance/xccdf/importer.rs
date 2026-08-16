@@ -283,6 +283,7 @@ pub fn validate_cf_native_document(
             layer: Some(bundle_canonical.layer),
             owner: Some(bundle_canonical.owner),
             description: bundle_canonical.description,
+            environment_ids: Vec::new(),
         },
         is_disa_stig: false,
         rules_to_import: rules,
@@ -741,6 +742,7 @@ mod tests {
                 layer: None,
                 owner: None,
                 description: None,
+                environment_ids: Vec::new(),
             },
         }
     }
@@ -1229,6 +1231,7 @@ mod tests {
                 layer: None,
                 owner: None,
                 description: None,
+                environment_ids: Vec::new(),
             },
         };
         let validated = validate_import_plan(plan, &parsed).unwrap();

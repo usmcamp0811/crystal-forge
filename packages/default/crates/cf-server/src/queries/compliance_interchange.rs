@@ -26,7 +26,7 @@
 //! Any failure rolls back every write in this list.
 //! Shared policy creation ensures exactly one policy lineage/version per group.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -581,6 +581,17 @@ pub async fn commit_foreign_import(
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
 
+    let environment_ids = &validated.bundle.environment_ids;
+    let valid_environment_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM environments WHERE id = ANY($1::uuid[])")
+            .bind(environment_ids)
+            .fetch_one(&mut *tx)
+            .await
+            .context("failed to validate imported bundle environments")?;
+    if valid_environment_count != environment_ids.len() as i64 {
+        bail!("import plan references one or more unknown environments");
+    }
+
     let bundle_id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO compliance_bundles (name, framework, version, description, layer, owner)
@@ -597,6 +608,17 @@ pub async fn commit_foreign_import(
     .fetch_one(&mut *tx)
     .await
     .context("failed to insert bundle lineage")?;
+
+    for environment_id in environment_ids {
+        sqlx::query(
+            "INSERT INTO compliance_bundle_environments (bundle_id, environment_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(bundle_id)
+        .bind(environment_id)
+        .execute(&mut *tx)
+        .await
+        .context("failed to persist imported bundle environment")?;
+    }
 
     // The INSERT above fires a trigger that creates the initial draft bundle
     // version and sets current_draft_version_id. We load that pointer now.
@@ -2249,6 +2271,7 @@ mod tests {
                 layer: Some("os".into()),
                 owner: Some("Security Team".into()),
                 description: Some("Imported from test fixture".into()),
+                environment_ids: Vec::new(),
             },
         };
 
@@ -3214,6 +3237,7 @@ mod tests {
                 layer: Some("os".to_string()),
                 owner: Some("Security Team".to_string()),
                 description: None,
+                environment_ids: Vec::new(),
             },
         };
         let mut validated =
@@ -3292,6 +3316,7 @@ mod tests {
                 layer: Some("os".to_string()),
                 owner: Some("Security Team".to_string()),
                 description: None,
+                environment_ids: Vec::new(),
             },
         };
         let mut validated =
@@ -3340,6 +3365,7 @@ mod tests {
                 layer: Some("os".into()),
                 owner: Some("Security Team".into()),
                 description: None,
+                environment_ids: Vec::new(),
             },
         };
         let validated = validate_import_plan(plan, &pkg.parsed).expect("valid MapExisting plan");
@@ -4240,6 +4266,7 @@ mod tests {
                 layer: None,
                 owner: None,
                 description: None,
+                environment_ids: Vec::new(),
             },
         };
 
@@ -5328,6 +5355,7 @@ mod tests {
                 layer: Some("os".into()),
                 owner: Some("Security Team".into()),
                 description: None,
+                environment_ids: Vec::new(),
             },
         };
         let validated = validate_import_plan(plan, &pkg.parsed).expect("valid exact match plan");
