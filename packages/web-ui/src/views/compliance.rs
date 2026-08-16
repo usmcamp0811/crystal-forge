@@ -73,6 +73,8 @@ pub fn ComplianceView() -> Element {
     let mut policies = use_signal(Vec::<DeploymentPolicySummary>::new);
     // Requirement coverage for the selected bundle version.
     let mut coverage_report: Signal<Option<BundleCoverageReport>> = use_signal(|| None);
+    let mut coverage_error = use_signal(|| None::<String>);
+    let mut coverage_loading = use_signal(|| false);
     let mut coverage_expanded = use_signal(|| false);
     let mut coverage_view = use_signal(|| false);
     let mut revisions_open = use_signal(|| false);
@@ -250,22 +252,35 @@ pub fn ComplianceView() -> Element {
     use_effect(move || {
         let Some(version_id) = *selected_bundle_version_id.read() else {
             coverage_report.set(None);
+            coverage_error.set(None);
+            coverage_loading.set(false);
             return;
         };
         if coverage_report
-            .read()
+            .peek()
             .as_ref()
             .is_some_and(|report| report.bundle_version_id == version_id)
         {
             return;
         }
-        let generation = *coverage_gen.read() + 1;
+        let generation = *coverage_gen.peek() + 1;
         coverage_gen.set(generation);
         coverage_report.set(None);
+        coverage_error.set(None);
+        coverage_loading.set(true);
         spawn(async move {
-            if let Ok(report) = fetch_bundle_requirement_coverage(&version_id).await {
-                if *coverage_gen.read() == generation {
-                    coverage_report.set(Some(report));
+            match fetch_bundle_requirement_coverage(&version_id).await {
+                Ok(report) => {
+                    if *coverage_gen.peek() == generation {
+                        coverage_report.set(Some(report));
+                        coverage_loading.set(false);
+                    }
+                }
+                Err(error) => {
+                    if *coverage_gen.peek() == generation {
+                        coverage_error.set(Some(error.to_string()));
+                        coverage_loading.set(false);
+                    }
                 }
             }
         });
@@ -512,10 +527,14 @@ pub fn ComplianceView() -> Element {
                                     button { class: "btn-icon focus-ring", onclick: move |_| coverage_view.set(false), Icon { name: IconName::ArrowLeft, size: 16 } }
                                     h2 { style: "font-size:15px;margin:8px 0 2px;", "Requirement coverage" }
                                     div { style: "font-size:11px;color:var(--cf-text-muted);margin-bottom:12px;", "{bundle.name}" }
-                                    if let Some(report) = coverage_report.read().clone() {
+                                    if *coverage_loading.read() {
+                                        DashboardLoadingSpinner { label: "Loading requirement coverage…".to_string() }
+                                    } else if let Some(error) = coverage_error.read().as_ref() {
+                                        div { class: "sd-callout sd-callout-danger", Icon { name: IconName::X, size: 13 }, div { "Failed to load requirement coverage: {error}" } }
+                                    } else if let Some(report) = coverage_report.read().clone() {
                                         RequirementCoverageCard { report, expanded: coverage_expanded, on_open: move |_| {}, on_open_policy }
                                     } else {
-                                        DashboardLoadingSpinner { label: "Loading requirement coverage…".to_string() }
+                                        div { class: "q-empty", "No requirement coverage is available for this revision." }
                                     }
                                 }
                             } else {

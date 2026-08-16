@@ -8267,6 +8267,7 @@ const steps = [
       const envId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
       const policyId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
       const bundleVersionId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+      let coverageRequests = 0;
 
       const bundle = {
         id: bundleId,
@@ -8353,6 +8354,7 @@ const steps = [
       });
 
       await page.route(`**/api/v1/compliance/bundle-versions/${bundleVersionId}/requirement-coverage`, async (route) => {
+        coverageRequests += 1;
         await route.fulfill({
           status: 200,
           contentType: "application/json",
@@ -8373,6 +8375,7 @@ const steps = [
 
       await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
+      if (coverageRequests !== 1) throw new Error(`Expected exactly one initial coverage request, got ${coverageRequests}`);
 
       // Page head
       await assertVisible(

@@ -95,9 +95,20 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                         let id = bundle.id;
                         let selected = props.selected_id == Some(id);
                         let framework = bundle.framework.clone();
-                        let version = bundle.version.clone();
-                        let name = bundle.name.clone();
                         let revisions = bundle.versions.clone();
+                        let summary_version_id = bundle
+                            .current_published_version_id
+                            .or(bundle.current_draft_version_id);
+                        let summary_revision = summary_version_id.and_then(|version_id| {
+                            revisions.iter().find(|revision| revision.id == version_id)
+                        });
+                        let version = summary_revision
+                            .map(|revision| revision.version.clone())
+                            .unwrap_or_else(|| bundle.version.clone());
+                        let publication_state = summary_revision
+                            .map(|revision| revision.publication_state.clone())
+                            .unwrap_or_else(|| "draft".to_string());
+                        let name = bundle.name.clone();
                         let score = bundle.aggregate_score;
                         let score_color = score.map_or("var(--cf-text-muted)", |score| if score >= 90 { "#34d399" } else if score >= 70 { "#fbbf24" } else { "#f87171" });
                         let score_label = score.map_or_else(|| "—".to_string(), |score| format!("{score}%"));
@@ -115,7 +126,7 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                                     }
                                 }
                                 td { span { class: "chip chip-info", "{framework}" } }
-                                td { div { class: "mono", style: "font-size:12px;", "{version}" } div { style: "margin-top:3px;", span { class: "chip", style: "font-size:9px;padding:1px 6px;", "{revisions.first().map(|v| v.publication_state.as_str()).unwrap_or(\"draft\")}" } } }
+                                 td { div { class: "mono", style: "font-size:12px;", "{version}" } div { style: "margin-top:3px;", span { class: "chip", style: "font-size:9px;padding:1px 6px;", "{publication_state}" } } }
                                 td { span { class: "mono", style: "font-size:13px;font-weight:600;color:{score_color};", "{score_label}" } div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{system_count_label}" } }
                                 td { style: "text-align:right;", div { class: "row-actions", style: "opacity:1;justify-content:flex-end;", button { class: "btn-icon focus-ring", title: "View bundle", onclick: move |event| { event.stop_propagation(); props.on_select.call(id); }, Icon { name: IconName::ArrowRight, size: 14 } } } }
                             }
