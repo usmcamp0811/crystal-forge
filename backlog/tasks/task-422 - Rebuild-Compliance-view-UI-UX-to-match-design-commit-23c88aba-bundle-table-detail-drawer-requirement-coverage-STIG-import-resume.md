@@ -7,7 +7,7 @@ status: Review
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-16 17:46'
+updated_date: '2026-08-16 18:28'
 labels: []
 milestone: m-22
 dependencies:
@@ -182,5 +182,10 @@ author: OpenAI
 created: 2026-08-16 15:25
 ---
 MR !316 is blocked by TASK-423 and TASK-424. Backend review found two coupled assignment-model defects: draft-only assignment history permanently blocks deletion, and current-published applicability treats empty legacy environment membership as fleet-wide. Fixes are being implemented together in /home/mcamp/code/crystal-forge/TASK-423-424-compliance-assignment-corrections before merge.
+---
+
+created: 2026-08-16 18:28
+---
+Continued remediation verification in /home/mcamp/code/crystal-forge/TASK-422-compliance-view-redesign. `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all --check`, `node --check checks/web-ui/tests/integration-test.js`, `git diff --check`, `nix build .#server --no-link -L`, and `nix build .#web-ui -L` completed successfully (only Nix deprecation warnings). The latest remediation changes remain uncommitted in the task worktree. The focused NixOS browser check still has no confirmed result after the previous timeout, and `list_bundle_summary_aggregates` still calls the detailed exact-version systems path once per bundle, so the required no-per-bundle-query batching criterion remains unresolved.
 ---
 <!-- COMMENTS:END -->
