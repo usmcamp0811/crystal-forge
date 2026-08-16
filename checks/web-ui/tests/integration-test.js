@@ -8266,6 +8266,7 @@ const steps = [
       const systemId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
       const envId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
       const policyId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+      const bundleVersionId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 
       const bundle = {
         id: bundleId,
@@ -8284,6 +8285,24 @@ const steps = [
         applicable_system_count: 1,
         aggregate_score: 100,
         environment_count: 1,
+        current_published_version_id: bundleVersionId,
+        current_published_version: "rev5",
+        versions: [{
+          id: bundleVersionId,
+          bundle_id: bundleId,
+          version: "rev5",
+          publication_state: "accepted",
+          trust_state: "trusted",
+          semantic_digest: "fixture-digest",
+          created_at: new Date().toISOString(),
+          published_at: new Date().toISOString(),
+          derived_from_version_id: null,
+          policy_count: 1,
+          requirement_count: 1,
+          control_count: 1,
+          is_current_published: true,
+          is_current_draft: false,
+        }],
       };
 
       await page.route("**/api/v1/compliance/bundles*", async (route) => {
@@ -8303,7 +8322,8 @@ const steps = [
           status: 200,
           contentType: "application/json",
           body: JSON.stringify({
-            bundle_id: bundleId,
+                bundle_id: bundleId,
+                bundle_version_id: bundleVersionId,
             systems: [
               {
                 system_id: systemId,
@@ -8328,6 +8348,25 @@ const steps = [
               total_controls: 1,
               overall_score: 100,
             },
+          }),
+        });
+      });
+
+      await page.route(`**/api/v1/compliance/bundle-versions/${bundleVersionId}/requirement-coverage`, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            bundle_version_id: bundleVersionId,
+            total_requirements: 10,
+            full: 6,
+            partial: 2,
+            unmapped: 2,
+            rows: [
+              ...Array.from({ length: 6 }, (_, i) => ({ requirement_version_id: `f${i}`, external_id: `AC-${i + 1}`, title: `Full requirement ${i + 1}`, kind: "control", parent_requirement_version_id: null, coverage: "full", mapped_policy_version_ids: [], mappings: [] })),
+              ...Array.from({ length: 2 }, (_, i) => ({ requirement_version_id: `p${i}`, external_id: `AU-${i + 1}`, title: `Partial requirement ${i + 1}`, kind: "control", parent_requirement_version_id: null, coverage: "partial", mapped_policy_version_ids: [], mappings: [] })),
+              ...Array.from({ length: 2 }, (_, i) => ({ requirement_version_id: `u${i}`, external_id: `CM-${i + 1}`, title: `Unmapped requirement ${i + 1}`, kind: "control", parent_requirement_version_id: null, coverage: "unmapped", mapped_policy_version_ids: [], mappings: [] })),
+            ],
           }),
         });
       });
@@ -8388,8 +8427,16 @@ const steps = [
         "Expected 'View evidence' action in systems matrix",
       );
 
+      await page.getByRole("button", { name: /Open coverage/i }).first().click();
+      await assertVisible(page.getByText("Requirement coverage").first(), "Expected requirement coverage drawer view");
+      await assertVisible(page.getByText("Full 6").first(), "Expected full coverage count from API");
+      await assertVisible(page.getByText("Partial 2").first(), "Expected partial coverage count from API");
+      await assertVisible(page.getByText("Unmapped 2").first(), "Expected unmapped coverage count from API");
+      await assertVisible(page.getByText("10 total").first(), "Expected coverage rows to partition the API total");
+
       await page.unroute("**/api/v1/compliance/bundles*");
       await page.unroute(`**/api/v1/compliance/bundles/${bundleId}/systems*`);
+      await page.unroute(`**/api/v1/compliance/bundle-versions/${bundleVersionId}/requirement-coverage`);
     },
   },
   {
