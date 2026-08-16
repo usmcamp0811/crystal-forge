@@ -2686,11 +2686,16 @@ async fn effective_policy_rollups_with_evidence_batch(
             })
             .count() as i64;
         for effective in policies {
-            let policy = policies_by_version
+            let mut policy = policies_by_version
                 .get(&effective.policy_version_id)
-                .context("missing materialized effective policy in batch evidence")?;
+                .context("missing materialized effective policy in batch evidence")?
+                .clone();
+            // Policy metadata is immutable and may be shared by many systems,
+            // but effective_config is runtime state after assignment overlays.
+            // Never let one system's override overwrite another's evaluation.
+            policy.config = effective.effective_config.clone();
             statuses.push(batch_evidence_status(
-                policy,
+                &policy,
                 context,
                 context.and_then(|context| scans.get(&context.derivation_id)),
             ));
@@ -2712,20 +2717,17 @@ fn batch_evidence_status(
         return ComplianceControlStatus::NotChecked;
     }
     match policy.policy_type.as_str() {
-        "require_cf_agent" | "require_packages" | "custom_check" => context
-            .and_then(|context| {
-                nix_policy_result(&context.policy_results, policy.id)
-                    .ok()
-                    .flatten()
-            })
-            .map(|(passed, _)| {
-                if passed {
-                    ComplianceControlStatus::Pass
-                } else {
-                    ComplianceControlStatus::Fail
-                }
-            })
-            .unwrap_or(ComplianceControlStatus::NotChecked),
+        "require_cf_agent" | "require_packages" | "custom_check" => {
+            let Some(context) = context else {
+                return ComplianceControlStatus::NotChecked;
+            };
+            match nix_policy_result(&context.policy_results, policy.id) {
+                Ok(None) => ComplianceControlStatus::NotChecked,
+                Ok(Some((true, _))) => ComplianceControlStatus::Pass,
+                Ok(Some((false, _))) => ComplianceControlStatus::Fail,
+                Err(_) => ComplianceControlStatus::Error,
+            }
+        }
         "require_cve_check" => {
             let Some((_, critical_count, high_count)) = scan else {
                 return ComplianceControlStatus::NotChecked;

@@ -2412,23 +2412,6 @@ const steps = [
     description: "Dashboard loading spinner remains visible while dashboard data is pending",
     action: async (page) => {
       await routeDashboardLoadingState(page);
-      const auditdXccdf = Buffer.from(`<?xml version="1.0" encoding="utf-8"?>
-<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.1" id="task-426-auditd-benchmark">
-  <status>accepted</status>
-  <title>TASK-426 auditd fixture</title>
-  <version>V1R1</version>
-  <Group id="V-426001">
-    <title>Audit logging</title>
-    <Rule id="SV-426001r1_rule" severity="high">
-      <title>Enable audit logging</title>
-      <description>The audit daemon must be enabled.</description>
-      <fixtext fixref="F-426001">Configure the following:
-security.auditd.enable = true;
-security.audit.enable = true;</fixtext>
-    </Rule>
-  </Group>
-</Benchmark>`, "utf8");
-
       try {
         await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
         await assertVisible(
@@ -6808,62 +6791,25 @@ security.audit.enable = true;</fixtext>
     },
   },
   {
-    name: "20ad-stig-nixos-assertion-roundtrip",
-    description: "STIG auditd assertions remain structured through refinement and import serialization",
-    action: async (page) => {
-      const preview = {
-        sha256: "fixture-task-426-auditd-sha256",
-        filename: "task-426-auditd.xml",
-        document_class: "foreign_xccdf",
-        fidelity: "lossless",
-        fidelity_losses: [],
-        xccdf_version: "1.2",
-        benchmark: {
-          id: "task-426-auditd-benchmark",
-          title: "TASK-426 auditd fixture",
-          description: "Focused structured assertion fixture",
-          version: "V1R1",
-          status: "accepted",
-          platforms: ["nixos"],
-        },
-        profiles: [],
-        rules: [
-          {
-            id: "task-426-auditd-rule",
-            title: "Enable audit logging",
-            description: "The audit daemon must be enabled.",
-            severity: "high",
-            is_native: false,
-            version: "V-426001",
-            group_id: "task-426-auditd-group",
-            platforms: ["nixos"],
-            identifiers: [],
-            checks: [],
-            fix: { content: "Configure audit logging." },
-            inferred_assertions: [
-              {
-                option_path: "security.auditd.enable",
-                expected_value: { type: "boolean", value: true },
-                nix_expression: "config.security.auditd.enable == true",
-                description: "auditd must be enabled",
-              },
-              {
-                option_path: "security.audit.enable",
-                expected_value: { type: "boolean", value: true },
-                nix_expression: "config.security.audit.enable == true",
-                description: "audit must be enabled",
-              },
-            ],
-            references: [],
-            has_opaque_xml: false,
-          },
-        ],
-        rule_count: 1,
-        profile_count: 0,
-        errors: [],
-        warnings: [],
-        foreign_stig_reconciliation: null,
-      };
+     name: "20ad-stig-nixos-assertion-roundtrip",
+     description: "STIG auditd assertions remain structured through refinement and import serialization",
+     action: async (page) => {
+       const auditdXccdf = Buffer.from(`<?xml version="1.0" encoding="utf-8"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.1" id="task-426-auditd-benchmark">
+  <status>accepted</status>
+  <title>TASK-426 auditd fixture</title>
+  <version>V1R1</version>
+  <Group id="V-426001">
+    <title>Audit logging</title>
+    <Rule id="SV-426001r1_rule" severity="high">
+      <title>Enable audit logging</title>
+      <description>The audit daemon must be enabled.</description>
+      <fixtext fixref="F-426001">Configure the following:
+security.auditd.enable = true;
+security.audit.enable = true;</fixtext>
+    </Rule>
+  </Group>
+</Benchmark>`, "utf8");
 
       let importCallCount = 0;
       let importPlan = null;

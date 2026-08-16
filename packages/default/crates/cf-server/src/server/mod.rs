@@ -157,6 +157,15 @@ pub(crate) fn normalize_custom_policy_expression(expression: &str) -> (String, b
             }
             LexicalState::IndentedString => {
                 if chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
+                    if chars
+                        .get(index + 2)
+                        .is_some_and(|next| matches!(next, '$' | '\\' | '\''))
+                    {
+                        output.push('\'');
+                        output.push('\'');
+                        index += 2;
+                        continue;
+                    }
                     output.push('\'');
                     output.push('\'');
                     index += 2;
@@ -234,6 +243,19 @@ fn normalize_string_interpolations(expression: &str) -> String {
             continue;
         }
         if indented && chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
+            if chars
+                .get(index + 2)
+                .is_some_and(|next| matches!(next, '$' | '\\' | '\''))
+            {
+                output.push('\'');
+                output.push('\'');
+                index += 2;
+                if let Some(escaped) = chars.get(index) {
+                    output.push(*escaped);
+                    index += 1;
+                }
+                continue;
+            }
             output.push('\'');
             output.push('\'');
             index += 2;
@@ -2189,7 +2211,7 @@ mod tests {
             && /* cfg.config.block_comment */ cfg.config.services.audit.enable
             && "${cfg.config.interpolated}"
             && ''${cfg.config.indented_interpolated}''
-            && "\\${cfg.config.literal_interpolated}""##;
+            && "\${cfg.config.literal_interpolated}""##;
         let (normalized, changed) = normalize_custom_policy_expression(expression);
 
         assert!(changed);
@@ -2202,7 +2224,24 @@ mod tests {
         assert!(normalized.contains("config.services.audit.enable"));
         assert!(normalized.contains("\"${config.interpolated}\""));
         assert!(normalized.contains("''${config.indented_interpolated}''"));
-        assert!(normalized.contains("\"\\${cfg.config.literal_interpolated}\""));
+        assert!(
+            normalized.contains("\"\\${cfg.config.literal_interpolated}\""),
+            "normalized={normalized:?}"
+        );
+    }
+
+    #[test]
+    fn normalize_custom_policy_expression_respects_indented_string_escapes() {
+        let expression = "''\n  ${cfg.config.real}\n  echo ''${cfg.config.literal}\n  echo '''cfg.config.literal_quotes\n''";
+        let (normalized, changed) = normalize_custom_policy_expression(expression);
+
+        assert!(changed);
+        assert!(normalized.contains("${config.real}"));
+        assert!(
+            normalized.contains("''${cfg.config.literal}"),
+            "normalized={normalized:?}"
+        );
+        assert!(normalized.contains("'''cfg.config.literal_quotes"));
     }
 
     #[test]

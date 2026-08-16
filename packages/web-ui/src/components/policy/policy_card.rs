@@ -3,9 +3,10 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
+use crate::components::{Icon, IconName};
 use super::types::{
     PolicyDefinition, is_core_policy, is_policy_enabled, is_policy_version_editable,
-    policy_rule_summaries,
+    policy_category, policy_rule_summaries,
 };
 
 /// Card component for displaying a policy definition with design-parity rule summaries.
@@ -25,6 +26,16 @@ pub fn PolicyCard(
     let is_core = is_core_policy(&policy);
     let enabled = is_policy_enabled(&policy);
     let is_editable = is_policy_version_editable(&policy);
+    let category = policy_category(&policy);
+    let rail_color = if enabled { category.color() } else { "#6b7280" };
+    let severity_label = policy.severity.as_deref().and_then(|severity| {
+        match severity.to_ascii_lowercase().as_str() {
+            "high" => Some(("CAT I", "#f87171")),
+            "medium" => Some(("CAT II", "#fbbf24")),
+            "low" => Some(("CAT III", "#60a5fa")),
+            _ => None,
+        }
+    });
     let type_label = if is_core { "built-in" } else { "custom" };
     let type_chip = if is_core {
         "chip chip-info"
@@ -42,9 +53,9 @@ pub fn PolicyCard(
             class: "sys-card",
             onclick: move |_| on_open.call(policy_for_open.clone()),
             style: if highlighted {
-                format!("--status-color: var(--cf-brand-purple); opacity: {opacity}; box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--cf-brand-purple) 55%, transparent), 0 0 0 2px color-mix(in oklab, var(--cf-brand-purple) 22%, transparent); background: color-mix(in oklab, var(--cf-brand-purple) 7%, var(--cf-card-bg));")
+                format!("--status-color: {rail_color}; opacity: {opacity}; box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--cf-brand-purple) 55%, transparent), 0 0 0 2px color-mix(in oklab, var(--cf-brand-purple) 22%, transparent); background: color-mix(in oklab, var(--cf-brand-purple) 7%, var(--cf-card-bg));")
             } else {
-                format!("--status-color: var(--cf-brand-purple); opacity: {opacity}; cursor: pointer;")
+                format!("--status-color: {rail_color}; opacity: {opacity}; cursor: pointer;")
             },
             "data-policy-card": "true",
             "data-policy-id": "{policy.id}",
@@ -71,12 +82,14 @@ pub fn PolicyCard(
                         }
                         span { "{policy.name}" }
                     }
-                    div { class: "text-[11px] text-gray-400 line-clamp-2", "{policy.description}" }
+                    div { style: "font-size:11px;color:var(--cf-text-secondary);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;", title: "{policy.description}", "{policy.description}" }
                 }
                 div { style: "display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex-shrink:0;",
                     span { class: "{type_chip}", "{type_label}" }
-                    if let Some(state) = policy.publication_state.as_ref() {
+                    if policy.revisions.len() > 1 {
+                        if let Some(state) = policy.publication_state.as_ref() {
                         span { class: "chip chip-unknown", "{state}" }
+                        }
                     }
                     if is_core {
                         span { class: "chip chip-info", "protected" }
@@ -85,21 +98,21 @@ pub fn PolicyCard(
                         span { class: "chip chip-unknown", "disabled" }
                     }
                     if policy.category.as_deref().is_some_and(|category| category.eq_ignore_ascii_case("security")) {
-                        if let Some(severity) = policy.severity.as_deref().filter(|severity| matches!(severity.to_ascii_lowercase().as_str(), "high" | "medium" | "low")) {
-                            span { class: "chip chip-unknown", "{severity}" }
+                        if let Some((severity_label, severity_color)) = severity_label {
+                            span { class: "chip", style: "font-size:9px;color:{severity_color};background:color-mix(in oklab, {severity_color} 14%, transparent);", "{severity_label}" }
                         }
                     }
                 }
             }
 
             div {
-                div { class: "sys-kv-key", "Rules" }
+                div { style: "font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);font-weight:600;margin-bottom:6px;", "Rules" }
                 div { class: "flex flex-col gap-1.5",
                     if rules.is_empty() {
                         div { class: "text-[11px] italic text-gray-500", "No automated rules — operator approves directly." }
                     } else {
-                        for rule in rules.iter().take(4) {
-                            div { class: "flex items-start gap-2 text-[11px] text-gray-200",
+                        for rule in rules.iter() {
+                            div { class: "flex items-start gap-2", style: "font-size:11px;color:var(--cf-text-primary);",
                                 svg {
                                     class: "mt-0.5 shrink-0", width: "10", height: "10", view_box: "0 0 24 24", fill: "none", stroke: "#34d399", stroke_width: "3", stroke_linecap: "round", stroke_linejoin: "round",
                                     polyline { points: "20 6 9 17 4 12" }
@@ -109,7 +122,7 @@ pub fn PolicyCard(
                         }
                     }
                     if rules.len() > 4 {
-                        div { class: "text-[11px] text-gray-500", "+ {rules.len() - 4} more rules" }
+                        div { class: "text-[11px]", style: "color:var(--cf-text-muted);", "+ {rules.len() - 4} more rules" }
                     }
                 }
             }
@@ -126,12 +139,12 @@ pub fn PolicyCard(
             }
 
             div { class: "sys-card-foot",
-                div { class: "flex items-center gap-2 text-[11px] text-gray-500",
+                    div { class: "flex items-center gap-2", style: "font-size:11px;color:var(--cf-text-muted);",
                     svg { width: "11", height: "11", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
                         rect { x: "3", y: "4", width: "18", height: "8", rx: "2" }
                         rect { x: "3", y: "14", width: "18", height: "6", rx: "2" }
                     }
-                    span { class: "mono font-semibold text-gray-300", "{policy.system_count}" }
+                    span { class: "mono", style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);", "{policy.system_count}" }
                     span { "systems use this" }
                 }
                 if is_core {
@@ -144,7 +157,7 @@ pub fn PolicyCard(
                                 evt.stop_propagation();
                                 on_edit.call(policy_for_edit.clone());
                             },
-                            "Edit"
+                            Icon { name: IconName::Gear, size: 12 } "Edit"
                         }
                         button {
                             class: "btn btn-ghost focus-ring xs",
