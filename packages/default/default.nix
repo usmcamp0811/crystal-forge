@@ -62,6 +62,10 @@ let
   agentSrc   = mkWorkspaceSrc (foundationalCrates ++ [ "cf-agent" ]);
   builderSrc = mkWorkspaceSrc (foundationalCrates ++ [ "cf-builder" ]);
   keygenSrc  = mkWorkspaceSrc [ "cf-keygen" ];
+  # The NixOS module generator depends only on the database-free compliance
+  # interchange crate, so it never pulls in sqlx, axum, or openssl.
+  nixosModuleCrates = [ "cf-compliance" "cf-nixos-module" ];
+  nixosModuleSrc = mkWorkspaceSrc nixosModuleCrates;
   serverSrc  = src; # server builds the full workspace
 
   agentWorkspaceManifest =
@@ -70,6 +74,8 @@ let
     mkComponentWorkspaceManifest "builder" (foundationalCrates ++ [ "cf-builder" ]);
   keygenWorkspaceManifest =
     mkComponentWorkspaceManifest "keygen" [ "cf-keygen" ];
+  nixosModuleWorkspaceManifest =
+    mkComponentWorkspaceManifest "nixos-module" nixosModuleCrates;
 
   # ─────────────────────────────────────────────────────────────────────────
   # Per-component SRC_HASH
@@ -231,6 +237,37 @@ let
   };
 
   # ─────────────────────────────────────────────────────────────────────────
+  # NixOS module generator — builds cf-nixos-module and cf-compliance only.
+  #
+  # Deliberately excludes cf-server so the generator carries no database,
+  # HTTP, or TLS dependency. Standalone; no SRC_HASH needed.
+  # ─────────────────────────────────────────────────────────────────────────
+  cf-nixos-module-drv = pkgs.rustPlatform.buildRustPackage rec {
+    src = nixosModuleSrc;
+    inherit version;
+    pname = "cf-nixos-module";
+    cargoLock = { lockFile = ./Cargo.lock; };
+    cargoBuildFlags = [ "--package" "cf-nixos-module" ];
+    cargoCheckFlags = cargoBuildFlags;
+    # Run the crate's unit and integration tests during the Nix build.
+    cargoTestFlags = [ "--package" "cf-nixos-module" "--package" "cf-compliance" ];
+
+    postPatch = ''
+      cp ${nixosModuleWorkspaceManifest} Cargo.toml
+    '';
+
+    nativeBuildInputs = commonNativeBuildInputs;
+    buildInputs = commonBuildInputs;
+
+    meta = with lib; {
+      description = "Generate standalone NixOS modules from exported Crystal Forge policies and compliance bundles";
+      license = licenses.agpl3Only;
+      platforms = platforms.all;
+      mainProgram = "cf-nixos-module";
+    };
+  };
+
+  # ─────────────────────────────────────────────────────────────────────────
   # Legacy "crystal-forge" combined output for backward compatibility.
   #
   # Previously a single buildRustPackage; now a symlinkJoin of the four
@@ -319,9 +356,14 @@ let
     text = ''${cf-builder-drv}/bin/builder "$@"'';
   };
 
+  cf-nixos-module = pkgs.writeShellApplication {
+    name = "cf-nixos-module";
+    text = ''${cf-nixos-module-drv}/bin/cf-nixos-module "$@"'';
+  };
+
 in crystal-forge // {
-  inherit agent server builder cf-keygen test-agent migrate;
-  inherit cf-server-drv cf-agent-drv cf-builder-drv cf-keygen-drv;
+  inherit agent server builder cf-keygen test-agent migrate cf-nixos-module;
+  inherit cf-server-drv cf-agent-drv cf-builder-drv cf-keygen-drv cf-nixos-module-drv;
   # Expose component-specific source hashes for verification
   agentSrcHash = agentSrcHash;
   serverSrcHash = serverSrcHash;

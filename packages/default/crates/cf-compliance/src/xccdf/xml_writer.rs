@@ -1523,7 +1523,7 @@ pub fn write_bundle_xccdf_export(snapshot: &XccdfBundleExport) -> Result<String,
 mod tests {
     use super::super::export_models::{XccdfPolicyExport, XccdfSourceMapping};
     use super::*;
-    use crate::compliance::canonical::{ImplementationState, PublicationState};
+    use crate::canonical::{ImplementationState, PublicationState};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -2874,7 +2874,7 @@ mod tests {
     use super::super::models::DocumentClass;
     use super::super::models::Fidelity;
     use super::super::parser::parse_xccdf;
-    use crate::compliance::interchange::InterchangeLimits;
+    use crate::interchange::InterchangeLimits;
 
     #[test]
     fn dual_checks_survive_real_writer_parser_round_trip() {
@@ -3194,7 +3194,7 @@ mod tests {
         let classified_policy_version_id = snap.policies[0].policy_version_id;
         snap.policies[0].compliance_metadata = classification_metadata.clone();
         for policy in &mut snap.policies {
-            let canonical = crate::compliance::digest::PolicyVersionCanonical {
+            let canonical = crate::digest::PolicyVersionCanonical {
                 name: policy.name.clone(),
                 description: policy.description.clone(),
                 policy_type: policy.policy_type.clone(),
@@ -3203,10 +3203,9 @@ mod tests {
                 config: policy.config.clone(),
                 compliance_metadata: policy.compliance_metadata.clone(),
                 dependencies: policy.dependencies.clone(),
-                opaque_xml_digest:
-                    crate::compliance::digest::PolicyVersionCanonical::digest_opaque_xml(
-                        policy.opaque_xml.as_deref(),
-                    ),
+                opaque_xml_digest: crate::digest::PolicyVersionCanonical::digest_opaque_xml(
+                    policy.opaque_xml.as_deref(),
+                ),
                 enabled_by_default: Some(policy.enabled_default),
             };
             policy.semantic_digest = canonical.compute_digest();
@@ -3215,12 +3214,12 @@ mod tests {
         ordered_policies.sort_by_key(|policy| policy.policy_order);
         let members = ordered_policies
             .iter()
-            .map(|policy| crate::compliance::digest::BundleMembershipEntry {
+            .map(|policy| crate::digest::BundleMembershipEntry {
                 policy_version_id: policy.policy_version_id,
                 selected: policy.selected,
             })
             .collect();
-        snap.semantic_digest = crate::compliance::digest::BundleVersionCanonical {
+        snap.semantic_digest = crate::digest::BundleVersionCanonical {
             name: snap.name.clone(),
             framework: snap.framework.clone(),
             framework_version: snap.framework_version.clone(),
@@ -3232,7 +3231,7 @@ mod tests {
         .compute_digest();
         let xml = write_bundle_xccdf_export(&snap).unwrap();
         let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
-        let (_, records) = crate::compliance::xccdf::importer::validate_cf_native_document(&parsed)
+        let (_, records) = crate::xccdf::importer::validate_cf_native_document(&parsed)
             .unwrap_or_else(|error| {
                 panic!(
                     "native round trip should validate: {} ({})",

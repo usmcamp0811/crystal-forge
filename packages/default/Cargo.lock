@@ -476,6 +476,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-compliance"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "quick-xml",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml 0.8.23",
+ "uuid",
+ "zip",
+]
+
+[[package]]
 name = "cf-config"
 version = "0.3.0"
 dependencies = [
@@ -505,6 +520,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-nixos-module"
+version = "0.3.0"
+dependencies = [
+ "cf-compliance",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml 0.8.23",
+ "uuid",
+]
+
+[[package]]
 name = "cf-protocol"
 version = "0.3.0"
 dependencies = [
@@ -525,6 +553,7 @@ dependencies = [
  "base64 0.21.7",
  "bigdecimal",
  "bytes",
+ "cf-compliance",
  "cf-config",
  "cf-protocol",
  "chrono",

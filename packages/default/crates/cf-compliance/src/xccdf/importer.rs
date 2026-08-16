@@ -7,15 +7,13 @@
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-use crate::compliance::digest::{
-    BundleMembershipEntry, BundleVersionCanonical, PolicyVersionCanonical,
-};
-use crate::compliance::interchange::{CANONICALIZATION_VERSION, DIGEST_ALGORITHM};
-use crate::compliance::xccdf::import_models::{
+use crate::digest::{BundleMembershipEntry, BundleVersionCanonical, PolicyVersionCanonical};
+use crate::interchange::{CANONICALIZATION_VERSION, DIGEST_ALGORITHM};
+use crate::xccdf::import_models::{
     ImportPlanError, ImportedPolicyRecord, MapExistingProof, ValidatedImportPlan, XccdfImportPlan,
     XccdfRuleImportAction,
 };
-use crate::compliance::xccdf::models::{DocumentClass, ParsedRule, ParsedXccdf};
+use crate::xccdf::models::{DocumentClass, ParsedRule, ParsedXccdf};
 
 // ── Document-class gate ───────────────────────────────────────────────────────
 
@@ -276,7 +274,7 @@ pub fn validate_cf_native_document(
     }
     let validated = ValidatedImportPlan {
         expected_sha256: parsed.source_sha256.clone(),
-        bundle: crate::compliance::xccdf::import_models::ImportedBundlePlan {
+        bundle: crate::xccdf::import_models::ImportedBundlePlan {
             name: bundle_canonical.name,
             framework: bundle_canonical.framework,
             version: benchmark.version.clone().unwrap_or_else(|| "1".into()),
@@ -658,14 +656,14 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compliance::xccdf::import_models::{
+    use crate::xccdf::import_models::{
         ImportedBundlePlan, ImportedCustomCheck, ImportedCustomCheckRule, ImportedMappingSemantics,
         ImportedPolicyCustomization, MapExistingProof, XccdfImportPlan, XccdfRuleImportAction,
     };
-    use crate::compliance::xccdf::models::{DocumentClass, Fidelity, ParsedXccdf};
+    use crate::xccdf::models::{DocumentClass, Fidelity, ParsedXccdf};
 
     fn minimal_foreign_parsed(rule_ids: &[&str]) -> ParsedXccdf {
-        use crate::compliance::xccdf::models::{BenchmarkMeta, ParsedRule};
+        use crate::xccdf::models::{BenchmarkMeta, ParsedRule};
         ParsedXccdf {
             class: DocumentClass::ForeignXccdf,
             fidelity: Fidelity::PreservedOpaque,
@@ -770,11 +768,11 @@ mod tests {
         rule.severity = Some("high".into());
         rule.rationale = Some("The source rationale.".into());
         rule.identifiers = vec![
-            crate::compliance::xccdf::models::StandardIdentifier {
+            crate::xccdf::models::StandardIdentifier {
                 system: "https://public.cyber.mil/stigs/srg".into(),
                 value: "SRG-OS-000001".into(),
             },
-            crate::compliance::xccdf::models::StandardIdentifier {
+            crate::xccdf::models::StandardIdentifier {
                 system: "https://public.cyber.mil/stigs/cci".into(),
                 value: "CCI-000001".into(),
             },
@@ -895,7 +893,7 @@ mod tests {
     fn deterministic_proof_cannot_be_combined_with_related_review() {
         let parsed = minimal_foreign_parsed(&["rule-1"]);
         let policy_version_id = Uuid::new_v4();
-        let related = crate::compliance::xccdf::import_models::ReviewedRelatedCandidate {
+        let related = crate::xccdf::import_models::ReviewedRelatedCandidate {
             policy_version_id,
             related_requirement_version_id: Uuid::new_v4(),
             shared_cci_ids: vec!["CCI-000001".into()],
@@ -933,7 +931,7 @@ mod tests {
     fn reviewed_related_requires_explicit_mapping_semantics() {
         let parsed = minimal_foreign_parsed(&["rule-1"]);
         let policy_version_id = Uuid::new_v4();
-        let related = crate::compliance::xccdf::import_models::ReviewedRelatedCandidate {
+        let related = crate::xccdf::import_models::ReviewedRelatedCandidate {
             policy_version_id,
             related_requirement_version_id: Uuid::new_v4(),
             shared_cci_ids: vec!["CCI-000001".into()],
@@ -1172,7 +1170,7 @@ mod tests {
 
     #[test]
     fn rule_outside_profile_is_rejected() {
-        use crate::compliance::xccdf::models::ParsedProfile;
+        use crate::xccdf::models::ParsedProfile;
         let mut parsed = minimal_foreign_parsed(&["r1", "r2"]);
         parsed.profiles.push(ParsedProfile {
             id: "xccdf_profile_a".into(),

@@ -1,0 +1,26 @@
+[package]
+name = "cf-nixos-module"
+version = "0.3.0"
+edition = "2024"
+description = "Generate standalone NixOS modules from exported Crystal Forge policies and compliance bundles"
+
+[dependencies]
+cf-compliance = { path = "../cf-compliance" }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10.9"
+hex = "0.4"
+toml = { version = "0.8", features = ["parse"] }
+uuid = { version = "1.17.0", features = ["v4", "serde"] }
+
+[lib]
+name = "cf_nixos_module"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cf-nixos-module"
+path = "src/bin/cf-nixos-module.rs"
+
+[[bin]]
+name = "cf-nixos-module-fixture"
+path = "src/bin/cf-nixos-module-fixture.rs"

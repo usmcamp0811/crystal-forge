@@ -2306,7 +2306,7 @@ mod tests {
         let path = std::env::var("CF_TEST_ANDURIL_STIG_ZIP")
             .expect("CF_TEST_ANDURIL_STIG_ZIP must be set");
         let zip_bytes = std::fs::read(&path).expect("read zip");
-        let pkg = crate::compliance::xccdf::package::process_xccdf_bytes(
+        let pkg = crate::xccdf::package::process_xccdf_bytes(
             zip_bytes,
             Some(
                 std::path::Path::new(&path)

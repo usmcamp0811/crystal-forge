@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::compliance::xccdf::models::{CheckContent, FixContent, ParsedRule};
+use crate::xccdf::models::{CheckContent, FixContent, ParsedRule};
 
 // Make serde derive available for all local structs
 #[allow(unused_imports)]
@@ -623,13 +623,13 @@ fn check_content_to_json(c: &CheckContent) -> serde_json::Value {
         .body_parts
         .iter()
         .map(|part| match part {
-            crate::compliance::xccdf::models::CheckBodyPart::Inline { content } => {
+            crate::xccdf::models::CheckBodyPart::Inline { content } => {
                 serde_json::json!({
                     "type": "inline",
                     "content": content,
                 })
             }
-            crate::compliance::xccdf::models::CheckBodyPart::Reference { href, name } => {
+            crate::xccdf::models::CheckBodyPart::Reference { href, name } => {
                 serde_json::json!({
                     "type": "reference",
                     "href": href,

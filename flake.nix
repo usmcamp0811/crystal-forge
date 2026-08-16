@@ -42,6 +42,7 @@
           server = channels.nixpkgs.crystal-forge.default.server;
           builder = channels.nixpkgs.crystal-forge.default.builder;
           cf-keygen = channels.nixpkgs.crystal-forge.default.cf-keygen;
+          cf-nixos-module = channels.nixpkgs.crystal-forge.default.cf-nixos-module;
           test-agent = channels.nixpkgs.crystal-forge.default.test-agent;
           web-ui = channels.nixpkgs.crystal-forge.web-ui;
           oscal-fixture = channels.nixpkgs.crystal-forge.oscal-fixture;
