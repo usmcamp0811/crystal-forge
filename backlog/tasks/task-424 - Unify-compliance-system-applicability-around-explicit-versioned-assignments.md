@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-16 15:17'
-updated_date: '2026-08-16 15:17'
+updated_date: '2026-08-16 15:18'
 labels: []
 dependencies: []
 references:
@@ -37,6 +37,23 @@ The TASK-422 compliance view can report every system as applicable when a curren
 - [ ] #9 Regression tests cover zero assignments environment assignment explicit system assignment inactive history and version variants
 - [ ] #10 MR !316 is blocked until the corrected applicability behavior is verified
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Replace current-published applicability fallback with exact bundle-version active assignment resolution.
+2. Make the unversioned alias select the canonical published-first version and use the same explicit assignment query as all exact-version requests.
+3. Update system-bundles and evidence applicability paths to use active versioned assignments and exclude inactive history.
+4. Remove remaining compliance applicability predicates that treat no legacy environment rows as fleet-wide.
+5. Add regression coverage for zero assignments, environment assignments, explicit system assignments, inactive history, and draft/published version consistency.
+6. Run formatting and targeted/server verification in the dedicated worktree.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Preflight completed: TASK-423 and TASK-424 are being implemented together because both correct the mixed legacy/versioned assignment model and both block MR !316. Dedicated worktree is /home/mcamp/code/crystal-forge/TASK-423-424-compliance-assignment-corrections on branch TASK-423-424-compliance-assignment-corrections from dev.
+<!-- SECTION:NOTES:END -->
 
 ## Comments
 
