@@ -41,47 +41,45 @@ struct NotificationEmailRow {
 }
 
 pub async fn run_user_notification_email_loop(pool: PgPool, config: ServerConfig) {
-    if !email_delivery_policy_permitted(&config) {
-        if let Err(err) = cancel_prohibited_email_deliveries(&pool).await {
-            tracing::warn!(%err, "failed to cancel prohibited notification email deliveries");
-        }
-        tracing::info!("notification email worker disabled by external-delivery policy");
-        return;
-    }
-    if !email_transport_available(&config) {
-        tracing::info!("notification email worker disabled: email transport is unavailable");
-        return;
-    }
-
     let interval_seconds = config.notification_email_worker_interval_seconds.max(1);
     let mut ticker = interval(Duration::from_secs(interval_seconds));
 
     loop {
-        if let Err(err) = crate::queries::user_notifications::materialize_all_user_notifications(
-            &pool,
-            email_delivery_policy_permitted(&config),
-        )
-        .await
-        {
-            tracing::warn!(%err, "notification producer pass failed");
-        }
-        if let Err(err) = crate::queries::user_notifications::enqueue_due_weekly_digest_deliveries(
-            &pool,
-            &config.notification_email_digest_schedule,
-        )
-        .await
-        {
-            tracing::warn!(%err, "weekly digest producer pass failed");
-        }
-
-        let transport = HttpEmailTransport::new(config.clone());
-        if let Err(err) =
-            process_due_email_deliveries(&pool, &config, &transport, DEFAULT_BATCH_SIZE).await
-        {
-            tracing::warn!(%err, "notification email worker pass failed");
+        if let Err(err) = run_user_notification_email_producer_pass(&pool, &config).await {
+            tracing::warn!(%err, "notification email producer pass failed");
+        } else if email_transport_available(&config) {
+            let transport = HttpEmailTransport::new(config.clone());
+            if let Err(err) =
+                process_due_email_deliveries(&pool, &config, &transport, DEFAULT_BATCH_SIZE).await
+            {
+                tracing::warn!(%err, "notification email worker pass failed");
+            }
         }
         ticker.tick().await;
     }
+}
+
+pub async fn run_user_notification_email_producer_pass(
+    pool: &PgPool,
+    config: &ServerConfig,
+) -> Result<(), sqlx::Error> {
+    let email_permitted = email_delivery_policy_permitted(config);
+    crate::queries::user_notifications::materialize_all_user_notifications(pool, email_permitted)
+        .await?;
+
+    if !email_permitted {
+        cancel_prohibited_email_deliveries(pool).await?;
+        return Ok(());
+    }
+
+    if email_transport_available(config) {
+        crate::queries::user_notifications::enqueue_due_weekly_digest_deliveries(
+            pool,
+            &config.notification_email_digest_schedule,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 pub async fn process_due_email_deliveries(
@@ -807,7 +805,7 @@ fn escape_html(input: &str) -> String {
 mod tests {
     use super::{
         EmailMessage, EmailTransport, escape_html, process_due_email_deliveries,
-        render_immediate_email,
+        render_immediate_email, run_user_notification_email_producer_pass,
     };
     use chrono::Utc;
     use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -896,6 +894,84 @@ mod tests {
             notification_email_max_attempts: max_attempts,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn prohibited_policy_producer_materializes_in_app_without_email_delivery() {
+        let pool = test_pool().await;
+        let user_id = Uuid::new_v4();
+        let occurrence_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, username, first_name, last_name, email)
+             VALUES ($1, $2, 'Producer', 'Tester', $3)",
+        )
+        .bind(user_id)
+        .bind(format!("producer-{user_id}"))
+        .bind(format!("producer-{user_id}@example.test"))
+        .execute(&pool)
+        .await
+        .expect("insert producer test user");
+        sqlx::query("INSERT INTO user_role_assignments (user_id, role) VALUES ($1, 'viewer')")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("assign producer test role");
+        sqlx::query(
+            "INSERT INTO user_notification_preferences
+                (user_id, delivery_channel, build_failures_email_enabled_at,
+                 build_failures_in_app_enabled_at)
+             VALUES ($1, 'both', NOW(), NOW())",
+        )
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .expect("insert producer preferences");
+        sqlx::query(
+            "INSERT INTO attention_occurrences
+                (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at)
+             VALUES ($1, 'builds', 'builds', $2, $3, NOW() + INTERVAL '1 second', NOW() + INTERVAL '1 second')",
+        )
+        .bind(occurrence_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(format!("producer-test-{occurrence_id}"))
+        .execute(&pool)
+        .await
+        .expect("insert producer attention occurrence");
+
+        let mut prohibited_config = email_config(3);
+        prohibited_config.notification_email_external_delivery_allowed = false;
+        run_user_notification_email_producer_pass(&pool, &prohibited_config)
+            .await
+            .expect("run prohibited producer pass");
+
+        let (eligible,): (bool,) = sqlx::query_as(
+            "SELECT email_delivery_eligible FROM user_notifications
+             WHERE user_id = $1 AND source_occurrence_id = $2",
+        )
+        .bind(user_id)
+        .bind(occurrence_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load prohibited notification");
+        assert!(!eligible);
+
+        run_user_notification_email_producer_pass(&pool, &email_config(3))
+            .await
+            .expect("run permitted producer pass");
+        let (delivery_count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM user_notification_email_deliveries
+             WHERE user_id = $1 AND notification_id IN (
+                 SELECT id FROM user_notifications
+                 WHERE user_id = $1 AND source_occurrence_id = $2
+             )",
+        )
+        .bind(user_id)
+        .bind(occurrence_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count prohibited notification deliveries");
+        assert_eq!(delivery_count, 0);
     }
 
     async fn insert_queued_immediate_delivery(pool: &PgPool, attempt_count: i32) -> (Uuid, Uuid) {
