@@ -7,7 +7,7 @@ status: Review
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-16 15:25'
+updated_date: '2026-08-16 17:41'
 labels: []
 milestone: m-22
 dependencies:
@@ -138,6 +138,8 @@ Verification update: `nix build .#web-ui -L` passed; packaged web-ui unit tests 
 Checkpoint pushed as commit `2e3fa301` on `origin/TASK-422-compliance-view-redesign`. `nix build .#server --no-link -L` passed; server unit tests reported 1135 passed, 355 ignored. Worktree is clean after the push.
 
 Added and pushed commit `0994a8e9` with focused populated-compliance browser assertions: bundle list score/system fields, selected bundle version, coverage API fixture with 6 full + 2 partial + 2 unmapped requirements, drawer coverage counts, and total partition assertions. JavaScript syntax remains valid.
+
+Moved TASK-426 implementation and focused browser regression onto TASK-422-compliance-view-redesign for MR !316. Cherry-picked commits 82428db2 and c728872a; pushed branch to origin. Removed the temporary TASK-426 worktree and remote branch. No MR/release cleanup performed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
