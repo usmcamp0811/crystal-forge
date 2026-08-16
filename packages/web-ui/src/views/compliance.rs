@@ -313,15 +313,23 @@ pub fn ComplianceView() -> Element {
         }
     };
 
-    let mut on_open_policy = move |policy_id: uuid::Uuid| {
+    let mut on_open_policy = move |(policy_id, policy_version_id): (uuid::Uuid, uuid::Uuid)| {
         if let Some(policy) = policy_library
             .read()
             .iter()
             .find(|policy| policy.id == policy_id)
             .cloned()
         {
-            policy_drawer.set(Some(policy));
-            return;
+            if policy
+                .revisions
+                .iter()
+                .any(|revision| revision.id == policy_version_id)
+            {
+                let mut exact_policy = policy;
+                exact_policy.version_id = Some(policy_version_id);
+                policy_drawer.set(Some(exact_policy));
+                return;
+            }
         }
         if *policy_loading.read() {
             return;
@@ -329,21 +337,12 @@ pub fn ComplianceView() -> Element {
         policy_loading.set(true);
         policy_error.set(None);
         spawn(async move {
-            match crate::views::policies_api::load_policies().await {
-                crate::views::policies_api::PolicyLoadResult::Ok(policies) => {
-                    let selected = policies
-                        .iter()
-                        .find(|policy| policy.id == policy_id)
-                        .cloned();
-                    policy_library.set(policies);
-                    policy_drawer.set(selected);
-                    if policy_drawer.read().is_none() {
-                        policy_error
-                            .set(Some(format!("Policy {policy_id} could not be resolved.")));
-                    }
+            match crate::views::policies_api::load_policy_version(policy_id, policy_version_id).await {
+                Ok(policy) => {
+                    policy_drawer.set(Some(policy));
                     policy_loading.set(false);
                 }
-                crate::views::policies_api::PolicyLoadResult::Err(error) => {
+                Err(error) => {
                     policy_loading.set(false);
                     policy_error.set(Some(error));
                 }
@@ -1680,6 +1679,7 @@ struct StigRule {
 }
 
 const STIG_IMPORT_DRAFT_KEY: &str = "cf-stig-import-draft";
+const MAX_STIG_IMPORT_DRAFT_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct StigImportDraftMetadata {
@@ -1692,6 +1692,12 @@ struct StigImportDraftMetadata {
     refine_cursor: usize,
     selected_rule_ids: Vec<String>,
     refined_rule_ids: Vec<String>,
+    #[serde(default)]
+    refined_rules: Vec<crate::components::compliance::RefinedStigRule>,
+    /// Optional cached preview. It is only a convenience for recovery; source
+    /// verification and reparsing remain mandatory before restoring refinement.
+    #[serde(default)]
+    preview_payload: Option<crate::api::models::XccdfPreviewResponse>,
 }
 
 fn load_stig_import_draft() -> Option<StigImportDraftMetadata> {
@@ -1713,7 +1719,7 @@ fn save_stig_import_draft(draft: &StigImportDraftMetadata) {
     let Ok(raw) = serde_json::to_string(draft) else {
         return;
     };
-    if raw.len() > 2 * 1024 * 1024 {
+    if raw.len() > MAX_STIG_IMPORT_DRAFT_BYTES {
         return;
     }
     if let Some(storage) =
@@ -1721,6 +1727,37 @@ fn save_stig_import_draft(draft: &StigImportDraftMetadata) {
     {
         let _ = storage.set_item(STIG_IMPORT_DRAFT_KEY, &raw);
     }
+}
+
+fn restore_refined_rules(
+    parsed_rules: &[StigRule],
+    saved_rules: &[crate::components::compliance::RefinedStigRule],
+    selected_rule_ids: &[String],
+) -> Vec<crate::components::compliance::RefinedStigRule> {
+    let selected_rule_ids = selected_rule_ids
+        .iter()
+        .collect::<std::collections::HashSet<_>>();
+    let fresh = refined_rules_from_rules(parsed_rules);
+    fresh
+        .into_iter()
+        .map(|mut rule| {
+            if let Some(saved) = saved_rules
+                .iter()
+                .find(|saved| saved.source.rule_id == rule.source.rule_id)
+            {
+                rule.draft = saved.draft.clone();
+                rule.selected = saved.selected;
+                rule.mapping_relationship = saved.mapping_relationship.clone();
+                rule.mapping_coverage = saved.mapping_coverage.clone();
+                rule.mapping_rationale = saved.mapping_rationale.clone();
+                rule.candidate_options = saved.candidate_options.clone();
+                rule.selected_candidate = saved.selected_candidate.clone();
+            } else if !selected_rule_ids.is_empty() {
+                rule.selected = selected_rule_ids.contains(&rule.source.rule_id);
+            }
+            rule
+        })
+        .collect()
 }
 
 /// Convert the server's ordered source check parts without changing the XCCDF
@@ -2284,6 +2321,13 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                 .iter()
                 .map(|rule| rule.source.rule_id.clone())
                 .collect(),
+            refined_rules: refined_rules.read().clone(),
+            preview_payload: preview_response.read().as_ref().and_then(|preview| {
+                serde_json::to_vec(preview)
+                    .ok()
+                    .filter(|payload| payload.len() <= MAX_STIG_IMPORT_DRAFT_BYTES)
+                    .map(|_| preview.clone())
+            }),
         });
     };
 
@@ -2354,9 +2398,10 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         let mut bench_title = bench_title;
                                         let mut bench_ver = bench_ver;
                                         let mut selected_envs = selected_envs;
-                                        let mut previewing = previewing;
-                                        let mut step = step;
-                                        let all_env_names = all_env_names.clone();
+                                         let mut previewing = previewing;
+                                         let mut step = step;
+                                         let paused_draft = load_stig_import_draft();
+                                         let all_env_names = all_env_names.clone();
 
                                         parse_error.set(None);
                                         let files = event.files();
@@ -2399,9 +2444,22 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                      step.set("native-review".to_string());
                                                                  } else {
                                                                      // Foreign XCCDF workflow: do rule processing
-                                                                      let parsed_rules = rules_from_preview(&preview_response.read().as_ref().unwrap());
-                                                                      rules.set(parsed_rules.clone());
-                                                                      let mut refined = refined_rules_from_rules(&parsed_rules);
+                                                                       let parsed_rules = rules_from_preview(&preview_response.read().as_ref().unwrap());
+                                                                       let mut refined = restore_refined_rules(
+                                                                           &parsed_rules,
+                                                                           paused_draft.as_ref().map(|draft| draft.refined_rules.as_slice()).unwrap_or(&[]),
+                                                                           paused_draft.as_ref().map(|draft| draft.selected_rule_ids.as_slice()).unwrap_or(&[]),
+                                                                       );
+                                                                       let restored_selected = refined
+                                                                           .iter()
+                                                                           .filter(|rule| rule.selected)
+                                                                           .map(|rule| rule.source.rule_id.clone())
+                                                                           .collect::<std::collections::HashSet<_>>();
+                                                                       let mut parsed_rules = parsed_rules;
+                                                                       for rule in parsed_rules.iter_mut() {
+                                                                           rule.selected = restored_selected.contains(&rule.rule_id);
+                                                                       }
+                                                                       rules.set(parsed_rules.clone());
                                                                       if let Some(reconciliation) = foreign_reconciliation.as_ref() {
                                                                           for rule in refined.iter_mut() {
                                                                               if let Some(requirement) = reconciliation.requirements.iter().find(|requirement| requirement.rule_id == rule.source.rule_id) {
@@ -2409,7 +2467,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                               }
                                                                           }
                                                                       }
-                                                                      refined_rules.set(refined);
+                                                                       refined_rules.set(refined);
                                                                       mapping_semantics.set(
                                                                       foreign_reconciliation
                                                                           .as_ref()
@@ -2430,8 +2488,16 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                           })
                                                                           .collect(),
                                                                   );
-                                                                     selected_envs.set(all_env_names.clone());
-                                                                     step.set("review".to_string());
+                                                                      selected_envs.set(all_env_names.clone());
+                                                                      if let Some(draft) = paused_draft.as_ref() {
+                                                                          refine_rule_ids.set(draft.refined_rule_ids.clone());
+                                                                          step.set(match draft.step.as_str() {
+                                                                              "review" | "reconcile" | "refine" | "final-review" => draft.step.clone(),
+                                                                              _ => "review".to_string(),
+                                                                          });
+                                                                      } else {
+                                                                          step.set("review".to_string());
+                                                                      }
                                                                  }
                                                             }
                                                             Err(err) => {
@@ -5097,7 +5163,7 @@ fn RequirementCoverageCard(
     report: BundleCoverageReport,
     expanded: Signal<bool>,
     #[props(default)] on_open: EventHandler<()>,
-    #[props(default)] on_open_policy: EventHandler<uuid::Uuid>,
+    #[props(default)] on_open_policy: EventHandler<(uuid::Uuid, uuid::Uuid)>,
 ) -> Element {
     let mut filter = use_signal(|| "all".to_string());
     let mut query = use_signal(String::new);
@@ -5213,9 +5279,10 @@ fn RequirementCoverageCard(
                                          span { style: "color:{coverage_color};font-weight:600;white-space:nowrap;", "{coverage_label}" }
                                           for mapping in row.mappings.iter() {
                                               {
-                                                  let policy_id = mapping.policy_id;
+                                                   let policy_id = mapping.policy_id;
+                                                   let policy_version_id = mapping.policy_version_id;
                                                   let policy_name = mapping.policy_name.clone();
-                                                  rsx! { button { class: "cf-policy-link", onclick: move |_| on_open_policy.call(policy_id), Icon { name: IconName::File, size: 10 }, "{policy_name}", Icon { name: IconName::ArrowRight, size: 10 } } }
+                                                   rsx! { button { class: "cf-policy-link", onclick: move |_| on_open_policy.call((policy_id, policy_version_id)), Icon { name: IconName::File, size: 10 }, "{policy_name}", Icon { name: IconName::ArrowRight, size: 10 } } }
                                               }
                                           }
                                      }

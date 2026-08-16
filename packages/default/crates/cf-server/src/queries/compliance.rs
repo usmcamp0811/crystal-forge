@@ -747,150 +747,153 @@ async fn list_bundle_summary_aggregates(
     pool: &PgPool,
     bundles: &[ComplianceBundleSummary],
 ) -> Result<std::collections::HashMap<Uuid, (i64, Option<i64>)>> {
-    let targets: Vec<(Uuid, Uuid, bool)> = bundles
+    let pairs: Vec<(Uuid, Uuid)> = bundles
         .iter()
         .filter_map(|bundle| {
             bundle
                 .current_published_version_id
                 .or(bundle.current_draft_version_id)
-                .map(|version_id| {
-                    (
-                        bundle.id,
-                        version_id,
-                        bundle.current_published_version_id == Some(version_id),
-                    )
-                })
+                .map(|version_id| (bundle.id, version_id))
         })
         .collect();
-    if targets.is_empty() {
+    if pairs.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
 
-    let bundle_ids: Vec<Uuid> = targets.iter().map(|target| target.0).collect();
-    let version_ids: Vec<Uuid> = targets.iter().map(|target| target.1).collect();
-    let published: Vec<bool> = targets.iter().map(|target| target.2).collect();
-
-    let policy_rows =
-        sqlx::query_as::<_, (Uuid, Uuid, String, Option<String>, String, Value, bool)>(
-            r#"
-        SELECT t.bundle_id, pv.policy_id, pv.name, pv.description, pv.policy_type,
-               pv.config, (dp.enabled AND pv.publication_state IN ('accepted', 'deprecated'))
-        FROM unnest($1::uuid[], $2::uuid[]) AS t(bundle_id, bundle_version_id)
-        JOIN compliance_bundle_version_policies cbvp
-          ON cbvp.bundle_version_id = t.bundle_version_id AND cbvp.selected = true
-        JOIN deployment_policy_versions pv ON pv.id = cbvp.policy_version_id
-        JOIN deployment_policies dp ON dp.id = pv.policy_id
-        ORDER BY t.bundle_id, cbvp.policy_order
-        "#,
+    // Load every bundle/version's applicable systems in one set-based query.
+    // Published revisions use the bundle environment scope; draft revisions
+    // use their explicit assignment scope, exactly as the detail endpoint does.
+    let bundle_ids: Vec<Uuid> = pairs.iter().map(|(bundle_id, _)| *bundle_id).collect();
+    let version_ids: Vec<Uuid> = pairs.iter().map(|(_, version_id)| *version_id).collect();
+    let rows: Vec<(Uuid, Uuid, Uuid, String, Option<String>, String, i32, i32)> = sqlx::query_as(
+        r#"
+        WITH requested(bundle_id, bundle_version_id) AS (
+            SELECT * FROM unnest($1::uuid[], $2::uuid[])
         )
-        .bind(&bundle_ids)
-        .bind(&version_ids)
-        .fetch_all(pool)
-        .await?;
-
-    let mut policies_by_bundle: std::collections::HashMap<Uuid, Vec<PolicyRow>> =
-        std::collections::HashMap::new();
-    for (bundle_id, policy_id, name, description, policy_type, config, enabled) in policy_rows {
-        policies_by_bundle
-            .entry(bundle_id)
-            .or_default()
-            .push(PolicyRow {
-                id: policy_id,
-                bundle_id,
-                name,
-                description,
-                policy_type,
-                config,
-                enabled,
-                compliance_metadata: Value::Object(Default::default()),
-            });
-    }
-
-    let system_rows =
-        sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, Option<String>, String, i32, i32)>(
-            r#"
-        WITH targets AS (
-            SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::bool[])
-                AS t(bundle_id, bundle_version_id, is_published)
-        )
-        SELECT t.bundle_id, t.bundle_version_id,
+        SELECT DISTINCT requested.bundle_id, requested.bundle_version_id,
                v.id, v.hostname, v.environment, v.health_status,
                v.critical_cve_count, v.high_cve_count
-        FROM targets t
+        FROM requested
+        JOIN compliance_bundles b ON b.id = requested.bundle_id
         JOIN view_system_list v ON
-            (t.is_published AND (
-                NOT EXISTS (
-                    SELECT 1 FROM compliance_bundle_environments cbe
-                    WHERE cbe.bundle_id = t.bundle_id
-                ) OR EXISTS (
-                    SELECT 1 FROM compliance_bundle_environments cbe
-                    JOIN environments e ON e.id = cbe.environment_id
-                    WHERE cbe.bundle_id = t.bundle_id AND e.name = v.environment
-                )
-            )) OR
-            (NOT t.is_published AND EXISTS (
-                SELECT 1
-                FROM compliance_bundle_assignments a
-                LEFT JOIN environments e ON e.id = a.environment_id
-                WHERE a.bundle_id = t.bundle_id
-                  AND a.bundle_version_id = t.bundle_version_id
-                  AND a.active
-                  AND ((a.scope_type = 'system' AND a.system_id = v.id)
-                    OR (a.scope_type = 'environment' AND a.environment_id = e.id))
-            ))
+             (b.current_published_version_id = requested.bundle_version_id AND (
+                 NOT EXISTS (
+                     SELECT 1 FROM compliance_bundle_environments cbe
+                     WHERE cbe.bundle_id = b.id
+                 ) OR EXISTS (
+                     SELECT 1 FROM compliance_bundle_environments cbe
+                     JOIN environments scoped_env ON scoped_env.id = cbe.environment_id
+                     WHERE cbe.bundle_id = b.id AND scoped_env.name = v.environment
+                 )
+             ))
+          OR (b.current_published_version_id IS DISTINCT FROM requested.bundle_version_id AND EXISTS (
+                 SELECT 1
+                 FROM compliance_bundle_assignments a
+                 LEFT JOIN environments assigned_env ON assigned_env.id = a.environment_id
+                 LEFT JOIN environments system_env ON system_env.name = v.environment
+                 WHERE a.bundle_id = b.id
+                   AND a.bundle_version_id = requested.bundle_version_id
+                   AND a.active
+                   AND (
+                       (a.scope_type = 'system' AND a.system_id = v.id)
+                       OR (a.scope_type = 'environment' AND a.environment_id = system_env.id)
+                   )
+             ))
+        ORDER BY requested.bundle_id, requested.bundle_version_id, v.hostname
         "#,
-        )
-        .bind(&bundle_ids)
-        .bind(&version_ids)
-        .bind(&published)
-        .fetch_all(pool)
-        .await?;
+    )
+    .bind(&bundle_ids)
+    .bind(&version_ids)
+    .fetch_all(pool)
+    .await?;
 
-    let mut totals_by_bundle: std::collections::HashMap<Uuid, ComplianceRollupTotals> =
-        std::collections::HashMap::new();
+    let mut systems_by_pair = std::collections::HashMap::<(Uuid, Uuid), Vec<SystemRow>>::new();
     for (
         bundle_id,
-        _version_id,
+        version_id,
         id,
         hostname,
         environment,
         health_status,
         critical_cve_count,
         high_cve_count,
-    ) in system_rows
+    ) in rows
     {
-        let policies = policies_by_bundle
-            .get(&bundle_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let rollup = system_rollup(
-            SystemRow {
-                id,
-                hostname,
-                environment,
-                health_status,
-                critical_cve_count,
-                high_cve_count,
-            },
-            policies,
-        );
-        let totals = totals_by_bundle.entry(bundle_id).or_default();
-        totals.system_count += 1;
-        totals.total_controls += rollup.total;
-        totals.evaluated_controls += rollup.evaluated_total;
-        totals.pass += rollup.pass;
-        totals.warn += rollup.warn;
-        totals.fail += rollup.fail;
-        totals.waiver += rollup.waiver;
+        let system = SystemRow {
+            id,
+            hostname,
+            environment,
+            health_status,
+            critical_cve_count,
+            high_cve_count,
+        };
+        systems_by_pair
+            .entry((bundle_id, version_id))
+            .or_default()
+            .push(system);
     }
 
-    Ok(totals_by_bundle
-        .into_iter()
-        .map(|(bundle_id, totals)| {
-            let score = aggregate_score(totals.pass, totals.evaluated_controls);
-            (bundle_id, (totals.system_count, score))
-        })
-        .collect())
+    // Resolve each distinct version once for all systems that need it. This is
+    // the bounded batch path; no bundle calls the detailed systems endpoint.
+    let mut system_ids_by_version = std::collections::HashMap::<Uuid, Vec<Uuid>>::new();
+    for ((_, version_id), systems) in &systems_by_pair {
+        let ids = system_ids_by_version.entry(*version_id).or_default();
+        ids.extend(systems.iter().map(|system| system.id));
+    }
+    for ids in system_ids_by_version.values_mut() {
+        ids.sort_unstable();
+        ids.dedup();
+    }
+    let mut effective_by_version = std::collections::HashMap::new();
+    for (version_id, system_ids) in system_ids_by_version {
+        effective_by_version.insert(
+            version_id,
+            resolve_systems_effective_policies_for_bundle_version_batch(
+                pool,
+                &system_ids,
+                version_id,
+            )
+            .await?,
+        );
+    }
+
+    let mut aggregates = std::collections::HashMap::new();
+    for (bundle_id, version_id) in pairs {
+        let Some(systems) = systems_by_pair.get(&(bundle_id, version_id)) else {
+            aggregates.insert(bundle_id, (0, None));
+            continue;
+        };
+        let effective = effective_by_version
+            .get(&version_id)
+            .context("missing batch policy resolution for bundle summary")?;
+        let mut rollups = Vec::with_capacity(systems.len());
+        for system in systems {
+            let rollup = match effective.get(&system.id) {
+                Some(ResolutionOutcome::Resolved(set)) if set.bundle_version_id == version_id => {
+                    effective_policy_rollup_with_evidence(pool, system, &set.policies).await?
+                }
+                Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup(
+                    system.clone(),
+                    0,
+                    conflicts
+                        .first()
+                        .map(|conflict| conflict.code.as_str())
+                        .unwrap_or("conflict"),
+                ),
+                _ => unresolved_system_rollup(system.clone(), 0, "not_applicable"),
+            };
+            rollups.push(rollup);
+        }
+        let totals = totals_for_rollups(&rollups);
+        aggregates.insert(
+            bundle_id,
+            (
+                totals.system_count,
+                aggregate_score(totals.pass, totals.evaluated_controls),
+            ),
+        );
+    }
+    Ok(aggregates)
 }
 
 pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>> {

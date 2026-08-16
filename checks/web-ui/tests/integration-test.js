@@ -6848,24 +6848,15 @@ const steps = [
         foreign_stig_reconciliation: null,
       };
 
-      let previewCallCount = 0;
       let importCallCount = 0;
       let importPlan = null;
-      await page.route("**/api/v1/compliance/xccdf/preview", async (route) => {
-        previewCallCount += 1;
-        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(preview) });
-      });
-      await page.route("**/api/v1/compliance/xccdf/import", async (route) => {
+      page.on("request", (request) => {
+        if (!request.url().includes("/api/v1/compliance/xccdf/import") || request.method() !== "POST") return;
         importCallCount += 1;
-        const raw = route.request().postDataBuffer()?.toString("utf8") || "";
+        const raw = request.postDataBuffer()?.toString("utf8") || "";
         const match = raw.match(/name="plan"\r\n\r\n([\s\S]*?)\r\n--/);
         if (!match) throw new Error("TASK-426 import request did not contain a plan multipart field");
         importPlan = JSON.parse(match[1]);
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({ bundle_version_id: null, created_policy_count: 1, reused_policy_versions: 0, errors: [] }),
-        });
       });
 
       try {
@@ -6879,12 +6870,26 @@ const steps = [
         await page.locator('input[type="file"]').setInputFiles({
           name: "task-426-auditd.xml",
           mimeType: "application/xml",
-          buffer: Buffer.from("<Benchmark id=\"task-426-auditd-benchmark\"/>", "utf8"),
+          buffer: Buffer.from(`<?xml version="1.0" encoding="utf-8"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.1" id="task-426-auditd-benchmark">
+  <status>accepted</status>
+  <title>TASK-426 auditd fixture</title>
+  <version>V1R1</version>
+  <Group id="V-426001">
+    <title>Audit logging</title>
+    <Rule id="SV-426001r1_rule" severity="high">
+      <title>Enable audit logging</title>
+      <description>The audit daemon must be enabled.</description>
+      <fixtext fixref="F-426001">Configure the following:
+security.auditd.enable = true;
+security.audit.enable = true;</fixtext>
+    </Rule>
+  </Group>
+</Benchmark>`, "utf8"),
         });
         const previewResponse = await previewResponsePromise;
         const previewBody = await previewResponse.json();
         const inferred = previewBody.rules?.[0]?.inferred_assertions;
-        if (previewCallCount !== 1) throw new Error(`Expected one preview call, got ${previewCallCount}`);
         if (!Array.isArray(inferred) || inferred.length !== 2) throw new Error(`Expected two inferred assertions: ${JSON.stringify(inferred)}`);
         for (const [index, assertion] of inferred.entries()) {
           if (!assertion.option_path || assertion.expected_value?.type !== "boolean" || assertion.expected_value?.value !== true) {
@@ -6913,6 +6918,34 @@ const steps = [
         const remainingPaths = await assertionCards.locator(".refine-option-row input").evaluateAll((inputs) => inputs.map((input) => input.value));
         if (remainingPaths.join(",") !== "security.audit.enable,security.audit.manual") throw new Error(`Removal changed source order: ${remainingPaths.join(",")}`);
 
+        await page.getByTitle("Pause — your progress is saved").click();
+        await page.getByText(/Paused STIG import/).waitFor({ timeout: 5000 });
+        await page.getByRole("button", { name: "Resume", exact: true }).click();
+        await page.getByRole("heading", { name: "Import STIG / XCCDF" }).waitFor({ timeout: 5000 });
+        const resumedPreviewResponsePromise = page.waitForResponse(
+          (response) => response.url().includes("/api/v1/compliance/xccdf/preview") && response.request().method() === "POST",
+        );
+        await page.locator('input[type="file"]').setInputFiles({
+          name: "task-426-auditd.xml",
+          mimeType: "application/xml",
+          buffer: Buffer.from(`<?xml version="1.0" encoding="utf-8"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.1" id="task-426-auditd-benchmark">
+  <status>accepted</status><title>TASK-426 auditd fixture</title><version>V1R1</version>
+  <Group id="V-426001"><title>Audit logging</title><Rule id="SV-426001r1_rule" severity="high"><title>Enable audit logging</title><description>The audit daemon must be enabled.</description><fixtext fixref="F-426001">Configure the following:
+security.auditd.enable = true;
+security.audit.enable = true;</fixtext></Rule></Group>
+</Benchmark>`, "utf8"),
+        });
+        await resumedPreviewResponsePromise;
+        await page.getByTestId("xccdf-review-reconcile-button").click();
+        await page.getByRole("button", { name: "Refine all instead" }).click();
+        const restoredCards = page.locator(".refine-assertion-card");
+        if (await restoredCards.count() !== 2) throw new Error("Paused refinement did not restore the remaining assertions");
+        const restoredPaths = await restoredCards.locator(".refine-option-row input").evaluateAll((inputs) => inputs.map((input) => input.value));
+        if (restoredPaths.join(",") !== "security.audit.enable,security.audit.manual") throw new Error(`Paused refinement lost assertion order: ${restoredPaths.join(",")}`);
+        const restoredManualValue = await restoredCards.nth(1).locator(".refine-expected").inputValue();
+        if (restoredManualValue !== "true") throw new Error(`Paused refinement lost edited Boolean value: ${restoredManualValue}`);
+
         await page.getByRole("button", { name: "Review import" }).click();
         await page.getByRole("button", { name: "Create draft bundle" }).click();
         if (importCallCount !== 1 || !importPlan) throw new Error("Expected exactly one captured import request");
@@ -6927,8 +6960,6 @@ const steps = [
         }
         if (expressions.some((expression) => expression.includes('"true"'))) throw new Error("Boolean assertion was quoted in import serialization");
       } finally {
-        await page.unroute("**/api/v1/compliance/xccdf/preview");
-        await page.unroute("**/api/v1/compliance/xccdf/import");
       }
     },
   },

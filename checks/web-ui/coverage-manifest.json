@@ -238,7 +238,7 @@
       ],
       "semanticAssertions": true,
       "interactions": false,
-      "mockedData": true,
+      "mockedData": false,
       "baseline": "advisory"
     },
     {
@@ -386,7 +386,7 @@
       ],
       "semanticAssertions": true,
       "interactions": true,
-      "mockedData": true,
+      "mockedData": false,
       "baseline": "advisory"
     },
     {
@@ -1530,7 +1530,7 @@
       ],
       "semanticAssertions": true,
       "interactions": true,
-      "mockedData": true,
+      "mockedData": false,
       "baseline": "advisory"
     },
     {

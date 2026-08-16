@@ -811,7 +811,7 @@ mod tests {
     }
 
     #[test]
-    fn native_custom_check_requires_cfg_binding_and_preserves_assertions() {
+    fn native_custom_check_requires_config_binding_and_preserves_assertions() {
         let parsed = minimal_foreign_parsed(&["rule-1"]);
         let mut plan = valid_plan(&["rule-1"]);
         plan.rule_actions = vec![XccdfRuleImportAction::CreateNativeCustom {
@@ -821,7 +821,7 @@ mod tests {
                 mode: "any".into(),
                 rules: vec![ImportedCustomCheckRule {
                     field_name: "firewallEnabled".into(),
-                    expression: "cfg.config.networking.firewall.enable".into(),
+                    expression: "config.networking.firewall.enable".into(),
                     description: "Firewall is enabled".into(),
                     strict: false,
                 }],

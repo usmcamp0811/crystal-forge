@@ -99,9 +99,110 @@ fn custom_field_name(name: &str, id: uuid::Uuid) -> String {
     }
 }
 
-fn normalize_custom_policy_expression(expression: &str) -> (String, bool) {
-    let normalized = expression.replace("cfg.config.", "config.");
-    (normalized.clone(), normalized != expression)
+pub(crate) fn normalize_custom_policy_expression(expression: &str) -> (String, bool) {
+    let chars = expression.chars().collect::<Vec<_>>();
+    let legacy = "cfg.config.";
+    let legacy_chars = legacy.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(expression.len());
+    let mut index = 0;
+    let mut state = LexicalState::Normal;
+
+    while index < chars.len() {
+        match state {
+            LexicalState::Normal => {
+                if chars[index] == '"' {
+                    state = LexicalState::DoubleQuoted;
+                    output.push(chars[index]);
+                    index += 1;
+                } else if chars[index] == '#' {
+                    state = LexicalState::LineComment;
+                    output.push(chars[index]);
+                    index += 1;
+                } else if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+                    state = LexicalState::BlockComment;
+                    output.push('/');
+                    output.push('*');
+                    index += 2;
+                } else if chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
+                    state = LexicalState::IndentedString;
+                    output.push('\'');
+                    output.push('\'');
+                    index += 2;
+                } else if index + legacy_chars.len() <= chars.len()
+                    && chars[index..index + legacy_chars.len()] == legacy_chars
+                    && (index == 0 || !is_nix_identifier_char(chars[index - 1]))
+                    && chars
+                        .get(index + legacy_chars.len())
+                        .is_some_and(|character| is_nix_identifier_char(*character))
+                {
+                    output.push_str("config.");
+                    index += legacy_chars.len();
+                } else {
+                    output.push(chars[index]);
+                    index += 1;
+                }
+            }
+            LexicalState::DoubleQuoted => {
+                let character = chars[index];
+                output.push(character);
+                index += 1;
+                if character == '\\' {
+                    if let Some(escaped) = chars.get(index) {
+                        output.push(*escaped);
+                        index += 1;
+                    }
+                } else if character == '"' {
+                    state = LexicalState::Normal;
+                }
+            }
+            LexicalState::IndentedString => {
+                if chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
+                    output.push('\'');
+                    output.push('\'');
+                    index += 2;
+                    state = LexicalState::Normal;
+                } else {
+                    output.push(chars[index]);
+                    index += 1;
+                }
+            }
+            LexicalState::LineComment => {
+                let character = chars[index];
+                output.push(character);
+                index += 1;
+                if character == '\n' {
+                    state = LexicalState::Normal;
+                }
+            }
+            LexicalState::BlockComment => {
+                if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
+                    output.push('*');
+                    output.push('/');
+                    index += 2;
+                    state = LexicalState::Normal;
+                } else {
+                    output.push(chars[index]);
+                    index += 1;
+                }
+            }
+        }
+    }
+
+    let changed = output != expression;
+    (output, changed)
+}
+
+#[derive(Clone, Copy)]
+enum LexicalState {
+    Normal,
+    DoubleQuoted,
+    IndentedString,
+    LineComment,
+    BlockComment,
+}
+
+fn is_nix_identifier_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
 }
 
 async fn run_post_finalize_derivation_side_effects(
@@ -1940,17 +2041,17 @@ mod tests {
     #[test]
     fn normalize_custom_policy_expression_rewrites_legacy_config_prefix() {
         let (normalized, changed) =
-            normalize_custom_policy_expression("config.services.auditd.enable or false");
+            normalize_custom_policy_expression("cfg.config.services.auditd.enable or false");
         assert!(changed);
-        assert_eq!(normalized, "cfg.config.services.auditd.enable or false");
+        assert_eq!(normalized, "config.services.auditd.enable or false");
     }
 
     #[test]
     fn normalize_custom_policy_expression_keeps_cfg_config_prefix() {
         let (normalized, changed) =
             normalize_custom_policy_expression("cfg.config.networking.firewall.enable");
-        assert!(!changed);
-        assert_eq!(normalized, "cfg.config.networking.firewall.enable");
+        assert!(changed);
+        assert_eq!(normalized, "config.networking.firewall.enable");
     }
 
     #[test]
@@ -1972,10 +2073,31 @@ mod tests {
         let parsed = parse_deployment_policy_record(&record).expect("policy should parse");
         match parsed {
             DeploymentPolicy::CustomCheck { expression, .. } => {
-                assert_eq!(expression, "cfg.config.services.auditd.enable or false")
+                assert_eq!(expression, "config.services.auditd.enable or false")
             }
             _ => panic!("expected CustomCheck variant"),
         }
+    }
+
+    #[test]
+    fn normalize_custom_policy_expression_preserves_nix_literals_comments_and_boundaries() {
+        let expression = r##"cfg.config.services.auditd.enable &&
+            "cfg.config.in_a_string" == "cfg.config.foo" # cfg.config.comment
+            && mycfg.config.not_a_reference
+            && ''cfg.config.in_an_indented_string''
+            && /* cfg.config.block_comment */ cfg.config.services.audit.enable
+            && ${cfg.config.interpolated}"##;
+        let (normalized, changed) = normalize_custom_policy_expression(expression);
+
+        assert!(changed);
+        assert!(normalized.contains("config.services.auditd.enable"));
+        assert!(normalized.contains("\"cfg.config.in_a_string\""));
+        assert!(normalized.contains("# cfg.config.comment"));
+        assert!(normalized.contains("mycfg.config.not_a_reference"));
+        assert!(normalized.contains("''cfg.config.in_an_indented_string''"));
+        assert!(normalized.contains("/* cfg.config.block_comment */"));
+        assert!(normalized.contains("config.services.audit.enable"));
+        assert!(normalized.contains("${config.interpolated}"));
     }
 
     #[test]

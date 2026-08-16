@@ -7,7 +7,7 @@
 
 use uuid::Uuid;
 
-use crate::api::client::{ApiClientError, fetch_deployment_policies};
+use crate::api::client::{ApiClientError, fetch_deployment_policies, fetch_deployment_policy};
 use crate::api::models::DeploymentPolicyRecord;
 use crate::components::policy::PolicyDefinition;
 use crate::components::policy::PolicyRevisionSummary;
@@ -46,6 +46,31 @@ pub async fn load_policies() -> PolicyLoadResult {
         Err(ApiClientError::Deserialize(msg)) => {
             PolicyLoadResult::Err(format!("Deserialize error: {}", msg))
         }
+    }
+}
+
+/// Fetch a complete policy lineage directly and select the exact version used
+/// by a bundle coverage mapping. This deliberately bypasses the first-100
+/// catalog page used by the policies list.
+pub async fn load_policy_version(
+    policy_id: Uuid,
+    policy_version_id: Uuid,
+) -> Result<PolicyDefinition, String> {
+    let record = fetch_deployment_policy(&policy_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut definition = policy_record_to_definition(record);
+    if definition
+        .revisions
+        .iter()
+        .any(|revision| revision.id == policy_version_id)
+    {
+        definition.version_id = Some(policy_version_id);
+        Ok(definition)
+    } else {
+        Err(format!(
+            "Policy version {policy_version_id} is not present in policy {policy_id}."
+        ))
     }
 }
 

@@ -7,7 +7,7 @@ use crate::api::models::{
 };
 use crate::components::icon::{Icon, IconName};
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SourceCheck {
     pub system: String,
     pub selector: Option<String>,
@@ -17,13 +17,13 @@ pub struct SourceCheck {
     pub body_parts: Vec<SourceCheckBodyPart>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SourceCheckBodyPart {
     Inline(String),
     Reference { href: String, name: Option<String> },
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SourceStigRule {
     pub rule_id: String,
     pub group_id: Option<String>,
@@ -39,7 +39,7 @@ pub struct SourceStigRule {
     pub rule_order: usize,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum RefinedRuleAction {
     Native,
     Manual,
@@ -48,7 +48,7 @@ pub enum RefinedRuleAction {
     Existing(Option<uuid::Uuid>),
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ComparisonOperator {
     Equal,
     NotEqual,
@@ -66,7 +66,7 @@ impl ComparisonOperator {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum TypedPolicyValue {
     Boolean(bool),
     Integer(String),
@@ -86,7 +86,7 @@ impl TypedPolicyValue {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PolicyAssertionDraft {
     NixosOption {
         path: String,
@@ -161,7 +161,7 @@ impl PolicyAssertionDraft {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum EvidenceRequirementDraft {
     Command {
         command: String,
@@ -221,7 +221,7 @@ impl EvidenceRequirementDraft {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RefinedPolicyDraft {
     pub local_name: String,
     pub local_description: String,
@@ -234,7 +234,7 @@ pub struct RefinedPolicyDraft {
     pub evidence_requirements: Vec<EvidenceRequirementDraft>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RefinedStigRule {
     pub source: SourceStigRule,
     pub draft: RefinedPolicyDraft,

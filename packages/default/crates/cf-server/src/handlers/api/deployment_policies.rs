@@ -114,8 +114,8 @@ fn validate_and_normalize_nix_expression(expr: &str) -> Result<String, (StatusCo
         ));
     }
 
-    let normalized = trimmed.replace("cfg.config.", "config.");
-    if normalized != trimmed {
+    let (normalized, changed) = crate::server::normalize_custom_policy_expression(trimmed);
+    if changed {
         tracing::warn!(
             "Normalized legacy policy expression from 'cfg.config.' to 'config.': {} -> {}",
             trimmed,
@@ -1175,30 +1175,30 @@ mod tests {
     fn validate_policy_config_accepts_valid_custom_check() {
         let result = validate_policy_config(
             "custom_check",
-            &serde_json::json!({"expression": "cfg.config.services.ssh.enable", "strict": true}),
+            &serde_json::json!({"expression": "config.services.ssh.enable", "strict": true}),
         )
         .expect("valid custom_check config must pass");
 
         // Verify expression is preserved when already correct
         assert_eq!(
             result.get("expression").and_then(|v| v.as_str()),
-            Some("cfg.config.services.ssh.enable")
+            Some("config.services.ssh.enable")
         );
     }
 
     #[test]
-    fn validate_policy_config_auto_fixes_config_prefix() {
+    fn validate_policy_config_auto_fixes_legacy_cfg_prefix() {
         let result = validate_policy_config(
             "custom_check",
-            &serde_json::json!({"expression": "config.services.ssh.enable", "strict": true}),
+            &serde_json::json!({"expression": "cfg.config.services.ssh.enable", "strict": true}),
         )
-        .expect("should auto-fix config. to cfg.config.");
+        .expect("should normalize cfg.config. to config.");
 
         // Verify expression was auto-corrected
         assert_eq!(
             result.get("expression").and_then(|v| v.as_str()),
-            Some("cfg.config.services.ssh.enable"),
-            "Expression should be auto-corrected from 'config.' to 'cfg.config.'"
+            Some("config.services.ssh.enable"),
+            "Expression should be normalized from 'cfg.config.' to 'config.'"
         );
     }
 
@@ -1211,12 +1211,12 @@ mod tests {
                 "strict": false
             }),
         )
-        .expect("should auto-fix complex expression");
+        .expect("complex canonical expression should validate");
 
         assert_eq!(
             result.get("expression").and_then(|v| v.as_str()),
-            Some("!cfg.config.services.openssh.settings.PasswordAuthentication"),
-            "Complex expressions should be auto-corrected"
+            Some("!config.services.openssh.settings.PasswordAuthentication"),
+            "Complex expressions should remain canonical"
         );
     }
 
@@ -1275,11 +1275,11 @@ mod tests {
 
         assert_eq!(
             rules[0].get("expression").and_then(|v| v.as_str()),
-            Some("cfg.config.services.openssh.enable")
+            Some("config.services.openssh.enable")
         );
         assert_eq!(
             rules[1].get("expression").and_then(|v| v.as_str()),
-            Some("cfg.config.services.nginx.enable")
+            Some("config.services.nginx.enable")
         );
     }
 

@@ -1479,7 +1479,7 @@ mod tests {
         let (_, expr) = policy.to_nix_expression();
 
         assert!(
-            expr.starts_with("(cfg.config.systemd.services.crystal-forge-agent.enable or false)"),
+            expr.starts_with("(config.systemd.services.crystal-forge-agent.enable or false)"),
             "cf agent policy should use the realized systemd service as the primary signal"
         );
         assert!(
@@ -1811,20 +1811,22 @@ mod tests {
             expr.contains("\"gray\" = cfg:"),
             "bulk checker must bind full cfg object, got:\n{expr}"
         );
-        // The package policy must reference the full cfg object.
+        // The checker receives the full cfg object while policy expressions use
+        // the canonical public `config` binding.
         assert!(
-            expr.contains("cfg.config.environment.systemPackages"),
-            "package policy must use cfg.config scope, got:\n{expr}"
+            expr.contains("config.environment.systemPackages"),
+            "package policy must use config scope, got:\n{expr}"
         );
-        // The checker must be invoked with the full cfg object.
+        // The checker is invoked with the public `config` binding from the
+        // full cfg object.
         assert!(
-            expr.contains("checker cfg") && !expr.contains("checker cfg.config"),
-            "checker must receive full cfg object, got:\n{expr}"
+            expr.contains("checker cfg.config"),
+            "checker must receive cfg.config as its public config binding, got:\n{expr}"
         );
-        // Sanity: must not mix a `config` binding with a `cfg` expression.
+        // Sanity: the checker lambda itself remains bound to cfg.
         assert!(
-            !expr.contains("\"gray\" = config:"),
-            "checker must not bind `config` while expressions reference `cfg`, got:\n{expr}"
+            expr.contains("\"gray\" = cfg:"),
+            "checker must bind the full nixosConfiguration object as cfg, got:\n{expr}"
         );
     }
 
@@ -1843,19 +1845,12 @@ mod tests {
         );
 
         // Both the unconditional cfAgentEnabled and the assigned-policy stable
-        // key must use cfg.config.
+        // key must use the canonical config binding.
         assert!(
-            expr.contains("cfg.config.systemd.services.crystal-forge-agent.enable"),
-            "standalone agent check must use cfg.config scope, got:\n{expr}"
+            expr.contains("config.systemd.services.crystal-forge-agent.enable"),
+            "standalone agent check must use config scope, got:\n{expr}"
         );
-        // Every occurrence of `config.systemd.services` must be prefixed with `cfg.`;
-        // otherwise the expression references an unbound `config` variable.
-        let cfg_count = expr.matches("cfg.config.systemd.services").count();
-        let config_count = expr.matches("config.systemd.services").count();
-        assert_eq!(
-            cfg_count, config_count,
-            "standalone expression must not reference unbound `config`, got:\n{expr}"
-        );
+        assert!(!expr.contains("cfg.config.systemd.services"));
     }
 
     #[test]
