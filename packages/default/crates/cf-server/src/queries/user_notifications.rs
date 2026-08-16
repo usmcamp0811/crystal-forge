@@ -6,6 +6,7 @@ use uuid::Uuid;
 pub async fn materialize_attention_notifications_for_user(
     pool: &PgPool,
     user_id: Uuid,
+    email_delivery_permitted: bool,
 ) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
         r#"
@@ -132,6 +133,10 @@ pub async fn materialize_attention_notifications_for_user(
     .execute(pool)
     .await?;
 
+    if !email_delivery_permitted {
+        return Ok(result.rows_affected());
+    }
+
     sqlx::query(
         r#"
         WITH prefs AS (
@@ -227,7 +232,10 @@ pub async fn materialize_attention_notifications_for_user(
     Ok(result.rows_affected())
 }
 
-pub async fn materialize_all_user_notifications(pool: &PgPool) -> Result<u64, sqlx::Error> {
+pub async fn materialize_all_user_notifications(
+    pool: &PgPool,
+    email_delivery_permitted: bool,
+) -> Result<u64, sqlx::Error> {
     let users: Vec<(Uuid,)> = sqlx::query_as(
         "SELECT DISTINCT p.user_id
                         FROM user_notification_preferences p
@@ -239,7 +247,9 @@ pub async fn materialize_all_user_notifications(pool: &PgPool) -> Result<u64, sq
 
     let mut total = 0;
     for (user_id,) in users {
-        total += materialize_attention_notifications_for_user(pool, user_id).await?;
+        total +=
+            materialize_attention_notifications_for_user(pool, user_id, email_delivery_permitted)
+                .await?;
     }
     Ok(total)
 }
@@ -634,7 +644,7 @@ mod tests {
         .await
         .expect("insert attention occurrence");
 
-        let materialized = materialize_attention_notifications_for_user(&pool, user_id)
+        let materialized = materialize_attention_notifications_for_user(&pool, user_id, true)
             .await
             .expect("materialize notifications");
 

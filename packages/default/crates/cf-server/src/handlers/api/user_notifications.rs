@@ -133,6 +133,7 @@ pub async fn patch_notification_preferences(
 pub async fn get_notifications(
     RequireAuth(user): RequireAuth,
     State(pool): State<PgPool>,
+    State(server_config): State<ServerConfig>,
     Query(params): Query<ListNotificationsParams>,
 ) -> impl IntoResponse {
     let limit = params.limit.unwrap_or(20).clamp(1, 50);
@@ -154,7 +155,14 @@ pub async fn get_notifications(
         None => params.before.map(|before| (before, Uuid::max())),
     };
 
-    if let Err(err) = materialize_attention_notifications_for_user(&pool, user.user_id).await {
+    if let Err(err) = materialize_attention_notifications_for_user(
+        &pool,
+        user.user_id,
+        server_config.notification_email_enabled
+            && server_config.notification_email_external_delivery_allowed,
+    )
+    .await
+    {
         tracing::warn!(%err, user_id = %user.user_id, "failed to materialize attention notifications");
     }
 

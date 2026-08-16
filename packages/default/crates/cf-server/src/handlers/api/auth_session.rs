@@ -30,35 +30,39 @@ pub struct SessionCookies {
 
 /// Resolve a session's client address using a bounded, right-to-left proxy
 /// chain walk. Forwarded addresses are trusted only when the direct peer is in
-/// a configured proxy CIDR; malformed or overlong headers fall back safely to
-/// the direct peer.
+/// a configured proxy CIDR; malformed, ambiguous, or overlong headers are
+/// treated as unavailable.
 pub fn resolve_client_ip(
     peer: SocketAddr,
     headers: &HeaderMap,
     trusted_proxy_cidrs: &[String],
-) -> String {
+) -> Option<IpAddr> {
+    let forwarded = headers.get_all("x-forwarded-for");
+    if forwarded.iter().count() > 1 {
+        return None;
+    }
     if !ip_in_any_cidr(peer.ip(), trusted_proxy_cidrs) {
-        return peer.ip().to_string();
+        return Some(peer.ip());
     }
 
-    let Some(raw) = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-    else {
-        return peer.ip().to_string();
+    if forwarded.iter().count() != 1 {
+        return None;
+    }
+    let Some(raw) = forwarded.iter().next().and_then(|v| v.to_str().ok()) else {
+        return None;
     };
     let mut chain = Vec::with_capacity(MAX_FORWARDED_ADDRESSES + 1);
     for value in raw.split(',').map(str::trim) {
         if value.is_empty() || chain.len() >= MAX_FORWARDED_ADDRESSES {
-            return peer.ip().to_string();
+            return None;
         }
         let Ok(address) = value.parse::<IpAddr>() else {
-            return peer.ip().to_string();
+            return None;
         };
         chain.push(address);
     }
     if chain.is_empty() {
-        return peer.ip().to_string();
+        return None;
     }
     chain.push(peer.ip());
 
@@ -66,8 +70,6 @@ pub fn resolve_client_ip(
         .into_iter()
         .rev()
         .find(|address| !ip_in_any_cidr(*address, trusted_proxy_cidrs))
-        .unwrap_or(peer.ip())
-        .to_string()
 }
 
 fn ip_in_any_cidr(address: IpAddr, cidrs: &[String]) -> bool {
@@ -306,11 +308,11 @@ mod tests {
 
         assert_eq!(
             resolve_client_ip(peer, &headers, &["192.0.2.0/24".to_string()]),
-            "198.51.100.20"
+            Some("198.51.100.20".parse().unwrap())
         );
         assert_eq!(
             resolve_client_ip(peer, &headers, &["198.0.2.11/32".to_string()]),
-            "192.0.2.10"
+            Some("192.0.2.10".parse().unwrap())
         );
     }
 
@@ -325,7 +327,26 @@ mod tests {
 
         assert_eq!(
             resolve_client_ip(peer, &headers, &["10.0.0.0/8".to_string()]),
-            "198.51.100.20"
+            Some("198.51.100.20".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn trusted_proxy_resolution_rejects_ambiguous_and_trusted_only_headers() {
+        let peer = "10.0.0.2:443".parse().unwrap();
+        let mut multiple = HeaderMap::new();
+        multiple.append("x-forwarded-for", "10.0.0.3".parse().unwrap());
+        multiple.append("x-forwarded-for", "10.0.0.4".parse().unwrap());
+        assert_eq!(
+            resolve_client_ip(peer, &multiple, &["10.0.0.0/8".to_string()]),
+            None
+        );
+
+        let mut trusted_only = HeaderMap::new();
+        trusted_only.insert("x-forwarded-for", "10.0.0.3".parse().unwrap());
+        assert_eq!(
+            resolve_client_ip(peer, &trusted_only, &["10.0.0.0/8".to_string()]),
+            None
         );
     }
 }

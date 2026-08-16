@@ -41,6 +41,13 @@ struct NotificationEmailRow {
 }
 
 pub async fn run_user_notification_email_loop(pool: PgPool, config: ServerConfig) {
+    if !email_delivery_policy_permitted(&config) {
+        if let Err(err) = cancel_prohibited_email_deliveries(&pool).await {
+            tracing::warn!(%err, "failed to cancel prohibited notification email deliveries");
+        }
+        tracing::info!("notification email worker disabled by external-delivery policy");
+        return;
+    }
     if !email_transport_available(&config) {
         tracing::info!("notification email worker disabled: email transport is unavailable");
         return;
@@ -50,8 +57,11 @@ pub async fn run_user_notification_email_loop(pool: PgPool, config: ServerConfig
     let mut ticker = interval(Duration::from_secs(interval_seconds));
 
     loop {
-        if let Err(err) =
-            crate::queries::user_notifications::materialize_all_user_notifications(&pool).await
+        if let Err(err) = crate::queries::user_notifications::materialize_all_user_notifications(
+            &pool,
+            email_delivery_policy_permitted(&config),
+        )
+        .await
         {
             tracing::warn!(%err, "notification producer pass failed");
         }
@@ -81,6 +91,9 @@ pub async fn process_due_email_deliveries(
     batch_size: i64,
 ) -> Result<u64, sqlx::Error> {
     if !email_transport_available(config) {
+        if !email_delivery_policy_permitted(config) {
+            return cancel_prohibited_email_deliveries(pool).await;
+        }
         return Ok(0);
     }
 
@@ -91,6 +104,32 @@ pub async fn process_due_email_deliveries(
         processed += 1;
     }
     Ok(processed)
+}
+
+pub async fn cancel_prohibited_email_deliveries(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let result = sqlx::query(
+        "UPDATE user_notification_email_deliveries
+         SET state = 'cancelled',
+             last_error = 'external email delivery prohibited by deployment policy',
+             claim_token = NULL,
+             updated_at = NOW()
+         WHERE state IN ('pending', 'sending')",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE user_notification_weekly_digest_runs
+         SET status = 'skipped',
+             error_details = 'external email delivery prohibited by deployment policy'
+         WHERE delivery_id IN (
+             SELECT id FROM user_notification_email_deliveries WHERE state = 'cancelled'
+         ) AND status IN ('pending', 'sending')",
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(result.rows_affected())
 }
 
 async fn claim_due_email_deliveries(
@@ -613,7 +652,7 @@ async fn fail_delivery_for_retry(
 }
 
 fn email_transport_available(config: &ServerConfig) -> bool {
-    config.notification_email_enabled
+    email_delivery_policy_permitted(config)
         && config.notification_email_external_delivery_allowed
         && config
             .notification_email_endpoint
@@ -640,6 +679,10 @@ fn email_transport_available(config: &ServerConfig) -> bool {
             .as_deref()
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false)
+}
+
+fn email_delivery_policy_permitted(config: &ServerConfig) -> bool {
+    config.notification_email_enabled && config.notification_email_external_delivery_allowed
 }
 
 async fn load_provider_token(config: &ServerConfig) -> Result<String, String> {

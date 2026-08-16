@@ -68,11 +68,8 @@ pub async fn dev_login(
                 .and_then(|v| v.to_str().ok())
                 .map(ToString::to_string);
 
-            let ip_address = Some(resolve_client_ip(
-                addr,
-                &headers,
-                &server_config.trusted_proxy_cidrs,
-            ));
+            let ip_address = resolve_client_ip(addr, &headers, &server_config.trusted_proxy_cidrs)
+                .map(|ip| ip.to_string());
 
             // Establish session cookies
             let session_cookies =
