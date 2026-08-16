@@ -7,7 +7,7 @@ status: Review
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-16 14:49'
+updated_date: '2026-08-16 15:25'
 labels: []
 milestone: m-22
 dependencies:
@@ -172,5 +172,11 @@ author: OpenAI
 created: 2026-08-16 14:49
 ---
 P0 remediation pushed as 82ae4804 and added to MR !316: coverage effect now uses peek() for bookkeeping, explicit coverage loading/error/empty states were added, BundleCatalog uses the exact published-first summary revision for version/state display, and 29a asserts one initial coverage request. web-ui build and hygiene checks pass.
+---
+
+author: OpenAI
+created: 2026-08-16 15:25
+---
+MR !316 is blocked by TASK-423 and TASK-424. Backend review found two coupled assignment-model defects: draft-only assignment history permanently blocks deletion, and current-published applicability treats empty legacy environment membership as fleet-wide. Fixes are being implemented together in /home/mcamp/code/crystal-forge/TASK-423-424-compliance-assignment-corrections before merge.
 ---
 <!-- COMMENTS:END -->
