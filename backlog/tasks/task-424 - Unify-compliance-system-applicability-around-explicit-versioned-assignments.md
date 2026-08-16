@@ -1,9 +1,11 @@
 ---
 id: TASK-424
 title: Unify compliance system applicability around explicit versioned assignments
-status: Backlog
-assignee: []
+status: In Progress
+assignee:
+  - '@Matt Camp'
 created_date: '2026-08-16 15:17'
+updated_date: '2026-08-16 15:17'
 labels: []
 dependencies: []
 references:
@@ -35,3 +37,13 @@ The TASK-422 compliance view can report every system as applicable when a curren
 - [ ] #9 Regression tests cover zero assignments environment assignment explicit system assignment inactive history and version variants
 - [ ] #10 MR !316 is blocked until the corrected applicability behavior is verified
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: OpenAI
+created: 2026-08-16 15:17
+---
+Implementation authorized by user now; this bug blocks MR !316. Work will be coordinated with TASK-423 in one focused compliance backend change set.
+---
+<!-- COMMENTS:END -->
