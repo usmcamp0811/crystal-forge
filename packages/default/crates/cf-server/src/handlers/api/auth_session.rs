@@ -37,14 +37,11 @@ pub fn resolve_client_ip(
     headers: &HeaderMap,
     trusted_proxy_cidrs: &[String],
 ) -> Option<IpAddr> {
-    let forwarded = headers.get_all("x-forwarded-for");
-    if forwarded.iter().count() > 1 {
-        return None;
-    }
     if !ip_in_any_cidr(peer.ip(), trusted_proxy_cidrs) {
         return Some(peer.ip());
     }
 
+    let forwarded = headers.get_all("x-forwarded-for");
     if forwarded.iter().count() != 1 {
         return None;
     }
@@ -347,6 +344,18 @@ mod tests {
         assert_eq!(
             resolve_client_ip(peer, &trusted_only, &["10.0.0.0/8".to_string()]),
             None
+        );
+
+        let untrusted_peer = "198.51.100.10:443".parse().unwrap();
+        assert_eq!(
+            resolve_client_ip(untrusted_peer, &multiple, &["10.0.0.0/8".to_string()]),
+            Some("198.51.100.10".parse().unwrap())
+        );
+        let mut malformed = HeaderMap::new();
+        malformed.insert("x-forwarded-for", "not-an-ip".parse().unwrap());
+        assert_eq!(
+            resolve_client_ip(untrusted_peer, &malformed, &["10.0.0.0/8".to_string()]),
+            Some("198.51.100.10".parse().unwrap())
         );
     }
 }

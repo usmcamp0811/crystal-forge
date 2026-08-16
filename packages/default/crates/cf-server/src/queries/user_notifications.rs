@@ -29,12 +29,18 @@ pub async fn materialize_attention_notifications_for_user(
                 'attention_occurrence' AS identity_type,
                 ao.id::text AS identity_id,
                 ao.opened_at,
-                COALESCE((p.delivery_channel IN ('in_app', 'both') AND ao.opened_at >= CASE ao.category
+                 COALESCE((p.delivery_channel IN ('in_app', 'both') AND ao.opened_at >= CASE ao.category
                     WHEN 'builds' THEN p.build_failures_in_app_enabled_at
                     WHEN 'evals' THEN p.policy_violations_in_app_enabled_at
                     WHEN 'cves' THEN p.critical_cves_in_app_enabled_at
                     WHEN 'systems' THEN p.heartbeat_lost_in_app_enabled_at
-                END), FALSE) AS in_app_visible,
+                     END), FALSE) AS in_app_visible,
+                 COALESCE(($2 AND p.delivery_channel IN ('email', 'both') AND ao.opened_at >= CASE ao.category
+                     WHEN 'builds' THEN p.build_failures_email_enabled_at
+                     WHEN 'evals' THEN p.policy_violations_email_enabled_at
+                     WHEN 'cves' THEN p.critical_cves_email_enabled_at
+                     WHEN 'systems' THEN p.heartbeat_lost_email_enabled_at
+                 END), FALSE) AS email_delivery_eligible,
                 CASE ao.category
                     WHEN 'builds' THEN 'Build failed'
                     WHEN 'evals' THEN 'Policy or evaluation failure'
@@ -97,7 +103,8 @@ pub async fn materialize_attention_notifications_for_user(
                 'system_event' AS identity_type,
                 se.id::text AS identity_id,
                 se.occurred_at AS opened_at,
-                COALESCE((p.delivery_channel IN ('in_app', 'both') AND se.occurred_at >= p.deploy_failures_in_app_enabled_at), FALSE) AS in_app_visible,
+                 COALESCE((p.delivery_channel IN ('in_app', 'both') AND se.occurred_at >= p.deploy_failures_in_app_enabled_at), FALSE) AS in_app_visible,
+                 COALESCE(($2 AND p.delivery_channel IN ('email', 'both') AND se.occurred_at >= p.deploy_failures_email_enabled_at), FALSE) AS email_delivery_eligible,
                 'Deployment failed' AS title,
                 'A deployment entered a failed terminal state.' AS summary,
                 '/systems' AS route
@@ -120,16 +127,17 @@ pub async fn materialize_attention_notifications_for_user(
         )
         INSERT INTO user_notifications (
             user_id, category, source_occurrence_id, source_type, source_id,
-            title, summary, route, in_app_visible, created_at
+            title, summary, route, in_app_visible, email_delivery_eligible, created_at
         )
         SELECT $1, category, source_occurrence_id, source_type, subject_id,
-               title, summary, route, in_app_visible, opened_at
+               title, summary, route, in_app_visible, email_delivery_eligible, opened_at
         FROM eligible
         WHERE category IS NOT NULL
         ON CONFLICT DO NOTHING
         "#,
     )
     .bind(user_id)
+    .bind(email_delivery_permitted)
     .execute(pool)
     .await?;
 
@@ -200,7 +208,7 @@ pub async fn materialize_attention_notifications_for_user(
             SELECT * FROM deployment_eligible
         ), existing_notification AS (
             SELECT un.id, un.source_occurrence_id, un.category::text AS category,
-                   un.source_type, un.source_id
+                   un.source_type, un.source_id, un.email_delivery_eligible
             FROM user_notifications un
             WHERE un.user_id = $1
         )
@@ -213,15 +221,16 @@ pub async fn materialize_attention_notifications_for_user(
             'immediate',
             'immediate:' || $1::text || ':' || e.identity_type || ':' || e.identity_id
         FROM eligible e
-        LEFT JOIN existing_notification n
+        JOIN existing_notification n
           ON n.category = e.category
          AND (
                 (e.source_occurrence_id IS NOT NULL AND n.source_occurrence_id = e.source_occurrence_id)
              OR (e.source_occurrence_id IS NULL AND n.source_type = e.source_type AND n.source_id = e.source_id)
          )
         WHERE e.category IS NOT NULL
-          AND e.email_enabled_at IS NOT NULL
-          AND e.opened_at >= e.email_enabled_at
+           AND e.email_enabled_at IS NOT NULL
+           AND e.opened_at >= e.email_enabled_at
+           AND n.email_delivery_eligible
         ON CONFLICT (idempotency_key) DO NOTHING
         "#,
     )
@@ -654,6 +663,88 @@ mod tests {
             .expect("list notifications");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].source_occurrence_id, Some(occurrence_id));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn prohibited_email_materialization_is_not_retroactively_queued() {
+        let pool = test_pool().await;
+        let user_id = create_test_user(&pool, "email-policy-boundary").await;
+        get_or_create_notification_preferences(&pool, user_id)
+            .await
+            .expect("initialize notification preferences");
+        sqlx::query(
+            "UPDATE user_notification_preferences
+             SET delivery_channel = 'both',
+                 build_failures_email_enabled_at = NOW(),
+                 build_failures_in_app_enabled_at = NOW()
+             WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .expect("enable both notification channels");
+
+        let first_occurrence_id = Uuid::new_v4();
+        for (occurrence_id, key) in [
+            (first_occurrence_id, "allowed"),
+            (Uuid::new_v4(), "prohibited"),
+        ] {
+            sqlx::query(
+                "INSERT INTO attention_occurrences
+                    (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at)
+                 VALUES ($1, 'builds', 'builds', $2, $3, NOW(), NOW())",
+            )
+            .bind(occurrence_id)
+            .bind(Uuid::new_v4().to_string())
+            .bind(format!("test-email-policy-{key}-{occurrence_id}"))
+            .execute(&pool)
+            .await
+            .expect("insert attention occurrence");
+
+            let permitted = key == "allowed";
+            materialize_attention_notifications_for_user(&pool, user_id, permitted)
+                .await
+                .expect("materialize policy-boundary notification");
+        }
+
+        let delivery_count_before_reenable: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)
+             FROM user_notification_email_deliveries
+             WHERE user_id = $1 AND delivery_type = 'immediate'",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count deliveries before re-enable");
+        assert_eq!(delivery_count_before_reenable.0, 1);
+
+        materialize_attention_notifications_for_user(&pool, user_id, true)
+            .await
+            .expect("rematerialize after policy re-enable");
+
+        let deliveries: Vec<(String,)> = sqlx::query_as(
+            "SELECT idempotency_key
+             FROM user_notification_email_deliveries
+             WHERE user_id = $1 AND delivery_type = 'immediate'
+             ORDER BY idempotency_key",
+        )
+        .bind(user_id)
+        .fetch_all(&pool)
+        .await
+        .expect("list policy-boundary deliveries");
+        assert_eq!(deliveries.len(), 1);
+        assert!(deliveries[0].0.contains(&first_occurrence_id.to_string()));
+
+        let notification_count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM user_notifications
+             WHERE user_id = $1 AND source_occurrence_id IS NOT NULL",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count policy-boundary notifications");
+        assert_eq!(notification_count.0, 2);
     }
 
     #[tokio::test]
