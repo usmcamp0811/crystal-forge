@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-16 01:51'
+updated_date: '2026-08-16 02:04'
 labels: []
 milestone: m-22
 dependencies:
@@ -132,6 +132,8 @@ Current implementation progress: web-ui bundle rail is now a full-width searchab
 Known follow-up before Phase 1 STOP: aggregate bundle summary fields currently reuse `list_bundle_systems_for_version()` once per bundle, preserving exact score semantics but not yet satisfying the required set-based/no-per-bundle-query implementation. This must be replaced before finalizing the server contract.
 
 Verification update: `nix build .#web-ui -L` passed; packaged web-ui unit tests passed 172/172 (1 ignored). `cargo check` for web-ui and Nix-based SQLX-offline `cargo check -p cf-server` pass. `node --check checks/web-ui/tests/integration-test.js` and `git diff --check` pass. The focused browser/NixOS check has not yet been completed. The server aggregate implementation remains semantically correct but temporarily per-bundle and must be refactored to satisfy the no-N+1 acceptance criterion.
+
+Checkpoint pushed as commit `2e3fa301` on `origin/TASK-422-compliance-view-redesign`. `nix build .#server --no-link -L` passed; server unit tests reported 1135 passed, 355 ignored. Worktree is clean after the push.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
