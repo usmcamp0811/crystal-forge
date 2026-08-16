@@ -735,6 +735,14 @@ fn bundle_from_row(row: BundleRow) -> ComplianceBundleSummary {
     }
 }
 
+fn aggregate_score(pass: i64, evaluated_controls: i64) -> Option<i64> {
+    if evaluated_controls > 0 {
+        Some((pass * 100) / evaluated_controls)
+    } else {
+        None
+    }
+}
+
 async fn list_bundle_summary_aggregates(
     pool: &PgPool,
     bundles: &[ComplianceBundleSummary],
@@ -879,11 +887,7 @@ async fn list_bundle_summary_aggregates(
     Ok(totals_by_bundle
         .into_iter()
         .map(|(bundle_id, totals)| {
-            let score = if totals.evaluated_controls > 0 {
-                Some((totals.pass * 100) / totals.evaluated_controls)
-            } else {
-                None
-            };
+            let score = aggregate_score(totals.pass, totals.evaluated_controls);
             (bundle_id, (totals.system_count, score))
         })
         .collect())
@@ -3789,6 +3793,21 @@ mod tests {
         );
         assert_eq!(totals.evaluated_controls, 1);
         assert_eq!(totals.total_controls, 2);
+    }
+
+    #[test]
+    fn aggregate_score_returns_none_without_evaluated_controls() {
+        assert_eq!(aggregate_score(0, 0), None);
+    }
+
+    #[test]
+    fn aggregate_score_returns_zero_for_one_failed_control() {
+        assert_eq!(aggregate_score(0, 1), Some(0));
+    }
+
+    #[test]
+    fn aggregate_score_returns_100_for_one_passing_control() {
+        assert_eq!(aggregate_score(1, 1), Some(100));
     }
 
     #[test]
