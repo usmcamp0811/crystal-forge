@@ -7,7 +7,7 @@ status: Review
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-16 19:54'
+updated_date: '2026-08-17 00:56'
 labels: []
 milestone: m-22
 dependencies:
@@ -122,6 +122,8 @@ Spec §9 contains the endpoint/URL table a reviewer uses to put the running desi
 P1 correctness refinement before browser proof: canonicalize each bundle's summary version as published-first then draft; make exact-version policy/requirement/control counts use that target. Replace the per-bundle `list_bundle_systems_for_version` aggregate loop with a dedicated batch summary path that loads exact-version membership, applicable assignment scope, and status-level inputs without constructing detailed evidence. Add published+draft, draft-only, multi-bundle, zero-evaluated, and no-system regression coverage while retaining commit 0994a8e9's 6/2/2 requirement-coverage browser fixture.
 
 MR !316 review remediation sequence: (1) persist and restore complete STIG refined-rule state after source SHA verification, (2) make catalog aggregate score use the same effective resolver/evidence semantics as bundle detail via batching rather than simplified pure rollup, (3) carry exact coverage policy_version_id into a direct non-paginated policy/version drill-in and initialize the drawer to that version, (4) replace blind cfg.config normalization with lexical-safe reference normalization and update all stale tests, (5) run real non-mocked preview/import browser coverage plus full server/web verification and refresh MR evidence.
+
+Review remediation follow-up: fix indented-string `''\\X` lexical escaping in both interpolation scanners; deduplicate imported environment UUIDs before validation and association persistence; add duplicate-ID regression; run focused normalizer, live DB, browser, build, formatting, syntax, and diff verification; update MR verification results without claiming interrupted checks passed.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -142,6 +144,8 @@ Checkpoint pushed as commit `2e3fa301` on `origin/TASK-422-compliance-view-redes
 Added and pushed commit `0994a8e9` with focused populated-compliance browser assertions: bundle list score/system fields, selected bundle version, coverage API fixture with 6 full + 2 partial + 2 unmapped requirements, drawer coverage counts, and total partition assertions. JavaScript syntax remains valid.
 
 Moved TASK-426 implementation and focused browser regression onto TASK-422-compliance-view-redesign for MR !316. Cherry-picked commits 82428db2 and c728872a; pushed branch to origin. Removed the temporary TASK-426 worktree and remote branch. No MR/release cleanup performed.
+
+Reviewer feedback on 533b8f1e: resolver batching, snapshot consistency, virtual baseline, environment transaction coverage, and query-count regression code are accepted. Remaining blockers are indented-string `''\\X` escape handling, duplicate valid environment IDs, and unverified focused/live checks.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
