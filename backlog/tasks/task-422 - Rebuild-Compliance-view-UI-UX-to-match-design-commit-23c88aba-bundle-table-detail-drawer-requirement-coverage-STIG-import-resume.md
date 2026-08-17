@@ -3,11 +3,11 @@ id: TASK-422
 title: >-
   Rebuild Compliance view UI/UX to match design commit 23c88aba (bundle table,
   detail drawer, requirement coverage, STIG import resume)
-status: Review
+status: In Progress
 assignee:
-  - Matt Camp
+  - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-17 19:09'
+updated_date: '2026-08-17 20:23'
 labels: []
 milestone: m-22
 dependencies:
@@ -124,6 +124,8 @@ P1 correctness refinement before browser proof: canonicalize each bundle's summa
 MR !316 review remediation sequence: (1) persist and restore complete STIG refined-rule state after source SHA verification, (2) make catalog aggregate score use the same effective resolver/evidence semantics as bundle detail via batching rather than simplified pure rollup, (3) carry exact coverage policy_version_id into a direct non-paginated policy/version drill-in and initialize the drawer to that version, (4) replace blind cfg.config normalization with lexical-safe reference normalization and update all stale tests, (5) run real non-mocked preview/import browser coverage plus full server/web verification and refresh MR evidence.
 
 Review remediation follow-up: fix indented-string `''\\X` lexical escaping in both interpolation scanners; deduplicate imported environment UUIDs before validation and association persistence; add duplicate-ID regression; run focused normalizer, live DB, browser, build, formatting, syntax, and diff verification; update MR verification results without claiming interrupted checks passed.
+
+Review regression follow-up: reproduce the real Anduril STIG import using `/home/mcamp/code/crystal-forge/U_Anduril_NixOS_V1R1_STIG.zip`, capture the import POST status and complete server response, fix the underlying backend failure, then extend `ImportReview` with committing/error props and add deterministic failure coverage plus full-Anduril regression coverage. Verify 20ad success, failure behavior, and real-STIG import behavior before pushing a new remediation commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -152,6 +154,8 @@ Rebased TASK-422-compliance-view-redesign onto origin/dev at fa302602. Rebase co
 Review remediation verification completed in the dedicated TASK-422 worktree. Fixed the malformed Dioxus `refine` RSX scope that nested `final-review` and `done` under the `refine` condition, so a normal `Review import` click now renders final review. The focused 20ad browser check also captures the browser FormData import plan through a narrowly scoped fetch hook and retries one dropped preview UI transition. Final focused command passed with `[OK] 20ad-stig-nixos-assertion-roundtrip` and 1/1 screenshot. `nix build .#server --no-link -L` passed (1154 server tests passed, 369 ignored; time-window integration 4/4), `nix build .#web-ui --no-link -L` passed (179 passed, 1 ignored), backend changed-file rustfmt passed, Node syntax passed, and `git diff --check` passed. Full web-ui rustfmt remains unsuitable as a proof because the rebased web-ui tree contains unrelated pre-existing formatting drift outside TASK-422; no broad formatting rewrite was applied. Live DB remediation results remain: aggregate query counts one=17/twenty=17, valid environment association persists once after duplicate-ID deduplication, invalid environment import rolls back, and virtual-baseline coverage passed.
 
 Committed review remediation as `86b9c8c3082265c59bc09ac9734b744281e5462c` and force-with-lease updated `origin/TASK-422-compliance-view-redesign` from stale pre-rebase head `533b8f1e` to the same SHA. Local and remote SHAs match and the worktree is clean. MR !316 description and verification comment now record the focused browser pass, final builds, live DB evidence, and exact remediation SHA.
+
+User returned TASK-422 to active implementation for a deployed real-STIG regression. MCP still reported Review at inspection time; task is being explicitly set In Progress for this follow-up.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
