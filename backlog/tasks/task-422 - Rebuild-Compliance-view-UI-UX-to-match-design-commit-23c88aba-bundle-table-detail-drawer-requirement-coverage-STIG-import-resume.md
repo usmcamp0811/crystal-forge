@@ -7,7 +7,7 @@ status: Review
 assignee:
   - Matt Camp
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-17 00:56'
+updated_date: '2026-08-17 02:18'
 labels: []
 milestone: m-22
 dependencies:
@@ -146,6 +146,8 @@ Added and pushed commit `0994a8e9` with focused populated-compliance browser ass
 Moved TASK-426 implementation and focused browser regression onto TASK-422-compliance-view-redesign for MR !316. Cherry-picked commits 82428db2 and c728872a; pushed branch to origin. Removed the temporary TASK-426 worktree and remote branch. No MR/release cleanup performed.
 
 Reviewer feedback on 533b8f1e: resolver batching, snapshot consistency, virtual baseline, environment transaction coverage, and query-count regression code are accepted. Remaining blockers are indented-string `''\\X` escape handling, duplicate valid environment IDs, and unverified focused/live checks.
+
+Rebased TASK-422-compliance-view-redesign onto origin/dev at fa302602. Rebase completed cleanly; restored uncommitted remediation changes. Local branch now has 13 commits atop origin/dev and diverges from the previously pushed remote branch, so remote MR branch has not been force-updated.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
