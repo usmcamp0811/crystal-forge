@@ -589,7 +589,9 @@ pub async fn commit_foreign_import(
             .await
             .context("failed to validate imported bundle environments")?;
     if valid_environment_count != environment_ids.len() as i64 {
-        bail!("import plan references one or more unknown environments");
+        bail!(
+            "IMPORT_ENVIRONMENT_NOT_FOUND: import plan references one or more unknown environments"
+        );
     }
 
     let bundle_id: Uuid = sqlx::query_scalar(
@@ -4126,6 +4128,175 @@ mod tests {
 
         // Cleanup.
         cleanup_import(&pool, result.bundle_id, &result.created_policy_version_ids).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn foreign_import_valid_environment_persists_bundle_association() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let environment_id: Uuid =
+            sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
+                .bind(format!("xccdf-env-{}", Uuid::new_v4().simple()))
+                .fetch_one(&pool)
+                .await
+                .expect("insert test environment");
+        let mut bytes = minimal_xccdf_bytes();
+        bytes.extend_from_slice(format!("\n<!-- {} -->", Uuid::new_v4()).as_bytes());
+        let pkg = make_package(bytes);
+        let (mut validated, policy_records) = make_plan(&pkg, &["xccdf_test_rule_001"]);
+        validated.bundle.environment_ids = vec![environment_id];
+
+        let result = commit_foreign_import(&pool, user_id, pkg, validated, policy_records)
+            .await
+            .expect("environment-scoped import should commit");
+
+        let association_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_bundle_environments WHERE bundle_id = $1 AND environment_id = $2",
+        )
+        .bind(result.bundle_id)
+        .bind(environment_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(association_count, 1);
+
+        cleanup_import(&pool, result.bundle_id, &result.created_policy_version_ids).await;
+        sqlx::query("DELETE FROM environments WHERE id = $1")
+            .bind(environment_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn foreign_import_invalid_environment_rolls_back_bundle_policies_and_associations() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let mut bytes = minimal_xccdf_bytes();
+        bytes.extend_from_slice(format!("\n<!-- {} -->", Uuid::new_v4()).as_bytes());
+        let pkg = make_package(bytes);
+        let source_sha256 = pkg.provenance.sha256.clone();
+        let (mut validated, policy_records) = make_plan(&pkg, &["xccdf_test_rule_001"]);
+        let bundle_name = validated.bundle.name.clone();
+        let policy_names: Vec<String> = policy_records
+            .iter()
+            .map(|record| record.name.clone())
+            .collect();
+        let before_bundles: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundles")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let before_bundle_versions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundle_versions")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let before_policies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let before_policy_versions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policy_versions")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let before_memberships: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundle_version_policies")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let before_associations: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundle_environments")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        validated.bundle.environment_ids = vec![Uuid::new_v4()];
+
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, policy_records)
+            .await
+            .expect_err("unknown environment must reject the import");
+        assert!(
+            error.to_string().contains("IMPORT_ENVIRONMENT_NOT_FOUND"),
+            "unexpected error: {error:?}"
+        );
+
+        let bundle_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundles WHERE name = $1")
+                .bind(&bundle_name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(bundle_count, 0, "bundle row must roll back");
+
+        let policy_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policy_versions WHERE name = ANY($1)",
+        )
+        .bind(&policy_names)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(policy_count, 0, "policy versions must roll back");
+
+        let source_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1",
+        )
+        .bind(&source_sha256)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(source_count, 0, "source artifact must roll back");
+
+        let association_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_bundle_environments cbe LEFT JOIN compliance_bundles b ON b.id = cbe.bundle_id WHERE b.name = $1",
+        )
+        .bind(&bundle_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            association_count, 0,
+            "environment associations must roll back"
+        );
+        let after_counts: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+            r#"
+            SELECT
+                (SELECT COUNT(*) FROM compliance_bundles),
+                (SELECT COUNT(*) FROM compliance_bundle_versions),
+                (SELECT COUNT(*) FROM deployment_policies),
+                (SELECT COUNT(*) FROM deployment_policy_versions),
+                (SELECT COUNT(*) FROM compliance_bundle_version_policies),
+                (SELECT COUNT(*) FROM compliance_bundle_environments)
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            after_counts.0, before_bundles,
+            "no compliance bundle persisted"
+        );
+        assert_eq!(
+            after_counts.1, before_bundle_versions,
+            "no compliance bundle version persisted"
+        );
+        assert_eq!(
+            after_counts.2, before_policies,
+            "no deployment policy persisted"
+        );
+        assert_eq!(
+            after_counts.3, before_policy_versions,
+            "no deployment policy version persisted"
+        );
+        assert_eq!(
+            after_counts.4, before_memberships,
+            "no bundle-policy membership persisted"
+        );
+        assert_eq!(
+            after_counts.5, before_associations,
+            "no bundle-environment association persisted"
+        );
     }
 
     #[tokio::test]

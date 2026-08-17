@@ -15,6 +15,7 @@ use crate::compliance::digest::{
 use crate::compliance::resolver::{
     ResolutionOutcome, resolve_system_effective_policies,
     resolve_systems_effective_policies_for_bundle_version_batch,
+    resolve_systems_effective_policies_for_bundle_versions_batch,
 };
 use crate::queries::deletion::{blocker, eligibility};
 
@@ -844,18 +845,10 @@ async fn list_bundle_summary_aggregates(
         ids.sort_unstable();
         ids.dedup();
     }
-    let mut effective_by_version = std::collections::HashMap::new();
-    for (version_id, system_ids) in system_ids_by_version {
-        effective_by_version.insert(
-            version_id,
-            resolve_systems_effective_policies_for_bundle_version_batch(
-                pool,
-                &system_ids,
-                version_id,
-            )
-            .await?,
-        );
-    }
+    let resolver_requests: Vec<(Uuid, Vec<Uuid>)> = system_ids_by_version.into_iter().collect();
+    let effective_by_version_system =
+        resolve_systems_effective_policies_for_bundle_versions_batch(pool, &resolver_requests)
+            .await?;
 
     let mut evidence_work = Vec::new();
     let mut unresolved_by_pair =
@@ -865,11 +858,8 @@ async fn list_bundle_summary_aggregates(
             unresolved_by_pair.insert((bundle_id, version_id), Vec::new());
             continue;
         };
-        let effective = effective_by_version
-            .get(&version_id)
-            .context("missing batch policy resolution for bundle summary")?;
         for system in systems {
-            let rollup = match effective.get(&system.id) {
+            let rollup = match effective_by_version_system.get(&(version_id, system.id)) {
                 Some(ResolutionOutcome::Resolved(set)) if set.bundle_version_id == version_id => {
                     evidence_work.push((
                         (bundle_id, version_id),
@@ -2628,13 +2618,13 @@ async fn effective_policy_rollups_with_evidence_batch(
         SELECT s.id, d.id AS derivation_id, d.policy_results
         FROM systems s
         JOIN LATERAL (
-            SELECT ss.derivation_path
+            SELECT ss.store_path
             FROM system_states ss
             WHERE ss.hostname = s.hostname
             ORDER BY ss.timestamp DESC, ss.id DESC
             LIMIT 1
         ) deployed ON true
-        JOIN derivations d ON d.derivation_path = deployed.derivation_path
+        JOIN derivations d ON COALESCE(d.store_path, d.expected_store_path) = deployed.store_path
         WHERE s.id = ANY($1)
           AND d.derivation_type = 'nixos'
         ORDER BY s.id, d.completed_at DESC NULLS LAST, d.id DESC
@@ -2914,13 +2904,13 @@ async fn assessment_context(pool: &PgPool, system_id: Uuid) -> Result<Option<Ass
         SELECT d.id AS derivation_id, d.policy_results
         FROM systems s
         JOIN LATERAL (
-            SELECT ss.derivation_path
+            SELECT ss.store_path
             FROM system_states ss
             WHERE ss.hostname = s.hostname
             ORDER BY ss.timestamp DESC, ss.id DESC
             LIMIT 1
         ) deployed ON true
-        JOIN derivations d ON d.derivation_path = deployed.derivation_path
+        JOIN derivations d ON COALESCE(d.store_path, d.expected_store_path) = deployed.store_path
         WHERE s.id = $1
           AND d.derivation_type = 'nixos'
         ORDER BY d.completed_at DESC NULLS LAST, d.id DESC
@@ -3575,6 +3565,327 @@ mod tests {
         )
         .await;
         assert!(missing.is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database with pg_stat_statements"]
+    async fn bundle_summary_aggregate_query_count_is_bounded_across_versions() {
+        let pool = PgPool::connect(
+            &std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests"),
+        )
+        .await
+        .unwrap();
+        sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
+            .execute(&pool)
+            .await
+            .expect("pg_stat_statements extension must be available");
+
+        let suffix = Uuid::new_v4().simple().to_string()[..8].to_string();
+        let env_id = create_query_count_environment(&pool, &suffix).await;
+        let system_ids = create_query_count_systems(&pool, env_id, &suffix).await;
+        let custom_policy_id = create_published_query_count_policy(
+            &pool,
+            &format!("aggregate-query-custom-{suffix}"),
+            "custom_check",
+            serde_json::json!({ "expression": "config.security.auditd.enable", "strict": true }),
+            &format!("aggregate-query-custom-digest-{suffix}"),
+        )
+        .await;
+        let cve_policy_id = create_published_query_count_policy(
+            &pool,
+            &format!("aggregate-query-cve-{suffix}"),
+            "require_cve_check",
+            serde_json::json!({ "max_critical": 0, "max_high": 0 }),
+            &format!("aggregate-query-cve-digest-{suffix}"),
+        )
+        .await;
+        set_query_count_policy_results(&pool, custom_policy_id, &suffix).await;
+
+        let mut summaries = Vec::new();
+        for index in 0..20 {
+            summaries.push(
+                create_query_count_bundle(
+                    &pool,
+                    env_id,
+                    &[custom_policy_id, cve_policy_id],
+                    system_ids[index % system_ids.len()],
+                    index,
+                    &suffix,
+                )
+                .await,
+            );
+        }
+
+        let one_version_calls =
+            measured_bundle_summary_aggregate_calls(&pool, &summaries[..1]).await;
+        let twenty_version_calls = measured_bundle_summary_aggregate_calls(&pool, &summaries).await;
+
+        assert!(
+            twenty_version_calls <= one_version_calls + 8,
+            "aggregate query count should stay bounded across versions: one={one_version_calls}, twenty={twenty_version_calls}"
+        );
+    }
+
+    async fn create_query_count_environment(pool: &PgPool, suffix: &str) -> Uuid {
+        sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
+            .bind(format!("aggregate-query-env-{suffix}"))
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn create_query_count_systems(pool: &PgPool, env_id: Uuid, suffix: &str) -> Vec<Uuid> {
+        let flake_id: i32 =
+            sqlx::query_scalar("INSERT INTO flakes (name, repo_url) VALUES ($1, $2) RETURNING id")
+                .bind(format!("aggregate-query-flake-{suffix}"))
+                .bind(format!("https://example.invalid/{suffix}.git"))
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, now()) RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(format!("aggregate-query-{suffix}"))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+
+        let mut system_ids = Vec::new();
+        for index in 0..10 {
+            let system_id = Uuid::new_v4();
+            let hostname = format!("aggregate-query-system-{index}-{suffix}");
+            let derivation_path = format!("/nix/store/{suffix}-{index}-system.drv");
+            sqlx::query("INSERT INTO systems (id, hostname, environment_id, public_key, flake_id, derivation, is_active) VALUES ($1, $2, $3, $4, $5, $6, TRUE)")
+                .bind(system_id)
+                .bind(&hostname)
+                .bind(env_id)
+                .bind(format!("ssh-ed25519 aggregate-query-{index}"))
+                .bind(flake_id)
+                .bind(&derivation_path)
+                .execute(pool)
+                .await
+                .unwrap();
+            let derivation_id: i32 = sqlx::query_scalar(
+                "INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, store_path, expected_store_path, status_id, attempt_count, completed_at, policy_results) VALUES ($1, 'nixos', $2, $3, $3, $3, 10, 0, now(), '{}'::jsonb) RETURNING id",
+            )
+            .bind(commit_id)
+            .bind(&hostname)
+            .bind(&derivation_path)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO system_states (hostname, store_path, change_reason) VALUES ($1, $2, 'startup')")
+                .bind(&hostname)
+                .bind(&derivation_path)
+                .execute(pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO cve_scans (derivation_id, status, scanner_name, critical_count, high_count, completed_at) VALUES ($1, 'completed', 'query-count-test', 0, 0, now())")
+                .bind(derivation_id)
+                .execute(pool)
+                .await
+                .unwrap();
+            system_ids.push(system_id);
+        }
+        system_ids
+    }
+
+    async fn create_published_query_count_policy(
+        pool: &PgPool,
+        name: &str,
+        policy_type: &str,
+        config: Value,
+        digest: &str,
+    ) -> Uuid {
+        let policy_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind(name)
+        .bind(policy_type)
+        .bind(config)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let version_id: Uuid =
+            sqlx::query_scalar("SELECT id FROM deployment_policy_versions WHERE policy_id = $1")
+                .bind(policy_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("UPDATE deployment_policies SET current_draft_version_id = NULL WHERE id = $1 AND current_draft_version_id = $2")
+            .bind(policy_id)
+            .bind(version_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET publication_state = 'accepted', semantic_digest = $2, trust_state = 'trusted', implementation_state = 'native' WHERE id = $1",
+        )
+        .bind(version_id)
+        .bind(digest)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(version_id)
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        version_id
+    }
+
+    async fn set_query_count_policy_results(pool: &PgPool, policy_version_id: Uuid, suffix: &str) {
+        let (policy_id,): (Uuid,) =
+            sqlx::query_as("SELECT policy_id FROM deployment_policy_versions WHERE id = $1")
+                .bind(policy_version_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        let policy_results = serde_json::json!({
+            "assigned": {
+                policy_id.to_string(): { "passed": true, "details": "ok" }
+            }
+        });
+        sqlx::query("UPDATE derivations SET policy_results = $1 WHERE derivation_path LIKE $2")
+            .bind(policy_results)
+            .bind(format!("/nix/store/{suffix}-%-system.drv"))
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn create_query_count_bundle(
+        pool: &PgPool,
+        env_id: Uuid,
+        policy_version_ids: &[Uuid],
+        system_id: Uuid,
+        index: usize,
+        suffix: &str,
+    ) -> ComplianceBundleSummary {
+        let bundle_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_bundles (name, framework, version, layer, owner) VALUES ($1, 'QUERY', '1.0', 'os', 'Tests') RETURNING id",
+        )
+        .bind(format!("aggregate-query-bundle-{index}-{suffix}"))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let bundle_version_id: Uuid =
+            sqlx::query_scalar("SELECT id FROM compliance_bundle_versions WHERE bundle_id = $1")
+                .bind(bundle_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        for (order, policy_version_id) in policy_version_ids.iter().enumerate() {
+            sqlx::query("INSERT INTO compliance_bundle_version_policies (bundle_version_id, policy_version_id, policy_order, selected) VALUES ($1, $2, $3, TRUE)")
+                .bind(bundle_version_id)
+                .bind(policy_version_id)
+                .bind(order as i32)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("UPDATE compliance_bundles SET current_draft_version_id = NULL WHERE id = $1 AND current_draft_version_id = $2")
+            .bind(bundle_id)
+            .bind(bundle_version_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundle_versions SET publication_state = 'accepted', semantic_digest = $2, trust_state = 'trusted' WHERE id = $1",
+        )
+        .bind(bundle_version_id)
+        .bind(format!("aggregate-query-bundle-digest-{index}-{suffix}"))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(bundle_version_id)
+        .bind(bundle_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        sqlx::query("INSERT INTO compliance_bundle_environments (bundle_id, environment_id) VALUES ($1, $2)")
+            .bind(bundle_id)
+            .bind(env_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let assignment_id = Uuid::new_v4();
+        let assignment_version_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO compliance_bundle_assignments (id, bundle_id, bundle_version_id, scope_type, system_id, enforcement_mode, assignment_overlay_digest, active) VALUES ($1, $2, $3, 'system', $4, 'report_only', $5, TRUE)")
+            .bind(assignment_id)
+            .bind(bundle_id)
+            .bind(bundle_version_id)
+            .bind(system_id)
+            .bind(format!("aggregate-query-assignment-digest-{index}-{suffix}"))
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO compliance_bundle_assignment_versions (id, assignment_id, version_number, bundle_version_id, enforcement_mode, assignment_overlay_digest) VALUES ($1, $2, 1, $3, 'report_only', $4)")
+            .bind(assignment_version_id)
+            .bind(assignment_id)
+            .bind(bundle_version_id)
+            .bind(format!("aggregate-query-assignment-version-digest-{index}-{suffix}"))
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundle_assignments SET current_version_id = $1 WHERE id = $2",
+        )
+        .bind(assignment_version_id)
+        .bind(assignment_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO compliance_assignment_value_overrides (assignment_id, assignment_version_id, policy_version_id, value_path, value) VALUES ($1, $2, $3, 'max_high', '0'::jsonb)")
+            .bind(assignment_id)
+            .bind(assignment_version_id)
+            .bind(policy_version_ids[1])
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let mut summary = bundle(
+            bundle_id,
+            &format!("aggregate-query-bundle-{index}-{suffix}"),
+        );
+        summary.current_published_version_id = Some(bundle_version_id);
+        summary
+    }
+
+    async fn measured_bundle_summary_aggregate_calls(
+        pool: &PgPool,
+        summaries: &[ComplianceBundleSummary],
+    ) -> i64 {
+        sqlx::query("SELECT pg_stat_statements_reset()")
+            .execute(pool)
+            .await
+            .unwrap();
+        let aggregates = list_bundle_summary_aggregates(pool, summaries)
+            .await
+            .unwrap();
+        assert_eq!(aggregates.len(), summaries.len());
+        sqlx::query_scalar(
+            r#"
+            SELECT COALESCE(SUM(calls), 0)::bigint
+            FROM pg_stat_statements
+            WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+              AND query NOT ILIKE '%pg_stat_statements%'
+            "#,
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
     }
 
     fn named_policy(policy_type: &str, name: &str, config: Value, enabled: bool) -> PolicyRow {

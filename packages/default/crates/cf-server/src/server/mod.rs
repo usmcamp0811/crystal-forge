@@ -288,29 +288,85 @@ fn normalize_string_interpolations(expression: &str) -> String {
 
 fn interpolation_end(chars: &[char], mut index: usize) -> Option<usize> {
     let mut depth = 1usize;
-    let mut quote = false;
+    let mut state = LexicalState::Normal;
     while index < chars.len() {
-        if quote {
-            if chars[index] == '\\' {
-                index += 2;
-                continue;
-            }
-            quote = chars[index] != '"';
-            index += 1;
-            continue;
-        }
-        match chars[index] {
-            '"' => quote = true,
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(index);
+        match state {
+            LexicalState::Normal => match chars[index] {
+                '"' => {
+                    state = LexicalState::DoubleQuoted;
+                    index += 1;
+                }
+                '#' => {
+                    state = LexicalState::LineComment;
+                    index += 1;
+                }
+                '/' if chars.get(index + 1) == Some(&'*') => {
+                    state = LexicalState::BlockComment;
+                    index += 2;
+                }
+                '\'' if chars.get(index + 1) == Some(&'\'') => {
+                    state = LexicalState::IndentedString;
+                    index += 2;
+                }
+                '{' => {
+                    depth += 1;
+                    index += 1;
+                }
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(index);
+                    }
+                    index += 1;
+                }
+                _ => index += 1,
+            },
+            LexicalState::DoubleQuoted => {
+                if chars[index] == '\\' {
+                    index += 2;
+                } else if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+                    let nested_start = index + 2;
+                    index = interpolation_end(chars, nested_start)? + 1;
+                } else if chars[index] == '"' {
+                    state = LexicalState::Normal;
+                    index += 1;
+                } else {
+                    index += 1;
                 }
             }
-            _ => {}
+            LexicalState::IndentedString => {
+                if chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
+                    if chars
+                        .get(index + 2)
+                        .is_some_and(|next| matches!(next, '$' | '\\' | '\''))
+                    {
+                        index += 3;
+                    } else {
+                        state = LexicalState::Normal;
+                        index += 2;
+                    }
+                } else if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+                    let nested_start = index + 2;
+                    index = interpolation_end(chars, nested_start)? + 1;
+                } else {
+                    index += 1;
+                }
+            }
+            LexicalState::LineComment => {
+                if chars[index] == '\n' {
+                    state = LexicalState::Normal;
+                }
+                index += 1;
+            }
+            LexicalState::BlockComment => {
+                if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
+                    state = LexicalState::Normal;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
         }
-        index += 1;
     }
     None
 }
@@ -2242,6 +2298,49 @@ mod tests {
             "normalized={normalized:?}"
         );
         assert!(normalized.contains("'''cfg.config.literal_quotes"));
+    }
+
+    #[test]
+    fn normalize_custom_policy_expression_ignores_braces_in_nested_interpolation_strings() {
+        let expression = r#""${let x = ''}''; in cfg.config.services.auditd.enable}""#;
+        let (normalized, changed) = normalize_custom_policy_expression(expression);
+
+        assert!(changed);
+        assert_eq!(
+            normalized,
+            r#""${let x = ''}''; in config.services.auditd.enable}""#
+        );
+    }
+
+    #[test]
+    fn normalize_custom_policy_expression_ignores_braces_in_nested_interpolation_comments() {
+        let expression = "\"${let\n  x = 1; # }\nin cfg.config.services.auditd.enable}\"";
+        let (normalized, changed) = normalize_custom_policy_expression(expression);
+
+        assert!(changed);
+        assert_eq!(
+            normalized,
+            "\"${let\n  x = 1; # }\nin config.services.auditd.enable}\""
+        );
+    }
+
+    #[test]
+    fn normalize_custom_policy_expression_handles_combined_nested_interpolation_lexing() {
+        let expression = r#""${let
+  a = ''literal } and ''${notInterpolation}'';
+  b = "also }";
+  # }
+  /* } */
+in cfg.config.security.auditd.enable}""#;
+        let (normalized, changed) = normalize_custom_policy_expression(expression);
+
+        assert!(changed);
+        assert!(normalized.contains("''literal } and ''${notInterpolation}''"));
+        assert!(normalized.contains("\"also }\""));
+        assert!(normalized.contains("# }"));
+        assert!(normalized.contains("/* } */"));
+        assert!(normalized.contains("in config.security.auditd.enable}"));
+        assert!(!normalized.contains("cfg.config.security.auditd.enable"));
     }
 
     #[test]

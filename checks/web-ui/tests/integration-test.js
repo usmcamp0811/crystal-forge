@@ -231,8 +231,8 @@ async function captureThemedBaselines(page, step, visualThemes) {
 
 // Test user credentials
 const TEST_USER = {
-  username: process.env.CF_UI_TEST_USERNAME || "admin",
-  email: process.env.CF_UI_TEST_EMAIL || "admin@example.com",
+  username: process.env.CF_UI_TEST_USERNAME || "cf-ui-admin",
+  email: process.env.CF_UI_TEST_EMAIL || "cf-ui-admin@example.com",
   password: process.env.CF_UI_TEST_PASSWORD || "testpassword123",
   firstName: process.env.CF_UI_TEST_FIRST_NAME || "Test",
   lastName: process.env.CF_UI_TEST_LAST_NAME || "Admin",
@@ -258,6 +258,34 @@ async function assertVisible(locator, message, timeoutMs = 5000) {
   }
 }
 
+async function fillDioxusInput(locator, value) {
+  await locator.fill(value);
+  await locator.evaluate((element, nextValue) => {
+    element.value = nextValue;
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  }, value);
+}
+
+async function collapseOnboardingCoach(page) {
+  const coachCollapse = page.locator("[data-testid='onboarding-coach-collapse']").first();
+  if (await coachCollapse.isVisible().catch(() => false)) {
+    await coachCollapse.click({ force: true });
+    await page.waitForTimeout(250);
+  }
+}
+
+async function waitForAssertionCardCount(page, expected, message) {
+  await page.waitForFunction(
+    ({ expected }) => document.querySelectorAll(".refine-assertion-card").length === expected,
+    { expected },
+    { timeout: 5000 },
+  ).catch(async () => {
+    const actual = await page.locator(".refine-assertion-card").count();
+    throw new Error(`${message} (expected ${expected}, got ${actual})`);
+  });
+}
+
 async function ensureAuthenticated(page) {
   const isAuthenticated = async () => page.evaluate(async (base) => {
     const controller = new AbortController();
@@ -281,23 +309,68 @@ async function ensureAuthenticated(page) {
   // Focused runs skip the ordered registration/login steps. On a fresh local
   // auth instance, reproduce only the registration preflight here so the
   // requested post-login step remains self-contained.
-  const registrationRequired = page.url().includes("/register") ||
+  const setupStatus = await page.evaluate(async (base) => {
+    const response = await fetch(`${base}/api/auth/setup-status`, { credentials: "include" });
+    if (!response.ok) return null;
+    return response.json();
+  }, apiBaseUrl).catch(() => null);
+  const registrationRequired = setupStatus?.requires_setup === true ||
+    page.url().includes("/register") ||
     await page.locator('input[type="email"]').isVisible().catch(() => false);
   if (registrationRequired) {
-    if (!page.url().includes("/register")) {
-      await page.goto(`${baseUrl}/register`, { timeout: LOAD_TIMEOUT, waitUntil: "domcontentloaded" });
+    const registration = await page.evaluate(async ({ base, user }) => {
+      const response = await fetch(`${base}/api/auth/local/register`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: user.username,
+          email: user.email,
+          password: user.password,
+          first_name: user.firstName,
+          last_name: user.lastName,
+        }),
+      });
+      return { ok: response.ok, status: response.status, body: await response.text() };
+    }, { base: apiBaseUrl, user: TEST_USER });
+    if (!registration.ok && registration.status !== 409) {
+      throw new Error(`Registration preflight failed (${registration.status}): ${registration.body}`);
     }
-    await page.locator('input[type="text"]').first().fill(TEST_USER.username);
-    await page.locator('input[type="email"]').fill(TEST_USER.email);
-    await page.locator('input[type="password"]').first().fill(TEST_USER.password);
-    await page.locator('input[type="password"]').last().fill(TEST_USER.password);
-    await page.locator('button[type="submit"]').first().click();
+    if (await isAuthenticated()) return;
+  }
+
+  const apiLogin = await page.evaluate(async ({ base, user }) => {
+    const response = await fetch(`${base}/api/auth/local/login`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: user.username, password: user.password }),
+    });
+    return { ok: response.ok, status: response.status, body: await response.text() };
+  }, { base: apiBaseUrl, user: TEST_USER });
+  if (apiLogin.ok && await isAuthenticated()) return;
+
+  await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT, waitUntil: "domcontentloaded" });
+  if (page.url().includes("/register")) {
+    await page.waitForTimeout(2000);
+    await fillDioxusInput(page.locator('input[type="text"]').first(), TEST_USER.username);
+    await fillDioxusInput(page.locator('input[type="email"]'), TEST_USER.email);
+    await fillDioxusInput(page.locator('input[type="password"]').first(), TEST_USER.password);
+    await fillDioxusInput(page.locator('input[type="password"]').last(), TEST_USER.password);
     await page.waitForTimeout(500);
+    await page.locator('button[type="submit"]').first().waitFor({ state: "visible", timeout: 5000 });
+    await page.waitForFunction(() => {
+      const button = document.querySelector('button[type="submit"]');
+      return button && !button.disabled;
+    }, undefined, { timeout: 5000 });
+    await page.locator('button[type="submit"]').first().click();
+    await page.waitForTimeout(3000);
+    if (await isAuthenticated()) return;
     await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT, waitUntil: "domcontentloaded" });
   }
 
-  await page.locator('input[type="text"]').fill(TEST_USER.username);
-  await page.locator('input[type="password"]').fill(TEST_USER.password);
+  await fillDioxusInput(page.locator('input[type="text"]').first(), TEST_USER.username);
+  await fillDioxusInput(page.locator('input[type="password"]').first(), TEST_USER.password);
   await page.locator('button[type="submit"]').click();
   await page.waitForFunction(async (base) => {
     const controller = new AbortController();
@@ -6824,6 +6897,7 @@ security.audit.enable = true;</fixtext>
 
       try {
         await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+        await collapseOnboardingCoach(page);
         await page.getByRole("button", { name: /Import \/ Export/i }).click();
         await page.getByText("Import STIG or XCCDF (.xml/.zip)", { exact: true }).click();
         await page.getByRole("heading", { name: "Import STIG / XCCDF" }).waitFor({ timeout: 5000 });
@@ -6850,19 +6924,20 @@ security.audit.enable = true;</fixtext>
 
         await page.getByTestId("xccdf-review-reconcile-button").click();
         await page.getByRole("button", { name: "Refine all instead" }).click();
+        await page.getByTestId("xccdf-refine-tab-enforcement").click();
         const assertionCards = page.locator(".refine-assertion-card");
-        if (await assertionCards.count() !== 2) throw new Error("Expected two structured assertion editors");
+        await waitForAssertionCardCount(page, 2, "Expected two structured assertion editors");
         if (await page.getByText(/Custom nix expression/).count() !== 0) throw new Error("Inferred assertions became CustomExpression editors");
         const inferredPaths = await assertionCards.locator(".refine-option-row input").evaluateAll((inputs) => inputs.map((input) => input.value));
         if (inferredPaths.join(",") !== "security.auditd.enable,security.audit.enable") throw new Error(`Unexpected inferred editor order: ${inferredPaths.join(",")}`);
 
         await page.getByTestId("xccdf-add-assertion").selectOption("option");
-        if (await assertionCards.count() !== 3) throw new Error("Expected exactly one independently added assertion");
+        await waitForAssertionCardCount(page, 3, "Expected exactly one independently added assertion");
         const manualCard = assertionCards.nth(2);
         await manualCard.locator(".refine-option-row input").fill("security.audit.manual");
         await manualCard.locator(".refine-expected").selectOption("true");
         await assertionCards.first().getByTitle("Remove").click();
-        if (await assertionCards.count() !== 2) throw new Error("Expected one assertion removal");
+        await waitForAssertionCardCount(page, 2, "Expected one assertion removal");
         const remainingPaths = await assertionCards.locator(".refine-option-row input").evaluateAll((inputs) => inputs.map((input) => input.value));
         if (remainingPaths.join(",") !== "security.audit.enable,security.audit.manual") throw new Error(`Removal changed source order: ${remainingPaths.join(",")}`);
 
@@ -6891,8 +6966,9 @@ security.audit.enable = true;</fixtext>
         await matchingPreviewResponsePromise;
         await page.getByTestId("xccdf-review-reconcile-button").click();
         await page.getByRole("button", { name: "Refine all instead" }).click();
+        await page.getByTestId("xccdf-refine-tab-enforcement").click();
         const restoredCards = page.locator(".refine-assertion-card");
-        if (await restoredCards.count() !== 2) throw new Error("Paused refinement did not restore the remaining assertions");
+        await waitForAssertionCardCount(page, 2, "Paused refinement did not restore the remaining assertions");
         const restoredPaths = await restoredCards.locator(".refine-option-row input").evaluateAll((inputs) => inputs.map((input) => input.value));
         if (restoredPaths.join(",") !== "security.audit.enable,security.audit.manual") throw new Error(`Paused refinement lost assertion order: ${restoredPaths.join(",")}`);
         const restoredManualValue = await restoredCards.nth(1).locator(".refine-expected").inputValue();
