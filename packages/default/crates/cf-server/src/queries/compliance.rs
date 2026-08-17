@@ -3619,6 +3619,9 @@ mod tests {
         let one_version_calls =
             measured_bundle_summary_aggregate_calls(&pool, &summaries[..1]).await;
         let twenty_version_calls = measured_bundle_summary_aggregate_calls(&pool, &summaries).await;
+        println!(
+            "aggregate query count regression: one={one_version_calls}, twenty={twenty_version_calls}"
+        );
 
         assert!(
             twenty_version_calls <= one_version_calls + 8,

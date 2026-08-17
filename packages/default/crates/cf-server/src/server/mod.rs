@@ -243,9 +243,21 @@ fn normalize_string_interpolations(expression: &str) -> String {
             continue;
         }
         if indented && chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
+            if chars.get(index + 2) == Some(&'\\') {
+                output.push('\'');
+                output.push('\'');
+                index += 2;
+                output.push(chars[index]);
+                index += 1;
+                if let Some(escaped) = chars.get(index) {
+                    output.push(*escaped);
+                    index += 1;
+                }
+                continue;
+            }
             if chars
                 .get(index + 2)
-                .is_some_and(|next| matches!(next, '$' | '\\' | '\''))
+                .is_some_and(|next| matches!(next, '$' | '\''))
             {
                 output.push('\'');
                 output.push('\'');
@@ -336,9 +348,14 @@ fn interpolation_end(chars: &[char], mut index: usize) -> Option<usize> {
             }
             LexicalState::IndentedString => {
                 if chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
-                    if chars
+                    if chars.get(index + 2) == Some(&'\\') {
+                        index += 3;
+                        if index < chars.len() {
+                            index += 1;
+                        }
+                    } else if chars
                         .get(index + 2)
-                        .is_some_and(|next| matches!(next, '$' | '\\' | '\''))
+                        .is_some_and(|next| matches!(next, '$' | '\''))
                     {
                         index += 3;
                     } else {
@@ -2288,13 +2305,17 @@ mod tests {
 
     #[test]
     fn normalize_custom_policy_expression_respects_indented_string_escapes() {
-        let expression = "''\n  ${cfg.config.real}\n  echo ''${cfg.config.literal}\n  echo '''cfg.config.literal_quotes\n''";
+        let expression = "''\n  ${cfg.config.real}\n  echo ''${cfg.config.literal}\n  echo ''\\${cfg.config.literal_backslash}\n  echo '''cfg.config.literal_quotes\n''";
         let (normalized, changed) = normalize_custom_policy_expression(expression);
 
         assert!(changed);
         assert!(normalized.contains("${config.real}"));
         assert!(
             normalized.contains("''${cfg.config.literal}"),
+            "normalized={normalized:?}"
+        );
+        assert!(
+            normalized.contains("''\\${cfg.config.literal_backslash}"),
             "normalized={normalized:?}"
         );
         assert!(normalized.contains("'''cfg.config.literal_quotes"));

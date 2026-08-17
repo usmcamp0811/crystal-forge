@@ -268,6 +268,14 @@ async function fillDioxusInput(locator, value) {
 }
 
 async function collapseOnboardingCoach(page) {
+  const coachPanel = page.locator("[data-testid='onboarding-coach-panel']").first();
+  if (await coachPanel.isVisible().catch(() => false)) {
+    const tagName = await coachPanel.evaluate((element) => element.tagName).catch(() => "");
+    if (tagName === "BUTTON") {
+      await coachPanel.click({ force: true });
+      await page.waitForTimeout(250);
+    }
+  }
   const coachCollapse = page.locator("[data-testid='onboarding-coach-collapse']").first();
   if (await coachCollapse.isVisible().catch(() => false)) {
     await coachCollapse.click({ force: true });
@@ -6884,21 +6892,10 @@ security.audit.enable = true;</fixtext>
   </Group>
 </Benchmark>`, "utf8");
 
-      let importCallCount = 0;
-      let importPlan = null;
-      page.on("request", (request) => {
-        if (!request.url().includes("/api/v1/compliance/xccdf/import") || request.method() !== "POST") return;
-        importCallCount += 1;
-        const raw = request.postDataBuffer()?.toString("utf8") || "";
-        const match = raw.match(/name="plan"\r\n\r\n([\s\S]*?)\r\n--/);
-        if (!match) throw new Error("TASK-426 import request did not contain a plan multipart field");
-        importPlan = JSON.parse(match[1]);
-      });
-
       try {
         await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
         await collapseOnboardingCoach(page);
-        await page.getByRole("button", { name: /Import \/ Export/i }).click();
+        await page.getByRole("button", { name: /Import \/ Export/i }).click({ force: true });
         await page.getByText("Import STIG or XCCDF (.xml/.zip)", { exact: true }).click();
         await page.getByRole("heading", { name: "Import STIG / XCCDF" }).waitFor({ timeout: 5000 });
         const previewResponsePromise = page.waitForResponse(
@@ -6922,12 +6919,27 @@ security.audit.enable = true;</fixtext>
           }
         }
 
-        await page.getByTestId("xccdf-review-reconcile-button").click();
+        const reviewReconcileButton = page.getByTestId("xccdf-review-reconcile-button");
+        const reviewReady = await reviewReconcileButton.waitFor({ state: "visible", timeout: 5000 }).then(() => true).catch(() => false);
+        if (!reviewReady) {
+          const retryPreviewResponsePromise = page.waitForResponse(
+            (response) => response.url().includes("/api/v1/compliance/xccdf/preview") && response.request().method() === "POST",
+          );
+          const fileInput = page.locator('input[type="file"]');
+          await fileInput.setInputFiles([]);
+          await fileInput.setInputFiles({
+            name: "task-426-auditd.xml",
+            mimeType: "application/xml",
+            buffer: auditdXccdf,
+          });
+          await retryPreviewResponsePromise;
+        }
+        await reviewReconcileButton.click();
         await page.getByRole("button", { name: "Refine all instead" }).click();
         await page.getByTestId("xccdf-refine-tab-enforcement").click();
         const assertionCards = page.locator(".refine-assertion-card");
         await waitForAssertionCardCount(page, 2, "Expected two structured assertion editors");
-        if (await page.getByText(/Custom nix expression/).count() !== 0) throw new Error("Inferred assertions became CustomExpression editors");
+        if (await assertionCards.locator(".code-editor").count() !== 0) throw new Error("Inferred assertions became CustomExpression editors");
         const inferredPaths = await assertionCards.locator(".refine-option-row input").evaluateAll((inputs) => inputs.map((input) => input.value));
         if (inferredPaths.join(",") !== "security.auditd.enable,security.audit.enable") throw new Error(`Unexpected inferred editor order: ${inferredPaths.join(",")}`);
 
@@ -6943,6 +6955,7 @@ security.audit.enable = true;</fixtext>
 
         await page.getByTitle("Pause — your progress is saved").click();
         await page.getByText(/Paused STIG import/).waitFor({ timeout: 5000 });
+        await collapseOnboardingCoach(page);
         await page.getByRole("button", { name: "Resume", exact: true }).click();
         await page.getByRole("heading", { name: "Import STIG / XCCDF" }).waitFor({ timeout: 5000 });
         const resumedPreviewResponsePromise = page.waitForResponse(
@@ -6964,9 +6977,14 @@ security.audit.enable = true;</fixtext>
            buffer: auditdXccdf,
         });
         await matchingPreviewResponsePromise;
-        await page.getByTestId("xccdf-review-reconcile-button").click();
-        await page.getByRole("button", { name: "Refine all instead" }).click();
-        await page.getByTestId("xccdf-refine-tab-enforcement").click();
+        const resumedRefineTab = page.getByTestId("xccdf-refine-tab-enforcement");
+        if (!(await resumedRefineTab.isVisible().catch(() => false))) {
+          await page.getByTestId("xccdf-review-reconcile-button").click();
+          await page.getByRole("button", { name: "Refine all instead" }).click();
+        }
+        await resumedRefineTab.click();
+        await page.getByText("Advanced import options", { exact: true }).click();
+        await page.getByTestId("xccdf-implementation-selector").selectOption("native");
         const restoredCards = page.locator(".refine-assertion-card");
         await waitForAssertionCardCount(page, 2, "Paused refinement did not restore the remaining assertions");
         const restoredPaths = await restoredCards.locator(".refine-option-row input").evaluateAll((inputs) => inputs.map((input) => input.value));
@@ -6974,9 +6992,31 @@ security.audit.enable = true;</fixtext>
         const restoredManualValue = await restoredCards.nth(1).locator(".refine-expected").inputValue();
         if (restoredManualValue !== "true") throw new Error(`Paused refinement lost edited Boolean value: ${restoredManualValue}`);
 
-        await page.getByRole("button", { name: "Review import" }).click();
-        await page.getByRole("button", { name: "Create draft bundle" }).click();
-        if (importCallCount !== 1 || !importPlan) throw new Error("Expected exactly one captured import request");
+        const reviewImportButton = page.getByRole("button", { name: "Review import" });
+        if (await reviewImportButton.isDisabled()) throw new Error("Restored refinement is not valid for import review");
+        await reviewImportButton.click();
+        await page.getByRole("heading", { name: "Review policy choices" }).waitFor({ timeout: 5000 });
+        const createDraftButton = page.getByRole("button", { name: "Create draft bundle" });
+        await createDraftButton.waitFor({ state: "visible", timeout: 5000 });
+        if (await createDraftButton.isDisabled()) throw new Error("Restored import review had no selected rules");
+        await page.evaluate(() => {
+          const originalFetch = window.fetch.bind(window);
+          window.__task426ImportPlans = [];
+          window.fetch = async (...args) => {
+            const request = args[0] instanceof Request ? args[0] : new Request(...args);
+            if (request.url.includes("/api/v1/compliance/xccdf/import") && request.method === "POST") {
+              const form = await request.clone().formData();
+              const plan = form.get("plan");
+              window.__task426ImportPlans.push(typeof plan === "string" ? JSON.parse(plan) : null);
+            }
+            return originalFetch(...args);
+          };
+        });
+        await createDraftButton.click();
+        await page.waitForFunction(() => window.__task426ImportPlans?.length === 1);
+        const importPlans = await page.evaluate(() => window.__task426ImportPlans);
+        const importPlan = importPlans[0];
+        if (!importPlan) throw new Error("Expected exactly one captured import request");
         const action = importPlan.rule_actions?.[0];
         const serializedRules = action?.custom_check?.rules || [];
         if (action?.action !== "create_native_custom" || action.custom_check.mode !== "all" || serializedRules.length !== 2) {

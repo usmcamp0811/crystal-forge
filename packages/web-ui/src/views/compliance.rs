@@ -3131,17 +3131,12 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                 // STEP: refine (structured per-control walkthrough)
                 // ══════════════════════════════════════════════════════
                 if *step.read() == "refine" {
-                    {
-                        let refined_rules_signal = refined_rules;
-                        let cursor_signal = cursor;
-                        rsx! {
-                        RefinePolicyStep {
-                            rules: refined_rules_signal,
-                            cursor: cursor_signal,
-                            review_rule_ids: Some(refine_rule_ids.read().clone()),
-                            on_back: move |_| step.set("reconcile".to_string()),
-                            on_review: move |_| step.set("final-review".to_string()),
-                        }
+                    RefinePolicyStep {
+                        rules: refined_rules,
+                        cursor,
+                        review_rule_ids: Some(refine_rule_ids.read().clone()),
+                        on_back: move |_| step.set("reconcile".to_string()),
+                        on_review: move |_| step.set("final-review".to_string()),
                     }
                 }
 
@@ -3254,7 +3249,6 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         }
                     }
                 }
-            }
         }
     }
 }

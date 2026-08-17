@@ -581,10 +581,12 @@ pub async fn commit_foreign_import(
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
 
-    let environment_ids = &validated.bundle.environment_ids;
+    let mut environment_ids = validated.bundle.environment_ids.clone();
+    environment_ids.sort_unstable();
+    environment_ids.dedup();
     let valid_environment_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM environments WHERE id = ANY($1::uuid[])")
-            .bind(environment_ids)
+            .bind(&environment_ids)
             .fetch_one(&mut *tx)
             .await
             .context("failed to validate imported bundle environments")?;
@@ -4145,7 +4147,7 @@ mod tests {
         bytes.extend_from_slice(format!("\n<!-- {} -->", Uuid::new_v4()).as_bytes());
         let pkg = make_package(bytes);
         let (mut validated, policy_records) = make_plan(&pkg, &["xccdf_test_rule_001"]);
-        validated.bundle.environment_ids = vec![environment_id];
+        validated.bundle.environment_ids = vec![environment_id, environment_id];
 
         let result = commit_foreign_import(&pool, user_id, pkg, validated, policy_records)
             .await
