@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-08-17 04:05'
+updated_date: '2026-08-17 04:05'
 labels:
   - compliance
   - nixos
@@ -36,5 +37,4 @@ Action: fix the policy assertion to a real NixOS option (`services.openssh.enabl
 - [ ] #1 The offending policy assertion no longer references services.sshd.enable
 - [ ] #2 Re-export from Crystal Forge produces a policies.json whose NixOS assertions validate against real NixOS options
 - [ ] #3 cf-nixos-module output for the fixed export evaluates successfully through NixOS eval-config
-- [ ] #4 null
 <!-- AC:END -->
