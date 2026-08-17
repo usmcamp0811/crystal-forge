@@ -525,6 +525,7 @@ version = "0.3.0"
 dependencies = [
  "cf-compliance",
  "hex",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

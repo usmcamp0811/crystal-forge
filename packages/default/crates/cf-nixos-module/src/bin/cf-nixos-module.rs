@@ -5,12 +5,13 @@
 //! database, and it never evaluates Nix contained in an export.
 
 use std::collections::BTreeSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-use cf_nixos_module::generate::{Generated, Layout, generate};
+use cf_nixos_module::generate::{Generated, derive_baseline, generate};
 use cf_nixos_module::input::{LoadedInput, load_input};
 use cf_nixos_module::select::select_policies;
+use cf_nixos_module::write::write_output;
 
 const USAGE: &str = "\
 cf-nixos-module — generate standalone NixOS modules from exported Crystal Forge content
@@ -25,11 +26,17 @@ REQUIRED:
                            Not required with --check.
 
 OPTIONS:
-        --check            Validate the inputs without writing any output.
+        --check            Validate the inputs without writing output.
         --strict           Exit non-zero if any policy cannot be converted.
-        --single-file      Emit one combined default.nix instead of a directory
-                           of per-policy modules.
+        --baseline <NAME>  Identifier for the generated baseline. Defaults to
+                           the bundle name, or the first input's file stem.
     -h, --help             Print this help.
+
+The artifact contains default.nix, lib.nix, and manifest.json. Import it and
+enable the baseline:
+
+    imports = [ ./generated-compliance ];
+    crystal-forge.compliance.<baseline>.enable = true;
 
 The generated module depends only on standard NixOS module infrastructure and
 requires no running Crystal Forge server.
@@ -41,7 +48,7 @@ struct Args {
     output: Option<PathBuf>,
     check: bool,
     strict: bool,
-    single_file: bool,
+    baseline: Option<String>,
     help: bool,
 }
 
@@ -54,7 +61,12 @@ fn parse_args(raw: impl IntoIterator<Item = String>) -> Result<Args, String> {
             "-h" | "--help" => args.help = true,
             "--check" => args.check = true,
             "--strict" => args.strict = true,
-            "--single-file" => args.single_file = true,
+            "--baseline" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--baseline requires a name".to_string())?;
+                args.baseline = Some(value);
+            }
             "-i" | "--input" => {
                 let value = iter
                     .next()
@@ -72,6 +84,8 @@ fn parse_args(raw: impl IntoIterator<Item = String>) -> Result<Args, String> {
                     args.inputs.push(PathBuf::from(value));
                 } else if let Some(value) = other.strip_prefix("--output=") {
                     args.output = Some(PathBuf::from(value));
+                } else if let Some(value) = other.strip_prefix("--baseline=") {
+                    args.baseline = Some(value.to_string());
                 } else {
                     return Err(format!("unrecognized argument: {other}"));
                 }
@@ -147,13 +161,9 @@ fn run(args: &Args) -> Result<ExitCode, String> {
         message
     })?;
 
-    let layout = if args.single_file {
-        Layout::SingleFile
-    } else {
-        Layout::Directory
-    };
+    let baseline = derive_baseline(&selection, args.baseline.as_deref());
 
-    let generated = generate(&selection, layout).map_err(|conflicts| {
+    let generated = generate(&selection, &baseline).map_err(|conflicts| {
         let mut message = String::from("conflicting NixOS implementations:\n");
         for conflict in conflicts {
             message.push_str(&format!("  {conflict}\n"));
@@ -191,6 +201,15 @@ fn run(args: &Args) -> Result<ExitCode, String> {
         generated.files.len(),
         output.display()
     );
+    println!(
+        "\nImport the artifact and enable the baseline:\n\n  \
+         imports = [ ./{} ];\n  crystal-forge.compliance.{}.enable = true;",
+        output
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "generated-compliance".to_string()),
+        generated.baseline
+    );
 
     Ok(ExitCode::SUCCESS)
 }
@@ -227,33 +246,6 @@ fn report(generated: &Generated, deduplicated: &[String]) {
     eprintln!();
 }
 
-/// Write every generated file beneath `output`.
-///
-/// Each path is re-validated before use so nothing can be written outside the
-/// requested directory even if an upstream layer produced an unexpected path.
-fn write_output(generated: &Generated, output: &Path) -> Result<(), String> {
-    for file in &generated.files {
-        let relative = Path::new(&file.path);
-        if relative.is_absolute()
-            || relative
-                .components()
-                .any(|component| !matches!(component, Component::Normal(_)))
-        {
-            return Err(format!("refusing to write unsafe path: {}", file.path));
-        }
-
-        let destination = output.join(relative);
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
-        }
-        std::fs::write(&destination, &file.contents)
-            .map_err(|error| format!("could not write {}: {error}", destination.display()))?;
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,12 +266,18 @@ mod tests {
 
     #[test]
     fn parses_equals_form_and_short_flags() {
-        let parsed =
-            args(&["-i", "a.json", "--output=out", "--strict", "--single-file"]).expect("parses");
+        let parsed = args(&[
+            "-i",
+            "a.json",
+            "--output=out",
+            "--strict",
+            "--baseline=custom",
+        ])
+        .expect("parses");
         assert_eq!(parsed.inputs, vec![PathBuf::from("a.json")]);
         assert_eq!(parsed.output, Some(PathBuf::from("out")));
         assert!(parsed.strict);
-        assert!(parsed.single_file);
+        assert_eq!(parsed.baseline, Some("custom".to_string()));
     }
 
     #[test]

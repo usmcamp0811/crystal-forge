@@ -68,13 +68,13 @@ pub fn extract_assignments(policy: &ResolvedPolicy) -> Result<Vec<OptionAssignme
         // turned into a coherent module.
         if let Some(existing) = assignments
             .iter()
-            .find(|candidate| candidate.option_path == assignment.option_path)
+            .find(|candidate| candidate.path == assignment.path)
         {
             if existing.value != assignment.value {
                 return Err(SkipReason::SelfContradictory {
-                    option_path: assignment.option_path,
-                    first: existing.value.nix_repr(),
-                    second: assignment.value.nix_repr(),
+                    option_path: assignment.dotted_path(),
+                    first: existing.value_display(),
+                    second: assignment.value_display(),
                 });
             }
             continue;
@@ -84,7 +84,7 @@ pub fn extract_assignments(policy: &ResolvedPolicy) -> Result<Vec<OptionAssignme
     }
 
     // Deterministic emission order regardless of rule order in the export.
-    assignments.sort_by(|a, b| a.option_path.cmp(&b.option_path));
+    assignments.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(assignments)
 }
 
@@ -96,7 +96,17 @@ pub fn extract_assignments(policy: &ResolvedPolicy) -> Result<Vec<OptionAssignme
 fn collect_expressions(config: &serde_json::Value) -> Result<Vec<String>, SkipReason> {
     let mut expressions = Vec::new();
 
-    if let Some(rules) = config.get("rules").and_then(serde_json::Value::as_array) {
+    // A `custom_check` is either the ordered multi-rule form or the legacy
+    // single-expression form. Every rule must contribute exactly one usable
+    // expression: silently keeping only the well-formed rules would emit a
+    // policy that enforces less than it asserts.
+    if let Some(rules) = config.get("rules") {
+        let rules = rules
+            .as_array()
+            .ok_or_else(|| SkipReason::MalformedConfig {
+                detail: "custom_check 'rules' is present but is not an array".to_string(),
+            })?;
+
         if !rules.is_empty() {
             let mode = config
                 .get("mode")
@@ -107,20 +117,42 @@ fn collect_expressions(config: &serde_json::Value) -> Result<Vec<String>, SkipRe
                     mode: mode.to_string(),
                 });
             }
-            for rule in rules {
-                if let Some(expression) = rule.get("expression").and_then(serde_json::Value::as_str)
-                {
-                    expressions.push(expression.to_string());
+
+            for (index, rule) in rules.iter().enumerate() {
+                let Some(expression) = rule.get("expression") else {
+                    return Err(SkipReason::MalformedConfig {
+                        detail: format!("custom_check rule {index} has no 'expression'"),
+                    });
+                };
+                let Some(expression) = expression.as_str() else {
+                    return Err(SkipReason::MalformedConfig {
+                        detail: format!("custom_check rule {index} 'expression' is not a string"),
+                    });
+                };
+                if expression.trim().is_empty() {
+                    return Err(SkipReason::MalformedConfig {
+                        detail: format!("custom_check rule {index} 'expression' is empty"),
+                    });
                 }
+                expressions.push(expression.to_string());
             }
+
             return Ok(expressions);
         }
     }
 
-    if let Some(expression) = config.get("expression").and_then(serde_json::Value::as_str) {
-        if !expression.trim().is_empty() {
-            expressions.push(expression.to_string());
+    if let Some(expression) = config.get("expression") {
+        let Some(expression) = expression.as_str() else {
+            return Err(SkipReason::MalformedConfig {
+                detail: "custom_check 'expression' is not a string".to_string(),
+            });
+        };
+        if expression.trim().is_empty() {
+            return Err(SkipReason::MalformedConfig {
+                detail: "custom_check 'expression' is empty".to_string(),
+            });
         }
+        expressions.push(expression.to_string());
     }
 
     Ok(expressions)
@@ -166,19 +198,23 @@ fn invert_assertion(expression: &str) -> Option<OptionAssignment> {
 
     let value = parse_nix_literal(raw_value.trim())?;
 
-    Some(OptionAssignment {
-        option_path: option_path.to_string(),
-        value,
-    })
+    Some(OptionAssignment::from_literal(option_path, &value))
 }
 
 #[cfg(test)]
 mod tests {
-    use cf_compliance::xccdf::inference::NixosLiteralValue;
     use uuid::Uuid;
 
     use super::*;
     use crate::model::PolicyOrigin;
+
+    /// Build the expected typed assignment for a dotted path.
+    fn assignment(path: &str, value: serde_json::Value) -> OptionAssignment {
+        OptionAssignment {
+            path: path.split('.').map(str::to_string).collect(),
+            value,
+        }
+    }
 
     fn policy(policy_type: &str, state: &str, config: serde_json::Value) -> ResolvedPolicy {
         ResolvedPolicy {
@@ -193,11 +229,7 @@ mod tests {
             config,
             compliance_metadata: serde_json::json!({}),
             semantic_digest: String::new(),
-            origin: PolicyOrigin {
-                input_label: "input.json".into(),
-                source_sha256: String::new(),
-                bundle_version_id: None,
-            },
+            origin: PolicyOrigin::new("input.json".into(), String::new(), None),
         }
     }
 
@@ -213,10 +245,10 @@ mod tests {
         let assignments = extract_assignments(&p).expect("representable");
         assert_eq!(
             assignments,
-            vec![OptionAssignment {
-                option_path: "networking.firewall.enable".into(),
-                value: NixosLiteralValue::Boolean(true),
-            }]
+            vec![assignment(
+                "networking.firewall.enable",
+                serde_json::json!(true)
+            )]
         );
     }
 
@@ -226,7 +258,38 @@ mod tests {
             "expression": "cfg.config.services.openssh.enable == true",
         }));
         let assignments = extract_assignments(&p).expect("representable");
-        assert_eq!(assignments[0].option_path, "services.openssh.enable");
+        assert_eq!(assignments[0].path, vec!["services", "openssh", "enable"]);
+    }
+
+    #[test]
+    fn assignments_carry_typed_json_values_not_nix_source() {
+        let p = native_check(serde_json::json!({
+            "mode": "all",
+            "rules": [
+                {"expression": "config.a.flag == true"},
+                {"expression": "config.a.count == 7"},
+                {"expression": "config.a.name == \"x\""},
+            ],
+        }));
+        let assignments = extract_assignments(&p).expect("representable");
+        assert!(assignments[1].value.is_boolean());
+        assert!(assignments[0].value.is_i64());
+        assert!(assignments[2].value.is_string());
+        // Path is structured, never a dotted string.
+        assert_eq!(assignments[0].path, vec!["a", "count"]);
+    }
+
+    /// A string literal that resembles Nix source must stay a plain string.
+    #[test]
+    fn nix_looking_string_literals_remain_literal_strings() {
+        let p = native_check(serde_json::json!({
+            "expression": "config.services.x.text == \"builtins.readFile /etc/passwd\"",
+        }));
+        let assignments = extract_assignments(&p).expect("representable");
+        assert_eq!(
+            assignments[0].value,
+            serde_json::Value::String("builtins.readFile /etc/passwd".into())
+        );
     }
 
     #[test]
@@ -242,17 +305,14 @@ mod tests {
         assert_eq!(assignments.len(), 2);
         assert_eq!(
             assignments[0],
-            OptionAssignment {
-                option_path: "services.openssh.ports".into(),
-                value: NixosLiteralValue::Integer(22),
-            }
+            assignment("services.openssh.ports", serde_json::json!(22))
         );
         assert_eq!(
             assignments[1],
-            OptionAssignment {
-                option_path: "services.openssh.settings.PermitRootLogin".into(),
-                value: NixosLiteralValue::StringLiteral("no".into()),
-            }
+            assignment(
+                "services.openssh.settings.PermitRootLogin",
+                serde_json::json!("no")
+            )
         );
     }
 
@@ -405,6 +465,79 @@ mod tests {
                 "expression should be rejected: {expression}"
             );
         }
+    }
+
+    // ── Partial extraction must never happen (review finding 10.3) ──────────
+
+    #[test]
+    fn a_rule_without_an_expression_rejects_the_whole_policy() {
+        let p = native_check(serde_json::json!({
+            "rules": [
+                {"expression": "config.a.b == true"},
+                {"field_name": "no_expression", "strict": true},
+            ],
+        }));
+        match extract_assignments(&p) {
+            Err(SkipReason::MalformedConfig { detail }) => {
+                assert!(detail.contains("rule 1"), "got: {detail}");
+            }
+            other => panic!("expected MalformedConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_non_string_expression_rejects_the_whole_policy() {
+        let p = native_check(serde_json::json!({
+            "rules": [
+                {"expression": "config.a.b == true"},
+                {"expression": 42},
+            ],
+        }));
+        assert!(matches!(
+            extract_assignments(&p),
+            Err(SkipReason::MalformedConfig { .. })
+        ));
+    }
+
+    #[test]
+    fn an_empty_expression_rejects_the_whole_policy() {
+        for config in [
+            serde_json::json!({"rules": [{"expression": "config.a.b == true"}, {"expression": "   "}]}),
+            serde_json::json!({"expression": ""}),
+            serde_json::json!({"expression": "  \t "}),
+        ] {
+            assert!(
+                matches!(
+                    extract_assignments(&native_check(config.clone())),
+                    Err(SkipReason::MalformedConfig { .. })
+                ),
+                "config should be rejected: {config}"
+            );
+        }
+    }
+
+    #[test]
+    fn rules_that_are_not_an_array_reject_the_whole_policy() {
+        for rules in [
+            serde_json::json!("not-an-array"),
+            serde_json::json!({"a": 1}),
+            serde_json::json!(7),
+        ] {
+            let p = native_check(serde_json::json!({"rules": rules}));
+            assert!(matches!(
+                extract_assignments(&p),
+                Err(SkipReason::MalformedConfig { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn a_non_string_legacy_expression_rejects_the_whole_policy() {
+        let p = native_check(serde_json::json!({"expression": ["config.a.b == true"]}));
+        assert!(matches!(
+            extract_assignments(&p),
+            Err(SkipReason::MalformedConfig { .. })
+        ));
     }
 
     #[test]

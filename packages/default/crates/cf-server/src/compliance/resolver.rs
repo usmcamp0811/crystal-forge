@@ -195,6 +195,17 @@ pub enum PolicySpecificity {
     System = 2,
 }
 
+impl PolicySpecificity {
+    /// Map to the shared specificity used by the authoritative lineage rule.
+    fn to_shared(self) -> cf_compliance::effective_set::Specificity {
+        match self {
+            Self::BundleBaseline => cf_compliance::effective_set::Specificity::BundleBaseline,
+            Self::Environment => cf_compliance::effective_set::Specificity::Environment,
+            Self::System => cf_compliance::effective_set::Specificity::System,
+        }
+    }
+}
+
 /// The complete resolved effective policy set for one assignment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectivePolicySet {
@@ -295,9 +306,31 @@ fn merge_effective_policy_candidate(
     // Look up the existing entry and remove it temporarily to avoid borrow issues.
     let existing = per_lineage.remove(&lineage_id);
 
+    // The lineage/version decision itself is the shared authoritative rule in
+    // `cf_compliance::effective_set`, so the offline `cf-nixos-module`
+    // generator cannot drift from this resolver.
+    let decision = cf_compliance::effective_set::resolve_lineage_candidate(
+        lineage_id,
+        existing.map(|(ver, spec, _)| (ver, spec.to_shared())),
+        version_id,
+        specificity.to_shared(),
+    );
+    debug_assert!(
+        !matches!(
+            decision,
+            cf_compliance::effective_set::LineageDecision::Insert
+        ) || existing.is_none(),
+        "shared resolver returned Insert for an occupied lineage"
+    );
+
     let result = if let Some((existing_ver, existing_spec, existing_idx)) = existing {
         if existing_ver == version_id {
-            let spec_updated = specificity > existing_spec;
+            let spec_updated = matches!(
+                decision,
+                cf_compliance::effective_set::LineageDecision::Deduplicate {
+                    adopt_candidate_metadata: true
+                }
+            );
             if spec_updated {
                 let entry = &mut staging[existing_idx];
                 entry.specificity = specificity;
@@ -334,7 +367,10 @@ fn merge_effective_policy_candidate(
                 index: existing_idx,
                 specificity_updated: spec_updated,
             }
-        } else if specificity > existing_spec {
+        } else if matches!(
+            decision,
+            cf_compliance::effective_set::LineageDecision::Replace
+        ) {
             let mut new_entry = candidate;
             for p in &mut staging[existing_idx].provenance {
                 p.authoritative = false;
@@ -349,7 +385,10 @@ fn merge_effective_policy_candidate(
             MergeOutcome::Replaced {
                 index: existing_idx,
             }
-        } else if specificity == existing_spec {
+        } else if matches!(
+            decision,
+            cf_compliance::effective_set::LineageDecision::Conflict { .. }
+        ) {
             // Conflict: put the entry back and return conflict.
             per_lineage.insert(lineage_id, (existing_ver, existing_spec, existing_idx));
             let existing_type = &staging[existing_idx].policy_type;

@@ -27,7 +27,12 @@ use crate::model::{PolicyOrigin, ResolvedBundle, ResolvedPolicy};
 #[derive(Debug, Clone)]
 pub struct LoadedInput {
     pub label: String,
+    /// SHA-256 of the artifact the user actually supplied. For a ZIP package
+    /// this identifies the archive, not the XML member selected from it.
     pub source_sha256: String,
+    /// SHA-256 of the XCCDF member selected from a ZIP package, when the input
+    /// was an archive. `None` for direct XML and policy documents.
+    pub selected_xml_sha256: Option<String>,
     pub bundle: Option<ResolvedBundle>,
     pub policies: Vec<ResolvedPolicy>,
 }
@@ -127,17 +132,14 @@ fn load_policy_document(bytes: &[u8], label: &str) -> Result<LoadedInput, InputE
             config: policy.config,
             compliance_metadata: policy.compliance_metadata,
             semantic_digest: policy.semantic_digest,
-            origin: PolicyOrigin {
-                input_label: label.to_string(),
-                source_sha256: source_sha256.clone(),
-                bundle_version_id: None,
-            },
+            origin: PolicyOrigin::new(label.to_string(), source_sha256.clone(), None),
         })
         .collect();
 
     Ok(LoadedInput {
         label: label.to_string(),
         source_sha256,
+        selected_xml_sha256: None,
         bundle: None,
         policies,
     })
@@ -148,8 +150,13 @@ fn load_xccdf_bundle(bytes: &[u8], label: &str) -> Result<LoadedInput, InputErro
     let processed = process_xccdf_bytes(bytes.to_vec(), Some(label.to_string()), &limits)
         .map_err(|error| InputError::new(label, describe_processing_error(&error)))?;
 
+    // `provenance.sha256` is the digest of the artifact the user supplied; for
+    // a ZIP that is the archive itself. `parsed.source_sha256` is only the
+    // digest of the selected XML member, so it must not be reported as the
+    // source export digest.
+    let source_sha256 = processed.provenance.sha256.clone();
+    let selected_xml_sha256 = processed.provenance.selected_xml_sha256.clone();
     let parsed = processed.parsed;
-    let source_sha256 = parsed.source_sha256.clone();
 
     if !matches!(parsed.class, DocumentClass::CfNativeExact) {
         return Err(InputError::new(
@@ -199,8 +206,8 @@ fn load_xccdf_bundle(bytes: &[u8], label: &str) -> Result<LoadedInput, InputErro
         framework_version: bundle_meta.framework_version.clone(),
         publication_state: bundle_meta.publication_state.clone(),
         semantic_digest: bundle_meta.digest.clone(),
-        source_sha256: source_sha256.clone(),
-        input_label: label.to_string(),
+        source_sha256s: vec![source_sha256.clone()],
+        input_labels: vec![label.to_string()],
         selected_policy_version_ids,
     };
 
@@ -219,17 +226,18 @@ fn load_xccdf_bundle(bytes: &[u8], label: &str) -> Result<LoadedInput, InputErro
             config: record.config,
             compliance_metadata: record.compliance_metadata,
             semantic_digest: record.semantic_digest.unwrap_or_default(),
-            origin: PolicyOrigin {
-                input_label: label.to_string(),
-                source_sha256: source_sha256.clone(),
-                bundle_version_id: Some(bundle_meta.bundle_version_id),
-            },
+            origin: PolicyOrigin::new(
+                label.to_string(),
+                source_sha256.clone(),
+                Some(bundle_meta.bundle_version_id),
+            ),
         })
         .collect();
 
     Ok(LoadedInput {
         label: label.to_string(),
         source_sha256,
+        selected_xml_sha256,
         bundle: Some(bundle),
         policies,
     })

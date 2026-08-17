@@ -13,6 +13,7 @@
 
 pub mod canonical;
 pub mod digest;
+pub mod effective_set;
 pub mod interchange;
 pub mod policy_document;
 pub mod xccdf;
