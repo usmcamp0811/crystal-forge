@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-17 20:23'
+updated_date: '2026-08-17 21:49'
 labels: []
 milestone: m-22
 dependencies:
@@ -216,5 +216,11 @@ Pushed follow-up remediation `c0268db1` after review. Import plans now carry env
 created: 2026-08-16 19:54
 ---
 Continued TASK-422 only; MR !314 was disregarded. Pushed `add57c5d` to MR !316. Fixed the focused browser fixture scope/dead preview object, preserved per-system effective runtime configuration in aggregate evidence, aligned policy-card styling with the latest design example, and corrected quoted/indented Nix interpolation escaping with regressions. WASM cargo check, focused normalizer tests, formatting, Node syntax, and diff checks pass. The cross-version resolver batch/query-count regression and confirmed focused browser pass remain outstanding; MR description was updated honestly and TASK-422 remains request-changes.
+---
+
+author: opencode
+created: 2026-08-17 21:49
+---
+Verification update: reran `20ad-stig-nixos-assertion-roundtrip` after strengthening the review-reconcile readiness wait; passed 1/1. The real Anduril `20ae-anduril-nixos-stig-import-roundtrip` also passed 1/1 against the supplied full fixture, with HTTP 201 and 104 policies created. The deployed failure remains unreproduced locally.
 ---
 <!-- COMMENTS:END -->
