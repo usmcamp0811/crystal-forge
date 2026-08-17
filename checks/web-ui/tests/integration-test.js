@@ -111,6 +111,106 @@ async function getAccountPreferences(page) {
   }, { baseUrl });
 }
 
+async function mockAccountNotifications(page) {
+  let unread = 1;
+  await page.route("**/api/v1/user/notifications**", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        unread_count: unread,
+        next_cursor: null,
+        notifications: [
+          {
+            id: "11111111-1111-4111-8111-111111111111",
+            category: "build_failures",
+            title: "Build failed",
+            summary: "A build entered a failed terminal state.",
+            route: "/builds",
+            created_at: new Date(Date.now() - 60_000).toISOString(),
+            read_at: unread > 0 ? null : new Date().toISOString(),
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/v1/user/notifications/read-all", async (route) => {
+    unread = 0;
+    await route.fulfill({ status: 204 });
+  });
+  await page.route("**/api/v1/user/notifications/*/read", async (route) => {
+    unread = 0;
+    await route.fulfill({ status: 204 });
+  });
+  await page.route("**/api/v1/user/notifications/*", async (route) => {
+    if (route.request().method() === "DELETE") {
+      unread = 0;
+      await route.fulfill({ status: 204 });
+      return;
+    }
+    await route.fallback();
+  });
+}
+
+async function mockProfileNotificationAndSessionApis(page) {
+  let notificationPreferences = {
+    deploy_failures: true,
+    build_failures: true,
+    critical_cves: true,
+    policy_violations: true,
+    heartbeat_lost: false,
+    weekly_digest: false,
+    delivery_channel: "in_app",
+    email_available: false,
+    delivery_email: TEST_USER.email,
+    email_unavailable_reason: "Email delivery is not configured for this deployment",
+    updated_at: new Date().toISOString(),
+  };
+
+  await page.route("**/api/v1/user/notification-preferences", async (route) => {
+    if (route.request().method() === "PATCH") {
+      notificationPreferences = {
+        ...notificationPreferences,
+        ...(await route.request().postDataJSON()),
+        updated_at: new Date().toISOString(),
+      };
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(notificationPreferences),
+    });
+  });
+
+  await page.route("**/api/v1/user/sessions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            id: "22222222-2222-4222-8222-222222222222",
+            current: true,
+            device_label: "Linux · Chrome",
+            browser: "Chrome",
+            operating_system: "Linux",
+            device_class: "desktop",
+            ip_address: "127.0.0.1",
+            auth_source: "local",
+            created_at: new Date(Date.now() - 3_600_000).toISOString(),
+            last_seen_at: new Date().toISOString(),
+            expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+          },
+        ],
+      }),
+    });
+  });
+}
+
 async function captureThemedBaselines(page, step, visualThemes) {
   const visuals = [];
 
@@ -3557,8 +3657,9 @@ const steps = [
   },
   {
     name: "09g-topbar-notifications-dark",
-    description: "Dark theme notifications panel opens with unread badge and settings placeholder",
+    description: "Dark theme notifications panel opens with server-backed unread badge and settings link",
     action: async (page) => {
+      await mockAccountNotifications(page);
       await page.setViewportSize(VIEWPORTS.desktop);
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
       await setAccountPreferences(page, { theme: "dark" });
@@ -3574,11 +3675,9 @@ const steps = [
         page.locator("[data-testid='topbar-notifications-badge']"),
         "Expected notifications unread badge",
       );
-      const settingsPlaceholder = page.locator(
-        "[data-testid='topbar-notifications-settings-placeholder']",
-      );
-      await assertVisible(settingsPlaceholder, "Expected notifications settings placeholder");
-      await assertDisabled(settingsPlaceholder, "Expected notifications settings placeholder to be disabled");
+      const settingsButton = page.locator("[data-testid='topbar-notifications-settings-button']");
+      await assertVisible(settingsButton, "Expected functional notification settings button");
+      await assertVisible(panel.getByText("Build failed"), "Expected server-backed notification row");
 
       const markRead = page.locator("[data-testid='topbar-notifications-mark-read']");
       await assertVisible(markRead, "Expected mark-all-read action");
@@ -3591,8 +3690,9 @@ const steps = [
   },
   {
     name: "09h-topbar-notifications-light",
-    description: "Light theme notifications panel opens with unread badge and settings placeholder",
+    description: "Light theme notifications panel opens with server-backed notifications",
     action: async (page) => {
+      await mockAccountNotifications(page);
       await page.setViewportSize(VIEWPORTS.desktop);
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
       await setAccountPreferences(page, { theme: "light" });
@@ -3604,6 +3704,7 @@ const steps = [
       await bell.click();
       const panel = page.locator("[data-testid='topbar-notifications-panel']");
       await assertVisible(panel, "Expected notifications panel to open");
+      await assertVisible(panel.getByText("Build failed"), "Expected server-backed notification row");
       const theme = await page.locator("html").getAttribute("data-theme");
       if (theme !== "light") {
         throw new Error(`Expected light theme for notifications screenshot, got: ${theme}`);
@@ -3614,6 +3715,7 @@ const steps = [
     name: "09i-topbar-notifications-non-admin",
     description: "Non-admin shell hides admin-gated notifications",
     action: async (page) => {
+      await mockAccountNotifications(page);
       await page.setViewportSize(VIEWPORTS.desktop);
       await page.goto(`${baseUrl}/systems?ui_check_auth=1&ui_check_role=viewer`, {
         timeout: LOAD_TIMEOUT,
@@ -3626,6 +3728,7 @@ const steps = [
 
       const panel = page.locator("[data-testid='topbar-notifications-panel']");
       await assertVisible(panel, "Expected notifications panel to open for non-admin shell");
+      await assertVisible(panel.getByText("Build failed"), "Expected non-admin-visible server notification");
       await assertHidden(
         panel.getByText("New critical CVE: CVE-2026-31822"),
         "Expected admin-gated CVE notification to be hidden for non-admin shell",
@@ -3691,12 +3794,17 @@ const steps = [
         throw new Error(`Expected server sidebar preference to collapse sidebar, got ${collapsedBox ? collapsedBox.width : "missing"}`);
       }
 
+      await mockProfileNotificationAndSessionApis(page);
       await page.goto(`${baseUrl}/profile`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1000);
       await assertVisible(page.getByRole("heading", { name: "Profile & Preferences" }), "Expected Profile page heading");
       await assertVisible(page.getByText(TEST_USER.email), "Expected profile identity email from AuthContext");
-      await assertVisible(page.getByText("Notification preferences will be available once backend integration is complete."), "Expected unavailable notification messaging");
-      await assertVisible(page.getByText("Session management will be available in a future release."), "Expected unavailable session messaging");
+      await assertVisible(page.getByText("Deploy failures"), "Expected notification preference controls");
+      await assertVisible(page.getByText("Weekly digest email"), "Expected weekly digest control");
+      await assertVisible(page.getByText("Email delivery is not configured for this deployment"), "Expected email unavailable explanation");
+      await assertVisible(page.getByRole("heading", { name: "Active sessions" }), "Expected Active sessions card");
+      await assertVisible(page.getByText("Linux · Chrome"), "Expected real session row");
+      await assertVisible(page.getByText("this device"), "Expected current-session chip");
 
       await page.route("**/api/v1/user/preferences", async (route) => {
         if (route.request().method() === "PATCH") {

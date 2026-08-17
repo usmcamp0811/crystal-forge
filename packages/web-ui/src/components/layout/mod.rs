@@ -14,4 +14,4 @@ pub use dev_banner::{
 pub use sidebar::{
     MobileDrawer, PreferencesContext, SidebarContext, SidebarEdgeToggle, SidebarNav,
 };
-pub use topbar::TopBar;
+pub use topbar::{AccountNotificationsContext, TopBar};

@@ -4,6 +4,7 @@
 //! All methods return deserialized DTOs from [`super::models`].
 
 use super::models::*;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 fn backend_origin_for_dev(window: &web_sys::Window, origin: &str) -> Option<String> {
@@ -1569,6 +1570,73 @@ pub async fn initialize_user_preferences(
 ) -> Result<UserPreferencesResponse, ApiClientError> {
     let url = format!("{}/user/preferences/initialize", base_url());
     send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+pub async fn fetch_notification_preferences() -> Result<NotificationPreferencesDto, ApiClientError>
+{
+    let url = format!("{}/user/notification-preferences", base_url());
+    fetch_json(&url).await
+}
+
+pub async fn update_notification_preferences(
+    request: &UpdateNotificationPreferences,
+) -> Result<NotificationPreferencesDto, ApiClientError> {
+    let url = format!("{}/user/notification-preferences", base_url());
+    send_json_with_csrf("PATCH", &url, Some(request)).await
+}
+
+pub async fn fetch_user_notifications(
+    limit: Option<i64>,
+    cursor: Option<String>,
+    unread_only: bool,
+) -> Result<UserNotificationsResponse, ApiClientError> {
+    let mut params = Vec::new();
+    if let Some(limit) = limit {
+        params.push(format!("limit={limit}"));
+    }
+    if let Some(cursor) = cursor {
+        params.push(format!("cursor={}", cursor.replace('|', "%7C")));
+    }
+    if unread_only {
+        params.push("unread_only=true".to_string());
+    }
+
+    let mut url = format!("{}/user/notifications", base_url());
+    if !params.is_empty() {
+        url.push('?');
+        url.push_str(&params.join("&"));
+    }
+    fetch_json(&url).await
+}
+
+pub async fn mark_user_notification_read(notification_id: Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/user/notifications/{}/read", base_url(), notification_id);
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
+pub async fn mark_all_user_notifications_read() -> Result<(), ApiClientError> {
+    let url = format!("{}/user/notifications/read-all", base_url());
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
+pub async fn dismiss_user_notification(notification_id: Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/user/notifications/{}", base_url(), notification_id);
+    send_empty_with_csrf("DELETE", &url, None::<&()>).await
+}
+
+pub async fn fetch_user_sessions() -> Result<UserSessionsResponse, ApiClientError> {
+    let url = format!("{}/user/sessions", base_url());
+    fetch_json(&url).await
+}
+
+pub async fn revoke_user_session(session_id: Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/user/sessions/{}", base_url(), session_id);
+    send_empty_with_csrf("DELETE", &url, None::<&()>).await
+}
+
+pub async fn revoke_all_user_sessions() -> Result<(), ApiClientError> {
+    let url = format!("{}/user/sessions/revoke-all", base_url());
+    send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
 /// Development mode login.

@@ -1102,6 +1102,21 @@ pub fn spawn_background_tasks(
         cfg.server.commit_cache_retention_days,
     ));
 
+    let notification_email_pool = pool.clone();
+    tokio::spawn(
+        crate::tasks::user_notification_email::run_user_notification_email_loop(
+            notification_email_pool,
+            cfg.server.clone(),
+        ),
+    );
+
+    let session_cleanup_pool = pool.clone();
+    let session_retention_days = cfg.server.session_retention_days;
+    tokio::spawn(run_session_retention_loop(
+        session_cleanup_pool,
+        session_retention_days as i64,
+    ));
+
     tokio::spawn(spawn_deployment_policy_manager(
         cfg.clone(),
         deployment_pool,
@@ -1128,6 +1143,26 @@ pub fn spawn_background_tasks(
         registry_for_spawn.register(cve_job_handle).await;
         run_cve_scan_loop(cve_pool, cve_job_for_task, cve_run_now_rx).await;
     });
+}
+
+async fn run_session_retention_loop(pool: PgPool, retention_days: i64) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+    loop {
+        match crate::queries::auth_identity::cleanup_retained_user_sessions(
+            &pool,
+            retention_days,
+            1_000,
+        )
+        .await
+        {
+            Ok(deleted) if deleted > 0 => {
+                tracing::info!(deleted, "cleaned retained user session records")
+            }
+            Ok(_) => {}
+            Err(err) => tracing::warn!(%err, "user session retention cleanup failed"),
+        }
+        ticker.tick().await;
+    }
 }
 
 /// Runs daily build log retention cleanup.

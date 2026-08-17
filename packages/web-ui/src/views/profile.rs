@@ -2,14 +2,33 @@
 
 use dioxus::prelude::*;
 
-use crate::api::client::logout;
-use crate::api::models::{AuthMode, Role, UpdateUserPreferences};
+use crate::api::client::{
+    fetch_notification_preferences, fetch_user_sessions, logout, revoke_all_user_sessions,
+    revoke_user_session, update_notification_preferences,
+};
+use crate::api::models::{
+    AuthMode, NotificationDeliveryChannel, NotificationPreferencesDto, Role,
+    UpdateNotificationPreferences, UpdateUserPreferences, UserSessionDto,
+};
 use crate::components::layout::sidebar::{PreferencesContext, SidebarContext};
 use crate::components::{Icon, IconName};
 use crate::routes::Route;
-use crate::state::app_state::AppState;
+use crate::state::app_state::{AppState, clear_authenticated_context};
 use crate::state::preferences;
 use crate::state::theme;
+
+fn profile_relative_time(timestamp: chrono::DateTime<chrono::Utc>) -> String {
+    let delta = chrono::Utc::now().signed_duration_since(timestamp);
+    if delta.num_minutes() < 1 {
+        "just now".to_string()
+    } else if delta.num_hours() < 1 {
+        format!("{} minutes ago", delta.num_minutes())
+    } else if delta.num_days() < 1 {
+        format!("{} hours ago", delta.num_hours())
+    } else {
+        format!("{} days ago", delta.num_days())
+    }
+}
 
 #[component]
 pub fn ProfileView() -> Element {
@@ -30,6 +49,15 @@ pub fn ProfileView() -> Element {
     let mut default_view = prefs_ctx.default_systems_view;
     let save_error = prefs_ctx.save_error;
     let mut logout_error = use_signal(|| None::<String>);
+    let mut notification_prefs = use_signal(|| None::<NotificationPreferencesDto>);
+    let mut notification_error = use_signal(|| None::<String>);
+    let notification_saving = use_signal(|| false);
+    let notification_pending_update = use_signal(|| None::<UpdateNotificationPreferences>);
+    let mut sessions = use_signal(Vec::<UserSessionDto>::new);
+    let mut sessions_loading = use_signal(|| true);
+    let mut sessions_error = use_signal(|| None::<String>);
+    let mut revoke_all_confirm = use_signal(|| false);
+    let mut revoke_all_in_progress = use_signal(|| false);
 
     // Only display identity values supplied by the authenticated context.
     let user_name = auth_context
@@ -79,6 +107,87 @@ pub fn ProfileView() -> Element {
         AuthMode::Local => "local",
         AuthMode::Oidc => "oidc",
         AuthMode::Dev => "dev",
+    });
+
+    let auth_user_id = auth_context
+        .as_ref()
+        .and_then(|ctx| ctx.user.as_ref())
+        .map(|user| user.id.clone());
+    let auth_generation = app_state.read().auth_generation;
+
+    let notification_load_user_id = auth_user_id.clone();
+    use_effect(move || {
+        let requested_user_id = notification_load_user_id.clone();
+        let requested_generation = auth_generation;
+        spawn(async move {
+            if requested_user_id.is_none() {
+                notification_prefs.set(None);
+                notification_error.set(None);
+                return;
+            }
+            match fetch_notification_preferences().await {
+                Ok(preferences) => {
+                    if notification_save_request_still_current(
+                        current_profile_user_id(app_state),
+                        current_profile_auth_generation(app_state),
+                        requested_user_id.clone(),
+                        requested_generation,
+                    ) {
+                        notification_prefs.set(Some(preferences));
+                        notification_error.set(None);
+                    }
+                }
+                Err(err) => {
+                    if notification_save_request_still_current(
+                        current_profile_user_id(app_state),
+                        current_profile_auth_generation(app_state),
+                        requested_user_id.clone(),
+                        requested_generation,
+                    ) {
+                        notification_error.set(Some(format!(
+                            "Could not load notification preferences: {err}"
+                        )));
+                    }
+                }
+            }
+        });
+    });
+
+    let session_load_user_id = auth_user_id.clone();
+    use_effect(move || {
+        let requested_user_id = session_load_user_id.clone();
+        let requested_generation = auth_generation;
+        spawn(async move {
+            if requested_user_id.is_none() {
+                sessions.set(Vec::new());
+                sessions_error.set(None);
+                sessions_loading.set(false);
+                return;
+            }
+            sessions_loading.set(true);
+            match fetch_user_sessions().await {
+                Ok(response) => {
+                    if current_profile_user_id(app_state) == requested_user_id
+                        && current_profile_auth_generation(app_state) == requested_generation
+                    {
+                        sessions.set(response.sessions);
+                        sessions_error.set(None);
+                    }
+                }
+                Err(err) => {
+                    if current_profile_user_id(app_state) == requested_user_id
+                        && current_profile_auth_generation(app_state) == requested_generation
+                    {
+                        sessions_error.set(Some(format!("Could not load active sessions: {err}")));
+                    }
+                }
+            }
+            if current_profile_user_id(app_state) == requested_user_id
+                && current_profile_auth_generation(app_state) == requested_generation
+            {
+                sessions_loading.set(false);
+            }
+        });
     });
 
     let is_oidc = auth_context
@@ -157,11 +266,16 @@ pub fn ProfileView() -> Element {
                             spawn(async move {
                                 match logout().await {
                                     Ok(()) => {
-                                        // Clear auth state before navigating
-                                        let mut state = app_state.write();
-                                        state.auth = None;
-                                        state.auth_fetch_state = crate::state::app_state::AuthFetchState::Loaded;
-                                        drop(state);
+                                        reset_profile_account_state(
+                                            app_state,
+                                            notification_prefs,
+                                            notification_error,
+                                            notification_saving,
+                                            notification_pending_update,
+                                            sessions,
+                                            sessions_error,
+                                            sessions_loading,
+                                        );
                                         nav.replace(Route::LoginView {});
                                     }
                                     Err(_) => logout_error
@@ -274,18 +388,101 @@ pub fn ProfileView() -> Element {
                     }
                 }
 
-                // Notifications card - disabled until backend integration
                 div {
                     class: "card",
-                    style: "padding: 8px 18px 14px; opacity: 0.6; pointer-events: none;",
+                    style: "padding: 8px 18px 14px;",
                     h3 {
                         style: "font-size: 13px; font-weight: 600; margin: 14px 0 4px;",
                         "Notifications"
                     }
-                    div {
-                        class: "help",
-                        style: "margin: 12px 0;",
-                        "Notification preferences will be available once backend integration is complete."
+                    if let Some(prefs) = notification_prefs() {
+                        NotificationToggleRow {
+                            title: "Deploy failures",
+                            checked: prefs.deploy_failures,
+                            on_change: move |checked| save_notification_pref(
+                                notification_prefs,
+                                notification_error,
+                                notification_saving,
+                                notification_pending_update,
+                                app_state,
+                                UpdateNotificationPreferences { deploy_failures: Some(checked), ..UpdateNotificationPreferences::default() },
+                            ),
+                        }
+                        NotificationToggleRow {
+                            title: "Build failures",
+                            checked: prefs.build_failures,
+                            on_change: move |checked| save_notification_pref(
+                                notification_prefs,
+                                notification_error,
+                                notification_saving,
+                                notification_pending_update,
+                                app_state,
+                                UpdateNotificationPreferences { build_failures: Some(checked), ..UpdateNotificationPreferences::default() },
+                            ),
+                        }
+                        NotificationToggleRow {
+                            title: "New critical CVEs",
+                            checked: prefs.critical_cves,
+                            on_change: move |checked| save_notification_pref(
+                                notification_prefs,
+                                notification_error,
+                                notification_saving,
+                                notification_pending_update,
+                                app_state,
+                                UpdateNotificationPreferences { critical_cves: Some(checked), ..UpdateNotificationPreferences::default() },
+                            ),
+                        }
+                        NotificationToggleRow {
+                            title: "Policy violations",
+                            checked: prefs.policy_violations,
+                            on_change: move |checked| save_notification_pref(
+                                notification_prefs,
+                                notification_error,
+                                notification_saving,
+                                notification_pending_update,
+                                app_state,
+                                UpdateNotificationPreferences { policy_violations: Some(checked), ..UpdateNotificationPreferences::default() },
+                            ),
+                        }
+                        NotificationToggleRow {
+                            title: "Heartbeat lost",
+                            checked: prefs.heartbeat_lost,
+                            on_change: move |checked| save_notification_pref(
+                                notification_prefs,
+                                notification_error,
+                                notification_saving,
+                                notification_pending_update,
+                                app_state,
+                                UpdateNotificationPreferences { heartbeat_lost: Some(checked), ..UpdateNotificationPreferences::default() },
+                            ),
+                        }
+                        NotificationToggleRow {
+                            title: "Weekly digest email",
+                            checked: prefs.weekly_digest,
+                            disabled: !prefs.email_available,
+                            on_change: move |checked| save_notification_pref(
+                                notification_prefs,
+                                notification_error,
+                                notification_saving,
+                                notification_pending_update,
+                                app_state,
+                                UpdateNotificationPreferences { weekly_digest: Some(checked), ..UpdateNotificationPreferences::default() },
+                            ),
+                        }
+                        PrefRow {
+                            title: "Delivery",
+                            desc: prefs.email_unavailable_reason.clone(),
+                            div { class: "seg", style: "width: fit-content;",
+                                button { class: if prefs.delivery_channel == NotificationDeliveryChannel::InApp { "active" } else { "" }, onclick: move |_| save_notification_pref(notification_prefs, notification_error, notification_saving, notification_pending_update, app_state, UpdateNotificationPreferences { delivery_channel: Some(NotificationDeliveryChannel::InApp), ..UpdateNotificationPreferences::default() }), "In-app" }
+                                button { disabled: !prefs.email_available, class: if prefs.delivery_channel == NotificationDeliveryChannel::Email { "active" } else { "" }, onclick: move |_| save_notification_pref(notification_prefs, notification_error, notification_saving, notification_pending_update, app_state, UpdateNotificationPreferences { delivery_channel: Some(NotificationDeliveryChannel::Email), ..UpdateNotificationPreferences::default() }), "Email" }
+                                button { disabled: !prefs.email_available, class: if prefs.delivery_channel == NotificationDeliveryChannel::Both { "active" } else { "" }, onclick: move |_| save_notification_pref(notification_prefs, notification_error, notification_saving, notification_pending_update, app_state, UpdateNotificationPreferences { delivery_channel: Some(NotificationDeliveryChannel::Both), ..UpdateNotificationPreferences::default() }), "Both" }
+                            }
+                        }
+                    } else {
+                        div { class: "help", style: "margin: 12px 0;", "Loading notification preferences..." }
+                    }
+                    if let Some(error) = notification_error() {
+                        div { class: "help", style: "color: var(--cf-critical); margin: 8px 0 4px;", "{error}" }
                     }
                 }
 
@@ -353,17 +550,75 @@ pub fn ProfileView() -> Element {
                     }
                 }
 
-                // Active sessions card - disabled until session management implemented
                 div {
                     class: "card",
-                    style: "padding: 18px; opacity: 0.6;",
+                    style: "padding: 18px;",
                     h3 {
                         style: "font-size: 13px; font-weight: 600; margin: 0 0 12px;",
                         "Active sessions"
                     }
-                    div {
-                        class: "help",
-                        "Session management will be available in a future release."
+                    if sessions_loading() {
+                        div { class: "help", "Loading active sessions..." }
+                    } else if let Some(error) = sessions_error() {
+                        div { class: "help", style: "color: var(--cf-critical);", "{error}" }
+                    } else if sessions().is_empty() {
+                        div { class: "help", "No active sessions were returned for this account." }
+                    } else {
+                        div { style: "display: grid; gap: 8px;",
+                            for session in sessions() {
+                                SessionRow { session: session.clone(), sessions, sessions_error }
+                            }
+                        }
+                        button {
+                            class: "btn ghost",
+                            style: "margin-top: 12px; color: var(--cf-critical); border-color: color-mix(in srgb, var(--cf-critical) 45%, transparent);",
+                            disabled: revoke_all_in_progress(),
+                            onclick: move |_| revoke_all_confirm.set(true),
+                            "Sign out everywhere"
+                        }
+                    }
+                    if revoke_all_confirm() {
+                        div { class: "modal-backdrop",
+                            div { class: "card", style: "padding: 18px; max-width: 420px;",
+                                h3 { style: "font-size: 13px; font-weight: 600; margin: 0 0 8px;", "Sign out everywhere?" }
+                                p { class: "help", "This will sign out all computers and browsers, including this one." }
+                                div { style: "display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px;",
+                                    button { class: "btn ghost", disabled: revoke_all_in_progress(), onclick: move |_| revoke_all_confirm.set(false), "Cancel" }
+                                    button {
+                                        class: "btn",
+                                        disabled: revoke_all_in_progress(),
+                                        onclick: move |_| {
+                                            if revoke_all_in_progress() {
+                                                return;
+                                            }
+                                            revoke_all_in_progress.set(true);
+                                            spawn(async move {
+                                                match revoke_all_user_sessions().await {
+                                                    Ok(()) => {
+                                                        reset_profile_account_state(
+                                                            app_state,
+                                                            notification_prefs,
+                                                            notification_error,
+                                                            notification_saving,
+                                                            notification_pending_update,
+                                                            sessions,
+                                                            sessions_error,
+                                                            sessions_loading,
+                                                        );
+                                                        nav.replace(Route::LoginView {});
+                                                    }
+                                                    Err(err) => {
+                                                        revoke_all_in_progress.set(false);
+                                                        sessions_error.set(Some(format!("Could not sign out everywhere: {err}")));
+                                                    }
+                                                }
+                                            });
+                                        },
+                                        if revoke_all_in_progress() { "Signing out…" } else { "Sign out everywhere" }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -374,6 +629,479 @@ pub fn ProfileView() -> Element {
 // ============================================================================
 // UI Components
 // ============================================================================
+
+fn save_notification_pref(
+    mut prefs_signal: Signal<Option<NotificationPreferencesDto>>,
+    mut error_signal: Signal<Option<String>>,
+    mut saving_signal: Signal<bool>,
+    mut pending_signal: Signal<Option<UpdateNotificationPreferences>>,
+    app_state: Signal<AppState>,
+    update: UpdateNotificationPreferences,
+) {
+    let requested_user_id = current_profile_user_id(app_state);
+    let requested_generation = current_profile_auth_generation(app_state);
+    let confirmed_before_update = prefs_signal();
+    if let Some(mut prefs) = prefs_signal() {
+        if let Some(value) = update.deploy_failures {
+            prefs.deploy_failures = value;
+        }
+        if let Some(value) = update.build_failures {
+            prefs.build_failures = value;
+        }
+        if let Some(value) = update.critical_cves {
+            prefs.critical_cves = value;
+        }
+        if let Some(value) = update.policy_violations {
+            prefs.policy_violations = value;
+        }
+        if let Some(value) = update.heartbeat_lost {
+            prefs.heartbeat_lost = value;
+        }
+        if let Some(value) = update.weekly_digest {
+            prefs.weekly_digest = value;
+        }
+        if let Some(value) = update.delivery_channel {
+            prefs.delivery_channel = value;
+        }
+        prefs_signal.set(Some(prefs));
+    }
+
+    pending_signal.with_mut(|pending| merge_notification_update(pending, update.clone()));
+    if saving_signal() {
+        return;
+    }
+    saving_signal.set(true);
+
+    spawn(async move {
+        let mut last_confirmed = confirmed_before_update;
+        loop {
+            let next = pending_signal.with_mut(|pending| pending.take());
+            let Some(next_update) = next else {
+                break;
+            };
+
+            match update_notification_preferences(&next_update).await {
+                Ok(mut saved) => {
+                    if current_profile_user_id(app_state) == requested_user_id
+                        && current_profile_auth_generation(app_state) == requested_generation
+                    {
+                        last_confirmed = Some(saved.clone());
+                        pending_signal.with(|pending| {
+                            if let Some(pending) = pending {
+                                apply_notification_update(&mut saved, pending);
+                            }
+                        });
+                        prefs_signal.set(Some(saved));
+                        error_signal.set(None);
+                    } else {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    if current_profile_user_id(app_state) == requested_user_id
+                        && current_profile_auth_generation(app_state) == requested_generation
+                    {
+                        let newer_pending = pending_signal.with_mut(|pending| pending.take());
+                        let (restored, requeued) = notification_save_failure_state(
+                            &last_confirmed,
+                            &next_update,
+                            newer_pending,
+                        );
+                        pending_signal.set(requeued);
+                        prefs_signal.set(restored);
+                        error_signal.set(Some(format!(
+                            "Could not save notification preferences: {err}"
+                        )));
+                    }
+                    break;
+                }
+            }
+        }
+        saving_signal.set(false);
+        if notification_save_request_still_current(
+            current_profile_user_id(app_state),
+            current_profile_auth_generation(app_state),
+            requested_user_id,
+            requested_generation,
+        ) && pending_signal.with(|pending| pending.is_some())
+        {
+            save_notification_pref(
+                prefs_signal,
+                error_signal,
+                saving_signal,
+                pending_signal,
+                app_state,
+                UpdateNotificationPreferences::default(),
+            );
+        }
+    });
+}
+
+fn notification_save_failure_state(
+    last_confirmed: &Option<NotificationPreferencesDto>,
+    failed_update: &UpdateNotificationPreferences,
+    newer_pending: Option<UpdateNotificationPreferences>,
+) -> (
+    Option<NotificationPreferencesDto>,
+    Option<UpdateNotificationPreferences>,
+) {
+    let mut restored = last_confirmed.clone();
+    let mut requeued = None;
+    if let Some(newer_pending) = newer_pending {
+        if let Some(restored) = restored.as_mut() {
+            apply_notification_update(restored, &newer_pending);
+        }
+        merge_notification_update(&mut requeued, failed_update.clone());
+        merge_notification_update(&mut requeued, newer_pending);
+    }
+    (restored, requeued)
+}
+
+fn notification_save_request_still_current(
+    current_user_id: Option<String>,
+    current_generation: u64,
+    requested_user_id: Option<String>,
+    requested_generation: u64,
+) -> bool {
+    current_user_id == requested_user_id && current_generation == requested_generation
+}
+
+fn apply_notification_update(
+    prefs: &mut NotificationPreferencesDto,
+    update: &UpdateNotificationPreferences,
+) {
+    if let Some(value) = update.deploy_failures {
+        prefs.deploy_failures = value;
+    }
+    if let Some(value) = update.build_failures {
+        prefs.build_failures = value;
+    }
+    if let Some(value) = update.critical_cves {
+        prefs.critical_cves = value;
+    }
+    if let Some(value) = update.policy_violations {
+        prefs.policy_violations = value;
+    }
+    if let Some(value) = update.heartbeat_lost {
+        prefs.heartbeat_lost = value;
+    }
+    if let Some(value) = update.weekly_digest {
+        prefs.weekly_digest = value;
+    }
+    if let Some(value) = update.delivery_channel {
+        prefs.delivery_channel = value;
+    }
+}
+
+fn merge_notification_update(
+    pending: &mut Option<UpdateNotificationPreferences>,
+    update: UpdateNotificationPreferences,
+) {
+    let target = pending.get_or_insert_with(UpdateNotificationPreferences::default);
+    if update.deploy_failures.is_some() {
+        target.deploy_failures = update.deploy_failures;
+    }
+    if update.build_failures.is_some() {
+        target.build_failures = update.build_failures;
+    }
+    if update.critical_cves.is_some() {
+        target.critical_cves = update.critical_cves;
+    }
+    if update.policy_violations.is_some() {
+        target.policy_violations = update.policy_violations;
+    }
+    if update.heartbeat_lost.is_some() {
+        target.heartbeat_lost = update.heartbeat_lost;
+    }
+    if update.weekly_digest.is_some() {
+        target.weekly_digest = update.weekly_digest;
+    }
+    if update.delivery_channel.is_some() {
+        target.delivery_channel = update.delivery_channel;
+    }
+}
+
+fn current_profile_user_id(app_state: Signal<AppState>) -> Option<String> {
+    app_state
+        .read()
+        .auth
+        .as_ref()
+        .and_then(|ctx| ctx.user.as_ref())
+        .map(|user| user.id.clone())
+}
+
+fn current_profile_auth_generation(app_state: Signal<AppState>) -> u64 {
+    app_state.read().auth_generation
+}
+
+fn reset_profile_account_state(
+    mut app_state: Signal<AppState>,
+    mut notification_prefs: Signal<Option<NotificationPreferencesDto>>,
+    mut notification_error: Signal<Option<String>>,
+    mut notification_saving: Signal<bool>,
+    mut notification_pending_update: Signal<Option<UpdateNotificationPreferences>>,
+    mut sessions: Signal<Vec<UserSessionDto>>,
+    mut sessions_error: Signal<Option<String>>,
+    mut sessions_loading: Signal<bool>,
+) {
+    clear_authenticated_context(&mut app_state.write());
+    notification_prefs.set(None);
+    notification_error.set(None);
+    notification_saving.set(false);
+    notification_pending_update.set(None);
+    sessions.set(Vec::new());
+    sessions_error.set(None);
+    sessions_loading.set(false);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        merge_notification_update, notification_save_failure_state,
+        notification_save_request_still_current,
+    };
+    use crate::api::models::{
+        NotificationDeliveryChannel, NotificationPreferencesDto, UpdateNotificationPreferences,
+    };
+    use chrono::Utc;
+
+    fn prefs(delivery_channel: NotificationDeliveryChannel) -> NotificationPreferencesDto {
+        NotificationPreferencesDto {
+            deploy_failures: true,
+            build_failures: true,
+            critical_cves: true,
+            policy_violations: true,
+            heartbeat_lost: false,
+            weekly_digest: false,
+            delivery_channel,
+            email_available: true,
+            delivery_email: Some("tester@example.test".to_string()),
+            email_unavailable_reason: None,
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn notification_preference_merge_preserves_last_action_per_field() {
+        let mut pending = None;
+
+        merge_notification_update(
+            &mut pending,
+            UpdateNotificationPreferences {
+                delivery_channel: Some(NotificationDeliveryChannel::Email),
+                build_failures: Some(false),
+                ..UpdateNotificationPreferences::default()
+            },
+        );
+        merge_notification_update(
+            &mut pending,
+            UpdateNotificationPreferences {
+                delivery_channel: Some(NotificationDeliveryChannel::Both),
+                critical_cves: Some(false),
+                ..UpdateNotificationPreferences::default()
+            },
+        );
+
+        let pending = pending.expect("pending update");
+        assert_eq!(
+            pending.delivery_channel,
+            Some(NotificationDeliveryChannel::Both)
+        );
+        assert_eq!(pending.build_failures, Some(false));
+        assert_eq!(pending.critical_cves, Some(false));
+    }
+
+    #[test]
+    fn notification_preference_merge_does_not_clear_omitted_fields() {
+        let mut pending = Some(UpdateNotificationPreferences {
+            weekly_digest: Some(true),
+            delivery_channel: Some(NotificationDeliveryChannel::Email),
+            ..UpdateNotificationPreferences::default()
+        });
+
+        merge_notification_update(
+            &mut pending,
+            UpdateNotificationPreferences {
+                heartbeat_lost: Some(true),
+                ..UpdateNotificationPreferences::default()
+            },
+        );
+
+        let pending = pending.expect("pending update");
+        assert_eq!(pending.weekly_digest, Some(true));
+        assert_eq!(
+            pending.delivery_channel,
+            Some(NotificationDeliveryChannel::Email)
+        );
+        assert_eq!(pending.heartbeat_lost, Some(true));
+    }
+
+    #[test]
+    fn notification_save_failure_restores_last_successful_snapshot() {
+        let last_confirmed = Some(prefs(NotificationDeliveryChannel::Email));
+        let failed_update = UpdateNotificationPreferences {
+            delivery_channel: Some(NotificationDeliveryChannel::Both),
+            ..UpdateNotificationPreferences::default()
+        };
+
+        let (restored, requeued) =
+            notification_save_failure_state(&last_confirmed, &failed_update, None);
+
+        assert_eq!(requeued, None);
+        assert_eq!(
+            restored.expect("restored prefs").delivery_channel,
+            NotificationDeliveryChannel::Email
+        );
+    }
+
+    #[test]
+    fn notification_save_failure_layers_newer_pending_over_last_success() {
+        let last_confirmed = Some(prefs(NotificationDeliveryChannel::Email));
+        let failed_update = UpdateNotificationPreferences {
+            build_failures: Some(false),
+            delivery_channel: Some(NotificationDeliveryChannel::Both),
+            ..UpdateNotificationPreferences::default()
+        };
+        let newer_pending = UpdateNotificationPreferences {
+            delivery_channel: Some(NotificationDeliveryChannel::InApp),
+            critical_cves: Some(false),
+            ..UpdateNotificationPreferences::default()
+        };
+
+        let (restored, requeued) =
+            notification_save_failure_state(&last_confirmed, &failed_update, Some(newer_pending));
+
+        let restored = restored.expect("restored prefs");
+        assert_eq!(
+            restored.delivery_channel,
+            NotificationDeliveryChannel::InApp
+        );
+        assert!(!restored.critical_cves);
+
+        let requeued = requeued.expect("requeued update");
+        assert_eq!(requeued.build_failures, Some(false));
+        assert_eq!(requeued.critical_cves, Some(false));
+        assert_eq!(
+            requeued.delivery_channel,
+            Some(NotificationDeliveryChannel::InApp)
+        );
+    }
+
+    #[test]
+    fn notification_save_generation_change_discards_queued_response() {
+        assert!(notification_save_request_still_current(
+            Some("user-a".to_string()),
+            7,
+            Some("user-a".to_string()),
+            7,
+        ));
+        assert!(!notification_save_request_still_current(
+            Some("user-a".to_string()),
+            8,
+            Some("user-a".to_string()),
+            7,
+        ));
+        assert!(!notification_save_request_still_current(
+            Some("user-b".to_string()),
+            7,
+            Some("user-a".to_string()),
+            7,
+        ));
+    }
+}
+
+#[component]
+fn NotificationToggleRow(
+    title: &'static str,
+    checked: bool,
+    disabled: Option<bool>,
+    on_change: EventHandler<bool>,
+) -> Element {
+    let is_disabled = disabled.unwrap_or(false);
+    rsx! {
+        PrefRow {
+            title,
+            desc: None::<String>,
+            label {
+                style: "display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--cf-text-muted);",
+                input {
+                    r#type: "checkbox",
+                    checked,
+                    disabled: is_disabled,
+                    onchange: move |evt| on_change.call(evt.checked()),
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SessionRow(
+    session: UserSessionDto,
+    mut sessions: Signal<Vec<UserSessionDto>>,
+    mut sessions_error: Signal<Option<String>>,
+) -> Element {
+    let session_id = session.id;
+    let label = session.device_label.clone();
+    let mut revoking = use_signal(|| false);
+    let session_title = if session.browser.starts_with("Unknown")
+        && session.operating_system.starts_with("Unknown")
+    {
+        session.device_label.clone()
+    } else {
+        format!("{} on {}", session.browser, session.operating_system)
+    };
+    let ip_address = session
+        .ip_address
+        .clone()
+        .unwrap_or_else(|| "unknown IP".to_string());
+    let active_label = profile_relative_time(session.last_seen_at);
+    rsx! {
+        div {
+            style: "display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 8px; background: var(--cf-surface-muted); flex-wrap: wrap;",
+            div { style: "display: flex; gap: 10px; min-width: 180px; flex: 1 1 260px;",
+                Icon { name: IconName::Server, size: 16 }
+                div { style: "min-width: 0;",
+                    div { style: "display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; flex-wrap: wrap;",
+                        span { style: "overflow-wrap: anywhere;", "{session_title}" }
+                        if session.current {
+                            span { class: "chip chip-healthy", style: "font-size: 10px;", "this device" }
+                        }
+                    }
+                    div { style: "font-size: 10px; color: var(--cf-text-muted); font-family: var(--cf-font-mono); margin-top: 2px;",
+                        "{ip_address} · Active {active_label}"
+                    }
+                }
+            }
+            if !session.current {
+                button {
+                    class: "btn ghost",
+                    aria_label: "Revoke session {label}",
+                    disabled: revoking(),
+                    onclick: move |_| {
+                        if revoking() {
+                            return;
+                        }
+                        revoking.set(true);
+                        spawn(async move {
+                            match revoke_user_session(session_id).await {
+                                Ok(()) => {
+                                    sessions.write().retain(|item| item.id != session_id);
+                                    sessions_error.set(None);
+                                }
+                                Err(err) => {
+                                    revoking.set(false);
+                                    sessions_error.set(Some(format!("Could not revoke session: {err}")));
+                                }
+                            }
+                        });
+                    },
+                    if revoking() { "Revoking…" } else { "Revoke" }
+                }
+            }
+        }
+    }
+}
 
 #[component]
 fn PrefRow(title: String, desc: Option<String>, children: Element) -> Element {

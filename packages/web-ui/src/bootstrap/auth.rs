@@ -2,9 +2,8 @@
 //!
 //! Handles fetching and hydrating the auth context on application startup.
 
-use crate::alerts::set_current_user_id;
 use crate::api::client;
-use crate::state::app_state::{AppState, AuthFetchState};
+use crate::state::app_state::{AppState, AuthFetchState, set_authenticated_context};
 
 /// Check if UI check mock auth mode is enabled via query param.
 /// Only available in debug builds to prevent production auth bypass.
@@ -39,14 +38,8 @@ pub fn init_auth(mut app_state: dioxus::prelude::Signal<AppState>) {
             }
             match client::fetch_whoami().await {
                 Ok(auth_context) => {
-                    // Namespace per-user dismissal storage before any view
-                    // can call dismiss_attention_item/attention_item_active.
-                    if let Some(user) = &auth_context.user {
-                        set_current_user_id(&user.id);
-                    }
                     let mut state = app_state.write();
-                    state.auth = Some(auth_context);
-                    state.auth_fetch_state = AuthFetchState::Loaded;
+                    set_authenticated_context(&mut state, auth_context);
                 }
                 Err(_) => {
                     app_state.write().auth_fetch_state = AuthFetchState::Error;

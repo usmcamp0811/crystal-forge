@@ -7642,6 +7642,7 @@ mod tests {
             Utc::now() + chrono::Duration::hours(1),
             Some("test-agent".to_string()),
             Some("127.0.0.1".to_string()),
+            "test".to_string(),
         )
         .await
         .expect("create_user_session should succeed");
@@ -8210,6 +8211,7 @@ mod tests {
             Utc::now() + chrono::Duration::hours(1),
             Some("test-agent".to_string()),
             Some("127.0.0.1".to_string()),
+            "test".to_string(),
         )
         .await
         .expect("create_user_session");
