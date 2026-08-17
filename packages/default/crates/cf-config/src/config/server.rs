@@ -163,6 +163,70 @@ pub struct ServerConfig {
     ///   need direct Git remote access.
     #[serde(default = "default_source_delivery_mode")]
     pub source_delivery_mode: SourceInputDeliveryMode,
+
+    /// Enables outbound notification email when transport details are also
+    /// configured and external delivery is permitted. Disabled by default so
+    /// newly deployed instances never send unsolicited email.
+    #[serde(default)]
+    pub notification_email_enabled: bool,
+
+    /// Deployment classification/external-delivery policy gate for email.
+    /// Keep this false on restricted deployments even if SMTP is configured.
+    #[serde(default)]
+    pub notification_email_external_delivery_allowed: bool,
+
+    /// HTTPS endpoint used by the notification email HTTP provider worker.
+    #[serde(default)]
+    pub notification_email_endpoint: Option<String>,
+
+    /// Public Crystal Forge origin used to expand application routes in email.
+    #[serde(default)]
+    pub public_base_url: Option<String>,
+
+    /// Allow http:// provider endpoints only for loopback development.
+    #[serde(default)]
+    pub notification_email_allow_insecure_loopback: bool,
+
+    /// File containing the provider bearer token. The token is never accepted inline.
+    #[serde(default)]
+    pub notification_email_provider_token_file: Option<PathBuf>,
+
+    /// Sender email address used for notification email.
+    #[serde(default)]
+    pub notification_email_sender_address: Option<String>,
+
+    /// Human-readable sender display name.
+    #[serde(default = "default_notification_email_sender_name")]
+    pub notification_email_sender_name: String,
+
+    /// Poll interval for immediate notification delivery worker.
+    #[serde(default = "default_notification_email_worker_interval_seconds")]
+    pub notification_email_worker_interval_seconds: u64,
+
+    /// Maximum send attempts before a delivery is permanently failed.
+    #[serde(default = "default_notification_email_max_attempts")]
+    pub notification_email_max_attempts: i32,
+
+    /// HTTP provider request timeout in seconds.
+    #[serde(default = "default_notification_email_request_timeout_seconds")]
+    pub notification_email_request_timeout_seconds: u64,
+
+    /// Digest schedule. Currently supports the previous completed UTC week.
+    #[serde(default = "default_notification_email_digest_schedule")]
+    pub notification_email_digest_schedule: String,
+
+    /// Session last-seen update throttle in seconds.
+    #[serde(default = "default_session_last_seen_throttle_seconds")]
+    pub session_last_seen_throttle_seconds: u64,
+
+    /// Retention period for expired/revoked session rows.
+    #[serde(default = "default_session_retention_days")]
+    pub session_retention_days: i32,
+
+    /// CIDR ranges for reverse proxies whose X-Forwarded-For header may be
+    /// used to resolve the client IP. Empty by default: record the direct peer.
+    #[serde(default)]
+    pub trusted_proxy_cidrs: Vec<String>,
 }
 
 fn default_remote_build_execution_strategy() -> RemoteBuildExecutionStrategy {
@@ -179,6 +243,34 @@ fn default_source_archive_root() -> PathBuf {
 
 fn default_source_delivery_mode() -> SourceInputDeliveryMode {
     SourceInputDeliveryMode::LocalGitWorktree
+}
+
+fn default_notification_email_sender_name() -> String {
+    "Crystal Forge".to_string()
+}
+
+fn default_notification_email_worker_interval_seconds() -> u64 {
+    60
+}
+
+fn default_notification_email_max_attempts() -> i32 {
+    5
+}
+
+fn default_notification_email_request_timeout_seconds() -> u64 {
+    30
+}
+
+fn default_notification_email_digest_schedule() -> String {
+    "weekly_utc".to_string()
+}
+
+fn default_session_last_seen_throttle_seconds() -> u64 {
+    300
+}
+
+fn default_session_retention_days() -> i32 {
+    30
 }
 
 // Default value functions for serde
@@ -241,6 +333,23 @@ impl Default for ServerConfig {
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
             source_archive_root: default_source_archive_root(),
             source_delivery_mode: default_source_delivery_mode(),
+            notification_email_enabled: false,
+            notification_email_external_delivery_allowed: false,
+            notification_email_endpoint: None,
+            public_base_url: None,
+            notification_email_allow_insecure_loopback: false,
+            notification_email_provider_token_file: None,
+            notification_email_sender_address: None,
+            notification_email_sender_name: default_notification_email_sender_name(),
+            notification_email_worker_interval_seconds:
+                default_notification_email_worker_interval_seconds(),
+            notification_email_max_attempts: default_notification_email_max_attempts(),
+            notification_email_request_timeout_seconds:
+                default_notification_email_request_timeout_seconds(),
+            notification_email_digest_schedule: default_notification_email_digest_schedule(),
+            session_last_seen_throttle_seconds: default_session_last_seen_throttle_seconds(),
+            session_retention_days: default_session_retention_days(),
+            trusted_proxy_cidrs: Vec::new(),
         }
     }
 }
@@ -307,6 +416,99 @@ impl ServerConfig {
             return Err("build log retention days must be greater than 0".to_string());
         }
 
+        if self.notification_email_enabled {
+            let endpoint = self
+                .notification_email_endpoint
+                .as_deref()
+                .unwrap_or("")
+                .trim();
+            if endpoint.is_empty() {
+                return Err(
+                    "notification_email_endpoint is required when notification email is enabled"
+                        .to_string(),
+                );
+            }
+            if !endpoint.starts_with("https://") && !endpoint.starts_with("http://") {
+                return Err(
+                    "notification_email_endpoint must be an HTTP provider URL starting with http:// or https://"
+                        .to_string(),
+                );
+            }
+            if !notification_provider_endpoint_allowed(
+                endpoint,
+                self.notification_email_allow_insecure_loopback,
+            ) {
+                return Err(
+                    "notification_email_endpoint must use https:// unless notification_email_allow_insecure_loopback is true and the endpoint host is loopback"
+                        .to_string(),
+                );
+            }
+            let public_base_url = self.public_base_url.as_deref().unwrap_or("").trim();
+            if !notification_public_base_url_allowed(public_base_url) {
+                return Err(
+                    "public_base_url is required for email and must be an https:// origin without path, query, or fragment"
+                        .to_string(),
+                );
+            }
+            match self.notification_email_provider_token_file.as_ref() {
+                Some(path) if path.starts_with("/nix/store") => {
+                    return Err(
+                        "notification_email_provider_token_file must not point into /nix/store"
+                            .to_string(),
+                    );
+                }
+                Some(path) if path.as_os_str().is_empty() => {
+                    return Err(
+                        "notification_email_provider_token_file must not be empty when email is enabled"
+                            .to_string(),
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    return Err(
+                        "notification_email_provider_token_file is required when notification email is enabled"
+                            .to_string(),
+                    );
+                }
+            }
+            if self
+                .notification_email_sender_address
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+            {
+                return Err(
+                    "notification_email_sender_address is required when notification email is enabled"
+                        .to_string(),
+                );
+            }
+        }
+
+        if self.notification_email_worker_interval_seconds == 0 {
+            return Err("notification email worker interval must be greater than 0".to_string());
+        }
+
+        if self.notification_email_max_attempts <= 0 {
+            return Err("notification email max attempts must be greater than 0".to_string());
+        }
+
+        if self.notification_email_request_timeout_seconds == 0 {
+            return Err("notification email request timeout must be greater than 0".to_string());
+        }
+
+        if self.notification_email_digest_schedule != "weekly_utc" {
+            return Err("notification email digest schedule must be weekly_utc".to_string());
+        }
+
+        if self.session_last_seen_throttle_seconds == 0 {
+            return Err("session last-seen throttle must be greater than 0".to_string());
+        }
+
+        if self.session_retention_days <= 0 {
+            return Err("session retention days must be greater than 0".to_string());
+        }
+
         if self.execution_mode.is_mock() && self.auth_mode != "local" {
             return Err(
                 "server.execution_mode=mock requires server.auth_mode=local for safety".to_string(),
@@ -329,6 +531,37 @@ impl ServerConfig {
 
         Ok(())
     }
+}
+
+pub fn notification_provider_endpoint_allowed(value: &str, allow_insecure_loopback: bool) -> bool {
+    let Ok(url) = url::Url::parse(value.trim()) else {
+        return false;
+    };
+    match url.scheme() {
+        "https" => true,
+        "http" if allow_insecure_loopback => url
+            .host()
+            .map(|host| match host {
+                url::Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
+                url::Host::Ipv4(addr) => addr.is_loopback(),
+                url::Host::Ipv6(addr) => addr.is_loopback(),
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+pub fn notification_public_base_url_allowed(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value.trim()) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host().is_some()
+        && (url.path().is_empty() || url.path() == "/")
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
 }
 
 #[cfg(test)]

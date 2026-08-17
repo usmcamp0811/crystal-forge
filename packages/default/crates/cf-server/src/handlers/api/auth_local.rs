@@ -15,7 +15,8 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 
 use crate::auth::password::{hash_password, verify_password};
-use crate::handlers::api::auth_session::establish_user_session;
+use crate::config::ServerConfig;
+use crate::handlers::api::auth_session::{establish_user_session, resolve_client_ip};
 use crate::queries::users::{
     count_users, get_by_email, get_by_username, get_password_hash_by_user_id, insert_user,
     update_username_and_password_hash,
@@ -149,6 +150,7 @@ pub struct LoginResponse {
 /// Verifies credentials and creates a session.
 pub async fn login(
     State(pool): State<PgPool>,
+    State(server_config): State<ServerConfig>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
@@ -185,9 +187,10 @@ pub async fn login(
         .and_then(|v| v.to_str().ok())
         .map(ToString::to_string);
 
-    let ip_address = Some(addr.ip().to_string());
+    let ip_address = resolve_client_ip(addr, &headers, &server_config.trusted_proxy_cidrs)
+        .map(|ip| ip.to_string());
 
-    let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address)
+    let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address, "local")
         .await
         .map_err(|_| LocalAuthError::SessionCreationFailed)?;
 

@@ -1,25 +1,29 @@
 //! Top bar layout component.
 
-use crate::api::models::UpdateUserPreferences;
+use crate::api::client::{
+    dismiss_user_notification, fetch_user_notifications, mark_all_user_notifications_read,
+    mark_user_notification_read,
+};
+use crate::api::models::{NotificationCategory, UpdateUserPreferences, UserNotificationDto};
 use crate::components::layout::sidebar::{PreferencesContext, SidebarContext};
 use crate::routes::Route;
 use crate::state::app_state::AppState;
-use crate::state::auth;
 use crate::state::preferences;
 use crate::state::theme::UiTheme;
 use crate::theme;
+use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
 
-#[derive(Clone)]
-struct NotificationItem {
-    id: u8,
-    title: &'static str,
-    subtitle: &'static str,
-    age: &'static str,
-    color: &'static str,
-    unread: bool,
-    route: Option<Route>,
-    kind: NotificationKind,
+#[derive(Clone, Copy)]
+pub struct AccountNotificationsContext {
+    pub items: Signal<Vec<UserNotificationDto>>,
+    pub unread_count: Signal<i64>,
+    pub next_cursor: Signal<Option<String>>,
+    pub loading: Signal<bool>,
+    pub loading_more: Signal<bool>,
+    pub error: Signal<Option<String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -31,20 +35,6 @@ enum NotificationKind {
     Evaluation,
 }
 
-fn admin_only_route(route: &Option<Route>) -> bool {
-    matches!(
-        route,
-        Some(Route::CvesView { .. } | Route::ScanningView { .. } | Route::AdminView { .. })
-    )
-}
-
-fn visible_notifications(is_admin_user: bool) -> Vec<NotificationItem> {
-    notifications()
-        .into_iter()
-        .filter(|item| is_admin_user || !admin_only_route(&item.route))
-        .collect()
-}
-
 fn set_root_attr(name: &str, value: &str) {
     if let Some(document) = web_sys::window().and_then(|w| w.document()) {
         if let Some(root) = document.document_element() {
@@ -53,59 +43,143 @@ fn set_root_attr(name: &str, value: &str) {
     }
 }
 
-fn notifications() -> Vec<NotificationItem> {
-    vec![
-        NotificationItem {
-            id: 1,
-            title: "3 systems awaiting deploy approval",
-            subtitle: "production · manual policy",
-            age: "2m ago",
-            color: "#fbbf24",
-            unread: true,
-            route: Some(Route::SystemsView {}),
-            kind: NotificationKind::Deploy,
-        },
-        NotificationItem {
-            id: 2,
-            title: "Build failed: openssl-3.3.2",
-            subtitle: "hydra-02 · attempt 3",
-            age: "12m ago",
-            color: "#f87171",
-            unread: true,
-            route: Some(Route::BuildsView {}),
-            kind: NotificationKind::Build,
-        },
-        NotificationItem {
-            id: 3,
-            title: "New critical CVE: CVE-2026-31822",
-            subtitle: "affects 6 systems · openssl",
-            age: "38m ago",
-            color: "#f87171",
-            unread: true,
-            route: Some(Route::CvesView {}),
-            kind: NotificationKind::Shield,
-        },
-        NotificationItem {
-            id: 4,
-            title: "Heartbeat lost: edge-fra-01",
-            subtitle: "no signal for 6h",
-            age: "1h ago",
-            color: "#fbbf24",
-            unread: false,
-            route: Some(Route::SystemsView {}),
-            kind: NotificationKind::Warning,
-        },
-        NotificationItem {
-            id: 5,
-            title: "Eval complete: infrastructure@a3f8c12",
-            subtitle: "12 systems · all policies passed",
-            age: "2h ago",
-            color: "#34d399",
-            unread: false,
-            route: Some(Route::EvaluationsView {}),
-            kind: NotificationKind::Evaluation,
-        },
-    ]
+fn focus_topbar_bell() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(document) = web_sys::window().and_then(|w| w.document()) {
+            if let Some(element) = document
+                .query_selector("[data-testid='topbar-notifications-button']")
+                .ok()
+                .flatten()
+            {
+                if let Some(html_element) = element.dyn_ref::<web_sys::HtmlElement>() {
+                    let _ = html_element.focus();
+                }
+            }
+        }
+    }
+}
+
+fn close_notifications(mut notifications_open: Signal<bool>) {
+    notifications_open.set(false);
+    focus_topbar_bell();
+}
+
+fn notification_kind(category: NotificationCategory) -> NotificationKind {
+    match category {
+        NotificationCategory::DeployFailures => NotificationKind::Deploy,
+        NotificationCategory::BuildFailures => NotificationKind::Build,
+        NotificationCategory::CriticalCves => NotificationKind::Shield,
+        NotificationCategory::PolicyViolations => NotificationKind::Evaluation,
+        NotificationCategory::HeartbeatLost => NotificationKind::Warning,
+    }
+}
+
+fn notification_color(category: NotificationCategory) -> &'static str {
+    match category {
+        NotificationCategory::DeployFailures
+        | NotificationCategory::BuildFailures
+        | NotificationCategory::CriticalCves => "#f87171",
+        NotificationCategory::PolicyViolations | NotificationCategory::HeartbeatLost => "#fbbf24",
+    }
+}
+
+fn notification_route(route: &str) -> Option<Route> {
+    if route.starts_with("/systems") {
+        Some(Route::SystemsView {})
+    } else if route.starts_with("/builds") {
+        Some(Route::BuildsView {})
+    } else if route.starts_with("/cves") {
+        Some(Route::CvesView {})
+    } else if route.starts_with("/evaluations") {
+        Some(Route::EvaluationsView {})
+    } else if route.starts_with("/profile") {
+        Some(Route::ProfileView {})
+    } else {
+        None
+    }
+}
+
+fn relative_time(timestamp: DateTime<Utc>) -> String {
+    let delta = Utc::now().signed_duration_since(timestamp);
+    if delta.num_minutes() < 1 {
+        "now".to_string()
+    } else if delta.num_hours() < 1 {
+        format!("{}m ago", delta.num_minutes())
+    } else if delta.num_days() < 1 {
+        format!("{}h ago", delta.num_hours())
+    } else {
+        format!("{}d ago", delta.num_days())
+    }
+}
+
+fn current_topbar_user_id(app_state: Signal<AppState>) -> Option<String> {
+    app_state
+        .read()
+        .auth
+        .as_ref()
+        .and_then(|ctx| ctx.user.as_ref())
+        .map(|user| user.id.clone())
+}
+
+fn current_topbar_auth_generation(app_state: Signal<AppState>) -> u64 {
+    app_state.read().auth_generation
+}
+
+fn load_account_notifications(
+    mut ctx: AccountNotificationsContext,
+    app_state: Signal<AppState>,
+    auth_user_id: Option<String>,
+    auth_generation: u64,
+    cursor: Option<String>,
+    append: bool,
+) {
+    spawn(async move {
+        if auth_user_id.is_none() {
+            ctx.items.set(Vec::new());
+            ctx.unread_count.set(0);
+            ctx.next_cursor.set(None);
+            return;
+        }
+        if append {
+            ctx.loading_more.set(true);
+        } else {
+            ctx.loading.set(true);
+        }
+        match fetch_user_notifications(Some(10), cursor, false).await {
+            Ok(response) => {
+                if current_topbar_user_id(app_state) == auth_user_id
+                    && current_topbar_auth_generation(app_state) == auth_generation
+                {
+                    if append {
+                        ctx.items.write().extend(response.notifications);
+                    } else {
+                        ctx.items.set(response.notifications);
+                    }
+                    ctx.unread_count.set(response.unread_count);
+                    ctx.next_cursor.set(response.next_cursor);
+                    ctx.error.set(None);
+                }
+            }
+            Err(err) => {
+                if current_topbar_user_id(app_state) == auth_user_id
+                    && current_topbar_auth_generation(app_state) == auth_generation
+                {
+                    ctx.error
+                        .set(Some(format!("Could not load notifications: {err}")))
+                }
+            }
+        }
+        if current_topbar_user_id(app_state) == auth_user_id
+            && current_topbar_auth_generation(app_state) == auth_generation
+        {
+            if append {
+                ctx.loading_more.set(false);
+            } else {
+                ctx.loading.set(false);
+            }
+        }
+    });
 }
 
 /// Header bar displaying the current page title and optional actions.
@@ -117,7 +191,11 @@ pub fn TopBar(title: String) -> Element {
     let breadcrumb_override = use_context::<Signal<Option<(String, String)>>>();
     let app_state = use_context::<Signal<AppState>>();
     let auth_context = app_state.read().auth.clone();
-    let is_admin_user = auth::is_admin(&auth_context);
+    let auth_user_id = auth_context
+        .as_ref()
+        .and_then(|ctx| ctx.user.as_ref())
+        .map(|user| user.id.clone());
+    let auth_generation = app_state.read().auth_generation;
 
     let sidebar_ctx = use_context::<SidebarContext>();
     let mut is_mobile_drawer_open = sidebar_ctx.is_mobile_drawer_open;
@@ -130,12 +208,13 @@ pub fn TopBar(title: String) -> Element {
 
     let mut tweaks_open = use_signal(|| false);
     let mut notifications_open = use_signal(|| false);
-    let mut notification_items = use_signal(|| visible_notifications(is_admin_user));
-    let unread_count = notification_items
-        .read()
-        .iter()
-        .filter(|item| item.unread)
-        .count();
+    let notification_ctx = use_context::<AccountNotificationsContext>();
+    let mut notification_items = notification_ctx.items;
+    let mut notifications_loading = notification_ctx.loading;
+    let mut notifications_loading_more = notification_ctx.loading_more;
+    let mut notifications_error = notification_ctx.error;
+    let mut unread_count = notification_ctx.unread_count;
+    let mut notification_next_cursor = notification_ctx.next_cursor;
     let (crumb_parent, crumb_current) =
         if let Some((parent, current)) = breadcrumb_override.read().clone() {
             (Some(parent), current)
@@ -166,9 +245,20 @@ pub fn TopBar(title: String) -> Element {
         );
     });
 
+    let effect_auth_user_id = auth_user_id.clone();
     use_effect(move || {
-        notification_items.set(visible_notifications(is_admin_user));
+        load_account_notifications(
+            notification_ctx,
+            app_state,
+            effect_auth_user_id.clone(),
+            auth_generation,
+            None,
+            false,
+        );
     });
+
+    let open_auth_user_id = auth_user_id.clone();
+    let more_auth_user_id = auth_user_id.clone();
 
     rsx! {
         header {
@@ -230,10 +320,23 @@ pub fn TopBar(title: String) -> Element {
                 button {
                     "data-testid": "topbar-notifications-button",
                     class: "btn-icon focus-ring topbar-bell",
-                    "aria-label": "Notifications",
+                    "aria-label": "Notifications ({unread_count()} unread)",
+                    "aria-expanded": "{notifications_open()}",
+                    "aria-haspopup": "menu",
                     title: "Notifications",
                     onclick: move |_| {
-                        notifications_open.set(!notifications_open());
+                        let next_open = !notifications_open();
+                        notifications_open.set(next_open);
+                        if next_open {
+                            load_account_notifications(
+                                notification_ctx,
+                                app_state,
+                                open_auth_user_id.clone(),
+                                auth_generation,
+                                None,
+                                false,
+                            );
+                        }
                     },
                     svg {
                         class: "w-4 h-4",
@@ -245,11 +348,11 @@ pub fn TopBar(title: String) -> Element {
                             d: "M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
                         }
                     }
-                    if unread_count > 0 {
+                    if unread_count() > 0 {
                         span {
                             "data-testid": "topbar-notifications-badge",
                             class: "topbar-bell-badge",
-                            "{unread_count}"
+                            "{unread_count()}"
                         }
                     }
                 }
@@ -257,11 +360,17 @@ pub fn TopBar(title: String) -> Element {
                 if notifications_open() {
                     div {
                         class: "cf-overlay-backdrop",
-                        onclick: move |_| notifications_open.set(false),
+                        onclick: move |_| close_notifications(notifications_open),
                     }
                     div {
                         "data-testid": "topbar-notifications-panel",
                         class: "notif-panel",
+                        tabindex: "-1",
+                        onkeydown: move |evt| {
+                            if evt.key() == Key::Escape {
+                                close_notifications(notifications_open);
+                            }
+                        },
                         div {
                             class: "notif-head",
                             strong { "Notifications" }
@@ -271,8 +380,21 @@ pub fn TopBar(title: String) -> Element {
                                 title: "Mark all read",
                                 style: "padding: 4px;",
                                 onclick: move |_| {
-                                    notification_items.write().iter_mut().for_each(|item| {
-                                        item.unread = false;
+                                    let requested_generation = auth_generation;
+                                    spawn(async move {
+                                        if mark_all_user_notifications_read().await.is_ok() {
+                                            if current_topbar_auth_generation(app_state) == requested_generation {
+                                                notification_items.write().iter_mut().for_each(|item| {
+                                                    item.read_at = Some(Utc::now());
+                                                });
+                                                unread_count.set(0);
+                                                notifications_error.set(None);
+                                            }
+                                        } else {
+                                            if current_topbar_auth_generation(app_state) == requested_generation {
+                                                notifications_error.set(Some("Could not mark notifications read".to_string()));
+                                            }
+                                        }
                                     });
                                 },
                                 svg {
@@ -287,32 +409,97 @@ pub fn TopBar(title: String) -> Element {
                         }
                         div {
                             class: "notif-list",
-                            for item in notification_items.read().clone() {
-                                button {
-                                    key: "notif-{item.id}",
-                                    class: if item.unread { "notif-item unread focus-ring" } else { "notif-item focus-ring" },
+                            if let Some(error) = notifications_error() {
+                                div { class: "help", style: "padding: 10px 12px; color: var(--cf-critical); border-bottom: 1px solid var(--cf-divider);", "{error}" }
+                            }
+                            if notifications_loading() && notification_items.read().is_empty() {
+                                div { class: "help", style: "padding: 12px;", "Loading notifications..." }
+                            } else if notification_items.read().is_empty() {
+                                div { class: "help", style: "padding: 12px;", "No notifications yet." }
+                            } else {
+                                for item in notification_items.read().clone() {
+                                    div {
+                                        key: "notif-{item.id}",
+                                        class: if item.read_at.is_none() { "notif-item unread focus-ring" } else { "notif-item focus-ring" },
+                                        role: "button",
+                                        tabindex: "0",
+                                        onkeydown: {
+                                            let nav = nav.clone();
+                                            let route = notification_route(&item.route);
+                                            let item_id = item.id;
+                                            let requested_generation = auth_generation;
+                                            move |evt| {
+                                                if evt.key() == Key::Enter || evt.key() == Key::Character(" ".to_string()) {
+                                                    close_notifications(notifications_open);
+                                                    if let Some(route) = route.clone() {
+                                                        nav.push(route);
+                                                    }
+                                                    spawn(async move {
+                                                        if current_topbar_auth_generation(app_state) == requested_generation {
+                                                            match mark_user_notification_read(item_id).await {
+                                                                Ok(()) => {
+                                                                    if let Some(clicked) = notification_items
+                                                                        .write()
+                                                                        .iter_mut()
+                                                                        .find(|candidate| candidate.id == item_id)
+                                                                    {
+                                                                        if clicked.read_at.is_none() {
+                                                                            unread_count.set((unread_count() - 1).max(0));
+                                                                        }
+                                                                        clicked.read_at = Some(Utc::now());
+                                                                    }
+                                                                    notifications_error.set(None);
+                                                                }
+                                                                Err(err) => notifications_error.set(Some(format!(
+                                                                    "Could not mark notification read: {err}"
+                                                                ))),
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                        },
                                     onclick: {
                                         let nav = nav.clone();
-                                        let route = item.route.clone();
+                                        let route = notification_route(&item.route);
                                         let item_id = item.id;
+                                        let requested_generation = auth_generation;
                                         move |_| {
-                                            if let Some(clicked) = notification_items
-                                                .write()
-                                                .iter_mut()
-                                                .find(|candidate| candidate.id == item_id)
-                                            {
-                                                clicked.unread = false;
-                                            }
-                                            notifications_open.set(false);
+                                            close_notifications(notifications_open);
                                             if let Some(route) = route.clone() {
                                                 nav.push(route);
                                             }
+                                            spawn(async move {
+                                                if current_topbar_auth_generation(app_state) == requested_generation
+                                                {
+                                                    match mark_user_notification_read(item_id).await {
+                                                        Ok(()) => {
+                                                            if let Some(clicked) = notification_items
+                                                                .write()
+                                                                .iter_mut()
+                                                                .find(|candidate| candidate.id == item_id)
+                                                            {
+                                                                if clicked.read_at.is_none() {
+                                                                    unread_count.set((unread_count() - 1).max(0));
+                                                                }
+                                                                clicked.read_at = Some(Utc::now());
+                                                            }
+                                                            notifications_error.set(None);
+                                                        }
+                                                        Err(err) => {
+                                                            notifications_error.set(Some(format!(
+                                                                "Could not mark notification read: {err}"
+                                                            )));
+                                                        }
+                                                    }
+                                                }
+                                            });
                                         }
                                     },
                                     span {
                                         class: "notif-icon",
-                                        style: "color: {item.color}; background: color-mix(in oklab, {item.color} 16%, transparent);",
-                                        match item.kind {
+                                        style: "color: {notification_color(item.category)}; background: color-mix(in oklab, {notification_color(item.category)} 16%, transparent);",
+                                        match notification_kind(item.category) {
                                             NotificationKind::Deploy => rsx!(
                                                 svg {
                                                     class: "w-3.5 h-3.5",
@@ -376,18 +563,71 @@ pub fn TopBar(title: String) -> Element {
                                         }
                                         span {
                                             class: "notif-sub",
-                                            "{item.subtitle}"
+                                            "{item.summary}"
                                         }
                                     }
                                     span {
                                         class: "notif-at",
-                                        "{item.age}"
+                                        title: "{item.created_at}",
+                                        "{relative_time(item.created_at)}"
+                                    }
+                                    button {
+                                        class: "btn-icon focus-ring",
+                                        title: "Dismiss notification",
+                                        onclick: move |evt| {
+                                            evt.stop_propagation();
+                                            let requested_generation = auth_generation;
+                                            spawn(async move {
+                                                match dismiss_user_notification(item.id).await {
+                                                    Ok(()) => {
+                                                        if current_topbar_auth_generation(app_state) == requested_generation {
+                                                            let was_unread = notification_items
+                                                                .read()
+                                                                .iter()
+                                                                .find(|candidate| candidate.id == item.id)
+                                                                .map(|candidate| candidate.read_at.is_none())
+                                                                .unwrap_or(false);
+                                                            notification_items.write().retain(|candidate| candidate.id != item.id);
+                                                            if was_unread {
+                                                                unread_count.set((unread_count() - 1).max(0));
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(err) => {
+                                                        if current_topbar_auth_generation(app_state) == requested_generation {
+                                                            notifications_error.set(Some(format!("Could not dismiss notification: {err}")));
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        },
+                                        "×"
                                     }
                                 }
+                            }
                             }
                         }
                         div {
                             class: "notif-foot",
+                            if let Some(cursor) = notification_next_cursor() {
+                                button {
+                                    "data-testid": "topbar-notifications-load-more",
+                                    class: "btn btn-ghost focus-ring xs",
+                                    r#type: "button",
+                                    disabled: notifications_loading_more(),
+                                    onclick: move |_| {
+                                        load_account_notifications(
+                                            notification_ctx,
+                                            app_state,
+                                            more_auth_user_id.clone(),
+                                            auth_generation,
+                                            Some(cursor.clone()),
+                                            true,
+                                        )
+                                    },
+                                    if notifications_loading_more() { "Loading..." } else { "Load more" }
+                                }
+                            }
                             button {
                                 "data-testid": "topbar-notifications-settings-button",
                                 class: "btn btn-ghost focus-ring xs",
@@ -395,7 +635,7 @@ pub fn TopBar(title: String) -> Element {
                                 title: "Notification settings",
                                 onclick: move |_| {
                                     notifications_open.set(false);
-                                    tweaks_open.set(true);
+                                    nav.push(Route::ProfileView {});
                                 },
                                 "Notification settings"
                             }

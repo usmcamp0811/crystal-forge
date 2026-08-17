@@ -44,6 +44,27 @@
             cfg.server.allow_private_cache_test_targets;
           trust_forwarded_builder_https =
             cfg.server.trust_forwarded_builder_https;
+          notification_email_enabled = cfg.server.notificationEmail.enable;
+          notification_email_external_delivery_allowed =
+            cfg.server.notificationEmail.externalDeliveryAllowed;
+          notification_email_endpoint = cfg.server.notificationEmail.endpoint;
+          public_base_url = cfg.server.notificationEmail.publicBaseUrl;
+          notification_email_allow_insecure_loopback =
+            cfg.server.notificationEmail.allowInsecureLoopback;
+          notification_email_provider_token_file =
+            cfg.server.notificationEmail.providerTokenFile;
+          notification_email_sender_address = cfg.server.notificationEmail.senderAddress;
+          notification_email_sender_name = cfg.server.notificationEmail.senderName;
+          notification_email_worker_interval_seconds =
+            cfg.server.notificationEmail.workerIntervalSeconds;
+          notification_email_max_attempts = cfg.server.notificationEmail.maxAttempts;
+          notification_email_request_timeout_seconds =
+            cfg.server.notificationEmail.requestTimeoutSeconds;
+          notification_email_digest_schedule = cfg.server.notificationEmail.digestSchedule;
+          session_last_seen_throttle_seconds =
+            cfg.server.sessionLastSeenThrottleSeconds;
+           session_retention_days = cfg.server.sessionRetentionDays;
+           trusted_proxy_cidrs = cfg.server.trustedProxyCidrs;
           remote_build_execution_strategy = cfg.build.remote_execution_strategy;
           source_delivery_mode = cfg.build.source_delivery_mode;
           source_archive_root = toString cfg.build.source_archive_root;
@@ -1749,6 +1770,131 @@ in {
           an HTTPS-terminating reverse proxy (e.g. nginx, Caddy) that you
           control, and builders only reach the server through that proxy.
         '';
+      };
+
+      notificationEmail = {
+        enable = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = lib.mdDoc ''
+            Enable outbound account notification email. This only enables the
+            server-side delivery path when the endpoint, sender address, and
+            external delivery policy also permit email. Disabled by default to
+            avoid unsolicited email from new deployments.
+          '';
+        };
+
+        externalDeliveryAllowed = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = lib.mdDoc ''
+            Permit notification email to leave the deployment boundary. Keep
+            this disabled for classified or otherwise restricted deployments.
+          '';
+        };
+
+        endpoint = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "https://mail-provider.internal.example/send-crystal-forge-email";
+          description = lib.mdDoc ''
+            HTTP provider endpoint for notification email. Crystal Forge sends
+            an authenticated-session-independent JSON POST containing the
+            rendered text and HTML bodies and an `Idempotency-Key` header.
+          '';
+        };
+
+        publicBaseUrl = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "https://crystal-forge.example.com";
+          description = lib.mdDoc ''
+            Canonical public Crystal Forge origin used to expand application
+            routes in notification email. Must be an HTTPS origin without path,
+            query, or fragment when notification email is enabled.
+          '';
+        };
+
+        allowInsecureLoopback = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = lib.mdDoc ''
+            Development-only escape hatch allowing an `http://` email provider
+            endpoint when the endpoint host is loopback. Non-loopback provider
+            endpoints must use HTTPS.
+          '';
+        };
+
+        providerTokenFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "/run/secrets/crystal-forge-email-provider-token";
+          description = lib.mdDoc ''
+            Runtime file containing the email provider bearer token. Do not use
+            a Nix store path; provision this through a secret manager such as
+            age/sops and point the option at the runtime secret file.
+          '';
+        };
+
+        senderAddress = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "crystal-forge@example.com";
+          description = "Sender email address for account notifications.";
+        };
+
+        senderName = lib.mkOption {
+          type = lib.types.str;
+          default = "Crystal Forge";
+          description = "Sender display name for account notifications.";
+        };
+
+        workerIntervalSeconds = lib.mkOption {
+          type = lib.types.ints.positive;
+          default = 60;
+          description = "Polling interval for the immediate email delivery worker.";
+        };
+
+        maxAttempts = lib.mkOption {
+          type = lib.types.ints.positive;
+          default = 5;
+          description = "Maximum notification email send attempts before terminal failure.";
+        };
+
+        requestTimeoutSeconds = lib.mkOption {
+          type = lib.types.ints.positive;
+          default = 30;
+          description = "HTTP provider request timeout for notification email delivery.";
+        };
+
+        digestSchedule = lib.mkOption {
+          type = lib.types.enum ["weekly_utc"];
+          default = "weekly_utc";
+          description = "Digest schedule. weekly_utc sends only the previous completed UTC week.";
+        };
+      };
+
+      sessionLastSeenThrottleSeconds = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 300;
+        description = "Minimum interval between writes to user session last-seen timestamps.";
+      };
+
+      sessionRetentionDays = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 30;
+        description = "Retention period for expired or revoked account session records.";
+      };
+
+      trustedProxyCidrs = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [];
+        description = lib.mdDoc ''
+          CIDR ranges of trusted reverse proxies. X-Forwarded-For is used only
+          when the direct peer is in one of these ranges; otherwise the direct
+          peer address is recorded for active sessions.
+        '';
+        example = [ "127.0.0.1/32" "10.0.0.0/8" ];
       };
 
       role_mapping = lib.mkOption {

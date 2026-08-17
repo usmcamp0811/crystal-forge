@@ -23,4 +23,6 @@ pub mod rbac;
 pub mod scanning;
 pub mod setup_wizard;
 pub mod systems;
+pub mod user_notifications;
 pub mod user_preferences;
+pub mod user_sessions;

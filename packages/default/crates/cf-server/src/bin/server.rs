@@ -24,7 +24,8 @@ use crystal_forge::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
             builders, caches, commits, compliance, config_health, cves, dashboard,
             deployment_policies, deployments, environments, flakes, framework_requirements,
-            hardening, navigation, scanning, setup_wizard, systems, user_preferences,
+            hardening, navigation, scanning, setup_wizard, systems, user_notifications,
+            user_preferences, user_sessions,
         },
         status,
         webhook::webhook_handler,
@@ -263,6 +264,36 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/user/preferences/initialize",
             post(user_preferences::initialize_preferences),
+        )
+        .route(
+            "/api/v1/user/notification-preferences",
+            get(user_notifications::get_notification_preferences)
+                .patch(user_notifications::patch_notification_preferences),
+        )
+        .route(
+            "/api/v1/user/notifications",
+            get(user_notifications::get_notifications),
+        )
+        .route(
+            "/api/v1/user/notifications/read-all",
+            post(user_notifications::read_all_notifications),
+        )
+        .route(
+            "/api/v1/user/notifications/:notification_id/read",
+            post(user_notifications::read_notification),
+        )
+        .route(
+            "/api/v1/user/notifications/:notification_id",
+            delete(user_notifications::delete_notification),
+        )
+        .route("/api/v1/user/sessions", get(user_sessions::list_sessions))
+        .route(
+            "/api/v1/user/sessions/revoke-all",
+            post(user_sessions::revoke_all_sessions),
+        )
+        .route(
+            "/api/v1/user/sessions/:session_id",
+            delete(user_sessions::revoke_session),
         )
         .route("/api/v1/cves", get(cves::list_cves))
         .route("/api/v1/cves/grouped", get(cves::list_cves_grouped))

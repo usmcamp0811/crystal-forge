@@ -5,6 +5,7 @@ use axum::{
 };
 use chrono::{Duration, Utc};
 use sqlx::PgPool;
+use std::net::{IpAddr, SocketAddr};
 use uuid::Uuid;
 
 use crate::{
@@ -17,6 +18,7 @@ use crate::{
 };
 
 pub const SESSION_TTL_SECONDS: i64 = 60 * 60 * 8;
+const MAX_FORWARDED_ADDRESSES: usize = 10;
 const SESSION_TTL_ENV: &str = "CRYSTAL_FORGE_SESSION_TTL_SECONDS";
 const SESSION_TTL_MIN_SECONDS: i64 = 60;
 const SESSION_TTL_MAX_SECONDS: i64 = 60 * 60 * 24 * 30;
@@ -26,11 +28,88 @@ pub struct SessionCookies {
     pub csrf_cookie: HeaderValue,
 }
 
+/// Resolve a session's client address using a bounded, right-to-left proxy
+/// chain walk. Forwarded addresses are trusted only when the direct peer is in
+/// a configured proxy CIDR; malformed, ambiguous, or overlong headers are
+/// treated as unavailable.
+pub fn resolve_client_ip(
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    trusted_proxy_cidrs: &[String],
+) -> Option<IpAddr> {
+    if !ip_in_any_cidr(peer.ip(), trusted_proxy_cidrs) {
+        return Some(peer.ip());
+    }
+
+    let forwarded = headers.get_all("x-forwarded-for");
+    if forwarded.iter().count() != 1 {
+        return None;
+    }
+    let Some(raw) = forwarded.iter().next().and_then(|v| v.to_str().ok()) else {
+        return None;
+    };
+    let mut chain = Vec::with_capacity(MAX_FORWARDED_ADDRESSES + 1);
+    for value in raw.split(',').map(str::trim) {
+        if value.is_empty() || chain.len() >= MAX_FORWARDED_ADDRESSES {
+            return None;
+        }
+        let Ok(address) = value.parse::<IpAddr>() else {
+            return None;
+        };
+        chain.push(address);
+    }
+    if chain.is_empty() {
+        return None;
+    }
+    chain.push(peer.ip());
+
+    chain
+        .into_iter()
+        .rev()
+        .find(|address| !ip_in_any_cidr(*address, trusted_proxy_cidrs))
+}
+
+fn ip_in_any_cidr(address: IpAddr, cidrs: &[String]) -> bool {
+    cidrs.iter().any(|cidr| ip_in_cidr(address, cidr))
+}
+
+fn ip_in_cidr(address: IpAddr, cidr: &str) -> bool {
+    let Some((network, prefix)) = cidr.split_once('/') else {
+        return false;
+    };
+    let Ok(network) = network.parse::<IpAddr>() else {
+        return false;
+    };
+    let Ok(prefix) = prefix.parse::<u8>() else {
+        return false;
+    };
+    match (address, network) {
+        (IpAddr::V4(address), IpAddr::V4(network)) if prefix <= 32 => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            u32::from(address) & mask == u32::from(network) & mask
+        }
+        (IpAddr::V6(address), IpAddr::V6(network)) if prefix <= 128 => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            u128::from(address) & mask == u128::from(network) & mask
+        }
+        _ => false,
+    }
+}
+
 pub async fn establish_user_session(
     pool: &PgPool,
     user_id: Uuid,
     user_agent: Option<String>,
     ip_address: Option<String>,
+    auth_source: &str,
 ) -> Result<SessionCookies, SessionError> {
     let ttl_seconds = session_ttl_seconds();
     let session_token = generate_token();
@@ -45,6 +124,7 @@ pub async fn establish_user_session(
         expires_at,
         user_agent,
         ip_address,
+        auth_source.to_string(),
     )
     .await
     .map_err(|_| SessionError::Database)?;
@@ -215,5 +295,67 @@ mod tests {
         assert_eq!(parse_session_ttl(Some("-10")), SESSION_TTL_SECONDS);
         assert_eq!(parse_session_ttl(Some("abc")), SESSION_TTL_SECONDS);
         assert_eq!(parse_session_ttl(Some("120")), 120);
+    }
+
+    #[test]
+    fn trusted_proxy_resolution_requires_trusted_direct_peer() {
+        let peer = "192.0.2.10:443".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "198.51.100.20".parse().unwrap());
+
+        assert_eq!(
+            resolve_client_ip(peer, &headers, &["192.0.2.0/24".to_string()]),
+            Some("198.51.100.20".parse().unwrap())
+        );
+        assert_eq!(
+            resolve_client_ip(peer, &headers, &["198.0.2.11/32".to_string()]),
+            Some("192.0.2.10".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn trusted_proxy_resolution_walks_multiple_trusted_hops() {
+        let peer = "10.0.0.2:443".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            "198.51.100.20, 10.0.0.3".parse().unwrap(),
+        );
+
+        assert_eq!(
+            resolve_client_ip(peer, &headers, &["10.0.0.0/8".to_string()]),
+            Some("198.51.100.20".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn trusted_proxy_resolution_rejects_ambiguous_and_trusted_only_headers() {
+        let peer = "10.0.0.2:443".parse().unwrap();
+        let mut multiple = HeaderMap::new();
+        multiple.append("x-forwarded-for", "10.0.0.3".parse().unwrap());
+        multiple.append("x-forwarded-for", "10.0.0.4".parse().unwrap());
+        assert_eq!(
+            resolve_client_ip(peer, &multiple, &["10.0.0.0/8".to_string()]),
+            None
+        );
+
+        let mut trusted_only = HeaderMap::new();
+        trusted_only.insert("x-forwarded-for", "10.0.0.3".parse().unwrap());
+        assert_eq!(
+            resolve_client_ip(peer, &trusted_only, &["10.0.0.0/8".to_string()]),
+            None
+        );
+
+        let untrusted_peer = "198.51.100.10:443".parse().unwrap();
+        assert_eq!(
+            resolve_client_ip(untrusted_peer, &multiple, &["10.0.0.0/8".to_string()]),
+            Some("198.51.100.10".parse().unwrap())
+        );
+        let mut malformed = HeaderMap::new();
+        malformed.insert("x-forwarded-for", "not-an-ip".parse().unwrap());
+        assert_eq!(
+            resolve_client_ip(untrusted_peer, &malformed, &["10.0.0.0/8".to_string()]),
+            Some("198.51.100.10".parse().unwrap())
+        );
     }
 }

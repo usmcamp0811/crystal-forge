@@ -2388,6 +2388,286 @@ pub struct UpdateUserPreferences {
     pub default_systems_view: Option<SystemsViewPreference>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationDeliveryChannel {
+    InApp,
+    Email,
+    Both,
+}
+
+impl From<crate::models::user_notifications::NotificationDeliveryChannel>
+    for NotificationDeliveryChannel
+{
+    fn from(value: crate::models::user_notifications::NotificationDeliveryChannel) -> Self {
+        match value {
+            crate::models::user_notifications::NotificationDeliveryChannel::InApp => Self::InApp,
+            crate::models::user_notifications::NotificationDeliveryChannel::Email => Self::Email,
+            crate::models::user_notifications::NotificationDeliveryChannel::Both => Self::Both,
+        }
+    }
+}
+
+impl From<NotificationDeliveryChannel>
+    for crate::models::user_notifications::NotificationDeliveryChannel
+{
+    fn from(value: NotificationDeliveryChannel) -> Self {
+        match value {
+            NotificationDeliveryChannel::InApp => Self::InApp,
+            NotificationDeliveryChannel::Email => Self::Email,
+            NotificationDeliveryChannel::Both => Self::Both,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationPreferencesDto {
+    pub deploy_failures: bool,
+    pub build_failures: bool,
+    pub critical_cves: bool,
+    pub policy_violations: bool,
+    pub heartbeat_lost: bool,
+    pub weekly_digest: bool,
+    pub delivery_channel: NotificationDeliveryChannel,
+    pub email_available: bool,
+    pub delivery_email: Option<String>,
+    pub email_unavailable_reason: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NotificationEmailCapability {
+    pub available: bool,
+    pub delivery_email: Option<String>,
+    pub unavailable_reason: Option<String>,
+}
+
+impl NotificationPreferencesDto {
+    pub fn from_model(
+        value: crate::models::user_notifications::UserNotificationPreferences,
+        email_capability: NotificationEmailCapability,
+    ) -> Self {
+        Self {
+            deploy_failures: value.deploy_failures,
+            build_failures: value.build_failures,
+            critical_cves: value.critical_cves,
+            policy_violations: value.policy_violations,
+            heartbeat_lost: value.heartbeat_lost,
+            weekly_digest: value.weekly_digest,
+            delivery_channel: value.delivery_channel.into(),
+            email_available: email_capability.available,
+            delivery_email: email_capability.delivery_email,
+            email_unavailable_reason: email_capability.unavailable_reason,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+#[cfg(test)]
+mod user_notifications_api_tests {
+    use super::{
+        NotificationDeliveryChannel, NotificationEmailCapability, NotificationPreferencesDto,
+        decode_notification_cursor, encode_notification_cursor,
+    };
+    use crate::models::user_notifications;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn preferences(
+        delivery_channel: user_notifications::NotificationDeliveryChannel,
+        weekly_digest: bool,
+    ) -> user_notifications::UserNotificationPreferences {
+        user_notifications::UserNotificationPreferences {
+            user_id: Uuid::new_v4(),
+            deploy_failures: true,
+            build_failures: true,
+            critical_cves: true,
+            policy_violations: true,
+            heartbeat_lost: false,
+            weekly_digest,
+            delivery_channel,
+            deploy_failures_email_enabled_at: None,
+            build_failures_email_enabled_at: None,
+            critical_cves_email_enabled_at: None,
+            policy_violations_email_enabled_at: None,
+            heartbeat_lost_email_enabled_at: None,
+            deploy_failures_in_app_enabled_at: Some(Utc::now()),
+            build_failures_in_app_enabled_at: Some(Utc::now()),
+            critical_cves_in_app_enabled_at: Some(Utc::now()),
+            policy_violations_in_app_enabled_at: Some(Utc::now()),
+            heartbeat_lost_in_app_enabled_at: None,
+            weekly_digest_enabled_at: None,
+            initialized_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn user_notifications_preferences_report_email_unavailable_reason() {
+        let dto = NotificationPreferencesDto::from_model(
+            preferences(
+                user_notifications::NotificationDeliveryChannel::InApp,
+                false,
+            ),
+            NotificationEmailCapability {
+                available: false,
+                delivery_email: Some("alice@example.com".to_string()),
+                unavailable_reason: Some("Email delivery is not configured".to_string()),
+            },
+        );
+
+        assert!(!dto.email_available);
+        assert_eq!(dto.delivery_email.as_deref(), Some("alice@example.com"));
+        assert_eq!(
+            dto.email_unavailable_reason.as_deref(),
+            Some("Email delivery is not configured")
+        );
+    }
+
+    #[test]
+    fn user_notifications_preferences_report_email_available() {
+        let dto = NotificationPreferencesDto::from_model(
+            preferences(user_notifications::NotificationDeliveryChannel::Both, true),
+            NotificationEmailCapability {
+                available: true,
+                delivery_email: Some("alice@example.com".to_string()),
+                unavailable_reason: None,
+            },
+        );
+
+        assert!(dto.email_available);
+        assert_eq!(dto.delivery_channel, NotificationDeliveryChannel::Both);
+        assert!(dto.weekly_digest);
+        assert!(dto.email_unavailable_reason.is_none());
+    }
+
+    #[test]
+    fn user_notifications_cursor_round_trips_without_url_reserved_time_chars() {
+        let id = Uuid::new_v4();
+        let created_at = Utc::now();
+        let cursor = encode_notification_cursor(created_at, id);
+
+        assert!(!cursor.contains('+'));
+        assert!(!cursor.contains(':'));
+
+        let (decoded_created_at, decoded_id) =
+            decode_notification_cursor(&cursor).expect("cursor decodes");
+        assert_eq!(decoded_id, id);
+        assert_eq!(
+            decoded_created_at.timestamp_micros(),
+            created_at.timestamp_micros()
+        );
+        assert!(decode_notification_cursor("not-a-cursor").is_none());
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UpdateNotificationPreferences {
+    pub deploy_failures: Option<bool>,
+    pub build_failures: Option<bool>,
+    pub critical_cves: Option<bool>,
+    pub policy_violations: Option<bool>,
+    pub heartbeat_lost: Option<bool>,
+    pub weekly_digest: Option<bool>,
+    pub delivery_channel: Option<NotificationDeliveryChannel>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationCategory {
+    DeployFailures,
+    BuildFailures,
+    CriticalCves,
+    PolicyViolations,
+    HeartbeatLost,
+}
+
+impl From<crate::models::user_notifications::UserNotificationCategory> for NotificationCategory {
+    fn from(value: crate::models::user_notifications::UserNotificationCategory) -> Self {
+        match value {
+            crate::models::user_notifications::UserNotificationCategory::DeployFailures => {
+                Self::DeployFailures
+            }
+            crate::models::user_notifications::UserNotificationCategory::BuildFailures => {
+                Self::BuildFailures
+            }
+            crate::models::user_notifications::UserNotificationCategory::CriticalCves => {
+                Self::CriticalCves
+            }
+            crate::models::user_notifications::UserNotificationCategory::PolicyViolations => {
+                Self::PolicyViolations
+            }
+            crate::models::user_notifications::UserNotificationCategory::HeartbeatLost => {
+                Self::HeartbeatLost
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserNotificationDto {
+    pub id: Uuid,
+    pub category: NotificationCategory,
+    pub title: String,
+    pub summary: String,
+    pub route: String,
+    pub created_at: DateTime<Utc>,
+    pub read_at: Option<DateTime<Utc>>,
+}
+
+impl From<crate::models::user_notifications::UserNotification> for UserNotificationDto {
+    fn from(value: crate::models::user_notifications::UserNotification) -> Self {
+        Self {
+            id: value.id,
+            category: value.category.into(),
+            title: value.title,
+            summary: value.summary,
+            route: value.route,
+            created_at: value.created_at,
+            read_at: value.read_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserNotificationsResponse {
+    pub notifications: Vec<UserNotificationDto>,
+    pub unread_count: i64,
+    pub next_cursor: Option<String>,
+}
+
+pub fn encode_notification_cursor(created_at: DateTime<Utc>, id: Uuid) -> String {
+    format!("{}|{}", created_at.timestamp_micros(), id)
+}
+
+pub fn decode_notification_cursor(value: &str) -> Option<(DateTime<Utc>, Uuid)> {
+    let (created_at, id) = value.split_once('|')?;
+    Some((
+        DateTime::from_timestamp_micros(created_at.parse().ok()?)?,
+        Uuid::parse_str(id).ok()?,
+    ))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserSessionDto {
+    pub id: Uuid,
+    pub current: bool,
+    pub device_label: String,
+    pub browser: String,
+    pub operating_system: String,
+    pub device_class: String,
+    pub ip_address: Option<String>,
+    pub auth_source: String,
+    pub created_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserSessionsResponse {
+    pub sessions: Vec<UserSessionDto>,
+}
+
 /// Admin users list item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminUserSummary {
