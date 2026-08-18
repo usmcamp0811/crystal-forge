@@ -1619,7 +1619,12 @@ async fn bundle_deletion_eligibility_in_transaction(
     .await
     .context("Failed to check compliance bundle immutable history")?;
     let immutable_assignment_history: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM compliance_bundle_assignment_versions av JOIN compliance_bundle_assignments a ON a.id = av.assignment_id WHERE a.bundle_id = $1",
+        "SELECT COUNT(*)
+         FROM compliance_bundle_assignment_versions av
+         JOIN compliance_bundle_assignments a ON a.id = av.assignment_id
+         JOIN compliance_bundle_versions bv ON bv.id = av.bundle_version_id
+         WHERE a.bundle_id = $1
+           AND bv.publication_state IN ('accepted', 'deprecated')",
     )
     .bind(bundle_id)
     .fetch_one(&mut **tx)
@@ -1720,6 +1725,17 @@ pub async fn delete_bundle(pool: &PgPool, bundle_id: Uuid) -> Result<BundleDelet
         tx.rollback().await.ok();
         return Ok(BundleDeleteOutcome::Blocked(eligibility));
     }
+
+    // Draft-only assignment lineages are disposable with their draft bundle.
+    // Remove them before deleting bundle versions because assignment rows hold
+    // RESTRICT references to those versions. Immutable assignment history was
+    // already checked above and blocks this path when it references published
+    // or deprecated bundle versions.
+    sqlx::query("DELETE FROM compliance_bundle_assignments WHERE bundle_id = $1")
+        .bind(bundle_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to remove disposable bundle assignments")?;
 
     sqlx::query("DELETE FROM compliance_source_object_mappings m USING compliance_bundle_versions bv WHERE m.bundle_version_id = bv.id AND bv.bundle_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim') AND NOT EXISTS (SELECT 1 FROM deployment_policy_versions pv WHERE pv.id = m.policy_version_id AND pv.publication_state IN ('accepted', 'deprecated'))")
         .bind(bundle_id).execute(&mut *tx).await.context("Failed to remove disposable bundle source mappings")?;
@@ -1982,15 +1998,9 @@ pub async fn list_system_bundles(
         FROM compliance_bundles b
         LEFT JOIN environments e ON e.name = $2
         WHERE b.id = ANY($1)
-          AND (
-            NOT EXISTS (
-                SELECT 1 FROM compliance_bundle_environments cbe
-                WHERE cbe.bundle_id = b.id
-            )
-            OR EXISTS (
-                SELECT 1 FROM compliance_bundle_environments cbe
-                WHERE cbe.bundle_id = b.id AND cbe.environment_id = e.id
-            )
+          AND EXISTS (
+              SELECT 1 FROM compliance_bundle_environments cbe
+              WHERE cbe.bundle_id = b.id AND cbe.environment_id = e.id
           )
         "#,
         )
@@ -2242,16 +2252,10 @@ async fn find_applicable_system_row(
             v.high_cve_count
         FROM view_system_list v
         LEFT JOIN environments e ON e.name = v.environment
-        WHERE v.id = $2
-          AND (
-            NOT EXISTS (
-                SELECT 1 FROM compliance_bundle_environments cbe
-                WHERE cbe.bundle_id = $1
-            )
-            OR EXISTS (
-                SELECT 1 FROM compliance_bundle_environments cbe
-                WHERE cbe.bundle_id = $1 AND cbe.environment_id = e.id
-            )
+          WHERE v.id = $2
+          AND EXISTS (
+              SELECT 1 FROM compliance_bundle_environments cbe
+              WHERE cbe.bundle_id = $1 AND cbe.environment_id = e.id
           )
         "#,
     )
@@ -2288,11 +2292,7 @@ async fn list_applicable_system_rows(pool: &PgPool, bundle_id: Uuid) -> Result<V
             v.high_cve_count
         FROM view_system_list v
         LEFT JOIN environments e ON e.name = v.environment
-        WHERE NOT EXISTS (
-            SELECT 1 FROM compliance_bundle_environments cbe
-            WHERE cbe.bundle_id = $1
-        )
-        OR EXISTS (
+        WHERE EXISTS (
             SELECT 1 FROM compliance_bundle_environments cbe
             WHERE cbe.bundle_id = $1 AND cbe.environment_id = e.id
         )
