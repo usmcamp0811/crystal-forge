@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-18 14:40'
+updated_date: '2026-08-18 16:36'
 labels: []
 milestone: m-22
 dependencies:
@@ -242,5 +242,14 @@ author: opencode
 created: 2026-08-18 14:01
 ---
 Pushed d51c0dda to fix repeated Anduril import after deleting a prior bundle. Today’s PostgreSQL journal showed collision on an already-generated `[SV-..._rule]` policy name. Name allocation is now centralized in the commit transaction, serialized by an advisory transaction lock, and reserves the complete deployment_policies name set including generated variants; retries advance to `-2`, `-3`, etc. Added regression for existing generated variants. Server build passed with 1156 tests; formatting and diff checks passed.
+---
+
+created: 2026-08-18 16:36
+---
+Pushed drawer-parity remediation commit eda648ba to MR !316.
+
+Changes: authoritative framework/release metadata in BundleCoverageReport (SQL + struct + unit test), RequirementCoverageCard redesigned with always-visible header toggle and framework label, coverage card rendered independently before systems card in bundle drawer, coverage request deduplication via coverage_requested_version signal, EvidenceDrawer extended with selected-system context (environment chip, resolution_state chip, Open-system Link), resolution_state column in SystemsMatrix, GET /api/v1/policy-versions/:version_id/usage endpoint with resolver-backed system membership, PolicyDrawer exact-version usage (Used by bundles + Systems using this version sections), integration test updated with framework fixture, valid UUID row IDs, and new assertions for card order / expand / evidence context / policy usage. web-ui-reconciliation reverted to 20ac step.
+
+Verification: nix build .#server passed (1156 tests, 0 failed); nix build .#web-ui passed (179 tests, 0 failed); cargo fmt (server), node --check, git diff --check all exit 0; SQLX_OFFLINE cargo check -p cf-server exit 0.
 ---
 <!-- COMMENTS:END -->
