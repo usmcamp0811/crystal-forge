@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-18 01:54'
+updated_date: '2026-08-18 04:02'
 labels: []
 milestone: m-22
 dependencies:
@@ -228,5 +228,11 @@ author: opencode
 created: 2026-08-18 01:54
 ---
 Pushed commit c75f7014 to MR !316. This includes the live Anduril fix: duplicate foreign XCCDF rule titles are disambiguated with source rule IDs before policy-lineage insertion, plus preserved import errors and focused browser regressions. Server build passed with 1155 tests; branch worktree is clean.
+---
+
+author: opencode
+created: 2026-08-18 04:02
+---
+Pushed aa1854a7 after deployed-regression feedback. Applicability now uses active compliance_bundle_assignments for summary aggregates, bundle systems, system bundle listing, and evidence checks across draft/published revisions; environment membership is only eligibility scope. Fresh STIG imports no longer auto-select every environment. Removed the UI active-assignment deletion shortcut. Added migration 0228 allowing deletion of assignment history tied only to mutable bundle versions while preserving published/deprecated immutability. Extended 20ae to assert the real Anduril import returns zero systems when unassigned. Verification: real 20ae passed 1/1 with HTTP 201 and zero-system assertion; server/web-ui builds, formatting, Node syntax, and diff checks passed. Deletion migration was not exercised against the live database in this session.
 ---
 <!-- COMMENTS:END -->
