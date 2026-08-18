@@ -7071,9 +7071,9 @@ security.audit.enable = true;</fixtext>
   },
   {
     name: "20ae-anduril-nixos-stig-import-roundtrip",
-    description: "The full Anduril NixOS STIG reaches import and preserves the complete backend response",
+    description: "The full official Anduril NixOS STIG V1R2 reaches import with 103 normalized requirements and full coverage",
     action: async (page) => {
-      const andurilXccdf = fs.readFileSync(path.join(__dirname, "fixtures", "U_Anduril_NixOS_STIG_V1R1_Manual-xccdf.xml"));
+      const andurilXccdf = fs.readFileSync(path.join(__dirname, "fixtures", "U_Anduril_NixOS_STIG_V1R2_Manual-xccdf.xml"));
       const browserErrors = [];
       let importPostObserved = false;
       const onPageError = (error) => browserErrors.push(`pageerror: ${error.message}`);
@@ -7095,14 +7095,16 @@ security.audit.enable = true;</fixtext>
           (response) => response.url().includes("/api/v1/compliance/xccdf/preview") && response.request().method() === "POST",
         );
         await page.locator('input[type="file"]').setInputFiles({
-          name: "U_Anduril_NixOS_STIG_V1R1_Manual-xccdf.xml",
+          name: "U_Anduril_NixOS_STIG_V1R2_Manual-xccdf.xml",
           mimeType: "application/xml",
           buffer: andurilXccdf,
         });
         const previewResponse = await previewResponsePromise;
         const previewBody = await previewResponse.json();
         if (!previewResponse.ok()) throw new Error(`Anduril preview failed: HTTP ${previewResponse.status()} ${JSON.stringify(previewBody)}`);
-        if (!Array.isArray(previewBody.rules) || previewBody.rules.length < 100) throw new Error(`Expected the full Anduril rule set, got ${previewBody.rules?.length ?? 0} rules`);
+        if (!Array.isArray(previewBody.rules) || previewBody.rules.length !== 103) {
+          throw new Error(`Expected the official Anduril V1R2 rule set of 103, got ${previewBody.rules?.length ?? 0} rules`);
+        }
 
         await page.getByTestId("xccdf-review-reconcile-button").click();
         await page.getByRole("button", { name: "Refine all instead" }).click();
@@ -7136,6 +7138,35 @@ security.audit.enable = true;</fixtext>
         if (!systemsResult.ok) throw new Error(`Anduril systems lookup failed: HTTP ${systemsResult.status} ${JSON.stringify(systemsBody)}`);
         if (!Array.isArray(systemsBody.systems) || systemsBody.systems.length !== 0) {
           throw new Error(`Unassigned Anduril bundle unexpectedly applies to systems: ${JSON.stringify(systemsBody.systems?.map((system) => system.hostname))}`);
+        }
+
+        // P1 data-integrity gate: a full official STIG import must produce
+        // normalized requirement membership and policy-to-requirement mappings
+        // for every selected rule, and the coverage report must reflect it.
+        const coverageResult = await page.evaluate(async (url) => {
+          const response = await fetch(url);
+          return { ok: response.ok, status: response.status, body: await response.json() };
+        }, `${baseUrl}/api/v1/compliance/bundle-versions/${importResult.bundle_version_id}/requirement-coverage`);
+        const coverageBody = coverageResult.body;
+        if (!coverageResult.ok) {
+          throw new Error(`Anduril coverage lookup failed: HTTP ${coverageResult.status} ${JSON.stringify(coverageBody)}`);
+        }
+        if (coverageBody.total_requirements !== 103) {
+          throw new Error(`Expected 103 selected bundle requirements, got ${coverageBody.total_requirements}`);
+        }
+        if (coverageBody.full !== 103 || coverageBody.partial !== 0 || coverageBody.unmapped !== 0) {
+          throw new Error(`Expected 103 fully-mapped Anduril requirements (full=${coverageBody.full}, partial=${coverageBody.partial}, unmapped=${coverageBody.unmapped})`);
+        }
+        const fw = Array.isArray(coverageBody.frameworks) ? coverageBody.frameworks[0] : undefined;
+        if (!fw) throw new Error("Anduril coverage report has no authoritative framework release");
+        if (fw.framework_name !== "Anduril NixOS Security Technical Implementation Guide") {
+          throw new Error(`Unexpected Anduril framework name: ${fw.framework_name}`);
+        }
+        if (fw.framework_version !== "V1R2") {
+          throw new Error(`Unexpected Anduril framework release: ${fw.framework_version}`);
+        }
+        if (fw.framework_publisher !== "DISA") {
+          throw new Error(`Unexpected Anduril framework publisher: ${fw.framework_publisher}`);
         }
       } catch (error) {
         if (!importPostObserved && browserErrors.length > 0) {

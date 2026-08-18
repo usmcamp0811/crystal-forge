@@ -5248,6 +5248,10 @@ fn RequirementCoverageCard(
             .collect::<Vec<_>>()
             .join(", ")
     };
+    let disa_invariant = report
+        .frameworks
+        .iter()
+        .any(|f| f.framework_publisher.as_deref() == Some("DISA"));
     let query_value = query.read().trim().to_ascii_lowercase();
     let visible_rows: Vec<_> = report
         .rows
@@ -5319,7 +5323,16 @@ fn RequirementCoverageCard(
                 }
             }
             if total == 0 {
-                div { class: "q-empty", "No requirement catalog modeled for {framework_label} yet." }
+                if disa_invariant {
+                    div {
+                        class: "q-empty",
+                        "data-testid": "coverage-invariant-error",
+                        style: "color:var(--cf-error);white-space:normal;text-align:center;",
+                        "No normalized requirements are attached to this bundle revision. A DISA STIG import must always produce normalized requirement membership — this is a data-integrity violation, not an empty coverage state."
+                    }
+                } else {
+                    div { class: "q-empty", "No normalized requirements are attached to this bundle revision." }
+                }
             } else if show_details {
                 div { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;",
                     div { class: "seg",

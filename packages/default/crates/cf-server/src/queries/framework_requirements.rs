@@ -126,6 +126,10 @@ pub struct BundleCoverageFramework {
     pub framework_name: String,
     pub framework_version_id: Uuid,
     pub framework_version: String,
+    /// Publisher of the framework lineage (e.g. "DISA"). Used by the UI to
+    /// distinguish a genuine empty bundle from a DISA STIG import invariant
+    /// violation (STIG bundles must always carry normalized requirements).
+    pub framework_publisher: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -590,7 +594,8 @@ pub async fn compute_bundle_requirement_coverage(
             f.id AS framework_id,
             f.name AS framework_name,
             fv.id AS framework_version_id,
-            fv.version AS framework_version
+            fv.version AS framework_version,
+            f.publisher AS framework_publisher
         FROM compliance_bundle_version_requirements bvr
         JOIN compliance_requirement_versions rv
           ON rv.id = bvr.requirement_version_id
@@ -3159,5 +3164,6 @@ pub mod tests {
         assert_eq!(report.frameworks[0].framework_name, "Coverage FW");
         assert_eq!(report.frameworks[0].framework_version_id, fv_id);
         assert_eq!(report.frameworks[0].framework_version, "V1R1");
+        assert_eq!(report.frameworks[0].framework_publisher, None);
     }
 }

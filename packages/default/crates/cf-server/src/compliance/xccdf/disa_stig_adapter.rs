@@ -24,6 +24,12 @@ use crate::compliance::requirement_model::{
 pub const DISA_STIG_ID_SYSTEM: &str = "http://cyber.mil/cci";
 pub const DISA_VULN_ID_SYSTEM: &str = "http://cyber.mil/stigs/stig";
 
+/// True when `value` has the DISA vulnerability identity shape: `V-` followed
+/// by one or more ASCII digits (e.g. `V-268161`).
+fn is_stig_vuln_value(value: &str) -> bool {
+    value.starts_with("V-") && value.len() > 2 && value[2..].chars().all(|c| c.is_ascii_digit())
+}
+
 /// Any `<ident>` whose value starts with `V-` and whose system is a
 /// recognized DISA identifier system is treated as a stable DISA vulnerability ID.
 /// Recognized systems include:
@@ -31,8 +37,15 @@ pub const DISA_VULN_ID_SYSTEM: &str = "http://cyber.mil/stigs/stig";
 /// - DISA CCI: `http://cyber.mil/cci`
 /// - Any system containing `"cyber.mil"` (authoritative DISA namespace)
 fn is_stig_vuln_id(ident: &StandardIdentifier) -> bool {
-    ident.value.starts_with("V-")
+    is_stig_vuln_value(&ident.value)
         && (ident.system.contains("cyber.mil") || ident.system.to_lowercase().contains("stig"))
+}
+
+/// True for the DISA rule-ID shape `SV-268078r1039122_rule`. Revisioned
+/// `SV-*` rule IDs change every STIG release, so they are structural evidence
+/// of DISA attribution but never stable requirement keys.
+fn is_disa_rule_id(id: &str) -> bool {
+    id.starts_with("SV-") && id.ends_with("_rule")
 }
 
 /// Any `<ident>` starting with `CCI-` is a DISA CCI identifier.
@@ -50,8 +63,10 @@ fn is_srg_id(ident: &StandardIdentifier) -> bool {
 /// Returns `true` if the parsed XCCDF document appears to be a DISA STIG.
 ///
 /// Strong attribution evidence is required: an official DISA benchmark
-/// namespace/prefix or a V-ID carried by a recognized DISA/STIG identifier
-/// system. Display text alone is deliberately not authoritative.
+/// namespace/prefix, a V-ID carried by a recognized DISA/STIG identifier
+/// system, or an authoritative DISA publisher combined with DISA STIG
+/// structure (V-* group ids, SV-* rule ids, or cyber.mil CCI/SRG idents).
+/// Display text alone is deliberately not authoritative.
 pub fn is_disa_stig(parsed: &ParsedXccdf) -> bool {
     if let Some(bm) = &parsed.benchmark {
         if bm.id.starts_with("xccdf_mil.disa.stig_benchmark_")
@@ -60,10 +75,34 @@ pub fn is_disa_stig(parsed: &ParsedXccdf) -> bool {
             return true;
         }
     }
-    parsed
+    if parsed
         .rules
         .iter()
         .any(|r| r.identifiers.iter().any(is_stig_vuln_id))
+    {
+        return true;
+    }
+    // Combined authoritative signal: the document publisher is DISA and the
+    // document carries DISA STIG structure. The real Anduril NixOS STIG
+    // (benchmark id "Anduril_NixOS_STIG") publishes this way: the V-IDs live
+    // on <Group id="V-…">, the rule IDs are revisioned SV-…_rule, and the
+    // only <ident> values are CCI-… under http://cyber.mil/cci.
+    let disa_publisher = parsed
+        .benchmark
+        .as_ref()
+        .and_then(|bm| bm.publisher.as_deref())
+        .is_some_and(|publisher| publisher.eq_ignore_ascii_case("DISA"));
+    if !disa_publisher {
+        return false;
+    }
+    let group_level_vid = parsed.groups.iter().any(|g| is_stig_vuln_value(&g.id));
+    let rule_sv_id = parsed.rules.iter().any(|r| is_disa_rule_id(&r.id));
+    let disa_ident_structure = parsed.rules.iter().any(|r| {
+        r.identifiers
+            .iter()
+            .any(|i| (is_cci_id(i) || is_srg_id(i)) && i.system.contains("cyber.mil"))
+    });
+    group_level_vid || rule_sv_id || disa_ident_structure
 }
 
 // ── Canonical framework identity ──────────────────────────────────────────────
@@ -102,7 +141,19 @@ pub fn identify_framework(parsed: &ParsedXccdf) -> Option<DisaStigFrameworkIdent
     // Canonical release key: extract and normalise the version string.
     // Common forms: "V1R1", "Version 1 Release 1", "1.1".
     let version_str = bm.version.as_deref().unwrap_or("").trim().to_string();
-    let canonical_release_key = normalise_release_key(&version_str);
+    // DISA STIGs publish the release counter ("Release: 2 …") in the
+    // <plain-text id="release-info"> block while <version> only carries the
+    // major version, so V1R1 and V1R2 both read "1" from <version>. Use the
+    // release-info derived key when available.
+    let (canonical_release_key, derived_from_release_info) =
+        if let Some(release_info) = bm.release_info.as_deref() {
+            match disa_release_key(&version_str, release_info) {
+                Some(key) => (key, true),
+                None => (normalise_release_key(&version_str), false),
+            }
+        } else {
+            (normalise_release_key(&version_str), false)
+        };
 
     if canonical_source_key.is_empty() || canonical_release_key.is_empty() {
         return None;
@@ -111,7 +162,9 @@ pub fn identify_framework(parsed: &ParsedXccdf) -> Option<DisaStigFrameworkIdent
     Some(DisaStigFrameworkIdentity {
         canonical_source_key,
         canonical_release_key: canonical_release_key.clone(),
-        version: if version_str.is_empty() {
+        version: if derived_from_release_info || version_str.is_empty() {
+            // Prefer the full canonical release form (e.g. "V1R2") for display;
+            // the bare DISA major version ("1") is not a useful release label.
             canonical_release_key
         } else {
             version_str
@@ -211,6 +264,49 @@ fn normalise_release_key(version: &str) -> String {
     v
 }
 
+/// Extract the DISA release counter from `<plain-text id="release-info">`,
+/// e.g. `"Release: 2 Benchmark Date: 01 Oct 2025"` → `2`.
+fn disa_release_number(release_info: &str) -> Option<u32> {
+    let lower = release_info.to_lowercase();
+    let idx = lower.find("release:")?;
+    let rest = &release_info[idx + "release:".len()..];
+    let digits: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Extract the DISA version major from the benchmark `<version>` element:
+/// `"1"` → `1`, `"V2R3"` → `2`, `"Version 1 Release 1"` → `1`.
+fn disa_version_major(version: &str) -> Option<u32> {
+    let v = version.trim().to_uppercase();
+    if let Some(rest) = v.strip_prefix('V') {
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() {
+            return digits.parse().ok();
+        }
+    }
+    let digits: String = v.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Combine the DISA version major with the release counter from
+/// `release-info` into a canonical release key: major `1` + `Release: 2` →
+/// `"V1R2"`.
+fn disa_release_key(version: &str, release_info: &str) -> Option<String> {
+    let release = disa_release_number(release_info)?;
+    let major = disa_version_major(version)?;
+    Some(format!("V{major}R{release}"))
+}
+
 // ── Canonical requirement key ─────────────────────────────────────────────────
 
 /// Derive the canonical requirement key for a DISA STIG rule.
@@ -227,6 +323,13 @@ pub fn canonical_key_for_rule(rule: &ParsedRule) -> String {
     // Next: SRG identifier.
     if let Some(srg) = rule.identifiers.iter().find(|i| is_srg_id(i)) {
         return srg.value.clone();
+    }
+    // Next: a V-ID carried structurally on the enclosing <Group id="V-…">.
+    // Real DISA STIGs (e.g. Anduril NixOS) place the vulnerability identity on
+    // the group and use revisioned SV-… rule ids that change every release, so
+    // the stable requirement key must come from the group V-ID.
+    if let Some(group_vid) = rule.group_id.as_deref().filter(|g| is_stig_vuln_value(g)) {
+        return group_vid.to_string();
     }
     // Fallback: XCCDF rule id.
     rule.id.clone()
@@ -453,6 +556,7 @@ mod tests {
                 title: Some(benchmark_title.to_string()),
                 description: None,
                 version: Some(version.to_string()),
+                release_info: None,
                 status: None,
                 status_date: None,
                 platforms: vec![],
@@ -780,6 +884,273 @@ mod tests {
             vec![rule],
         );
         assert!(!is_disa_stig(&parsed));
+    }
+
+    // ── Real-artifact regression coverage ───────────────────────────────────
+    //
+    // The official DISA "U_Anduril_NixOS_STIG_V1R2_Manual-xccdf.xml" was
+    // previously classified as a non-DISA foreign document: the benchmark id
+    // is the plain "Anduril_NixOS_STIG" (no xccdf_mil.disa.* prefix), the
+    // V-IDs live on <Group id="V-…">, the rule ids are revisioned SV-…_rule,
+    // and the only <ident> values are CCI-… under http://cyber.mil/cci. All
+    // of those signals must now be recognized.
+
+    fn real_anduril_v1r2() -> ParsedXccdf {
+        use crate::compliance::interchange::InterchangeLimits;
+        use crate::compliance::xccdf::parser::parse_xccdf;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata/xccdf/U_Anduril_NixOS_STIG_V1R2_Manual-xccdf.xml");
+        let bytes = std::fs::read(&path).expect("real V1R2 fixture must exist");
+        parse_xccdf(&bytes, Some("fixture.xml"), &InterchangeLimits::default())
+            .expect("real V1R2 fixture must parse")
+    }
+
+    #[test]
+    fn real_anduril_v1r2_shape_matches_official_document() {
+        let parsed = real_anduril_v1r2();
+        let bm = parsed
+            .benchmark
+            .expect("real Anduril must have a benchmark");
+        // The official SCAP benchmark ID has no xccdf_mil.disa.* prefix.
+        assert_eq!(bm.id, "Anduril_NixOS_STIG");
+        // The parser must preserve the DISA publisher and the release-info
+        // counter, and must not let rule-level <version> elements clobber the
+        // benchmark <version>.
+        assert_eq!(bm.publisher.as_deref(), Some("DISA"));
+        assert_eq!(bm.version.as_deref(), Some("1"));
+        assert!(
+            bm.release_info
+                .as_deref()
+                .is_some_and(|info| info.contains("Release: 2"))
+        );
+        assert_eq!(parsed.rules.len(), 103);
+        assert_eq!(parsed.groups.len(), 103);
+        // No rule carries a V-* <ident>; the V-IDs are group ids.
+        assert!(
+            parsed
+                .rules
+                .iter()
+                .all(|r| r.identifiers.iter().all(|i| !is_stig_vuln_id(i)))
+        );
+        assert!(parsed.groups.iter().all(|g| is_stig_vuln_value(&g.id)));
+        // Every rule sits under a V-* group and uses a revisioned SV-* id.
+        assert!(parsed.rules.iter().all(
+            |r| is_disa_rule_id(&r.id) && r.group_id.as_deref().is_some_and(is_stig_vuln_value)
+        ));
+    }
+
+    #[test]
+    fn is_disa_stig_classifies_real_anduril_v1r2() {
+        let parsed = real_anduril_v1r2();
+        assert!(
+            is_disa_stig(&parsed),
+            "real Anduril NixOS STIG V1R2 must be classified as DISA"
+        );
+    }
+
+    #[test]
+    fn identify_framework_real_anduril_v1r2() {
+        let parsed = real_anduril_v1r2();
+        let identity = identify_framework(&parsed).expect("real Anduril identity");
+        assert_eq!(identity.publisher, "DISA");
+        assert_eq!(identity.canonical_source_key, "anduril-nixos-stig");
+        assert_eq!(identity.canonical_release_key, "V1R2");
+        assert_eq!(identity.version, "V1R2");
+        assert_eq!(
+            identity.title.as_deref(),
+            Some("Anduril NixOS Security Technical Implementation Guide")
+        );
+    }
+
+    #[test]
+    fn canonical_keys_real_anduril_v1r2_use_group_vids() {
+        let parsed = real_anduril_v1r2();
+        // The V-ID lives on the group; the revisioned SV-* rule id must not be
+        // used as the requirement key because it changes every release.
+        for rule in parsed.rules.iter().take(20) {
+            let group_id = rule
+                .group_id
+                .as_deref()
+                .expect("every Anduril rule has a group");
+            assert_eq!(
+                canonical_key_for_rule(rule),
+                group_id,
+                "canonical key for {} must be the group V-ID",
+                rule.id
+            );
+        }
+        // Distinct rules must produce distinct stable keys across the document.
+        let mut keys: Vec<String> = parsed.rules.iter().map(canonical_key_for_rule).collect();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), 103, "103 distinct canonical requirement keys");
+    }
+
+    #[test]
+    fn disa_release_key_from_release_info() {
+        assert_eq!(
+            disa_release_key("1", "Release: 2 Benchmark Date: 01 Oct 2025"),
+            Some("V1R2".to_string())
+        );
+        assert_eq!(
+            disa_release_key("1", "Release: 1 Benchmark Date: 22 Oct 2024"),
+            Some("V1R1".to_string())
+        );
+        assert_eq!(
+            disa_release_key("2", "Release: 3 Benchmark Date: 01 Jan 2026"),
+            Some("V2R3".to_string())
+        );
+        assert_eq!(
+            disa_release_key("V1R1", "Release: 1 Benchmark Date: 22 Oct 2024"),
+            Some("V1R1".to_string())
+        );
+        // No release counter -> no DISA-derived key.
+        assert_eq!(disa_release_key("1", "Benchmark Date: 22 Oct 2024"), None);
+        assert_eq!(disa_release_key("", "Release: 2"), None);
+    }
+
+    #[test]
+    fn is_disa_stig_requires_publisher_with_structure() {
+        // A document that only mimics DISA identifiers (CCI under a non-DISA
+        // system) with no DISA publisher must not be classified as a STIG.
+        let rule = ParsedRule {
+            id: "rule-1".to_string(),
+            title: Some("STIG-like rule".to_string()),
+            identifiers: vec![
+                ident("http://example.com/custom", "V-999999"),
+                ident("http://example.com/cci", "CCI-000001"),
+            ],
+            description: None,
+            rationale: None,
+            severity: None,
+            weight: None,
+            version: None,
+            checks: vec![],
+            fix: None,
+            references: vec![],
+            platforms: vec![],
+            group_id: None,
+            rule_order: None,
+            cf_policy_meta: None,
+            preserved_xml: None,
+        };
+        let parsed = minimal_parsed_xccdf(
+            "generic-benchmark-stig-like",
+            "My STIG Benchmark",
+            "1.0",
+            vec![rule],
+        );
+        assert!(!is_disa_stig(&parsed));
+    }
+
+    #[test]
+    fn is_disa_stig_disa_publisher_needs_disa_structure() {
+        // DISA publisher alone (no V-*/SV-*/cyber.mil CCI/SRG structure) is
+        // not enough to classify a foreign document as a STIG.
+        let mut parsed = minimal_parsed_xccdf(
+            "generic-benchmark",
+            "Generic Benchmark",
+            "1.0",
+            vec![ParsedRule {
+                id: "rule-1".to_string(),
+                title: Some("Generic Rule".to_string()),
+                identifiers: vec![ident("http://example.com/custom", "GEN-0001")],
+                description: None,
+                rationale: None,
+                severity: None,
+                weight: None,
+                version: None,
+                checks: vec![],
+                fix: None,
+                references: vec![],
+                platforms: vec![],
+                group_id: None,
+                rule_order: None,
+                cf_policy_meta: None,
+                preserved_xml: None,
+            }],
+        );
+        parsed.benchmark.as_mut().unwrap().publisher = Some("DISA".to_string());
+        assert!(!is_disa_stig(&parsed));
+    }
+
+    #[test]
+    fn is_disa_stig_disa_publisher_with_group_vid() {
+        // The exact production shape of the Anduril document: DISA publisher +
+        // V-* group ids + CCI idents under http://cyber.mil/cci.
+        let parsed = minimal_parsed_xccdf(
+            "Anduril_NixOS_STIG",
+            "Anduril NixOS Security Technical Implementation Guide",
+            "1",
+            vec![ParsedRule {
+                id: "SV-268161r1039371_rule".to_string(),
+                title: Some("ASLR".to_string()),
+                identifiers: vec![ident("http://cyber.mil/cci", "CCI-002824")],
+                description: None,
+                rationale: None,
+                severity: Some("medium".to_string()),
+                weight: None,
+                version: None,
+                checks: vec![],
+                fix: None,
+                references: vec![],
+                platforms: vec![],
+                group_id: Some("V-268161".to_string()),
+                rule_order: None,
+                cf_policy_meta: None,
+                preserved_xml: None,
+            }],
+        );
+        assert!(!is_disa_stig(&parsed), "publisher still unset");
+        let mut parsed = parsed;
+        parsed.benchmark.as_mut().unwrap().publisher = Some("DISA".to_string());
+        assert!(is_disa_stig(&parsed));
+    }
+
+    #[test]
+    fn benchmark_version_not_clobbered_by_rule_versions() {
+        // Regression: rule-level <version> elements must not overwrite the
+        // benchmark <version> (they previously left "ANIX-00-002180" as the
+        // benchmark version, corrupting the derived release key).
+        use crate::compliance::interchange::InterchangeLimits;
+        use crate::compliance::xccdf::parser::parse_xccdf;
+        let xml = r#"<?xml version="1.0"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.1"
+           xmlns:dc="http://purl.org/dc/elements/1.1/"
+           id="Anduril_NixOS_STIG" xml:lang="en">
+  <status date="2025-08-19">accepted</status>
+  <title>Anduril NixOS Security Technical Implementation Guide</title>
+  <reference href="https://cyber.mil">
+    <dc:publisher>DISA</dc:publisher>
+    <dc:source>STIG.DOD.MIL</dc:source>
+  </reference>
+  <plain-text id="release-info">Release: 2 Benchmark Date: 01 Oct 2025</plain-text>
+  <version>1</version>
+  <Group id="V-268161">
+    <title>SRG-OS-000433-GPOS-00193</title>
+    <Rule id="SV-268161r1039371_rule" weight="10.0" severity="medium">
+      <version>ANIX-00-001670</version>
+      <title>NixOS must implement ASLR.</title>
+      <ident system="http://cyber.mil/cci">CCI-002824</ident>
+    </Rule>
+  </Group>
+</Benchmark>"#;
+        let parsed = parse_xccdf(
+            xml.as_bytes(),
+            Some("fixture.xml"),
+            &InterchangeLimits::default(),
+        )
+        .expect("fixture must parse");
+        let bm = parsed.benchmark.as_ref().expect("benchmark");
+        assert_eq!(bm.version.as_deref(), Some("1"));
+        assert!(
+            bm.release_info
+                .as_deref()
+                .is_some_and(|info| info.contains("Release: 2"))
+        );
+        assert!(is_disa_stig(&parsed));
+        let identity = identify_framework(&parsed).expect("identity");
+        assert_eq!(identity.canonical_release_key, "V1R2");
     }
 }
 

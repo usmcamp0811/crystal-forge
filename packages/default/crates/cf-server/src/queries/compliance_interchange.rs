@@ -684,9 +684,16 @@ pub async fn commit_foreign_import(
     // DISA STIGs have a stable framework/release identity and requirement
     // lineages.  Persist those authoritative objects before choosing policy
     // implementations; the legacy policy metadata remains source provenance.
-    let normalized_requirements = if is_disa_stig(&pkg.parsed)
-        && let Some(identity) = identify_framework(&pkg.parsed)
-    {
+    //
+    // Fail closed: a document classified as a DISA STIG must never degrade into
+    // a policy-only bundle with zero normalized requirements. If a stable
+    // framework identity cannot be produced, abort the whole import transaction.
+    let normalized_requirements = if is_disa_stig(&pkg.parsed) {
+        let Some(identity) = identify_framework(&pkg.parsed) else {
+            bail!(
+                "IMPORT_FRAMEWORK_NORMALIZATION_FAILED: DISA STIG import could not derive a stable framework identity"
+            );
+        };
         let framework_name = identity
             .title
             .as_deref()

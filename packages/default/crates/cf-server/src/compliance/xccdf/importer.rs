@@ -680,6 +680,7 @@ mod tests {
                 title: Some("Test".into()),
                 description: None,
                 version: Some("1.0".into()),
+                release_info: None,
                 status: Some("draft".into()),
                 status_date: None,
                 platforms: vec![],

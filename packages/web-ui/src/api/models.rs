@@ -4104,6 +4104,8 @@ pub struct BundleCoverageFramework {
     pub framework_name: String,
     pub framework_version_id: Uuid,
     pub framework_version: String,
+    #[serde(default)]
+    pub framework_publisher: Option<String>,
 }
 
 /// Request body for creating a requirement mapping.
