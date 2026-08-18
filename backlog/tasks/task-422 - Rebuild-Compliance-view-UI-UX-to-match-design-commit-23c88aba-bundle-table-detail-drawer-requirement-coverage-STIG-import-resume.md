@@ -3,11 +3,11 @@ id: TASK-422
 title: >-
   Rebuild Compliance view UI/UX to match design commit 23c88aba (bundle table,
   detail drawer, requirement coverage, STIG import resume)
-status: In Progress
+status: Review
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-18 16:42'
+updated_date: '2026-08-18 19:59'
 labels: []
 milestone: m-22
 dependencies:
@@ -265,5 +265,16 @@ Pushed drawer-parity remediation commit eda648ba to MR !316.
 Changes: authoritative framework/release metadata in BundleCoverageReport (SQL + struct + unit test), RequirementCoverageCard redesigned with always-visible header toggle and framework label, coverage card rendered independently before systems card in bundle drawer, coverage request deduplication via coverage_requested_version signal, EvidenceDrawer extended with selected-system context (environment chip, resolution_state chip, Open-system Link), resolution_state column in SystemsMatrix, GET /api/v1/policy-versions/:version_id/usage endpoint with resolver-backed system membership, PolicyDrawer exact-version usage (Used by bundles + Systems using this version sections), integration test updated with framework fixture, valid UUID row IDs, and new assertions for card order / expand / evidence context / policy usage. web-ui-reconciliation reverted to 20ac step.
 
 Verification: nix build .#server passed (1156 tests, 0 failed); nix build .#web-ui passed (179 tests, 0 failed); cargo fmt (server), node --check, git diff --check all exit 0; SQLX_OFFLINE cargo check -p cf-server exit 0.
+---
+
+created: 2026-08-18 19:59
+---
+- opencode - 2026-08-18 14:59 (UTC)
+Pushed remediation commit 4150c626 to MR !316 addressing all four reviewer items on the P1/data-integrity regression:
+1) New migration 0229_bundle_source_framework_version.sql adds compliance_bundle_versions.framework_version_id, and BundleCoverageReport now returns source_framework from that link (independent of requirement membership) so a DISA source framework survives zero-requirement bundles; UI coverage card labels it and shows a dedicated DISA invariant error.
+2) Fail-closed import invariants: bail (IMPORT_FRAMEWORK_NORMALIZATION_FAILED) when a DISA STIG normalizes zero authoritative requirements; cardinality gate before commit compares selected=true requirement membership and trusted mapping counts per selected rule.
+3) disa_version_major now accepts 'Version N Release N', 'V' prefix, and bare digits (regression disa_version_major_supports_documented_formats).
+4) Step 20ae now opens the deployed bundle drawer after import and machine-checks the coverage card DOM (framework name + (V1R2), 103 Fully covered, 0 Partially covered, 0 Unmapped, 103 total) instead of visual inspection alone.
+Focused web-ui check rerun (exit 0): derivation /nix/store/pf5vcc7pnasdfz9wlk404ka8yqjgsf4b-vm-test-run-crystal-forge-web-ui-mega-integration; results.json ok=true; import status 201 with 103/103/103 counts; step [OK]. Screenshots with the drawer coverage card open uploaded to MR !316 note 3701974720. Verification: disa_stig_adapter 25/25; cf-server --lib 1161 passed (3 pre-existing DB-only cve_scans_tests failures); cargo fmt --all -- --check clean; web-ui cargo check clean; new DB regression bundle_coverage_source_framework_survives_zero_requirements.
 ---
 <!-- COMMENTS:END -->
