@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-18 14:01'
+updated_date: '2026-08-18 14:40'
 labels: []
 milestone: m-22
 dependencies:
@@ -126,6 +126,8 @@ MR !316 review remediation sequence: (1) persist and restore complete STIG refin
 Review remediation follow-up: fix indented-string `''\\X` lexical escaping in both interpolation scanners; deduplicate imported environment UUIDs before validation and association persistence; add duplicate-ID regression; run focused normalizer, live DB, browser, build, formatting, syntax, and diff verification; update MR verification results without claiming interrupted checks passed.
 
 Review regression follow-up: reproduce the real Anduril STIG import using `/home/mcamp/code/crystal-forge/U_Anduril_NixOS_V1R1_STIG.zip`, capture the import POST status and complete server response, fix the underlying backend failure, then extend `ImportReview` with committing/error props and add deterministic failure coverage plus full-Anduril regression coverage. Verify 20ad success, failure behavior, and real-STIG import behavior before pushing a new remediation commit.
+
+Drawer parity follow-up: (1) add authoritative framework/release identity to exact bundle-version coverage responses; (2) render score, independently loaded collapsed requirement coverage, then independently loaded Systems; (3) pass the selected system rollup into EvidenceDrawer and expose environment/Open system using existing routes; (4) add minimal server-backed exact policy-version usage for bundle and resolved system membership; (5) add focused regressions and run targeted Nix builds/hygiene checks before commit/push. Do not synthesize assignment/evidence metadata absent from current authoritative APIs.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
