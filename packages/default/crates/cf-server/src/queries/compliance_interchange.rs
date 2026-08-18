@@ -155,6 +155,26 @@ async fn revalidate_reviewed_related_candidate(
     Ok(())
 }
 
+fn allocate_unique_import_policy_names(
+    policy_records: &mut [ImportedPolicyRecord],
+    mut reserved_names: HashSet<String>,
+) {
+    for record in policy_records {
+        let base_name = record.name.clone();
+        if reserved_names.insert(base_name.clone()) {
+            continue;
+        }
+
+        let mut disambiguated = format!("{base_name} [{}]", record.source_rule_id);
+        let mut suffix = 2;
+        while !reserved_names.insert(disambiguated.clone()) {
+            disambiguated = format!("{base_name} [{}-{suffix}]", record.source_rule_id);
+            suffix += 1;
+        }
+        record.name = disambiguated;
+    }
+}
+
 // ── Parser version identifier ─────────────────────────────────────────────────
 
 /// Monotone identifier incremented when the parser's semantic output changes.
@@ -554,37 +574,21 @@ pub async fn commit_foreign_import(
         });
     }
 
-    // Policy lineage names are globally unique. A foreign document may reuse
-    // a rule title that is already present from an earlier import, so reserve
-    // existing names before materializing this import and disambiguate those
-    // records with their stable source rule identity.
-    let candidate_names: Vec<String> = policy_records
-        .iter()
-        .map(|record| record.name.clone())
-        .collect();
-    let mut reserved_names: HashSet<String> =
-        sqlx::query_scalar("SELECT name FROM deployment_policies WHERE name = ANY($1::text[])")
-            .bind(&candidate_names)
+    // Serialize allocation of globally unique policy names across concurrent
+    // imports, then reserve every existing name (including previously generated
+    // source-ID variants) before allocating this batch.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('xccdf-import-policy-names', 0))")
+        .execute(&mut *tx)
+        .await
+        .context("failed to lock imported policy name allocation")?;
+    let reserved_names: HashSet<String> =
+        sqlx::query_scalar("SELECT name FROM deployment_policies")
             .fetch_all(&mut *tx)
             .await
-            .context("failed to check imported policy names")?
+            .context("failed to load imported policy names")?
             .into_iter()
             .collect();
-    for record in &mut policy_records {
-        if !reserved_names.contains(&record.name) {
-            reserved_names.insert(record.name.clone());
-            continue;
-        }
-
-        let base_name = record.name.clone();
-        let mut disambiguated = format!("{base_name} [{}]", record.source_rule_id);
-        let mut suffix = 2;
-        while !reserved_names.insert(disambiguated.clone()) {
-            disambiguated = format!("{base_name} [{}-{suffix}]", record.source_rule_id);
-            suffix += 1;
-        }
-        record.name = disambiguated;
-    }
+    allocate_unique_import_policy_names(&mut policy_records, reserved_names);
 
     // ── 2. Bundle lineage ─────────────────────────────────────────────────────
     let bundle_name = validated.bundle.name.trim().to_owned();
@@ -2320,6 +2324,23 @@ mod tests {
             record.name = format!("{}-{suffix}", record.name);
         }
         (validated, records)
+    }
+
+    #[test]
+    fn imported_policy_name_allocation_skips_existing_generated_variants() {
+        let pkg = make_package(minimal_xccdf_bytes());
+        let (_, mut records) = make_plan(&pkg, &["xccdf_test_rule_001", "xccdf_test_rule_002"]);
+        records[0].name = "Repeated title".into();
+        records[1].name = "Repeated title".into();
+        let reserved = HashSet::from([
+            "Repeated title".to_string(),
+            "Repeated title [xccdf_test_rule_001]".to_string(),
+        ]);
+
+        allocate_unique_import_policy_names(&mut records, reserved);
+
+        assert_eq!(records[0].name, "Repeated title [xccdf_test_rule_001-2]");
+        assert_eq!(records[1].name, "Repeated title [xccdf_test_rule_002]");
     }
 
     async fn test_pool() -> Option<PgPool> {
