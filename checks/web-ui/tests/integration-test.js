@@ -7118,6 +7118,16 @@ security.audit.enable = true;</fixtext>
         const importBody = await importResponse.text();
         console.log(`[20ae] import status=${importResponse.status()} body=${importBody}`);
         if (!importResponse.ok()) throw new Error(`Anduril import failed: HTTP ${importResponse.status()} ${importBody}`);
+        const importResult = JSON.parse(importBody);
+        const systemsResult = await page.evaluate(async (url) => {
+          const response = await fetch(url);
+          return { ok: response.ok, status: response.status, body: await response.json() };
+        }, `${baseUrl}/api/v1/compliance/bundles/${importResult.bundle_id}/systems`);
+        const systemsBody = systemsResult.body;
+        if (!systemsResult.ok) throw new Error(`Anduril systems lookup failed: HTTP ${systemsResult.status} ${JSON.stringify(systemsBody)}`);
+        if (!Array.isArray(systemsBody.systems) || systemsBody.systems.length !== 0) {
+          throw new Error(`Unassigned Anduril bundle unexpectedly applies to systems: ${JSON.stringify(systemsBody.systems?.map((system) => system.hostname))}`);
+        }
       } catch (error) {
         if (!importPostObserved && browserErrors.length > 0) {
           throw new Error(`${error.message}; no import POST observed; browser failures: ${browserErrors.join(" | ")}`);

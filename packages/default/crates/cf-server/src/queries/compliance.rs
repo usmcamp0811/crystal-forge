@@ -762,8 +762,8 @@ async fn list_bundle_summary_aggregates(
     }
 
     // Load every bundle/version's applicable systems in one set-based query.
-    // Published revisions use the bundle environment scope; draft revisions
-    // use their explicit assignment scope, exactly as the detail endpoint does.
+    // Environment membership is only an eligibility boundary; active
+    // assignments are the sole source of applicability for every revision.
     let bundle_ids: Vec<Uuid> = pairs.iter().map(|(bundle_id, _)| *bundle_id).collect();
     let version_ids: Vec<Uuid> = pairs.iter().map(|(_, version_id)| *version_id).collect();
     let rows: Vec<(Uuid, Uuid, Uuid, String, Option<String>, String, i32, i32)> = sqlx::query_as(
@@ -776,30 +776,18 @@ async fn list_bundle_summary_aggregates(
                v.critical_cve_count, v.high_cve_count
         FROM requested
         JOIN compliance_bundles b ON b.id = requested.bundle_id
-        JOIN view_system_list v ON
-             (b.current_published_version_id = requested.bundle_version_id AND (
-                 NOT EXISTS (
-                     SELECT 1 FROM compliance_bundle_environments cbe
-                     WHERE cbe.bundle_id = b.id
-                 ) OR EXISTS (
-                     SELECT 1 FROM compliance_bundle_environments cbe
-                     JOIN environments scoped_env ON scoped_env.id = cbe.environment_id
-                     WHERE cbe.bundle_id = b.id AND scoped_env.name = v.environment
-                 )
-             ))
-          OR (b.current_published_version_id IS DISTINCT FROM requested.bundle_version_id AND EXISTS (
-                 SELECT 1
-                 FROM compliance_bundle_assignments a
-                 LEFT JOIN environments assigned_env ON assigned_env.id = a.environment_id
-                 LEFT JOIN environments system_env ON system_env.name = v.environment
-                 WHERE a.bundle_id = b.id
-                   AND a.bundle_version_id = requested.bundle_version_id
-                   AND a.active
-                   AND (
-                       (a.scope_type = 'system' AND a.system_id = v.id)
-                       OR (a.scope_type = 'environment' AND a.environment_id = system_env.id)
-                   )
-             ))
+         JOIN view_system_list v ON EXISTS (
+             SELECT 1
+             FROM compliance_bundle_assignments a
+             LEFT JOIN environments system_env ON system_env.name = v.environment
+             WHERE a.bundle_id = b.id
+               AND a.bundle_version_id = requested.bundle_version_id
+               AND a.active
+               AND (
+                   (a.scope_type = 'system' AND a.system_id = v.id)
+                   OR (a.scope_type = 'environment' AND a.environment_id = system_env.id)
+               )
+         )
         ORDER BY requested.bundle_id, requested.bundle_version_id, v.hostname
         "#,
     )
@@ -1853,18 +1841,8 @@ pub async fn list_bundle_systems_for_version(
     .bind(bundle_id)
     .fetch_all(pool)
     .await?;
-    let is_current_published: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM compliance_bundles WHERE id = $1 AND current_published_version_id = $2)",
-    )
-    .bind(bundle_id)
-    .bind(bundle_version_id)
-    .fetch_one(pool)
-    .await?;
-    let systems = if is_current_published {
-        list_applicable_system_rows(pool, bundle_id).await?
-    } else {
-        list_explicit_bundle_version_system_rows(pool, bundle_id, bundle_version_id).await?
-    };
+    let systems =
+        list_explicit_bundle_version_system_rows(pool, bundle_id, bundle_version_id).await?;
     let system_ids: Vec<Uuid> = systems.iter().map(|system| system.id).collect();
     let effective = resolve_systems_effective_policies_for_bundle_version_batch(
         pool,
@@ -1999,13 +1977,21 @@ pub async fn list_system_bundles(
         LEFT JOIN environments e ON e.name = $2
         WHERE b.id = ANY($1)
           AND EXISTS (
-              SELECT 1 FROM compliance_bundle_environments cbe
-              WHERE cbe.bundle_id = b.id AND cbe.environment_id = e.id
+              SELECT 1
+              FROM compliance_bundle_assignments a
+              WHERE a.bundle_id = b.id
+                AND a.bundle_version_id = COALESCE(b.current_published_version_id, b.current_draft_version_id)
+                AND a.active
+                AND (
+                    (a.scope_type = 'system' AND a.system_id = $3)
+                    OR (a.scope_type = 'environment' AND a.environment_id = e.id)
+                )
           )
         "#,
         )
         .bind(all_bundles.iter().map(|b| b.id).collect::<Vec<_>>())
         .bind(&system.environment)
+        .bind(system.id)
         .fetch_all(pool)
         .await?
     };
@@ -2251,11 +2237,23 @@ async fn find_applicable_system_row(
             v.critical_cve_count,
             v.high_cve_count
         FROM view_system_list v
+        JOIN compliance_bundle_versions bv
+          ON bv.id = COALESCE(
+              (SELECT current_published_version_id FROM compliance_bundles WHERE id = $1),
+              (SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1)
+          )
         LEFT JOIN environments e ON e.name = v.environment
-          WHERE v.id = $2
+        WHERE v.id = $2
           AND EXISTS (
-              SELECT 1 FROM compliance_bundle_environments cbe
-              WHERE cbe.bundle_id = $1 AND cbe.environment_id = e.id
+              SELECT 1
+              FROM compliance_bundle_assignments a
+              WHERE a.bundle_id = $1
+                AND a.bundle_version_id = bv.id
+                AND a.active
+                AND (
+                    (a.scope_type = 'system' AND a.system_id = v.id)
+                    OR (a.scope_type = 'environment' AND a.environment_id = e.id)
+                )
           )
         "#,
     )
@@ -2291,10 +2289,20 @@ async fn list_applicable_system_rows(pool: &PgPool, bundle_id: Uuid) -> Result<V
             v.critical_cve_count,
             v.high_cve_count
         FROM view_system_list v
+        JOIN compliance_bundles b ON b.id = $1
+        JOIN compliance_bundle_versions bv
+          ON bv.id = COALESCE(b.current_published_version_id, b.current_draft_version_id)
         LEFT JOIN environments e ON e.name = v.environment
         WHERE EXISTS (
-            SELECT 1 FROM compliance_bundle_environments cbe
-            WHERE cbe.bundle_id = $1 AND cbe.environment_id = e.id
+            SELECT 1
+            FROM compliance_bundle_assignments a
+            WHERE a.bundle_id = b.id
+              AND a.bundle_version_id = bv.id
+              AND a.active
+              AND (
+                  (a.scope_type = 'system' AND a.system_id = v.id)
+                  OR (a.scope_type = 'environment' AND a.environment_id = e.id)
+              )
         )
         ORDER BY v.hostname ASC
         "#,

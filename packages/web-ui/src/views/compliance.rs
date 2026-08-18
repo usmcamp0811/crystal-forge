@@ -2188,7 +2188,6 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
     let mut draft_loaded = use_signal(|| false);
     let mut draft_save_error = use_signal(|| Option::<String>::None);
 
-    let all_env_names: Vec<String> = props.environments.iter().map(|e| e.name.clone()).collect();
 
     let draft_environments = props.environments.clone();
     use_effect(move || {
@@ -2229,12 +2228,11 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
         })
         .collect();
 
-    // can_advance: need at least one rule selected and a bundle name.
-    // Env selection is only required when environments actually exist — if the
-    // server has no environments yet the user can still proceed.
+    // can_advance: need at least one rule selected and a bundle name. An empty
+    // environment selection is intentional: it creates an unassigned bundle
+    // that must apply to zero systems until an assignment is created.
     let can_advance = sel_count > 0
-        && !bundle_name.read().trim().is_empty()
-        && (props.environments.is_empty() || !selected_envs.read().is_empty());
+        && !bundle_name.read().trim().is_empty();
     let foreign_reconciliation = preview_response
         .read()
         .as_ref()
@@ -2441,7 +2439,6 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                          let mut previewing = previewing;
                                          let mut step = step;
                                          let paused_draft = load_stig_import_draft();
-                                         let all_env_names = all_env_names.clone();
 
                                         parse_error.set(None);
                                         let files = event.files();
@@ -2530,10 +2527,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                           })
                                                                           .collect(),
                                                                   );
-                                                                       if paused_draft.is_none() && selected_envs.read().is_empty() {
-                                                                           selected_envs.set(all_env_names.clone());
-                                                                       }
-                                                                      if let Some(draft) = paused_draft.as_ref() {
+                                                                       if let Some(draft) = paused_draft.as_ref() {
                                                                           refine_rule_ids.set(draft.refined_rule_ids.clone());
                                                                           step.set(match draft.step.as_str() {
                                                                               "review" | "reconcile" | "refine" | "final-review" => draft.step.clone(),
@@ -4679,15 +4673,6 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
     let mut eligibility_error = use_signal(|| None::<String>);
     let framework_options = custom_bundle_frameworks(&props.bundles, &props.policies);
 
-    // Local pre-check from data already in the bundle summary.
-    let has_immutable_history = props.bundle.versions.iter().any(|version| {
-        matches!(
-            version.publication_state.as_str(),
-            "accepted" | "deprecated"
-        )
-    });
-    let assigned_count = props.bundle.active_assignment_count;
-
     let can_save = !name.read().trim().is_empty()
         && (!selected_policy_ids.read().is_empty() || !selected_requirement_ids.read().is_empty());
 
@@ -4911,21 +4896,6 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                                         }
                                     }
                                 }
-                            }
-                        } else if has_immutable_history {
-                            // Fast local gate — matches server would return permanently_blocked.
-                            div { style: "font-size:12px;color:var(--cf-text-muted);",
-                                "This bundle has published compliance history (accepted or deprecated versions). "
-                                "Permanent deletion is unavailable. Deactivate assignments and deprecate the bundle to stop using it; historical records remain for auditability."
-                            }
-                        } else if assigned_count > 0 {
-                            // An active assignment already implies immutable assignment
-                            // history (the server reports `immutable_assignment_history`),
-                            // so permanent deletion is unavailable; no preflight needed.
-                            div { style: "font-size:12px;color:var(--cf-text-muted);",
-                                "This bundle has active assignments and therefore has immutable assignment history. "
-                                "Permanent deletion is unavailable. Deactivate assignments to stop using the bundle; "
-                                "historical assignment records are retained for auditability."
                             }
                         } else {
                             // No local blockers detected — fetch authoritative check.
