@@ -6921,7 +6921,7 @@ security.audit.enable = true;</fixtext>
 
         const reviewReconcileButton = page.getByTestId("xccdf-review-reconcile-button");
         const reviewReady = await reviewReconcileButton.waitFor({ state: "visible", timeout: 5000 }).then(() => true).catch(() => false);
-        if (!reviewReady) {
+        if (!reviewReady || await reviewReconcileButton.isDisabled().catch(() => true)) {
           const retryPreviewResponsePromise = page.waitForResponse(
             (response) => response.url().includes("/api/v1/compliance/xccdf/preview") && response.request().method() === "POST",
           );
@@ -6934,6 +6934,10 @@ security.audit.enable = true;</fixtext>
           });
           await retryPreviewResponsePromise;
         }
+        await page.waitForFunction(() => {
+          const button = document.querySelector('[data-testid="xccdf-review-reconcile-button"]');
+          return button && !button.disabled;
+        }, { timeout: 10000 });
         await reviewReconcileButton.click();
         await page.getByRole("button", { name: "Refine all instead" }).click();
         await page.getByTestId("xccdf-refine-tab-enforcement").click();
@@ -7012,7 +7016,32 @@ security.audit.enable = true;</fixtext>
             return originalFetch(...args);
           };
         });
+        let forceImportFailure = true;
+        await page.route("**/api/v1/compliance/xccdf/import", async (route) => {
+          if (!forceImportFailure) {
+            await route.continue();
+            return;
+          }
+          forceImportFailure = false;
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          await route.fulfill({
+            status: 422,
+            contentType: "application/json",
+            body: JSON.stringify({
+              error: "IMPORT_PLAN_INVALID",
+              message: "synthetic final-review import failure",
+            }),
+          });
+        });
         await createDraftButton.click();
+        await page.getByRole("button", { name: "Creating…", exact: true }).waitFor({ state: "visible", timeout: 1000 });
+        await page.getByText(/synthetic final-review import failure/).waitFor({ state: "visible", timeout: 5000 });
+        if (!(await page.getByRole("heading", { name: "Review policy choices" }).isVisible())) throw new Error("Import failure left final review");
+        const retryDraftButton = page.getByRole("button", { name: "Create draft bundle", exact: true });
+        await retryDraftButton.waitFor({ state: "visible", timeout: 5000 });
+        if (await retryDraftButton.isDisabled()) throw new Error("Import failure did not re-enable retry");
+        await page.evaluate(() => { window.__task426ImportPlans = []; });
+        await retryDraftButton.click();
         await page.waitForFunction(() => window.__task426ImportPlans?.length === 1);
         const importPlans = await page.evaluate(() => window.__task426ImportPlans);
         const importPlan = importPlans[0];
@@ -7028,6 +7057,75 @@ security.audit.enable = true;</fixtext>
         }
         if (expressions.some((expression) => expression.includes('"true"'))) throw new Error("Boolean assertion was quoted in import serialization");
       } finally {
+      }
+    },
+  },
+  {
+    name: "20ae-anduril-nixos-stig-import-roundtrip",
+    description: "The full Anduril NixOS STIG reaches import and preserves the complete backend response",
+    action: async (page) => {
+      const andurilXccdf = fs.readFileSync(path.join(__dirname, "fixtures", "U_Anduril_NixOS_STIG_V1R1_Manual-xccdf.xml"));
+      const browserErrors = [];
+      let importPostObserved = false;
+      const onPageError = (error) => browserErrors.push(`pageerror: ${error.message}`);
+      const onConsole = (message) => {
+        if (message.type() === "error") browserErrors.push(`console: ${message.text()}`);
+      };
+      page.on("pageerror", onPageError);
+      page.on("console", onConsole);
+      page.on("request", (request) => {
+        if (request.url().includes("/api/v1/compliance/xccdf/import") && request.method() === "POST") importPostObserved = true;
+      });
+      try {
+        await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+        await collapseOnboardingCoach(page);
+        await page.getByRole("button", { name: /Import \/ Export/i }).click({ force: true });
+        await page.getByText("Import STIG or XCCDF (.xml/.zip)", { exact: true }).click();
+        await page.getByRole("heading", { name: "Import STIG / XCCDF" }).waitFor({ timeout: 5000 });
+        const previewResponsePromise = page.waitForResponse(
+          (response) => response.url().includes("/api/v1/compliance/xccdf/preview") && response.request().method() === "POST",
+        );
+        await page.locator('input[type="file"]').setInputFiles({
+          name: "U_Anduril_NixOS_STIG_V1R1_Manual-xccdf.xml",
+          mimeType: "application/xml",
+          buffer: andurilXccdf,
+        });
+        const previewResponse = await previewResponsePromise;
+        const previewBody = await previewResponse.json();
+        if (!previewResponse.ok()) throw new Error(`Anduril preview failed: HTTP ${previewResponse.status()} ${JSON.stringify(previewBody)}`);
+        if (!Array.isArray(previewBody.rules) || previewBody.rules.length < 100) throw new Error(`Expected the full Anduril rule set, got ${previewBody.rules?.length ?? 0} rules`);
+
+        await page.getByTestId("xccdf-review-reconcile-button").click();
+        await page.getByRole("button", { name: "Refine all instead" }).click();
+        await page.getByTestId("xccdf-refine-tab-enforcement").click();
+        const reviewImportButton = page.getByRole("button", { name: "Review import" });
+        const nextButton = page.getByTestId("xccdf-refine-next");
+        for (let index = 0; index < 500 && !(await reviewImportButton.isVisible().catch(() => false)); index += 1) {
+          await nextButton.waitFor({ state: "visible", timeout: 5000 });
+          await nextButton.click();
+        }
+        await reviewImportButton.waitFor({ state: "visible", timeout: 5000 });
+        if (await reviewImportButton.isDisabled()) throw new Error("Full Anduril refinement could not produce a valid import plan");
+        await reviewImportButton.click();
+        await page.getByRole("heading", { name: "Review policy choices" }).waitFor({ timeout: 10000 });
+        const createDraftButton = page.getByRole("button", { name: "Create draft bundle", exact: true });
+        const importResponsePromise = page.waitForResponse(
+          (response) => response.url().includes("/api/v1/compliance/xccdf/import") && response.request().method() === "POST",
+          { timeout: 120000 },
+        );
+        await createDraftButton.click();
+        const importResponse = await importResponsePromise;
+        const importBody = await importResponse.text();
+        console.log(`[20ae] import status=${importResponse.status()} body=${importBody}`);
+        if (!importResponse.ok()) throw new Error(`Anduril import failed: HTTP ${importResponse.status()} ${importBody}`);
+      } catch (error) {
+        if (!importPostObserved && browserErrors.length > 0) {
+          throw new Error(`${error.message}; no import POST observed; browser failures: ${browserErrors.join(" | ")}`);
+        }
+        throw error;
+      } finally {
+        page.off("pageerror", onPageError);
+        page.off("console", onConsole);
       }
     },
   },

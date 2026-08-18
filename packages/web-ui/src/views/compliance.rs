@@ -3143,6 +3143,8 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                 if *step.read() == "final-review" {
                     ImportReview {
                         rules: refined_rules,
+                        committing: *committing.read(),
+                        import_error: import_error.read().clone(),
                         on_back: move |_| step.set("refine".to_string()),
                          on_confirm: move |_| {
                                  let plan_environments = final_plan_environments.clone();

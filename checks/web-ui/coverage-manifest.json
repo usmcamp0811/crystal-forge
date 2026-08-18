@@ -1534,6 +1534,20 @@
       "baseline": "advisory"
     },
     {
+      "name": "20ae-anduril-nixos-stig-import-roundtrip",
+      "description": "The full Anduril NixOS STIG reaches import and preserves the complete backend response",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
       "name": "20b-policies-cve-gate-create-roundtrip",
       "description": "API: create require_cve_check policy and verify it round-trips correctly",
       "route": "/deployment-policies",

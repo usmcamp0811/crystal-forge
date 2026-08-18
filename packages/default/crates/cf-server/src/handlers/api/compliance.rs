@@ -4612,7 +4612,7 @@ pub async fn xccdf_import(
         Ok(committed) => (StatusCode::CREATED, Json(committed)).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "XCCDF import commit failed");
-            internal_error("Failed to commit XCCDF import")
+            import_commit_error_response(&e)
         }
     }
 }
@@ -7430,6 +7430,28 @@ fn internal_error(message: &str) -> axum::response::Response {
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(ApiError {
             error: "Internal Server Error".to_string(),
+            message: message.to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+fn import_commit_error_response(error: &anyhow::Error) -> axum::response::Response {
+    let full_message = format!("{error:#}");
+    let (code, message) = full_message
+        .split_once(": ")
+        .filter(|(code, _)| code.starts_with("IMPORT_"))
+        .unwrap_or(("IMPORT_COMMIT_FAILED", full_message.as_str()));
+    let status = if code.starts_with("IMPORT_") && code != "IMPORT_COMMIT_FAILED" {
+        StatusCode::UNPROCESSABLE_ENTITY
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (
+        status,
+        Json(ApiError {
+            error: code.to_string(),
             message: message.to_string(),
             details: None,
         }),

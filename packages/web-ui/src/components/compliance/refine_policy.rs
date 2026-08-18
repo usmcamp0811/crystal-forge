@@ -560,6 +560,8 @@ pub struct ImportReviewProps {
     pub rules: Signal<Vec<RefinedStigRule>>,
     pub on_back: EventHandler<()>,
     pub on_confirm: EventHandler<()>,
+    pub committing: bool,
+    pub import_error: Option<String>,
 }
 
 #[component]
@@ -592,9 +594,12 @@ pub fn ImportReview(props: ImportReviewProps) -> Element {
         div { class: "modal-head", h2 { "Review policy choices" }, p { class: "page-subtitle", "Confirm the selected policy mappings before creating the draft bundle." } }
         div { class: "modal-body",
             div { class: "stat-strip", div { class: "stat", div { class: "stat-label", "Selected" } div { class: "stat-value", "{selected.len()}" } } div { class: "stat", div { class: "stat-label", "Native" } div { class: "stat-value", "{native}" } } div { class: "stat", div { class: "stat-label", "Manual" } div { class: "stat-value", "{manual}" } } div { class: "stat", div { class: "stat-label", "Unresolved" } div { class: "stat-value", "{unresolved}" } } }
-            if unresolved > 0 { div { class: "sd-callout sd-callout-warn", "Unbound and opaque controls will remain visible but will not be executable." } }
-            div { style: "display:grid;gap:6px;margin-top:12px;", for rule in selected.iter() { div { class: "card", style: "padding:9px 11px;display:flex;gap:10px;align-items:center;", span { class: "mono", style: "font-size:10px;", "{rule.source.stig_id.clone().unwrap_or_else(|| rule.source.rule_id.clone())}" } div { style: "flex:1;min-width:0;", strong { "{rule.draft.local_name}" } div { class: "text-xs text-gray-500", "{action_label(&rule.draft.action)}" } } } } }
-        div { class: "modal-foot", style: "justify-content:space-between;", button { class: "btn btn-ghost", onclick: move |_| props.on_back.call(()), "Back to refine" } button { class: "btn btn-primary", disabled: selected.is_empty(), onclick: move |_| props.on_confirm.call(()), "Create draft bundle" } }
+             if unresolved > 0 { div { class: "sd-callout sd-callout-warn", "Unbound and opaque controls will remain visible but will not be executable." } }
+             if let Some(error) = props.import_error.as_ref() {
+                 div { class: "sd-callout sd-callout-danger", style: "margin-top:10px;", "{error}" }
+             }
+             div { style: "display:grid;gap:6px;margin-top:12px;", for rule in selected.iter() { div { class: "card", style: "padding:9px 11px;display:flex;gap:10px;align-items:center;", span { class: "mono", style: "font-size:10px;", "{rule.source.stig_id.clone().unwrap_or_else(|| rule.source.rule_id.clone())}" } div { style: "flex:1;min-width:0;", strong { "{rule.draft.local_name}" } div { class: "text-xs text-gray-500", "{action_label(&rule.draft.action)}" } } } } }
+         div { class: "modal-foot", style: "justify-content:space-between;", button { class: "btn btn-ghost", disabled: props.committing, onclick: move |_| props.on_back.call(()), "Back to refine" } button { class: "btn btn-primary", disabled: selected.is_empty() || props.committing, onclick: move |_| props.on_confirm.call(()), if props.committing { "Creating…" } else { "Create draft bundle" } } }
         }
     }
 }

@@ -543,7 +543,7 @@ pub fn validate_import_plan(
 
 /// Build an [`ImportedPolicyRecord`] for each non-excluded rule.
 pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPolicyRecord> {
-    validated
+    let mut records: Vec<ImportedPolicyRecord> = validated
         .rules_to_import
         .iter()
         .enumerate()
@@ -650,7 +650,29 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
                 evidence_requirements,
             })
         })
-        .collect()
+        .collect();
+
+    // Policy lineage names are globally unique, but foreign XCCDF documents
+    // are allowed to reuse a rule title for distinct rules. Keep the readable
+    // title when it is unique and add the source rule identity only when a
+    // single import would otherwise insert duplicate lineage names.
+    let mut names: HashSet<String> = HashSet::new();
+    for record in &mut records {
+        if names.insert(record.name.clone()) {
+            continue;
+        }
+
+        let base_name = record.name.clone();
+        let mut disambiguated = format!("{base_name} [{}]", record.source_rule_id);
+        let mut suffix = 2;
+        while !names.insert(disambiguated.clone()) {
+            disambiguated = format!("{base_name} [{}-{suffix}]", record.source_rule_id);
+            suffix += 1;
+        }
+        record.name = disambiguated;
+    }
+
+    records
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1239,6 +1261,20 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].source_rule_id, "r1");
         assert_eq!(records[0].implementation_state, "manual");
+    }
+
+    #[test]
+    fn duplicate_foreign_rule_titles_are_disambiguated_for_policy_lineages() {
+        let mut parsed = minimal_foreign_parsed(&["r1", "r2"]);
+        parsed.rules[0].title = Some("Repeated title".into());
+        parsed.rules[1].title = Some("Repeated title".into());
+        let validated = validate_import_plan(valid_plan(&["r1", "r2"]), &parsed).unwrap();
+
+        let records = build_policy_records(&validated);
+
+        assert_eq!(records[0].name, "Repeated title");
+        assert_eq!(records[1].name, "Repeated title [r2]");
+        assert_ne!(records[0].name, records[1].name);
     }
 
     #[test]
