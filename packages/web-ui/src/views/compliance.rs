@@ -80,6 +80,7 @@ pub fn ComplianceView() -> Element {
     let mut coverage_view = use_signal(|| false);
     let mut revisions_open = use_signal(|| false);
     let mut coverage_gen = use_signal(|| 0u32);
+    let mut coverage_requested_version = use_signal(|| None::<uuid::Uuid>);
     let mut environments = use_signal(Vec::<EnvironmentSummary>::new);
     let mut sys_filter = use_signal(|| "all".to_string());
     let mut selected_bundle_version_id = use_signal(|| None::<uuid::Uuid>);
@@ -150,6 +151,7 @@ pub fn ComplianceView() -> Element {
                     });
                     bundles.set(items);
                     selected_bundle_id.set(first_id);
+                    selected_bundle_version_id.set(first_version_id);
                     // loaded = true before the systems fetch so the bundle list
                     // renders immediately; systems has its own loading indicator.
                     loaded.set(true);
@@ -190,6 +192,8 @@ pub fn ComplianceView() -> Element {
 
     let mut on_select_bundle = move |bundle_id: uuid::Uuid| {
         selected_bundle_id.set(Some(bundle_id));
+        coverage_expanded.set(false);
+        coverage_view.set(false);
         evidence.set(None);
         evidence_error.set(None);
         // Bump evidence_gen so any in-flight evidence fetch for the old bundle
@@ -206,6 +210,7 @@ pub fn ComplianceView() -> Element {
                     .current_published_version_id
                     .or(bundle.current_draft_version_id)
             });
+        selected_bundle_version_id.set(version_id);
         start_systems_fetch(bundle_id, version_id);
     };
 
@@ -252,6 +257,7 @@ pub fn ComplianceView() -> Element {
 
     use_effect(move || {
         let Some(version_id) = *selected_bundle_version_id.read() else {
+            coverage_requested_version.set(None);
             coverage_report.set(None);
             coverage_error.set(None);
             coverage_loading.set(false);
@@ -264,8 +270,13 @@ pub fn ComplianceView() -> Element {
         {
             return;
         }
+        if *coverage_requested_version.peek() == Some(version_id) {
+            return;
+        }
         let generation = *coverage_gen.peek() + 1;
         coverage_gen.set(generation);
+        coverage_requested_version.set(Some(version_id));
+        coverage_expanded.set(false);
         coverage_report.set(None);
         coverage_error.set(None);
         coverage_loading.set(true);
@@ -532,7 +543,7 @@ pub fn ComplianceView() -> Element {
                                     } else if let Some(error) = coverage_error.read().as_ref() {
                                         div { class: "sd-callout sd-callout-danger", Icon { name: IconName::X, size: 13 }, div { "Failed to load requirement coverage: {error}" } }
                                     } else if let Some(report) = coverage_report.read().clone() {
-                                        RequirementCoverageCard { report, expanded: coverage_expanded, on_open: move |_| {}, on_open_policy }
+                                        RequirementCoverageCard { report, expanded: coverage_expanded, detail: true, on_open_policy }
                                     } else {
                                         div { class: "q-empty", "No requirement coverage is available for this revision." }
                                     }
@@ -620,13 +631,43 @@ pub fn ComplianceView() -> Element {
                                 if let Some(resp) = systems.read().as_ref() {
                                     ScoreStrip { totals: resp.totals.clone() }
                                 }
+                                if let Some(error) = coverage_error.read().as_ref() {
+                                    div { class: "card", "data-testid": "requirement-coverage-card",
+                                        div { style: "font-size:13px;font-weight:600;margin-bottom:8px;", "Requirement coverage" }
+                                        div { class: "sd-callout sd-callout-danger", Icon { name: IconName::X, size: 13 }, div { "Failed to load requirement coverage: {error}" } }
+                                    }
+                                } else if *coverage_loading.read() {
+                                    div { class: "card", "data-testid": "requirement-coverage-card",
+                                        div { style: "font-size:13px;font-weight:600;margin-bottom:8px;", "Requirement coverage" }
+                                        DashboardLoadingSpinner { label: "Loading requirement coverage…".to_string() }
+                                    }
+                                } else if let Some(report) = coverage_report.read().clone() {
+                                    RequirementCoverageCard {
+                                        report,
+                                        expanded: coverage_expanded,
+                                        on_open: move |_| { coverage_expanded.set(true); coverage_view.set(true); },
+                                        on_open_policy,
+                                    }
+                                } else {
+                                    div { class: "card", "data-testid": "requirement-coverage-card",
+                                        div { style: "font-size:13px;font-weight:600;", "Requirement coverage" }
+                                        div { class: "q-empty", "No requirement coverage is available for this revision." }
+                                    }
+                                }
                                 if let Some(err) = systems_error.read().as_ref() {
-                                    div { class: "sd-callout sd-callout-danger", Icon { name: IconName::X, size: 13 }, div { "Failed to load systems: {err}" } }
+                                    div { class: "card", "data-testid": "bundle-systems-card",
+                                        h3 { style: "margin:0 0 8px;font-size:13px;font-weight:600;", "Systems" }
+                                        div { class: "sd-callout sd-callout-danger", Icon { name: IconName::X, size: 13 }, div { "Failed to load systems: {err}" } }
+                                    }
                                 } else if *systems_loading.read() {
-                                    div { class: "sd-callout sd-callout-info", Icon { name: IconName::Shield, size: 13 }, div { "Loading systems rollup…" } }
+                                    div { class: "card", "data-testid": "bundle-systems-card",
+                                        h3 { style: "margin:0 0 8px;font-size:13px;font-weight:600;", "Systems" }
+                                        div { class: "sd-callout sd-callout-info", Icon { name: IconName::Shield, size: 13 }, div { "Loading systems rollup…" } }
+                                    }
                                 } else if let Some(resp) = systems.read().as_ref() {
-                                    SystemsMatrix { systems: resp.systems.clone(), on_evidence, filter: sys_filter.read().clone(), on_filter: move |filter| sys_filter.set(filter) }
-                                    if let Some(report) = coverage_report.read().clone() { RequirementCoverageCard { report, expanded: coverage_expanded, on_open: move |_| coverage_view.set(true), on_open_policy } }
+                                    div { class: "card", "data-testid": "bundle-systems-card", style: "padding:0;overflow:hidden;",
+                                        SystemsMatrix { systems: resp.systems.clone(), on_evidence, filter: sys_filter.read().clone(), on_filter: move |filter| sys_filter.set(filter) }
+                                    }
                                 }
                                 if is_admin {
                                     if let Some(version_id) = *selected_bundle_version_id.read() {
@@ -649,6 +690,9 @@ pub fn ComplianceView() -> Element {
                 bundle_name: selected_bundle_id.read()
                     .and_then(|id| bundles.read().iter().find(|b| b.id == id).map(|b| b.name.clone()))
                     .unwrap_or_default(),
+                system: systems.read().as_ref().and_then(|response| {
+                    response.systems.iter().find(|system| system.system_id == ev.system_id).cloned()
+                }),
                 on_close: move |_| { evidence.set(None); evidence_error.set(None); },
             }
         } else if let Some(err) = evidence_error.read().as_ref() {
@@ -5177,6 +5221,7 @@ mod tests {
 fn RequirementCoverageCard(
     report: BundleCoverageReport,
     expanded: Signal<bool>,
+    #[props(default)] detail: bool,
     #[props(default)] on_open: EventHandler<()>,
     #[props(default)] on_open_policy: EventHandler<(uuid::Uuid, uuid::Uuid)>,
 ) -> Element {
@@ -5187,6 +5232,22 @@ fn RequirementCoverageCard(
     let partial = report.partial;
     let unmapped = report.unmapped;
     let recovery_required = report.recovery_required;
+    let show_details = detail || *expanded.read();
+    let framework_label = if report.frameworks.is_empty() {
+        "this framework".to_string()
+    } else {
+        report
+            .frameworks
+            .iter()
+            .map(|framework| {
+                format!(
+                    "{} ({})",
+                    framework.framework_name, framework.framework_version
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let query_value = query.read().trim().to_ascii_lowercase();
     let visible_rows: Vec<_> = report
         .rows
@@ -5214,35 +5275,27 @@ fn RequirementCoverageCard(
         .collect();
 
     rsx! {
-             div { class: "card", "data-testid": "requirement-coverage-card", style: "display:flex;flex-direction:column;gap:10px;",
-            // Header row with expand toggle.
-            div { style: "display:flex;align-items:center;justify-content:space-between;",
-                div { style: "font-size:13px;font-weight:600;", "Requirement coverage" }
-                button {
-                    class: "btn btn-ghost xs focus-ring",
-                    style: "font-size:11px;",
-                    onclick: move |_| {
+        div { class: "card", "data-testid": "requirement-coverage-card", style: "display:flex;flex-direction:column;gap:10px;",
+            button {
+                class: "focus-ring",
+                style: "display:flex;align-items:center;justify-content:space-between;width:100%;padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer;",
+                onclick: move |_| {
+                    if !detail {
                         let current = *expanded.read();
                         expanded.set(!current);
-                    },
-                    if *expanded.read() { "Collapse" } else { "Expand" }
-             }
-             div { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;",
-                 div { class: "seg",
-                     for (value, label, count) in [("all", "All", total), ("full", "Full", full), ("partial", "Partial", partial), ("unmapped", "Unmapped", unmapped + recovery_required)] {
-                         button { class: if *filter.read() == value { "active" } else { "" }, onclick: move |_| filter.set(value.to_string()), "{label} {count}" }
-                     }
-                 }
-                 input { class: "q-search-input", placeholder: "Filter requirements…", value: "{query}", oninput: move |event| query.set(event.value()) }
-             }
-                button {
-                    class: "btn btn-ghost xs focus-ring",
-                    onclick: move |_| on_open.call(()),
-                    "Open coverage"
+                    }
+                },
+                div {
+                    div { style: "font-size:13px;font-weight:600;", "Requirement coverage" }
+                    div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:3px;",
+                        "{framework_label} · {total} requirements · derived from mapped policies, not policy tags"
+                    }
+                }
+                if !detail {
+                    Icon { name: if *expanded.read() { IconName::ChevronDown } else { IconName::ChevronRight }, size: 15 }
                 }
             }
-            // Summary chips.
-            div { style: "display:flex;gap:8px;flex-wrap:wrap;",
+            div { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;",
                 div { style: "display:flex;align-items:center;gap:4px;",
                     span { class: "chip chip-success", "{full}" }
                     span { style: "font-size:11px;color:var(--cf-text-muted);", "Fully covered" }
@@ -5265,10 +5318,25 @@ fn RequirementCoverageCard(
                     span { style: "font-size:11px;color:var(--cf-text-muted);", "{total} total" }
                 }
             }
-            // Expanded requirement rows.
-             if *expanded.read() && !visible_rows.is_empty() {
-                 div { style: "display:flex;flex-direction:column;gap:2px;max-height:360px;overflow-y:auto;",
-                     for row in visible_rows.iter() {
+            if total == 0 {
+                div { class: "q-empty", "No requirement catalog modeled for {framework_label} yet." }
+            } else if show_details {
+                div { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;",
+                    div { class: "seg",
+                        for (value, label, count) in [("all", "All", total), ("full", "Full", full), ("partial", "Partial", partial), ("unmapped", "Unmapped", unmapped + recovery_required)] {
+                            button { class: if *filter.read() == value { "active" } else { "" }, onclick: move |_| filter.set(value.to_string()), "{label} {count}" }
+                        }
+                    }
+                    input { class: "q-search-input", placeholder: "Filter requirements…", value: "{query}", oninput: move |event| query.set(event.value()) }
+                    if !detail {
+                        button { class: "btn btn-ghost xs focus-ring", style: "margin-left:auto;", onclick: move |_| on_open.call(()), "Open coverage" }
+                    }
+                }
+                if visible_rows.is_empty() {
+                    div { style: "font-size:12px;color:var(--cf-text-muted);text-align:center;padding:24px 0;", "No requirements match." }
+                } else {
+                    div { style: "display:flex;flex-direction:column;gap:2px;max-height:360px;overflow-y:auto;",
+                        for row in visible_rows.iter() {
                         {
                             let row_id = row.requirement_version_id;
                             let coverage_color = match row.coverage {
@@ -5304,11 +5372,10 @@ fn RequirementCoverageCard(
                                  }
                             }
                         }
+                        }
                     }
                 }
-             } else if *expanded.read() {
-                 div { style: "font-size:12px;color:var(--cf-text-muted);text-align:center;padding:24px 0;", if report.rows.is_empty() { "No requirement catalog modeled for this framework yet." } else { "No requirements match." } }
-             }
+            }
         }
     }
 }

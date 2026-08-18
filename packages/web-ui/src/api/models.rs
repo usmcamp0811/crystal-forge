@@ -1407,6 +1407,38 @@ pub struct BundleVersionPolicyMembership {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyVersionUsageResponse {
+    pub policy_version_id: Uuid,
+    pub bundle_versions: Vec<PolicyVersionBundleUsage>,
+    pub systems: Vec<PolicyVersionSystemUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyVersionBundleUsage {
+    pub bundle_id: Uuid,
+    pub bundle_name: String,
+    pub bundle_version_id: Uuid,
+    pub bundle_version: String,
+    pub publication_state: String,
+    pub policy_order: i32,
+    pub is_current_published: bool,
+    pub is_current_draft: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyVersionSystemUsage {
+    pub system_id: Uuid,
+    pub hostname: String,
+    pub environment: Option<String>,
+    pub bundle_id: Uuid,
+    pub bundle_name: String,
+    pub bundle_version_id: Uuid,
+    pub bundle_version: String,
+    pub source: String,
+    pub enforcement_mode: String,
+}
+
 /// Response for listing deployment policies with pagination.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentPoliciesListResponse {
@@ -4055,6 +4087,8 @@ pub struct BundleCoverageMapping {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BundleCoverageReport {
     pub bundle_version_id: Uuid,
+    #[serde(default)]
+    pub frameworks: Vec<BundleCoverageFramework>,
     pub total_requirements: i64,
     pub full: i64,
     pub partial: i64,
@@ -4062,6 +4096,14 @@ pub struct BundleCoverageReport {
     #[serde(default)]
     pub recovery_required: i64,
     pub rows: Vec<BundleCoverageRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BundleCoverageFramework {
+    pub framework_id: Uuid,
+    pub framework_name: String,
+    pub framework_version_id: Uuid,
+    pub framework_version: String,
 }
 
 /// Request body for creating a requirement mapping.

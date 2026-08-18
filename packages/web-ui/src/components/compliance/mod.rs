@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 
+use crate::Route;
 use crate::api::models::{
     ComplianceBundleSummary, ComplianceControlEvidence, ComplianceControlStatus,
     ComplianceEvidenceResponse, ComplianceRollupTotals, ComplianceSystemRollup,
@@ -380,6 +381,7 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
                             let hostname = row.hostname.clone();
                             let env = row.environment.clone().unwrap_or_else(|| "—".to_string());
                             let env_color = "#6b7280";
+                            let resolution_state = row.resolution_state.clone().unwrap_or_else(|| "—".to_string());
                             let score = row.score;
                             let score_color = if score >= 90 { "#34d399" } else if score >= 70 { "#fbbf24" } else { "#f87171" };
                             let pass = row.pass;
@@ -399,13 +401,13 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
                                             span { class: "mono", style: "font-weight:600;font-size:13px;", "{hostname}" }
                                         }
                                      }
-                                     td { style: "font-size:11px;color:var(--cf-text-muted);", "—" }
                                      td {
-                                        span {
-                                            style: "padding:2px 8px;border-radius:99px;font-size:11px;border:1px solid {env_color};background:color-mix(in oklab,{env_color} 14%,var(--cf-card-bg));color:{env_color};",
-                                            "{env}"
-                                        }
-                                    }
+                                         span {
+                                             style: "padding:2px 8px;border-radius:99px;font-size:11px;border:1px solid {env_color};background:color-mix(in oklab,{env_color} 14%,var(--cf-card-bg));color:{env_color};",
+                                             "{env}"
+                                         }
+                                     }
+                                     td { span { class: "chip chip-info", "{resolution_state}" } }
                                     td {
                                         div { style: "display:flex;align-items:center;gap:8px;",
                                             div {
@@ -457,6 +459,8 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
 pub struct EvidenceDrawerProps {
     pub evidence: ComplianceEvidenceResponse,
     pub bundle_name: String,
+    #[props(default)]
+    pub system: Option<ComplianceSystemRollup>,
     pub on_close: EventHandler<()>,
 }
 
@@ -606,6 +610,7 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
     let total = props.evidence.controls.len();
     let hostname = props.evidence.hostname.clone();
     let bundle_name = props.bundle_name.clone();
+    let system = props.system.clone();
 
     let query = filter.read().trim().to_ascii_lowercase();
     let groups = navigator_groups(
@@ -684,9 +689,24 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                         }
                     }
                 }
-                div { style: "display:flex;gap:6px;",
+                div { style: "display:flex;gap:6px;align-items:center;",
+                    if let Some(system) = system.as_ref() {
+                        if let Some(environment) = system.environment.as_deref() {
+                            span { class: "chip chip-neutral", "{environment}" }
+                        }
+                        if let Some(resolution_state) = system.resolution_state.as_deref() {
+                            span { class: "chip chip-info", "{resolution_state}" }
+                        }
+                        Link {
+                            class: "btn btn-ghost xs focus-ring",
+                            to: Route::SystemDetailView { id: system.system_id.to_string() },
+                            "Open system"
+                            Icon { name: IconName::ArrowRight, size: 12 }
+                        }
+                    }
                     button {
                         class: "btn-icon focus-ring",
+                        title: "Close",
                         onclick: move |_| props.on_close.call(()),
                         Icon { name: IconName::X, size: 16 }
                     }

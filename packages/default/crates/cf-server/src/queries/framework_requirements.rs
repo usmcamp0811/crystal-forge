@@ -108,6 +108,8 @@ pub enum RequirementCoverage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BundleCoverageReport {
     pub bundle_version_id: Uuid,
+    /// Authoritative framework releases represented by the selected requirements.
+    pub frameworks: Vec<BundleCoverageFramework>,
     pub total_requirements: i64,
     pub full: i64,
     pub partial: i64,
@@ -116,6 +118,14 @@ pub struct BundleCoverageReport {
     /// Included in `total_requirements`; cannot provide authoritative evidence.
     pub recovery_required: i64,
     pub rows: Vec<BundleCoverageRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
+pub struct BundleCoverageFramework {
+    pub framework_id: Uuid,
+    pub framework_name: String,
+    pub framework_version_id: Uuid,
+    pub framework_version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -574,6 +584,30 @@ pub async fn compute_bundle_requirement_coverage(
     pool: &PgPool,
     bundle_version_id: Uuid,
 ) -> Result<BundleCoverageReport> {
+    let frameworks = sqlx::query_as::<_, BundleCoverageFramework>(
+        r#"
+        SELECT DISTINCT
+            f.id AS framework_id,
+            f.name AS framework_name,
+            fv.id AS framework_version_id,
+            fv.version AS framework_version
+        FROM compliance_bundle_version_requirements bvr
+        JOIN compliance_requirement_versions rv
+          ON rv.id = bvr.requirement_version_id
+        JOIN compliance_framework_versions fv
+          ON fv.id = rv.framework_version_id
+        JOIN compliance_frameworks f
+          ON f.id = fv.framework_id
+        WHERE bvr.bundle_version_id = $1
+          AND bvr.selected = true
+        ORDER BY f.name, fv.version, fv.id
+        "#,
+    )
+    .bind(bundle_version_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to load bundle coverage framework releases")?;
+
     // Fetch all selected baseline requirements with their framework release status.
     #[derive(sqlx::FromRow)]
     struct RawRow {
@@ -770,6 +804,7 @@ pub async fn compute_bundle_requirement_coverage(
 
     Ok(BundleCoverageReport {
         bundle_version_id,
+        frameworks,
         total_requirements: total,
         full: full_count,
         partial: partial_count,
@@ -3119,5 +3154,10 @@ pub mod tests {
         assert_eq!(report.full, 1);
         assert_eq!(report.partial, 1);
         assert_eq!(report.unmapped, 1);
+        assert_eq!(report.frameworks.len(), 1);
+        assert_eq!(report.frameworks[0].framework_id, fw_id);
+        assert_eq!(report.frameworks[0].framework_name, "Coverage FW");
+        assert_eq!(report.frameworks[0].framework_version_id, fv_id);
+        assert_eq!(report.frameworks[0].framework_version, "V1R1");
     }
 }

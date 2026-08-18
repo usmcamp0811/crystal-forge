@@ -1195,6 +1195,14 @@ pub async fn fetch_bundle_version_policy_membership(
     fetch_json(&url).await
 }
 
+/// Fetch bundle membership and assignment-resolved systems for one exact policy version.
+pub async fn fetch_policy_version_usage(
+    policy_version_id: &Uuid,
+) -> Result<PolicyVersionUsageResponse, ApiClientError> {
+    let url = format!("{}/policy-versions/{}/usage", base_url(), policy_version_id);
+    fetch_json(&url).await
+}
+
 pub async fn fetch_bundle_version_requirement_membership(
     version_id: &Uuid,
 ) -> Result<Vec<BundleVersionRequirementMembership>, ApiClientError> {

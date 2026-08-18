@@ -6849,8 +6849,17 @@ const steps = [
        for (const row of mappingResponse.rows) {
         if (row.provenance !== "manual" || row.trust_state !== "trusted") {
           throw new Error(`Unexpected mapping audit state: ${JSON.stringify(row)}`);
-         }
+        }
        }
+       await assertVisible(drawer.getByText("Used by bundles", { exact: true }), "Expected exact-version bundle usage section");
+       await assertVisible(
+         drawer.getByText(/not selected by any bundle revision/i),
+         "Expected authoritative empty bundle membership for the new policy version",
+       );
+       await assertVisible(
+         drawer.getByText(/No active bundle assignment currently resolves this exact policy version/i),
+         "Expected authoritative empty resolved-system membership",
+       );
 
        // Edit the first mapping in place: Supports/Partial becomes
        // Implements/Full while preserving the exact requirement selection.
@@ -8709,14 +8718,20 @@ security.audit.enable = true;</fixtext>
           contentType: "application/json",
           body: JSON.stringify({
             bundle_version_id: bundleVersionId,
+            frameworks: [{
+              framework_id: "11111111-1111-4111-8111-111111111111",
+              framework_name: "NIST SP 800-53",
+              framework_version_id: "22222222-2222-4222-8222-222222222222",
+              framework_version: "Rev 5",
+            }],
             total_requirements: 10,
             full: 6,
             partial: 2,
             unmapped: 2,
             rows: [
-              ...Array.from({ length: 6 }, (_, i) => ({ requirement_version_id: `f${i}`, external_id: `AC-${i + 1}`, title: `Full requirement ${i + 1}`, kind: "control", parent_requirement_version_id: null, coverage: "full", mapped_policy_version_ids: [], mappings: [] })),
-              ...Array.from({ length: 2 }, (_, i) => ({ requirement_version_id: `p${i}`, external_id: `AU-${i + 1}`, title: `Partial requirement ${i + 1}`, kind: "control", parent_requirement_version_id: null, coverage: "partial", mapped_policy_version_ids: [], mappings: [] })),
-              ...Array.from({ length: 2 }, (_, i) => ({ requirement_version_id: `u${i}`, external_id: `CM-${i + 1}`, title: `Unmapped requirement ${i + 1}`, kind: "control", parent_requirement_version_id: null, coverage: "unmapped", mapped_policy_version_ids: [], mappings: [] })),
+              ...Array.from({ length: 6 }, (_, i) => ({ requirement_version_id: `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`, external_id: `AC-${i + 1}`, title: `Full requirement ${i + 1}`, kind: "control", parent_requirement_version_id: null, coverage: "full", mapped_policy_version_ids: [], mappings: [] })),
+              ...Array.from({ length: 2 }, (_, i) => ({ requirement_version_id: `00000000-0000-4000-8000-${String(i + 101).padStart(12, "0")}`, external_id: `AU-${i + 1}`, title: `Partial requirement ${i + 1}`, kind: "control", parent_requirement_version_id: null, coverage: "partial", mapped_policy_version_ids: [], mappings: [] })),
+              ...Array.from({ length: 2 }, (_, i) => ({ requirement_version_id: `00000000-0000-4000-8000-${String(i + 201).padStart(12, "0")}`, external_id: `CM-${i + 1}`, title: `Unmapped requirement ${i + 1}`, kind: "control", parent_requirement_version_id: null, coverage: "unmapped", mapped_policy_version_ids: [], mappings: [] })),
             ],
           }),
         });
@@ -8724,7 +8739,6 @@ security.audit.enable = true;</fixtext>
 
       await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
-      if (coverageRequests !== 1) throw new Error(`Expected exactly one initial coverage request, got ${coverageRequests}`);
 
       // Page head
       await assertVisible(
@@ -8765,9 +8779,26 @@ security.audit.enable = true;</fixtext>
         "Expected 100% overall score in score strip",
       );
       await assertVisible(
-        page.getByText(/Fully compliant hosts/i).first(),
-        "Expected 'Fully compliant hosts' in score strip",
+        page.getByText(/hosts fully compliant/i).first(),
+        "Expected fully compliant host count in score strip",
       );
+
+      const coverageCard = page.getByTestId("requirement-coverage-card").first();
+      const systemsCard = page.getByTestId("bundle-systems-card").first();
+      await coverageCard.waitFor({ state: "visible", timeout: 5000 });
+      const coverageText = await coverageCard.innerText();
+      if (!coverageText.includes("NIST SP 800-53 (Rev 5) · 10 requirements")) {
+        throw new Error(`Expected authoritative framework release metadata in coverage summary; rendered: ${coverageText}`);
+      }
+      if (coverageRequests !== 1) throw new Error(`Expected exactly one initial coverage request, got ${coverageRequests}`);
+      if (await coverageCard.getByPlaceholder("Filter requirements…").isVisible()) {
+        throw new Error("Expected requirement rows and filters to be collapsed initially");
+      }
+      const coverageBox = await coverageCard.boundingBox();
+      const systemsBox = await systemsCard.boundingBox();
+      if (!coverageBox || !systemsBox || coverageBox.y >= systemsBox.y) {
+        throw new Error("Expected requirement coverage card before the independent Systems card");
+      }
 
       // Systems matrix
       await assertVisible(
@@ -8779,7 +8810,12 @@ security.audit.enable = true;</fixtext>
         "Expected 'View evidence' action in systems matrix",
       );
 
-      await page.getByRole("button", { name: /Open coverage/i }).first().click();
+      await coverageCard.getByRole("button").first().click();
+      await assertVisible(
+        coverageCard.getByPlaceholder("Filter requirements…"),
+        "Expected requirement filters after expanding the coverage card",
+      );
+      await coverageCard.getByRole("button", { name: /Open coverage/i }).click();
       await assertVisible(page.getByText("Requirement coverage").first(), "Expected requirement coverage drawer view");
       await assertVisible(page.getByText("Full 6").first(), "Expected full coverage count from API");
       await assertVisible(page.getByText("Partial 2").first(), "Expected partial coverage count from API");
@@ -8833,7 +8869,7 @@ security.audit.enable = true;</fixtext>
           contentType: "application/json",
           body: JSON.stringify({
             bundle_id: bundleId,
-            systems: [{ system_id: systemId, hostname: "prod-web-01", environment: "production", applies: true, total: 1, pass: 0, warn: 0, fail: 1, waiver: 0, score: 0 }],
+            systems: [{ system_id: systemId, hostname: "prod-web-01", environment: "production", applies: true, total: 1, pass: 0, warn: 0, fail: 1, waiver: 0, score: 0, resolution_state: "resolved" }],
             totals: { system_count: 1, fully_compliant_count: 0, pass: 0, warn: 0, fail: 1, waiver: 0, total_controls: 1, overall_score: 0 },
           }),
         });
@@ -8883,9 +8919,10 @@ security.audit.enable = true;</fixtext>
 
       // Evidence drawer assertions
       await assertVisible(
-        page.getByText(/Evidence · prod-web-01/i).first(),
-        "Expected evidence drawer heading with hostname",
+        page.getByText("prod-web-01", { exact: true }).last(),
+        "Expected evidence drawer header with hostname",
       );
+      await assertVisible(page.getByText("NIST 800-53 High", { exact: true }).last(), "Expected bundle context in evidence header");
       await assertVisible(
         page.getByText("require_no_critical_cves").first(),
         "Expected policy name in evidence control card",
@@ -8894,6 +8931,9 @@ security.audit.enable = true;</fixtext>
         page.getByText(/3 critical CVEs detected/i).first(),
         "Expected artifact body in evidence item",
       );
+      await assertVisible(page.getByText("production").last(), "Expected selected-system environment in evidence header");
+      await assertVisible(page.getByText("resolved").last(), "Expected authoritative resolver state in evidence header");
+      await assertVisible(page.getByRole("link", { name: /Open system/i }), "Expected system-detail navigation from evidence header");
       await assertVisible(
         page.getByRole("button", { name: /Close/i }).first(),
         "Expected Close button in evidence drawer",

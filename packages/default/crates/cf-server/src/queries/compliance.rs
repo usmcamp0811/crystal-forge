@@ -13,7 +13,7 @@ use crate::compliance::digest::{
     write_bundle_version_digest, write_policy_version_digest,
 };
 use crate::compliance::resolver::{
-    ResolutionOutcome, resolve_system_effective_policies,
+    EffectivePolicySource, ResolutionOutcome, resolve_system_effective_policies,
     resolve_systems_effective_policies_for_bundle_version_batch,
     resolve_systems_effective_policies_for_bundle_versions_batch,
 };
@@ -566,7 +566,8 @@ use crate::api::models::{
     ComplianceBundleVersionSummary, ComplianceControlEvidence, ComplianceControlStatus,
     ComplianceEnvironmentRef, ComplianceEvidenceArtifact, ComplianceEvidenceItem,
     ComplianceEvidenceResponse, ComplianceRollupTotals, ComplianceSystemRollup,
-    CreateComplianceBundleRequest, UpdateComplianceBundleRequest,
+    CreateComplianceBundleRequest, PolicyVersionBundleUsage, PolicyVersionSystemUsage,
+    PolicyVersionUsageResponse, UpdateComplianceBundleRequest,
 };
 
 /// Load the exact immutable policy versions selected by one bundle version.
@@ -606,6 +607,164 @@ pub async fn list_bundle_version_policy_membership(
     .await?;
 
     Ok(Some(members))
+}
+
+/// Return immutable bundle membership and assignment-resolved system usage for
+/// one exact policy version. Bundle membership and effective usage are kept
+/// separate because assignment overlays can exclude or add policy versions.
+pub async fn load_policy_version_usage(
+    pool: &PgPool,
+    policy_version_id: Uuid,
+) -> Result<Option<PolicyVersionUsageResponse>> {
+    let policy_version_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM deployment_policy_versions WHERE id = $1)",
+    )
+    .bind(policy_version_id)
+    .fetch_one(pool)
+    .await?;
+    if !policy_version_exists {
+        return Ok(None);
+    }
+
+    let bundle_versions = sqlx::query_as::<_, PolicyVersionBundleUsage>(
+        r#"
+        SELECT b.id AS bundle_id,
+               b.name AS bundle_name,
+               bv.id AS bundle_version_id,
+               bv.version AS bundle_version,
+               bv.publication_state,
+               bvp.policy_order,
+               COALESCE(b.current_published_version_id = bv.id, false) AS is_current_published,
+               COALESCE(b.current_draft_version_id = bv.id, false) AS is_current_draft
+        FROM compliance_bundle_version_policies bvp
+        JOIN compliance_bundle_versions bv ON bv.id = bvp.bundle_version_id
+        JOIN compliance_bundles b ON b.id = bv.bundle_id
+        WHERE bvp.policy_version_id = $1
+          AND bvp.selected = true
+        ORDER BY b.name, bv.created_at DESC, bv.id
+        "#,
+    )
+    .bind(policy_version_id)
+    .fetch_all(pool)
+    .await
+    .context("load exact policy-version bundle usage")?;
+
+    #[derive(Debug, Clone, FromRow)]
+    struct CandidateSystemUsage {
+        system_id: Uuid,
+        hostname: String,
+        environment: Option<String>,
+        bundle_id: Uuid,
+        bundle_name: String,
+        bundle_version_id: Uuid,
+        bundle_version: String,
+    }
+
+    let candidates = sqlx::query_as::<_, CandidateSystemUsage>(
+        r#"
+        WITH candidate_assignments AS (
+            SELECT a.bundle_id,
+                   a.bundle_version_id,
+                   a.scope_type,
+                   a.environment_id,
+                   a.system_id
+            FROM compliance_bundle_assignments a
+            WHERE a.active
+              AND a.current_version_id IS NOT NULL
+              AND (
+                  EXISTS (
+                      SELECT 1
+                      FROM compliance_bundle_version_policies bvp
+                      WHERE bvp.bundle_version_id = a.bundle_version_id
+                        AND bvp.policy_version_id = $1
+                        AND bvp.selected = true
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                      FROM compliance_assignment_additions addition
+                      WHERE addition.assignment_version_id = a.current_version_id
+                        AND addition.policy_version_id = $1
+                  )
+              )
+        )
+        SELECT DISTINCT
+               s.id AS system_id,
+               s.hostname,
+               e.name AS environment,
+               b.id AS bundle_id,
+               b.name AS bundle_name,
+               bv.id AS bundle_version_id,
+               bv.version AS bundle_version
+        FROM candidate_assignments a
+        JOIN compliance_bundles b ON b.id = a.bundle_id
+        JOIN compliance_bundle_versions bv ON bv.id = a.bundle_version_id
+        JOIN systems s ON
+             (a.scope_type = 'system' AND a.system_id = s.id)
+             OR (a.scope_type = 'environment' AND a.environment_id = s.environment_id)
+        LEFT JOIN environments e ON e.id = s.environment_id
+        ORDER BY b.name, bv.version, s.hostname, s.id
+        "#,
+    )
+    .bind(policy_version_id)
+    .fetch_all(pool)
+    .await
+    .context("load exact policy-version system candidates")?;
+
+    let mut requests = std::collections::BTreeMap::<Uuid, Vec<Uuid>>::new();
+    for candidate in &candidates {
+        requests
+            .entry(candidate.bundle_version_id)
+            .or_default()
+            .push(candidate.system_id);
+    }
+    let requests: Vec<_> = requests.into_iter().collect();
+    let resolved = resolve_systems_effective_policies_for_bundle_versions_batch(pool, &requests)
+        .await
+        .context("resolve exact policy-version system usage")?;
+
+    let mut systems = Vec::new();
+    for candidate in candidates {
+        let Some(ResolutionOutcome::Resolved(set)) =
+            resolved.get(&(candidate.bundle_version_id, candidate.system_id))
+        else {
+            continue;
+        };
+        let Some(bundle_provenance) = set.policies.iter().find_map(|policy| {
+            (policy.policy_version_id == policy_version_id)
+                .then(|| {
+                    policy.provenance.iter().find(|entry| {
+                        entry.authoritative
+                            && entry.bundle_id == Some(candidate.bundle_id)
+                            && entry.bundle_version_id == Some(candidate.bundle_version_id)
+                    })
+                })
+                .flatten()
+        }) else {
+            continue;
+        };
+        let source = match &bundle_provenance.source {
+            EffectivePolicySource::Baseline => "baseline",
+            EffectivePolicySource::Addition => "addition",
+            EffectivePolicySource::LegacyDirect => "legacy_direct",
+        };
+        systems.push(PolicyVersionSystemUsage {
+            system_id: candidate.system_id,
+            hostname: candidate.hostname,
+            environment: candidate.environment,
+            bundle_id: candidate.bundle_id,
+            bundle_name: candidate.bundle_name,
+            bundle_version_id: candidate.bundle_version_id,
+            bundle_version: candidate.bundle_version,
+            source: source.to_string(),
+            enforcement_mode: bundle_provenance.enforcement_mode.clone(),
+        });
+    }
+
+    Ok(Some(PolicyVersionUsageResponse {
+        policy_version_id,
+        bundle_versions,
+        systems,
+    }))
 }
 
 pub async fn list_bundle_version_requirement_membership(

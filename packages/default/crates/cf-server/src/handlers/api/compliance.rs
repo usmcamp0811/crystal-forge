@@ -50,7 +50,8 @@ use crate::queries::compliance::{
     delete_grouping_scheme, ensure_bundle_draft, ensure_policy_draft, get_system_evidence,
     list_bundle_systems, list_bundle_systems_for_version, list_bundle_version_policy_membership,
     list_bundle_version_requirement_membership, list_bundles, list_grouping_schemes,
-    list_system_bundles, update_bundle as update_bundle_row, update_grouping_scheme,
+    list_system_bundles, load_policy_version_usage, update_bundle as update_bundle_row,
+    update_grouping_scheme,
 };
 use crate::queries::compliance_interchange;
 use crate::queries::framework_requirements::{
@@ -315,6 +316,23 @@ pub async fn get_bundle_version_policy_membership(
         Ok(Some(members)) => (StatusCode::OK, Json(members)).into_response(),
         Ok(None) => not_found(),
         Err(_) => internal_error("Failed to load bundle version policy membership"),
+    }
+}
+
+/// `GET /api/v1/policy-versions/:version_id/usage`
+pub async fn get_policy_version_usage(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(version_id): Path<Uuid>,
+) -> impl IntoResponse {
+    if authenticated_user_roles(&pool, &headers).await.is_none() {
+        return forbidden();
+    }
+
+    match load_policy_version_usage(&pool, version_id).await {
+        Ok(Some(usage)) => (StatusCode::OK, Json(usage)).into_response(),
+        Ok(None) => not_found(),
+        Err(_) => internal_error("Failed to load policy version usage"),
     }
 }
 

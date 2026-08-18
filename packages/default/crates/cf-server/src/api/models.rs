@@ -1413,6 +1413,39 @@ pub struct BundleVersionPolicyMembership {
     pub enabled: bool,
 }
 
+/// Bundle membership and resolved active-system usage for one exact policy version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyVersionUsageResponse {
+    pub policy_version_id: Uuid,
+    pub bundle_versions: Vec<PolicyVersionBundleUsage>,
+    pub systems: Vec<PolicyVersionSystemUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PolicyVersionBundleUsage {
+    pub bundle_id: Uuid,
+    pub bundle_name: String,
+    pub bundle_version_id: Uuid,
+    pub bundle_version: String,
+    pub publication_state: String,
+    pub policy_order: i32,
+    pub is_current_published: bool,
+    pub is_current_draft: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyVersionSystemUsage {
+    pub system_id: Uuid,
+    pub hostname: String,
+    pub environment: Option<String>,
+    pub bundle_id: Uuid,
+    pub bundle_name: String,
+    pub bundle_version_id: Uuid,
+    pub bundle_version: String,
+    pub source: String,
+    pub enforcement_mode: String,
+}
+
 /// An exact requirement-version member of a selected bundle version.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct BundleVersionRequirementMembership {

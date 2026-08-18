@@ -4,11 +4,12 @@ use dioxus::prelude::*;
 use std::collections::HashSet;
 use uuid::Uuid;
 
+use crate::Route;
 use crate::api::client::{
     delete_deployment_policy, export_policy_versions, fetch_compliance_grouping_schemes,
-    fetch_policy_requirement_mappings,
+    fetch_policy_requirement_mappings, fetch_policy_version_usage,
 };
-use crate::api::models::{ComplianceGroupingScheme, PolicyMappingRow};
+use crate::api::models::{ComplianceGroupingScheme, PolicyMappingRow, PolicyVersionUsageResponse};
 use crate::components::io_menu::{IOMenu, IOMenuItem};
 use crate::components::layout::Card;
 use crate::components::policy::{
@@ -828,6 +829,11 @@ pub fn PolicyDrawer(
     let mut mappings_error: Signal<Option<String>> = use_signal(|| None);
     let mut loaded_mapping_version: Signal<Option<Uuid>> = use_signal(|| None);
     let mut mapping_request_generation = use_signal(|| 0_u64);
+    let mut usage: Signal<Option<PolicyVersionUsageResponse>> = use_signal(|| None);
+    let mut usage_loading = use_signal(|| false);
+    let mut usage_error: Signal<Option<String>> = use_signal(|| None);
+    let mut loaded_usage_version: Signal<Option<Uuid>> = use_signal(|| None);
+    let mut usage_request_generation = use_signal(|| 0_u64);
 
     use_effect(move || {
         let requested_version = selected_version_id();
@@ -864,7 +870,54 @@ pub fn PolicyDrawer(
         });
     });
 
+    use_effect(move || {
+        let requested_version = selected_version_id();
+        let generation = *usage_request_generation.peek() + 1;
+        usage_request_generation.set(generation);
+        loaded_usage_version.set(None);
+        usage_error.set(None);
+
+        let Some(requested_version) = requested_version else {
+            usage.set(None);
+            usage_loading.set(false);
+            return;
+        };
+
+        usage.set(None);
+        usage_loading.set(true);
+        spawn(async move {
+            let result = fetch_policy_version_usage(&requested_version).await;
+            if usage_request_generation() != generation
+                || selected_version_id() != Some(requested_version)
+            {
+                return;
+            }
+            usage_loading.set(false);
+            match result {
+                Ok(value) => {
+                    usage.set(Some(value));
+                    loaded_usage_version.set(Some(requested_version));
+                }
+                Err(error) => {
+                    usage_error.set(Some(format!("Failed to load policy usage: {error}")))
+                }
+            }
+        });
+    });
+
     let mapping_groups = grouped_policy_mappings(&mappings.read());
+    let usage_snapshot = usage.read().clone();
+    let resolved_system_count = usage_snapshot
+        .as_ref()
+        .map(|usage| {
+            usage
+                .systems
+                .iter()
+                .map(|system| system.system_id)
+                .collect::<HashSet<_>>()
+                .len()
+        })
+        .unwrap_or(0);
 
     let version_id = displayed_policy.version_id;
     let revision_count = policy.revisions.len();
@@ -1007,7 +1060,7 @@ pub fn PolicyDrawer(
                 }
             }
             div { class: "ed-stats",
-                div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{displayed_policy.system_count}" } }
+                div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", if usage_loading() { "—" } else { "{resolved_system_count}" } } }
                 div { class: "ed-stat", div { class: "ed-stat-label", "Rules" } div { class: "ed-stat-val", "{rules.len()}" } }
                 div { class: "ed-stat", div { class: "ed-stat-label", "Type" } div { class: "ed-stat-val", style: "font-size:12px;", "{type_display}" } }
                 div { class: "ed-stat", div { class: "ed-stat-label", "Modified" } div { class: "ed-stat-val", style: "font-size:12px;", "{modified_at}" } }
@@ -1126,9 +1179,64 @@ pub fn PolicyDrawer(
                             }
                         }
                     }
-                    div {
-                        h3 { class: "policy-drawer-section-title", "Systems using this policy · {displayed_policy.system_count}" }
-                        p { style: "margin:0;font-size:12px;color:var(--cf-text-muted);line-height:1.5;", "{displayed_policy.system_count} systems currently use this policy. Detailed system membership is not available from this endpoint." }
+                    section {
+                        h3 { class: "policy-drawer-section-title", "Used by bundles" }
+                        if usage_loading() || loaded_usage_version() != displayed_policy.version_id {
+                            div { style: "font-size:12px;color:var(--cf-text-muted);", "Loading exact-version usage…" }
+                        } else if let Some(error) = usage_error.read().as_ref() {
+                            div { class: "sd-callout sd-callout-danger", style: "font-size:12px;", "{error}" }
+                        } else if let Some(usage) = usage_snapshot.as_ref() {
+                            if usage.bundle_versions.is_empty() {
+                                div { class: "sd-callout sd-callout-info", "This exact policy version is not selected by any bundle revision." }
+                            } else {
+                                div { style: "display:flex;flex-direction:column;gap:6px;",
+                                    for bundle in usage.bundle_versions.iter() {
+                                        div { key: "{bundle.bundle_version_id}", style: "display:flex;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid var(--cf-divider);border-radius:8px;background:var(--cf-subtle-bg);",
+                                            div {
+                                                div { style: "font-size:12px;font-weight:600;", "{bundle.bundle_name}" }
+                                                div { class: "mono", style: "font-size:10px;color:var(--cf-text-muted);margin-top:2px;", "Revision {bundle.bundle_version} · policy order {bundle.policy_order}" }
+                                            }
+                                            div { style: "display:flex;gap:4px;align-items:center;",
+                                                span { class: "chip chip-unknown", "{bundle.publication_state}" }
+                                                if bundle.is_current_published { span { class: "chip chip-healthy", "current" } }
+                                                if bundle.is_current_draft { span { class: "chip chip-info", "draft" } }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    section {
+                        h3 { class: "policy-drawer-section-title", "Systems using this version · {resolved_system_count}" }
+                        if usage_loading() || loaded_usage_version() != displayed_policy.version_id {
+                            div { style: "font-size:12px;color:var(--cf-text-muted);", "Loading resolved system membership…" }
+                        } else if usage_error.read().is_none() {
+                            if let Some(usage) = usage_snapshot.as_ref() {
+                                if usage.systems.is_empty() {
+                                    div { class: "sd-callout sd-callout-info", "No active bundle assignment currently resolves this exact policy version onto a system." }
+                                } else {
+                                    div { style: "display:flex;flex-direction:column;gap:6px;",
+                                        for system in usage.systems.iter() {
+                                            {
+                                                let environment = system.environment.as_deref().unwrap_or("No environment");
+                                                rsx! { Link { key: "{system.bundle_version_id}-{system.system_id}", class: "policy-revision-row focus-ring", to: Route::SystemDetailView { id: system.system_id.to_string() },
+                                                    div {
+                                                        div { class: "mono", style: "font-weight:700;", "{system.hostname}" }
+                                                        div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:3px;", "{environment} · {system.bundle_name} rev {system.bundle_version}" }
+                                                    }
+                                                    div { style: "display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;",
+                                                        span { class: "chip chip-info", "{system.source}" }
+                                                        span { class: "chip chip-neutral", "{system.enforcement_mode}" }
+                                                    }
+                                                }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     details { class: "policy-definition",
                         summary { "Definition" }
