@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-18 04:02'
+updated_date: '2026-08-18 14:01'
 labels: []
 milestone: m-22
 dependencies:
@@ -234,5 +234,11 @@ author: opencode
 created: 2026-08-18 04:02
 ---
 Pushed aa1854a7 after deployed-regression feedback. Applicability now uses active compliance_bundle_assignments for summary aggregates, bundle systems, system bundle listing, and evidence checks across draft/published revisions; environment membership is only eligibility scope. Fresh STIG imports no longer auto-select every environment. Removed the UI active-assignment deletion shortcut. Added migration 0228 allowing deletion of assignment history tied only to mutable bundle versions while preserving published/deprecated immutability. Extended 20ae to assert the real Anduril import returns zero systems when unassigned. Verification: real 20ae passed 1/1 with HTTP 201 and zero-system assertion; server/web-ui builds, formatting, Node syntax, and diff checks passed. Deletion migration was not exercised against the live database in this session.
+---
+
+author: opencode
+created: 2026-08-18 14:01
+---
+Pushed d51c0dda to fix repeated Anduril import after deleting a prior bundle. Today’s PostgreSQL journal showed collision on an already-generated `[SV-..._rule]` policy name. Name allocation is now centralized in the commit transaction, serialized by an advisory transaction lock, and reserves the complete deployment_policies name set including generated variants; retries advance to `-2`, `-3`, etc. Added regression for existing generated variants. Server build passed with 1156 tests; formatting and diff checks passed.
 ---
 <!-- COMMENTS:END -->
