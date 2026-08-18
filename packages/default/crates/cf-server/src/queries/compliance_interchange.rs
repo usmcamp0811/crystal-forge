@@ -28,6 +28,7 @@
 
 use anyhow::{Context, Result, bail};
 use sqlx::PgPool;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::compliance::digest::{
@@ -445,7 +446,7 @@ pub async fn commit_foreign_import(
     importing_user_id: Uuid,
     pkg: ProcessedXccdfPackage,
     validated: ValidatedImportPlan,
-    policy_records: Vec<ImportedPolicyRecord>,
+    mut policy_records: Vec<ImportedPolicyRecord>,
 ) -> Result<XccdfCommittedImportResult> {
     #[derive(Debug, Clone, Copy)]
     struct NormalizedRequirementImport {
@@ -551,6 +552,38 @@ pub async fn commit_foreign_import(
             bundle_semantic_digest,
             warnings: vec![],
         });
+    }
+
+    // Policy lineage names are globally unique. A foreign document may reuse
+    // a rule title that is already present from an earlier import, so reserve
+    // existing names before materializing this import and disambiguate those
+    // records with their stable source rule identity.
+    let candidate_names: Vec<String> = policy_records
+        .iter()
+        .map(|record| record.name.clone())
+        .collect();
+    let mut reserved_names: HashSet<String> =
+        sqlx::query_scalar("SELECT name FROM deployment_policies WHERE name = ANY($1::text[])")
+            .bind(&candidate_names)
+            .fetch_all(&mut *tx)
+            .await
+            .context("failed to check imported policy names")?
+            .into_iter()
+            .collect();
+    for record in &mut policy_records {
+        if !reserved_names.contains(&record.name) {
+            reserved_names.insert(record.name.clone());
+            continue;
+        }
+
+        let base_name = record.name.clone();
+        let mut disambiguated = format!("{base_name} [{}]", record.source_rule_id);
+        let mut suffix = 2;
+        while !reserved_names.insert(disambiguated.clone()) {
+            disambiguated = format!("{base_name} [{}-{suffix}]", record.source_rule_id);
+            suffix += 1;
+        }
+        record.name = disambiguated;
     }
 
     // ── 2. Bundle lineage ─────────────────────────────────────────────────────
