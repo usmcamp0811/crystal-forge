@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-18 16:36'
+updated_date: '2026-08-18 16:42'
 labels: []
 milestone: m-22
 dependencies:
@@ -158,6 +158,20 @@ Review remediation verification completed in the dedicated TASK-422 worktree. Fi
 Committed review remediation as `86b9c8c3082265c59bc09ac9734b744281e5462c` and force-with-lease updated `origin/TASK-422-compliance-view-redesign` from stale pre-rebase head `533b8f1e` to the same SHA. Local and remote SHAs match and the worktree is clean. MR !316 description and verification comment now record the focused browser pass, final builds, live DB evidence, and exact remediation SHA.
 
 User returned TASK-422 to active implementation for a deployed real-STIG regression. MCP still reported Review at inspection time; task is being explicitly set In Progress for this follow-up.
+
+Drawer parity review assessment (post eda648ba):
+
+**Completed by eda648ba vs. reviewer scope:**
+- P1.1-9 (Bundle drawer): Coverage before systems, independent loading/error/empty states, authoritative framework/release label from BundleCoverageReport.frameworks, chips always visible in collapsed state, whole-header chevron toggle, filters/rows only when expanded, exact policy-version drill-in preserved, systems as independent card with gap.
+- P1.10-15 (Evidence drawer): System context passed (ComplianceSystemRollup), environment badge, resolution_state chip, 'Open system' Link to SystemDetailView, keyboard navigation preserved, Close button with accessible title.
+- P2.16-18 (Policy drawer): 'Used by bundles' section with server-backed bundle-version membership, 'Systems using this version' with resolver-backed system rows linking to SystemDetailView.
+
+**Intentionally omitted:**
+- Assignment/resolution context callout above ControlEvidenceCard: reason/approver/deadline/POA&M data is not in the current evidence DTO; resolution_state chip in the header is the correct minimum without synthesizing missing fields.
+- Evidence-for-ATO in policy drawer: ImportedEvidenceRequirement belongs to STIG import, not policy-normalized-model; no authoritative backend field exists; correctly omitted per spec guidance.
+- ScoreStrip gating on systems response: left as-is because ScoreStrip requires ComplianceRollupTotals (per-control counts), not just an aggregate score; the bundle-table row already shows aggregate_score.
+
+**Verification**: web-ui-reconciliation 20ac-stig-import-reconciliation-fixture 1/1 passed with dark+light screenshots post-commit. nix build .#web-ui exit 0. All hygiene checks exit 0.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
