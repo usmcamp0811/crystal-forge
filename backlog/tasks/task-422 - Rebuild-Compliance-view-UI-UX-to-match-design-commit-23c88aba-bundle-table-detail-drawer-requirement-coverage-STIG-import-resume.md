@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-17 21:49'
+updated_date: '2026-08-18 01:54'
 labels: []
 milestone: m-22
 dependencies:
@@ -222,5 +222,11 @@ author: opencode
 created: 2026-08-17 21:49
 ---
 Verification update: reran `20ad-stig-nixos-assertion-roundtrip` after strengthening the review-reconcile readiness wait; passed 1/1. The real Anduril `20ae-anduril-nixos-stig-import-roundtrip` also passed 1/1 against the supplied full fixture, with HTTP 201 and 104 policies created. The deployed failure remains unreproduced locally.
+---
+
+author: opencode
+created: 2026-08-18 01:54
+---
+Pushed commit c75f7014 to MR !316. This includes the live Anduril fix: duplicate foreign XCCDF rule titles are disambiguated with source rule IDs before policy-lineage insertion, plus preserved import errors and focused browser regressions. Server build passed with 1155 tests; branch worktree is clean.
 ---
 <!-- COMMENTS:END -->
