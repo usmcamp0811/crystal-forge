@@ -294,6 +294,30 @@ async function waitForAssertionCardCount(page, expected, message) {
   });
 }
 
+/**
+ * Wait until the element with the given data-testid shows an innerText that
+ * matches every pattern and no longer matches any of the excluded patterns.
+ * Patterns are RegExp source strings, matched against card.innerText.
+ */
+async function assertCardText(page, testId, patterns, message, { excluded = [], timeoutMs = 10000 } = {}) {
+  await page.waitForFunction(
+    ({ testId, patterns, excluded }) => {
+      const card = document.querySelector(`[data-testid='${testId}']`);
+      if (!card) return false;
+      const text = card.innerText || "";
+      const missing = patterns.filter((pattern) => !new RegExp(pattern).test(text));
+      const forbidden = excluded.filter((pattern) => new RegExp(pattern).test(text));
+      return missing.length === 0 && forbidden.length === 0;
+    },
+    { testId, patterns, excluded },
+    { timeout: timeoutMs },
+  ).catch(async () => {
+    const card = page.getByTestId(testId).first();
+    const sample = (await card.innerText().catch(() => "(card not found)")) || "(empty card text)";
+    throw new Error(`${message} (card text was: ${JSON.stringify(sample)})`);
+  });
+}
+
 async function ensureAuthenticated(page) {
   const isAuthenticated = async () => page.evaluate(async (base) => {
     const controller = new AbortController();
@@ -7168,6 +7192,32 @@ security.audit.enable = true;</fixtext>
         if (fw.framework_publisher !== "DISA") {
           throw new Error(`Unexpected Anduril framework publisher: ${fw.framework_publisher}`);
         }
+
+        // Reviewer item 6: the deployed bundle drawer must present the
+        // coverage card with the authoritative source framework and the full
+        // cardinality (103 fully covered / 0 partial / 0 unmapped / 103 total).
+        await page.getByRole("button", { name: "Close", exact: true }).first().click({ force: true });
+        const andurilRow = page.locator("tr").filter({ hasText: "Anduril NixOS Security Technical Implementation Guide" }).first();
+        await assertVisible(andurilRow, "Imported Anduril bundle did not appear in the compliance catalog", 10000);
+        await andurilRow.click();
+        await assertVisible(
+          page.getByTestId("requirement-coverage-card").first(),
+          "Anduril bundle drawer did not show the requirement coverage card",
+          10000,
+        );
+        await assertCardText(
+          page,
+          "requirement-coverage-card",
+          [
+            "Requirement coverage",
+            "Anduril NixOS Security Technical Implementation Guide \\(V1R2\\) · 103 requirements",
+            "103\\s+Fully covered",
+            "0\\s+Partially covered",
+            "0\\s+Unmapped",
+            "103\\s+total",
+          ],
+          "Anduril bundle drawer coverage card did not show source framework V1R2 with 103 fully covered / 0 partial / 0 unmapped / 103 total",
+        );
       } catch (error) {
         if (!importPostObserved && browserErrors.length > 0) {
           throw new Error(`${error.message}; no import POST observed; browser failures: ${browserErrors.join(" | ")}`);

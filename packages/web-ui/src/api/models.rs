@@ -4088,6 +4088,8 @@ pub struct BundleCoverageMapping {
 pub struct BundleCoverageReport {
     pub bundle_version_id: Uuid,
     #[serde(default)]
+    pub source_framework: Option<BundleCoverageSourceFramework>,
+    #[serde(default)]
     pub frameworks: Vec<BundleCoverageFramework>,
     pub total_requirements: i64,
     pub full: i64,
@@ -4096,6 +4098,19 @@ pub struct BundleCoverageReport {
     #[serde(default)]
     pub recovery_required: i64,
     pub rows: Vec<BundleCoverageRow>,
+}
+
+/// Authoritative source framework identity of a bundle version, independent of
+/// requirement membership. A DISA STIG bundle with zero normalized requirements
+/// still reports its source framework through this field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BundleCoverageSourceFramework {
+    pub framework_id: Uuid,
+    pub framework_name: String,
+    pub framework_version_id: Uuid,
+    pub framework_version: String,
+    #[serde(default)]
+    pub framework_publisher: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

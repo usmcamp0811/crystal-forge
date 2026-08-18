@@ -5234,7 +5234,16 @@ fn RequirementCoverageCard(
     let recovery_required = report.recovery_required;
     let show_details = detail || *expanded.read();
     let framework_label = if report.frameworks.is_empty() {
-        "this framework".to_string()
+        report
+            .source_framework
+            .as_ref()
+            .map(|source| {
+                format!(
+                    "{} ({})",
+                    source.framework_name, source.framework_version
+                )
+            })
+            .unwrap_or_else(|| "this framework".to_string())
     } else {
         report
             .frameworks
@@ -5248,10 +5257,16 @@ fn RequirementCoverageCard(
             .collect::<Vec<_>>()
             .join(", ")
     };
+    // The DISA invariant signal MUST come from the bundle's authoritative
+    // source framework, not from `frameworks`: that list is derived from
+    // requirement membership, which is empty by construction in the exact
+    // corruption state this check exists to diagnose.
     let disa_invariant = report
-        .frameworks
-        .iter()
-        .any(|f| f.framework_publisher.as_deref() == Some("DISA"));
+        .source_framework
+        .as_ref()
+        .and_then(|f| f.framework_publisher.as_deref())
+        == Some("DISA")
+        && report.total_requirements == 0;
     let query_value = query.read().trim().to_ascii_lowercase();
     let visible_rows: Vec<_> = report
         .rows

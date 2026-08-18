@@ -717,6 +717,13 @@ pub async fn commit_foreign_import(
         .context("failed to load prior framework release for STIG reconciliation")?;
         let authoritative_requirements =
             canonical_framework_requirements_for_framework(&pkg.parsed);
+        // Fail closed on a degenerate DISA document that carries no rules at
+        // all: such an import must never succeed as a policy-only bundle.
+        if authoritative_requirements.is_empty() {
+            bail!(
+                "IMPORT_FRAMEWORK_NORMALIZATION_FAILED: DISA STIG produced no authoritative requirements"
+            );
+        }
         let incoming_requirement_digests =
             requirement_semantic_digests(&authoritative_requirements);
         let hierarchy_edges = hierarchy_edges_for_framework(&pkg.parsed);
@@ -736,6 +743,19 @@ pub async fn commit_foreign_import(
             &hierarchy_edges,
         )
         .await?;
+
+        // The bundle version records the framework release it was normalized
+        // against. This survives zero-requirement corruption: the coverage
+        // report reads bundle -> framework through this column, never through
+        // requirement membership.
+        sqlx::query(
+            "UPDATE compliance_bundle_versions SET framework_version_id = $1 WHERE id = $2",
+        )
+        .bind(framework_version_id)
+        .bind(bundle_version_id)
+        .execute(&mut *tx)
+        .await
+        .context("failed to record framework version on bundle version")?;
 
         let mut group_versions = std::collections::HashMap::new();
         for group in &pkg.parsed.groups {
@@ -1315,6 +1335,36 @@ pub async fn commit_foreign_import(
                 importing_user_id,
             )
             .await?;
+        }
+    }
+
+    // ── 7b. Fail-closed cardinality gate for normalized STIG imports ────────
+    // Every selected imported rule must carry both a selected bundle
+    // requirement membership and an effective trusted mapping before the
+    // transaction commits. Do not rely on the present parser shape: enforce
+    // the complete invariant explicitly.
+    if normalized_requirements.is_some() {
+        let selected_rule_count = policy_records.len() as i64;
+        let (membership_count, mapping_count): (i64, i64) = sqlx::query_as(
+            r#"
+            SELECT
+                (SELECT COUNT(*) FROM compliance_bundle_version_requirements
+                  WHERE bundle_version_id = $1 AND selected = true),
+                (SELECT COUNT(*) FROM policy_requirement_mappings m
+                  JOIN compliance_bundle_version_requirements bvr
+                    ON bvr.requirement_version_id = m.requirement_version_id
+                  WHERE bvr.bundle_version_id = $1 AND bvr.selected = true
+                    AND m.trust_state = 'trusted')
+            "#,
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("failed to verify STIG import cardinality")?;
+        if membership_count != selected_rule_count || mapping_count != selected_rule_count {
+            bail!(
+                "IMPORT_FRAMEWORK_NORMALIZATION_FAILED: DISA STIG import selected {selected_rule_count} rules but produced {membership_count} selected bundle requirements and {mapping_count} effective trusted mappings"
+            );
         }
     }
 

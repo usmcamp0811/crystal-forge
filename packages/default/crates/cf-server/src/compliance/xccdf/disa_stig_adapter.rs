@@ -285,17 +285,27 @@ fn disa_release_number(release_info: &str) -> Option<u32> {
 /// `"1"` → `1`, `"V2R3"` → `2`, `"Version 1 Release 1"` → `1`.
 fn disa_version_major(version: &str) -> Option<u32> {
     let v = version.trim().to_uppercase();
+
+    if let Some(rest) = v.strip_prefix("VERSION ") {
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() {
+            return digits.parse().ok();
+        }
+    }
+
     if let Some(rest) = v.strip_prefix('V') {
         let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
         if !digits.is_empty() {
             return digits.parse().ok();
         }
     }
+
     let digits: String = v.chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.is_empty() {
-        return None;
+        None
+    } else {
+        digits.parse().ok()
     }
-    digits.parse().ok()
 }
 
 /// Combine the DISA version major with the release counter from
@@ -1007,6 +1017,20 @@ mod tests {
         // No release counter -> no DISA-derived key.
         assert_eq!(disa_release_key("1", "Benchmark Date: 22 Oct 2024"), None);
         assert_eq!(disa_release_key("", "Release: 2"), None);
+    }
+
+    #[test]
+    fn disa_version_major_supports_documented_formats() {
+        // The exact formats the doc comment promises.
+        assert_eq!(disa_version_major("1"), Some(1));
+        assert_eq!(disa_version_major("V2R3"), Some(2));
+        assert_eq!(disa_version_major("Version 1 Release 1"), Some(1));
+        // Tolerates surrounding whitespace and case.
+        assert_eq!(disa_version_major("  v3r4  "), Some(3));
+        assert_eq!(disa_version_major("VERSION 2 Release 4"), Some(2));
+        // Unparseable values fall through to None.
+        assert_eq!(disa_version_major(""), None);
+        assert_eq!(disa_version_major("Release 2"), None);
     }
 
     #[test]

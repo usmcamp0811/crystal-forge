@@ -108,6 +108,12 @@ pub enum RequirementCoverage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BundleCoverageReport {
     pub bundle_version_id: Uuid,
+    /// Authoritative source framework release the bundle was normalized
+    /// against. Populated through `compliance_bundle_versions.framework_version_id`,
+    /// which survives a bundle with **zero** selected requirement rows so the
+    /// UI can distinguish a genuine empty bundle from a DISA STIG invariant
+    /// violation. `None` for bundles created without normalized requirements.
+    pub source_framework: Option<BundleCoverageSourceFramework>,
     /// Authoritative framework releases represented by the selected requirements.
     pub frameworks: Vec<BundleCoverageFramework>,
     pub total_requirements: i64,
@@ -118,6 +124,19 @@ pub struct BundleCoverageReport {
     /// Included in `total_requirements`; cannot provide authoritative evidence.
     pub recovery_required: i64,
     pub rows: Vec<BundleCoverageRow>,
+}
+
+/// Authoritative source framework identity of a bundle version, independent of
+/// requirement membership. A DISA STIG bundle with zero normalized requirements
+/// (the data-integrity corruption the coverage invariant exists to diagnose)
+/// still reports its source framework through this field.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
+pub struct BundleCoverageSourceFramework {
+    pub framework_id: Uuid,
+    pub framework_name: String,
+    pub framework_version_id: Uuid,
+    pub framework_version: String,
+    pub framework_publisher: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
@@ -588,6 +607,31 @@ pub async fn compute_bundle_requirement_coverage(
     pool: &PgPool,
     bundle_version_id: Uuid,
 ) -> Result<BundleCoverageReport> {
+    // Source framework identity reads through the bundle version's own
+    // framework_version_id. Unlike `frameworks` below it does NOT depend on
+    // requirement membership, so it survives the zero-requirement corruption
+    // state the DISA invariant must diagnose.
+    let source_framework = sqlx::query_as::<_, BundleCoverageSourceFramework>(
+        r#"
+        SELECT
+            f.id AS framework_id,
+            f.name AS framework_name,
+            fv.id AS framework_version_id,
+            fv.version AS framework_version,
+            f.publisher AS framework_publisher
+        FROM compliance_bundle_versions bv
+        JOIN compliance_framework_versions fv
+          ON fv.id = bv.framework_version_id
+        JOIN compliance_frameworks f
+          ON f.id = fv.framework_id
+        WHERE bv.id = $1
+        "#,
+    )
+    .bind(bundle_version_id)
+    .fetch_optional(pool)
+    .await
+    .context("failed to load bundle coverage source framework")?;
+
     let frameworks = sqlx::query_as::<_, BundleCoverageFramework>(
         r#"
         SELECT DISTINCT
@@ -809,6 +853,7 @@ pub async fn compute_bundle_requirement_coverage(
 
     Ok(BundleCoverageReport {
         bundle_version_id,
+        source_framework,
         frameworks,
         total_requirements: total,
         full: full_count,
@@ -3165,5 +3210,80 @@ pub mod tests {
         assert_eq!(report.frameworks[0].framework_version_id, fv_id);
         assert_eq!(report.frameworks[0].framework_version, "V1R1");
         assert_eq!(report.frameworks[0].framework_publisher, None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a database"]
+    async fn bundle_coverage_source_framework_survives_zero_requirements() {
+        let pool = test_pool().await;
+
+        // DISA framework + release.
+        let fw_key = format!("test-disa-source-{}", Uuid::new_v4());
+        let mut tx = pool.begin().await.unwrap();
+        let fw_id = upsert_framework_lineage(
+            &mut tx,
+            "Anduril NixOS Security Technical Implementation Guide",
+            Some("DISA"),
+            &fw_key,
+            None,
+        )
+        .await
+        .unwrap();
+        let fv_canonical = FrameworkVersionCanonical {
+            canonical_source_key: fw_key.clone(),
+            canonical_release_key: "V1R2".to_string(),
+            version: "V1R2".to_string(),
+            publisher: Some("DISA".to_string()),
+            title: None,
+        };
+        let fv_id = insert_framework_version(&mut tx, fw_id, &fv_canonical, None, None)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        // Bundle version linked to the framework release but with ZERO
+        // selected requirement membership — the exact corruption state the
+        // DISA coverage invariant exists to diagnose.
+        let bundle_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_bundles (name, framework, version, layer, owner) \
+             VALUES ($1, 'test', '1.0', 'fleet', 'test') RETURNING id",
+        )
+        .bind(format!("coverage-invariant-bundle-{}", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let bv_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1",
+        )
+        .bind(bundle_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundle_versions SET framework_version_id = $1 WHERE id = $2",
+        )
+        .bind(fv_id)
+        .bind(bv_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let report = compute_bundle_requirement_coverage(&pool, bv_id)
+            .await
+            .unwrap();
+        assert_eq!(report.total_requirements, 0);
+        assert!(
+            report.frameworks.is_empty(),
+            "frameworks derives from requirement membership and must be empty"
+        );
+        let source = report
+            .source_framework
+            .expect("source framework must survive zero requirements");
+        assert_eq!(
+            source.framework_name,
+            "Anduril NixOS Security Technical Implementation Guide"
+        );
+        assert_eq!(source.framework_version, "V1R2");
+        assert_eq!(source.framework_publisher.as_deref(), Some("DISA"));
     }
 }
