@@ -1009,10 +1009,11 @@ async fn list_bundle_summary_aggregates(
         };
         for system in systems {
             // Determine assignment status for this specific system and bundle
-            let assignment_status = determine_assignment_status_for_system(pool, bundle_id, system.id)
-                .await
-                .ok()
-                .flatten();
+            let assignment_status =
+                determine_assignment_status_for_system(pool, bundle_id, system.id)
+                    .await
+                    .ok()
+                    .flatten();
             let rollup = match effective_by_version_system.get(&(version_id, system.id)) {
                 Some(ResolutionOutcome::Resolved(set)) if set.bundle_version_id == version_id => {
                     evidence_work.push((
@@ -2018,7 +2019,7 @@ pub async fn list_bundle_systems_for_version(
     let systems =
         list_explicit_bundle_version_system_rows(pool, bundle_id, bundle_version_id).await?;
     let system_ids: Vec<Uuid> = systems.iter().map(|system| system.id).collect();
-     let effective = resolve_systems_effective_policies_for_bundle_version_batch(
+    let effective = resolve_systems_effective_policies_for_bundle_version_batch(
         pool,
         &system_ids,
         bundle_version_id,
@@ -2270,24 +2271,18 @@ pub async fn list_system_bundles(
         let policies = policies_by_bundle.remove(&bundle.id).unwrap_or_default();
         bundles.push((
             bundle,
-            effective_policy_rollup_with_evidence(
-                pool,
-                &system,
-                &policies,
-                assignment_status,
-            )
-            .await?,
+            effective_policy_rollup_with_evidence(pool, &system, &policies, assignment_status)
+                .await?,
         ));
     }
     let direct_rollup =
         effective_policy_rollup_with_evidence(pool, &system, &direct_policies, None).await?;
     // For overall rollup, determine assignment from the effective policy set's bundle version
-    let bundle_for_effective: Option<Uuid> = sqlx::query_scalar(
-        "SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1"
-    )
-    .bind(effective.bundle_version_id)
-    .fetch_optional(pool)
-    .await?;
+    let bundle_for_effective: Option<Uuid> =
+        sqlx::query_scalar("SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1")
+            .bind(effective.bundle_version_id)
+            .fetch_optional(pool)
+            .await?;
     let overall_assignment_status = match bundle_for_effective {
         Some(bundle_id) => determine_assignment_status_for_system(pool, bundle_id, system.id)
             .await
@@ -2554,12 +2549,13 @@ pub(crate) async fn determine_assignment_status_for_system(
     system_id: Uuid,
 ) -> Result<Option<String>> {
     // Get the bundle's current published version
-    let current_published_version: Option<Uuid> =
-        sqlx::query_scalar("SELECT current_published_version_id FROM compliance_bundles WHERE id = $1")
-            .bind(bundle_id)
-            .fetch_optional(pool)
-            .await?
-            .flatten();
+    let current_published_version: Option<Uuid> = sqlx::query_scalar(
+        "SELECT current_published_version_id FROM compliance_bundles WHERE id = $1",
+    )
+    .bind(bundle_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
 
     // Check for active assignment targeting this system (system scope takes precedence)
     // Note: compliance_bundle_assignments table doesn't have bundle_id directly,

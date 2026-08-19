@@ -1063,17 +1063,18 @@ pub fn PolicyDrawer(
                     }
                 }
             }
-            div { class: "ed-stats",
-                div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", if usage_loading() { "—" } else { "{resolved_system_count}" } } }
-                div { class: "ed-stat", div { class: "ed-stat-label", "Rules" } div { class: "ed-stat-val", "{rules.len()}" } }
-                div { class: "ed-stat", div { class: "ed-stat-label", "Type" } div { class: "ed-stat-val", style: "font-size:12px;", "{type_display}" } }
-                div { class: "ed-stat", div { class: "ed-stat-label", "Modified" } div { class: "ed-stat-val", style: "font-size:12px;", "{modified_at}" } }
-                // Owner is the user UUID who created this version
-                // For now, we display just the UUID since we don't have user lookup in this context
-                if let Some(created_by) = revision.created_by { 
-                    div { class: "ed-stat", div { class: "ed-stat-label", "Created by" } div { class: "ed-stat-val", style: "font-size:11px;", "{created_by}" } }
-                }
-            }
+             div { class: "ed-stats",
+                 div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", if usage_loading() { "—" } else { "{resolved_system_count}" } } }
+                 div { class: "ed-stat", div { class: "ed-stat-label", "Rules" } div { class: "ed-stat-val", "{rules.len()}" } }
+                 div { class: "ed-stat", div { class: "ed-stat-label", "Type" } div { class: "ed-stat-val", style: "font-size:12px;", "{type_display}" } }
+                 div { class: "ed-stat", div { class: "ed-stat-label", "Modified" } div { class: "ed-stat-val", style: "font-size:12px;", "{modified_at}" } }
+                 // Owner is the user who created this policy version
+                 if let Some(selected_rev) = selected_revision {
+                     if let Some(created_by_uuid) = selected_rev.created_by {
+                         div { class: "ed-stat", div { class: "ed-stat-label", "Created by" } div { class: "ed-stat-val", style: "font-size:11px;", "{created_by_uuid}" } }
+                     }
+                 }
+             }
             if revision_count > 1 {
                 div { class: "policy-drawer-tabs",
                     button { class: if !show_revisions() { "btn btn-ghost xs focus-ring active" } else { "btn btn-ghost xs focus-ring" }, onclick: move |_| show_revisions.set(false), "Details" }

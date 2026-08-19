@@ -167,6 +167,7 @@ fn policy_record_to_definition_with_count(
             cmmc_level: v.cmmc_level,
             cis_section: v.cis_section,
             rationale: v.rationale,
+            created_by: v.created_by,
         })
         .collect();
 

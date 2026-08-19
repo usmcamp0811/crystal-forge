@@ -87,9 +87,11 @@ pub struct PolicyRevisionSummary {
     pub cmmc_level: Option<i32>,
     /// CIS Benchmark section for this revision.
     pub cis_section: Option<String>,
-    /// Human-readable rationale for this revision.
-    pub rationale: Option<String>,
-}
+     /// Human-readable rationale for this revision.
+     pub rationale: Option<String>,
+     /// User who created this policy version (UUID from server, display name on server).
+     pub created_by: Option<uuid::Uuid>,
+ }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PolicyCategory {

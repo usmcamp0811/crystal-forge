@@ -5,6 +5,7 @@
 //! - POST/PUT endpoints: Available to Admin and Operator roles only
 //! - DELETE endpoint: Available to Admin role only
 
+use anyhow::Context;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -16,11 +17,11 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-use crate::api::models::{DeletionEligibility, DeploymentPolicyVersionSummary};
+use crate::api::models::{DeletionEligibility, DeploymentPolicyVersionSummary, EvidenceSpec};
 use crate::auth::extractors::{RequireAdmin, RequireAuth, RequireOperator};
 use crate::compliance::mappings::{
-    extract_cci_ids, extract_classification, extract_srg_ids, infer_legacy_category,
-    normalise_cci_ids, normalise_srg_ids,
+    extract_cci_ids, extract_classification, extract_evidence_specs, extract_srg_ids,
+    infer_legacy_category, normalise_cci_ids, normalise_srg_ids,
 };
 use crate::handlers::agent_request::CFState;
 use crate::models::deployment_policies::{
@@ -567,29 +568,36 @@ pub async fn list_deployment_policies(
 
     // Load requirement mapping counts per policy version
     let requirement_counts: HashMap<Uuid, i64> = sqlx::query_as::<_, (Uuid, i64)>(
-        "SELECT policy_version_id, COUNT(*) FROM policy_requirement_mappings WHERE policy_version_id = ANY(SELECT id FROM deployment_policy_versions WHERE policy_id = ANY($1)) AND trusted = true GROUP BY policy_version_id",
+        "SELECT policy_version_id, COUNT(DISTINCT requirement_version_id) FROM policy_requirement_mappings WHERE policy_version_id = ANY(SELECT id FROM deployment_policy_versions WHERE policy_id = ANY($1)) AND trust_state = 'trusted' GROUP BY policy_version_id",
     )
     .bind(&policy_ids)
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default()
+    .context("Failed to load policy requirement mapping counts")
+    .map_err(|e| {
+        tracing::error!("Failed to load policy requirement mapping counts: {}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to load policy counts".to_string())
+    })?
     .into_iter()
     .collect();
 
-    // Load bundle usage counts per policy
+    // Load bundle usage counts per policy version
     let bundle_usage_counts: HashMap<Uuid, i64> = sqlx::query_as::<_, (Uuid, i64)>(
         r#"
-        SELECT policy_id, COUNT(DISTINCT cb.id)
-        FROM compliance_bundle_policies cbp
-        JOIN compliance_bundles cb ON cb.id = cbp.bundle_id
-        WHERE cbp.policy_id = ANY($1)
-        GROUP BY cbp.policy_id
+        SELECT cbvp.policy_version_id, COUNT(DISTINCT cbvp.bundle_version_id)
+        FROM compliance_bundle_version_policies cbvp
+        WHERE cbvp.policy_version_id = ANY(SELECT id FROM deployment_policy_versions WHERE policy_id = ANY($1))
+        GROUP BY cbvp.policy_version_id
         "#,
     )
     .bind(&policy_ids)
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default()
+    .context("Failed to load policy bundle usage counts")
+    .map_err(|e| {
+        tracing::error!("Failed to load policy bundle usage counts: {}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to load policy counts".to_string())
+    })?
     .into_iter()
     .collect();
 
@@ -602,8 +610,10 @@ pub async fn list_deployment_policies(
                 let mapped_requirement_count = current_version_id
                     .and_then(|vid| requirement_counts.get(&vid).copied())
                     .unwrap_or(0);
-                // Get bundle usage count
-                let bundle_usage_count = bundle_usage_counts.get(&policy.id).copied().unwrap_or(0);
+                // Get bundle usage count from current version if available
+                let bundle_usage_count = current_version_id
+                    .and_then(|vid| bundle_usage_counts.get(&vid).copied())
+                    .unwrap_or(0);
 
                 policy.mapped_requirement_count = mapped_requirement_count;
                 policy.bundle_usage_count = bundle_usage_count;
@@ -651,7 +661,10 @@ pub async fn list_deployment_policies(
                                 cis_section: cis,
                                 rationale: rat,
                                 created_by: row.15,
-                                evidence_specs: Vec::new(),
+                                evidence_specs: extract_evidence_specs(compliance_meta)
+                                    .into_iter()
+                                    .filter_map(|spec| serde_json::from_value(spec).ok())
+                                    .collect(),
                             }
                         })
                         .collect(),

@@ -1,3 +1,4 @@
+use crystal_forge::queries::compliance::{BundleDraftIntent, ensure_bundle_draft};
 /// Regression test for framework_version_id lifecycle preservation.
 ///
 /// This test verifies that when a STIG-backed bundle with framework_version_id is published
@@ -12,7 +13,6 @@
 /// 5. Assert draft.framework_version_id == F
 use sqlx::PgPool;
 use uuid::Uuid;
-use crystal_forge::queries::compliance::{ensure_bundle_draft, BundleDraftIntent};
 
 #[sqlx::test]
 async fn framework_version_id_preserved_through_publish_draft_cycle(pool: PgPool) {
@@ -61,23 +61,23 @@ async fn framework_version_id_preserved_through_publish_draft_cycle(pool: PgPool
         bundle_id,
         actor_id,
         None,
-        BundleDraftIntent::EnsureMutable
+        BundleDraftIntent::EnsureMutable,
     )
     .await
     .expect("ensure_bundle_draft must succeed");
     tx.commit().await.expect("commit transaction");
 
     // 4. Load draft from PostgreSQL
-    let draft_version_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1",
-    )
-    .bind(bundle_id)
-    .fetch_optional(&pool)
-    .await
-    .expect("query draft version")
-    .flatten();
+    let draft_version_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1")
+            .bind(bundle_id)
+            .fetch_optional(&pool)
+            .await
+            .expect("query draft version")
+            .flatten();
 
-    let draft_version_id = draft_version_id.expect("draft version must exist after ensure_bundle_draft");
+    let draft_version_id =
+        draft_version_id.expect("draft version must exist after ensure_bundle_draft");
 
     // 5. Verify framework_version_id is preserved in new draft
     let retrieved_framework_version_id: Option<Uuid> = sqlx::query_scalar(

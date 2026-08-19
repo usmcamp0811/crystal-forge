@@ -305,6 +305,9 @@ pub async fn get_deployment_policy_by_version(
 /// Evaluation and deployment resolve policies per system, but many systems
 /// share the same policy versions. Loading those versions as a batch avoids a
 /// policy-version query for every system/policy pair.
+///
+/// Counts (mapped_requirement_count and bundle_usage_count) are loaded via a
+/// separate batched query to avoid N+1 and ensure they reflect real data.
 pub async fn get_deployment_policies_by_versions(
     pool: &PgPool,
     policy_version_ids: &[Uuid],
@@ -341,6 +344,9 @@ pub async fn get_deployment_policies_by_versions(
     .await
     .context("Failed to fetch deployment policies by version IDs")?;
 
+    // Load counts in a separate batch query to avoid N+1
+    let usage_counts = load_policy_version_usage_counts(pool, policy_version_ids).await?;
+
     Ok(rows
         .into_iter()
         .map(
@@ -355,6 +361,8 @@ pub async fn get_deployment_policies_by_versions(
                 created_at,
                 updated_at,
             )| {
+                let (mapped_requirement_count, bundle_usage_count) =
+                    usage_counts.get(&version_id).copied().unwrap_or((0, 0));
                 (
                     version_id,
                     DeploymentPolicyRecord {
@@ -366,12 +374,67 @@ pub async fn get_deployment_policies_by_versions(
                         enabled,
                         created_at,
                         updated_at,
-                        mapped_requirement_count: 0,
-                        bundle_usage_count: 0,
+                        mapped_requirement_count,
+                        bundle_usage_count,
                     },
                 )
             },
         )
+        .collect())
+}
+
+/// Load mapped requirement and bundle usage counts for a batch of policy versions.
+///
+/// Returns a map of policy_version_id -> (mapped_requirement_count, bundle_usage_count).
+/// This function enables batch loading of counts without N+1 queries.
+///
+/// - mapped_requirement_count: COUNT(DISTINCT requirement_version_id) from
+///   policy_requirement_mappings for this exact policy_version_id
+/// - bundle_usage_count: COUNT(DISTINCT bundle_version_id) from
+///   compliance_bundle_version_policies for this exact policy_version_id
+pub async fn load_policy_version_usage_counts(
+    pool: &PgPool,
+    policy_version_ids: &[Uuid],
+) -> Result<HashMap<Uuid, (i64, i64)>> {
+    if policy_version_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct CountRow {
+        policy_version_id: Uuid,
+        mapped_requirement_count: i64,
+        bundle_usage_count: i64,
+    }
+
+    let rows = sqlx::query_as::<_, CountRow>(
+        r#"
+        SELECT
+            pv.id AS policy_version_id,
+            COALESCE(COUNT(DISTINCT prm.requirement_version_id), 0) AS mapped_requirement_count,
+            COALESCE(COUNT(DISTINCT cbvp.bundle_version_id), 0) AS bundle_usage_count
+        FROM (SELECT UNNEST($1::uuid[]) AS id) pv(id)
+        LEFT JOIN policy_requirement_mappings prm
+            ON prm.policy_version_id = pv.id
+            AND prm.trust_state = 'trusted'
+        LEFT JOIN compliance_bundle_version_policies cbvp
+            ON cbvp.policy_version_id = pv.id
+        GROUP BY pv.id
+        "#,
+    )
+    .bind(policy_version_ids)
+    .fetch_all(pool)
+    .await
+    .context("Failed to load policy version usage counts")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.policy_version_id,
+                (row.mapped_requirement_count, row.bundle_usage_count),
+            )
+        })
         .collect())
 }
 

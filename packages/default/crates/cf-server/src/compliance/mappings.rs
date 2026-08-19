@@ -211,6 +211,18 @@ pub fn extract_cci_ids(metadata: &serde_json::Value) -> Vec<String> {
     Vec::new()
 }
 
+/// Extract evidence specifications from compliance_metadata.
+///
+/// Returns an array of evidence spec objects as stored in compliance_metadata.evidence_specs.
+/// If the key is absent or not an array, returns an empty array.
+pub fn extract_evidence_specs(metadata: &serde_json::Value) -> Vec<serde_json::Value> {
+    metadata
+        .get("evidence_specs")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.clone())
+        .unwrap_or_default()
+}
+
 /// Merge SRG/CCI mappings into an existing `compliance_metadata` JSON object.
 ///
 /// Semantics:

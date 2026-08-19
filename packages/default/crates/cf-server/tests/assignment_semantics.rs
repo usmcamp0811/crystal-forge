@@ -86,10 +86,7 @@ async fn test_assignment_status_current_version(pool: PgPool) {
 
     assert_eq!(response.systems.len(), 1, "Should have exactly one system");
     let rollup = &response.systems[0];
-    assert_eq!(
-        rollup.system_id, system_id,
-        "Should be the assigned system"
-    );
+    assert_eq!(rollup.system_id, system_id, "Should be the assigned system");
     assert_eq!(
         rollup.assignment_status,
         Some("current".to_string()),
@@ -257,7 +254,7 @@ async fn test_assignment_status_unassigned(pool: PgPool) {
 async fn test_assignment_independent_from_resolution(pool: PgPool) {
     // This test verifies that assignment_status is computed independently
     // from resolution_state (no mixing of concerns).
-    
+
     let bundle_id = Uuid::new_v4();
     let version_id = Uuid::new_v4();
 
@@ -325,7 +322,7 @@ async fn test_assignment_independent_from_resolution(pool: PgPool) {
 
     assert_eq!(response.systems.len(), 1, "Should have exactly one system");
     let rollup = &response.systems[0];
-    
+
     // Verify assignment_status and resolution_state are independent
     assert_eq!(
         rollup.assignment_status,
@@ -422,7 +419,7 @@ async fn test_environment_scoped_assignment(pool: PgPool) {
         response.systems.iter().any(|r| r.system_id == system_id),
         "System in assigned environment should be included"
     );
-    
+
     let rollup = response
         .systems
         .iter()
@@ -552,7 +549,7 @@ async fn test_system_assignment_precedence(pool: PgPool) {
         .iter()
         .find(|r| r.system_id == system_id)
         .expect("system found");
-    
+
     assert_eq!(
         rollup.assignment_status,
         Some("pinned".to_string()),
