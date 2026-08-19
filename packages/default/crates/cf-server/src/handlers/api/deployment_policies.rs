@@ -554,8 +554,8 @@ pub async fn list_deployment_policies(
 
     // Fetch all version rows in one query, including compliance_metadata for
     // SRG/CCI extraction. No N+1: one query covers all policies in the page.
-    let version_rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, String, String, chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>, Option<Uuid>, String, Option<String>, String, Value, bool, Value)>(
-        "SELECT id, policy_id, version, publication_state, trust_state, semantic_digest, created_at, published_at, derived_from_version_id, name, description, policy_type, config, COALESCE(enabled_by_default, true), compliance_metadata FROM deployment_policy_versions WHERE policy_id = ANY($1) ORDER BY policy_id, created_at DESC, id DESC",
+    let version_rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, String, String, chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>, Option<Uuid>, String, Option<String>, String, Value, bool, Value, Option<Uuid>)>(
+        "SELECT id, policy_id, version, publication_state, trust_state, semantic_digest, created_at, published_at, derived_from_version_id, name, description, policy_type, config, COALESCE(enabled_by_default, true), compliance_metadata, created_by FROM deployment_policy_versions WHERE policy_id = ANY($1) ORDER BY policy_id, created_at DESC, id DESC",
     )
     .bind(&policy_ids)
     .fetch_all(&state.pool)
@@ -650,6 +650,7 @@ pub async fn list_deployment_policies(
                                 cmmc_level: cmmc,
                                 cis_section: cis,
                                 rationale: rat,
+                                created_by: row.15,
                             }
                         })
                         .collect(),

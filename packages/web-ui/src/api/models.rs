@@ -1395,7 +1395,7 @@ pub struct DeploymentPolicyVersionSummary {
     /// Framework string, e.g. "DISA STIG", "NIST 800-53", "CMMC 2.0", "CIS Benchmark", or custom
     #[serde(default)]
     pub framework: Option<String>,
-    /// Severity: "high", "medium", "low" — None means unrated
+    /// Severity: "hard", "medium", "low" — None means unrated
     #[serde(default)]
     pub severity: Option<String>,
     /// NIST 800-53 control family, e.g. "AC", "AU", "CM", "IA", "SC", "SI", "MP"
@@ -1410,6 +1410,9 @@ pub struct DeploymentPolicyVersionSummary {
     /// Human-readable rationale for this control
     #[serde(default)]
     pub rationale: Option<String>,
+    /// User UUID who created this version (if available)
+    #[serde(default)]
+    pub created_by: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

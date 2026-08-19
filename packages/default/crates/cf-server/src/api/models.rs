@@ -1405,6 +1405,9 @@ pub struct DeploymentPolicyVersionSummary {
     /// Human-readable rationale for this control
     #[serde(default)]
     pub rationale: Option<String>,
+    /// User UUID who created this version (if available)
+    #[serde(default)]
+    pub created_by: Option<Uuid>,
 }
 
 /// An exact policy-version member of a selected bundle version.
