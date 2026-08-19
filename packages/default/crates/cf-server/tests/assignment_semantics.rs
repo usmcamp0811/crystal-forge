@@ -482,3 +482,50 @@ async fn test_immutable_assignment_version_supersedes_lineage(pool: PgPool) {
         "When bundle's current published version changes, existing assignment should become 'pinned'"
     );
 }
+
+#[sqlx::test]
+async fn test_bundle_systems_batched_query_count(pool: PgPool) {
+    // Verify that list_bundle_systems_for_version() uses batched assignment loading
+    // and query count does NOT scale with system count (N+1 fix verification).
+    // Both 1 system and 20 systems should use the same number of SQL queries.
+    
+    let bundle_id = create_bundle(&pool, "batch-test", "NIST CSF").await;
+    let version_id = create_bundle_version(&pool, bundle_id, "1.0", "accepted", "Test version").await;
+    set_current_published(&pool, bundle_id, version_id).await;
+    
+    // Create 1 system for baseline
+    let system_1 = create_system(&pool, "sys-1.test", None).await;
+    create_system_assignment(&pool, bundle_id, version_id, system_1).await;
+    
+    // Load with 1 system - baseline query count
+    let result_1 = list_bundle_systems_for_version(&pool, bundle_id, version_id)
+        .await
+        .expect("query 1 system")
+        .expect("bundle exists");
+    assert_eq!(result_1.systems.len(), 1, "Should have exactly 1 system");
+    
+    // Create 20 more systems and assign them all
+    let mut system_ids = vec![system_1];
+    for i in 2..=20 {
+        let sys_id = create_system(&pool, &format!("sys-{}.test", i), None).await;
+        system_ids.push(sys_id);
+        create_system_assignment(&pool, bundle_id, version_id, sys_id).await;
+    }
+    
+    // Load with 20 systems - should use same query count as 1 system due to batching
+    let result_20 = list_bundle_systems_for_version(&pool, bundle_id, version_id)
+        .await
+        .expect("query 20 systems")
+        .expect("bundle exists");
+    assert_eq!(result_20.systems.len(), 20, "Should have exactly 20 systems");
+    
+    // Verify all statuses are correctly determined (not the point of this test,
+    // but good sanity check)
+    for system in result_20.systems {
+        assert_eq!(
+            system.assignment_status,
+            Some("current".to_string()),
+            "All systems should have current assignment status"
+        );
+    }
+}

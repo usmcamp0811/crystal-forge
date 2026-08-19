@@ -1001,6 +1001,23 @@ async fn list_bundle_summary_aggregates(
         resolve_systems_effective_policies_for_bundle_versions_batch(pool, &resolver_requests)
             .await?;
 
+    // Collect all (bundle_id, system_id) pairs for batch assignment loading
+    let mut pair_list = Vec::new();
+    for (bundle_id, version_id) in &pairs {
+        if let Some(systems) = systems_by_pair.get(&(*bundle_id, *version_id)) {
+            for system in systems {
+                pair_list.push((*bundle_id, system.id));
+            }
+        }
+    }
+
+    // Load all assignment statuses in one batch query
+    let assignment_statuses = if !pair_list.is_empty() {
+        load_assignment_statuses_for_pairs(pool, &pair_list).await?
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let mut evidence_work = Vec::new();
     let mut unresolved_by_pair =
         std::collections::HashMap::<(Uuid, Uuid), Vec<ComplianceSystemRollup>>::new();
@@ -1010,12 +1027,11 @@ async fn list_bundle_summary_aggregates(
             continue;
         };
         for system in systems {
-            // Determine assignment status for this specific system and bundle
-            let assignment_status =
-                determine_assignment_status_for_system(pool, bundle_id, system.id)
-                    .await
-                    .ok()
-                    .flatten();
+            // Look up pre-loaded assignment status
+            let assignment_status = assignment_statuses
+                .get(&(bundle_id, system.id))
+                .cloned()
+                .flatten();
             let rollup = match effective_by_version_system.get(&(version_id, system.id)) {
                 Some(ResolutionOutcome::Resolved(set)) if set.bundle_version_id == version_id => {
                     evidence_work.push((
@@ -2721,6 +2737,122 @@ pub async fn load_assignment_statuses_for_systems(
     Ok(result)
 }
 
+/// Batch load assignment statuses for arbitrary (bundle_id, system_id) pairs.
+/// Returns a map keyed by (bundle_id, system_id) tuple with optional status strings.
+/// All requested pairs are present in the result; unassigned pairs have None.
+pub async fn load_assignment_statuses_for_pairs(
+    pool: &PgPool,
+    pairs: &[(Uuid, Uuid)],  // (bundle_id, system_id)
+) -> Result<std::collections::HashMap<(Uuid, Uuid), Option<String>>> {
+    if pairs.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    // Extract unique bundles and systems
+    let mut bundle_ids = std::collections::HashSet::new();
+    let mut system_ids = std::collections::HashSet::new();
+    for &(bundle_id, system_id) in pairs {
+        bundle_ids.insert(bundle_id);
+        system_ids.insert(system_id);
+    }
+    let bundle_ids: Vec<Uuid> = bundle_ids.into_iter().collect();
+    let system_ids: Vec<Uuid> = system_ids.into_iter().collect();
+
+    // Get current published version for each bundle
+    #[derive(sqlx::FromRow)]
+    struct BundleVersion {
+        bundle_id: Uuid,
+        current_published_version_id: Option<Uuid>,
+    }
+    let versions: Vec<BundleVersion> = sqlx::query_as(
+        "SELECT id AS bundle_id, current_published_version_id FROM compliance_bundles WHERE id = ANY($1)",
+    )
+    .bind(&bundle_ids)
+    .fetch_all(pool)
+    .await?;
+    let versions_by_bundle: std::collections::HashMap<Uuid, Option<Uuid>> = versions
+        .into_iter()
+        .map(|v| (v.bundle_id, v.current_published_version_id))
+        .collect();
+
+    // Load assignments for all (bundle, system) pairs in one query
+    // System-scoped assignments take precedence over environment-scoped
+    #[derive(sqlx::FromRow)]
+    struct AssignmentPair {
+        bundle_id: Uuid,
+        system_id: Uuid,
+        assigned_version_id: Uuid,
+    }
+    let bundle_pairs: Vec<(Uuid, Uuid)> = pairs.to_vec();
+    let assignments: Vec<AssignmentPair> = sqlx::query_as(
+        r#"
+        WITH requested_pairs AS (
+            SELECT DISTINCT * FROM UNNEST($1::uuid[], $2::uuid[]) AS t(bundle_id, system_id)
+        ),
+        pair_assignments AS (
+            -- System-scoped assignments take absolute precedence
+            SELECT DISTINCT ON (req.bundle_id, req.system_id)
+                req.bundle_id,
+                req.system_id,
+                av.bundle_version_id AS assigned_version_id
+            FROM requested_pairs req
+            JOIN compliance_bundle_assignments cba ON cba.bundle_id = req.bundle_id
+                AND cba.system_id = req.system_id
+                AND cba.active = true AND cba.scope_type = 'system'
+            JOIN compliance_bundle_assignment_versions av ON av.id = cba.current_version_id
+            
+            UNION ALL
+            
+            -- Environment-scoped assignments as fallback
+            SELECT DISTINCT ON (req.bundle_id, req.system_id)
+                req.bundle_id,
+                req.system_id,
+                av.bundle_version_id AS assigned_version_id
+            FROM requested_pairs req
+            JOIN systems sys ON sys.id = req.system_id
+            JOIN compliance_bundle_assignments cba ON cba.bundle_id = req.bundle_id
+                AND cba.active = true AND cba.scope_type = 'environment'
+                AND cba.environment_id = sys.environment_id
+            JOIN compliance_bundle_assignment_versions av ON av.id = cba.current_version_id
+            WHERE NOT EXISTS (
+                -- Exclude if this (bundle, system) already has a system-scoped assignment
+                SELECT 1 FROM compliance_bundle_assignments cba_sys
+                WHERE cba_sys.bundle_id = req.bundle_id AND cba_sys.active = true
+                  AND cba_sys.scope_type = 'system' AND cba_sys.system_id = req.system_id
+            )
+        )
+        SELECT * FROM pair_assignments
+        "#,
+    )
+    .bind(
+        bundle_pairs.iter().map(|(b, _)| b).copied().collect::<Vec<_>>()
+    )
+    .bind(
+        bundle_pairs.iter().map(|(_, s)| s).copied().collect::<Vec<_>>()
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // Build result map with status determination
+    let mut result = std::collections::HashMap::new();
+    for AssignmentPair { bundle_id, system_id, assigned_version_id } in assignments {
+        let current_published = versions_by_bundle.get(&bundle_id).copied().flatten();
+        let status = match current_published {
+            Some(current) if assigned_version_id == current => Some("current".to_string()),
+            Some(_) => Some("pinned".to_string()),
+            None => Some("pinned".to_string()),
+        };
+        result.insert((bundle_id, system_id), status);
+    }
+
+    // Ensure all requested pairs are in the result
+    for &(bundle_id, system_id) in pairs {
+        result.entry((bundle_id, system_id)).or_insert(None);
+    }
+
+    Ok(result)
+}
+
 /// Legacy function that determined status per bundle version (kept for backwards compatibility).
 /// Deprecated: Use determine_assignment_status_for_system() instead.
 pub(crate) async fn determine_assignment_status_for_bundle_version(
@@ -3140,13 +3272,26 @@ async fn effective_policy_rollups_with_evidence_batch(
     .map(|(id, derivation_id, critical, high)| (derivation_id, (id, critical, high)))
     .collect();
 
+    // Collect all (bundle_id, system_id) pairs for batch assignment loading
+    let assignment_pairs: Vec<(Uuid, Uuid)> = work
+        .iter()
+        .map(|((bundle_id, _), system, _)| (*bundle_id, system.id))
+        .collect();
+
+    // Load all assignment statuses in one batch query
+    let assignment_statuses = if !assignment_pairs.is_empty() {
+        load_assignment_statuses_for_pairs(pool, &assignment_pairs).await?
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let mut result = Vec::with_capacity(work.len());
     for (pair, system, policies) in work {
-        let (bundle_id, _version_id) = pair;
-        // Determine assignment status for this specific system and bundle
-        let assignment_status = determine_assignment_status_for_system(pool, *bundle_id, system.id)
-            .await
-            .ok()
+        let (bundle_id, _version_id) = *pair;
+        // Look up pre-loaded assignment status
+        let assignment_status = assignment_statuses
+            .get(&(bundle_id, system.id))
+            .cloned()
             .flatten();
         let context = contexts.get(&system.id);
         let mut statuses = Vec::with_capacity(policies.len());
