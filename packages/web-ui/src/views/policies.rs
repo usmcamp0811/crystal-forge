@@ -814,6 +814,8 @@ pub fn PolicyDrawer(
                 cmmc_level: revision.cmmc_level,
                 cis_section: revision.cis_section.clone(),
                 rationale: revision.rationale.clone(),
+                mapped_requirement_count: 0,
+                bundle_usage_count: 0,
             }
         },
     );

@@ -196,5 +196,7 @@ fn policy_record_to_definition_with_count(
         cmmc_level: current_cmmc_level,
         cis_section: current_cis_section,
         rationale: current_rationale,
+        mapped_requirement_count: 0,
+        bundle_usage_count: 0,
     }
 }

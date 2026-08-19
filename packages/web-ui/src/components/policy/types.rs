@@ -50,6 +50,12 @@ pub struct PolicyDefinition {
     pub cis_section: Option<String>,
     /// Human-readable rationale from the current version's compliance_metadata.
     pub rationale: Option<String>,
+    /// Count of unique requirements this policy is mapped to (from compliance metadata).
+    #[serde(default)]
+    pub mapped_requirement_count: i64,
+    /// Count of bundles (compliance frameworks) this policy is used by.
+    #[serde(default)]
+    pub bundle_usage_count: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]

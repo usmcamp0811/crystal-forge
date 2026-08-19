@@ -121,19 +121,30 @@ pub fn PolicyCard(
                             }
                         }
                     }
-                    if rules.len() > 4 {
-                        div { class: "text-[11px]", style: "color:var(--cf-text-muted);", "+ {rules.len() - 4} more rules" }
-                    }
                 }
             }
 
-            if !policy.srg_ids.is_empty() || !policy.cci_ids.is_empty() {
-                div { class: "policy-card-mappings",
-                    for srg in policy.srg_ids.iter() {
-                        span { class: "chip mono policy-mapping-srg", "{srg}" }
+            if policy.mapped_requirement_count > 0 || policy.bundle_usage_count > 0 {
+                div { style: "display:flex;flex-wrap:wrap;gap:5px;",
+                    if policy.mapped_requirement_count > 0 {
+                        {
+                            let req_plural = if policy.mapped_requirement_count == 1 { "" } else { "s" };
+                            rsx! {
+                                span { class: "chip chip-info", style: "font-size:9.5;",
+                                    "{policy.mapped_requirement_count} mapped requirement{req_plural}"
+                                }
+                            }
+                        }
                     }
-                    for cci in policy.cci_ids.iter() {
-                        span { class: "chip mono policy-mapping-cci", "{cci}" }
+                    if policy.bundle_usage_count > 0 {
+                        {
+                            let bundle_plural = if policy.bundle_usage_count == 1 { "" } else { "s" };
+                            rsx! {
+                                span { class: "chip chip-unknown", style: "font-size:9.5;",
+                                    "used by {policy.bundle_usage_count} bundle{bundle_plural}"
+                                }
+                            }
+                        }
                     }
                 }
             }
