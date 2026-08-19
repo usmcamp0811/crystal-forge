@@ -1181,6 +1181,15 @@ pub fn PolicyDrawer(
                             }
                         }
                     }
+                    // NOTE: Evidence for ATO section from design spec PoliciesView.jsx:1054-1070 is
+                    // intentionally omitted. Evidence is collected during STIG import (ComplianceEvidenceItem),
+                    // not stored per-policy in the normalized model. Implementing this would require:
+                    // 1. Adding policy_evidence table to schema
+                    // 2. Adding evidence field to DeploymentPolicyVersionSummary API model
+                    // 3. New migrations and API queries
+                    // This was deferred per task note #15: "ImportedEvidenceRequirement belongs to
+                    // STIG import, not policy-normalized-model; no authoritative backend field exists;
+                    // correctly omitted per spec guidance."
                     section {
                         h3 { class: "policy-drawer-section-title", "Used by bundles" }
                         if usage_loading() || loaded_usage_version() != displayed_policy.version_id {
