@@ -2005,6 +2005,15 @@ pub async fn list_bundle_systems_for_version(
         return Ok(None);
     }
 
+    // Get the bundle's current published version for assignment status determination
+    let current_published_version: Option<Uuid> = sqlx::query_scalar(
+        "SELECT current_published_version_id FROM compliance_bundles WHERE id = $1",
+    )
+    .bind(bundle_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+
     let policies = sqlx::query_as::<_, PolicyRow>(
         r#"SELECT pv.policy_id AS id, $2 AS bundle_id, pv.name, pv.description,
                   pv.policy_type, pv.config, (dp.enabled AND pv.publication_state IN ('accepted', 'deprecated')) AS enabled
@@ -2028,13 +2037,19 @@ pub async fn list_bundle_systems_for_version(
     )
     .await?;
 
+    // Load assignment statuses for all systems in one batch query
+    let assignment_statuses = load_assignment_statuses_for_systems(
+        pool,
+        bundle_id,
+        current_published_version,
+        &system_ids,
+    )
+    .await?;
+
     let mut rollups = Vec::with_capacity(systems.len());
     for system in systems {
-        // Determine assignment status for this specific system
-        let assignment_status = determine_assignment_status_for_system(pool, bundle_id, system.id)
-            .await
-            .ok()
-            .flatten();
+        // Retrieve pre-loaded assignment status
+        let assignment_status = assignment_statuses.get(&system.id).cloned().flatten();
 
         let rollup = match effective.get(&system.id) {
             Some(ResolutionOutcome::Resolved(set))
@@ -2612,6 +2627,98 @@ pub async fn determine_assignment_status_for_system(
         }
         None => Ok(None), // No assignment for this system
     }
+}
+
+/// Load assignment statuses for multiple systems in a single batch query.
+/// 
+/// This is the production path for determining assignment status across many systems.
+/// Uses set-oriented queries to minimize database round trips.
+/// 
+/// Returns a map of system_id -> assignment_status string (or None if no applicable assignment).
+/// 
+/// Assignment precedence:
+/// 1. System-scoped assignments (take precedence over environment-scoped)
+/// 2. Environment-scoped assignments for the system's environment
+/// 3. No assignment
+pub async fn load_assignment_statuses_for_systems(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    current_published_version: Option<Uuid>,
+    system_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, Option<String>>> {
+    if system_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    // Single query to load effective assignments for all systems with precedence
+    // System-scoped assignments take precedence over environment-scoped
+    // Uses DISTINCT ON to ensure each system gets only one assignment
+    #[derive(sqlx::FromRow)]
+    struct AssignmentRow {
+        system_id: Uuid,
+        assigned_version_id: Uuid,
+    }
+
+    let assignments: Vec<AssignmentRow> = sqlx::query_as(
+        r#"
+        WITH requested_systems AS (
+            SELECT DISTINCT UNNEST($2::uuid[]) AS system_id
+        ),
+        system_assignments AS (
+            -- System-scoped assignments take absolute precedence
+            SELECT DISTINCT ON (sys.id)
+                sys.id AS system_id,
+                av.bundle_version_id AS assigned_version_id
+            FROM requested_systems rs
+            JOIN systems sys ON sys.id = rs.system_id
+            JOIN compliance_bundle_assignments cba ON cba.system_id = sys.id 
+                AND cba.bundle_id = $1 AND cba.active = true AND cba.scope_type = 'system'
+            JOIN compliance_bundle_assignment_versions av ON av.id = cba.current_version_id
+            
+            UNION ALL
+            
+            -- Environment-scoped assignments as fallback (only if no system-scoped assignment)
+            SELECT DISTINCT ON (sys.id)
+                sys.id AS system_id,
+                av.bundle_version_id AS assigned_version_id
+            FROM requested_systems rs
+            JOIN systems sys ON sys.id = rs.system_id
+            JOIN compliance_bundle_assignments cba ON cba.bundle_id = $1 
+                AND cba.active = true AND cba.scope_type = 'environment'
+                AND cba.environment_id = sys.environment_id
+            JOIN compliance_bundle_assignment_versions av ON av.id = cba.current_version_id
+            WHERE NOT EXISTS (
+                -- Exclude if system already has a system-scoped assignment
+                SELECT 1 FROM compliance_bundle_assignments cba_sys
+                WHERE cba_sys.bundle_id = $1 AND cba_sys.active = true 
+                  AND cba_sys.scope_type = 'system' AND cba_sys.system_id = sys.id
+            )
+        )
+        SELECT system_id, assigned_version_id FROM system_assignments
+        "#,
+    )
+    .bind(bundle_id)
+    .bind(system_ids)
+    .fetch_all(pool)
+    .await?;
+
+    // Build the result map
+    let mut result = std::collections::HashMap::new();
+    for AssignmentRow { system_id, assigned_version_id } in assignments {
+        let status = match current_published_version {
+            Some(current) if assigned_version_id == current => Some("current".to_string()),
+            Some(_) => Some("pinned".to_string()),
+            None => Some("pinned".to_string()),
+        };
+        result.insert(system_id, status);
+    }
+
+    // Ensure all requested systems are in the map (with None for unassigned)
+    for &system_id in system_ids {
+        result.entry(system_id).or_insert(None);
+    }
+
+    Ok(result)
 }
 
 /// Legacy function that determined status per bundle version (kept for backwards compatibility).
