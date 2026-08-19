@@ -5,10 +5,12 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::api::models::DeletionEligibility;
+use crate::api::models::{DeletionEligibility, DeploymentPolicyVersionSummary};
 use crate::compliance::digest::{PolicyVersionCanonical, write_policy_version_digest};
 use crate::compliance::mappings::{
-    initial_policy_metadata, merge_classification_into_metadata, merge_policy_mappings,
+    extract_cci_ids, extract_classification, extract_evidence_specs, extract_srg_ids,
+    infer_legacy_category, initial_policy_metadata, merge_classification_into_metadata,
+    merge_policy_mappings,
 };
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
@@ -436,6 +438,129 @@ pub async fn load_policy_version_usage_counts(
             )
         })
         .collect())
+}
+
+/// Fetch full version summaries for a batch of policy lineage IDs.
+///
+/// This is the production path used by the deployment-policies list handler:
+/// - one query loads all version rows for the batch (no N+1);
+/// - the `users` table is joined to resolve `created_by` into a human-readable
+///   display name (username, falling back to email);
+/// - each version's `compliance_metadata` is decoded for SRG/CCI ids,
+///   classification, and evidence specs;
+/// - current published/draft pointers are resolved for `is_current_*` flags.
+///
+/// Returns a map of `policy_id -> Vec<DeploymentPolicyVersionSummary>`,
+/// ordered newest-first per policy.
+pub async fn fetch_policy_version_summaries(
+    pool: &PgPool,
+    policy_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<DeploymentPolicyVersionSummary>>> {
+    if policy_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct VersionRow {
+        id: Uuid,
+        policy_id: Uuid,
+        version: String,
+        publication_state: String,
+        trust_state: String,
+        semantic_digest: String,
+        created_at: chrono::DateTime<chrono::Utc>,
+        published_at: Option<chrono::DateTime<chrono::Utc>>,
+        derived_from_version_id: Option<Uuid>,
+        name: String,
+        description: Option<String>,
+        policy_type: String,
+        config: serde_json::Value,
+        enabled_by_default: Option<bool>,
+        compliance_metadata: serde_json::Value,
+        created_by: Option<Uuid>,
+        created_by_display: Option<String>,
+    }
+
+    let rows = sqlx::query_as::<_, VersionRow>(
+        r#"
+        SELECT dpv.id, dpv.policy_id, dpv.version, dpv.publication_state, dpv.trust_state,
+               dpv.semantic_digest, dpv.created_at, dpv.published_at,
+               dpv.derived_from_version_id, dpv.name, dpv.description, dpv.policy_type,
+               dpv.config, dpv.enabled_by_default, dpv.compliance_metadata, dpv.created_by,
+               COALESCE(u.username, u.email) AS created_by_display
+          FROM deployment_policy_versions dpv
+          LEFT JOIN users u ON dpv.created_by = u.id
+         WHERE dpv.policy_id = ANY($1)
+         ORDER BY dpv.policy_id, dpv.created_at DESC, dpv.id DESC
+        "#,
+    )
+    .bind(policy_ids)
+    .fetch_all(pool)
+    .await
+    .context("Failed to load policy version history")?;
+
+    let pointer_rows: HashMap<Uuid, (Option<Uuid>, Option<Uuid>)> = sqlx::query_as::<_, (Uuid, Option<Uuid>, Option<Uuid>)>(
+        "SELECT id, current_published_version_id, current_draft_version_id FROM deployment_policies WHERE id = ANY($1)",
+    )
+    .bind(policy_ids)
+    .fetch_all(pool)
+    .await
+    .context("Failed to load policy version pointers")?
+    .into_iter()
+    .map(|(id, published, draft)| (id, (published, draft)))
+    .collect();
+
+    let mut by_policy: HashMap<Uuid, Vec<DeploymentPolicyVersionSummary>> = HashMap::new();
+    for row in rows {
+        let pointers = pointer_rows
+            .get(&row.policy_id)
+            .copied()
+            .unwrap_or((None, None));
+        let compliance_meta = &row.compliance_metadata;
+        let (cat, fw, sev, cf, cmmc, cis, rat) = extract_classification(compliance_meta);
+        let inferred_category = cat.clone().unwrap_or_else(|| {
+            infer_legacy_category(&row.policy_type, compliance_meta).to_string()
+        });
+        let summary = DeploymentPolicyVersionSummary {
+            id: row.id,
+            policy_id: row.policy_id,
+            version: row.version,
+            publication_state: row.publication_state,
+            trust_state: row.trust_state,
+            semantic_digest: row.semantic_digest,
+            created_at: row.created_at,
+            published_at: row.published_at,
+            derived_from_version_id: row.derived_from_version_id,
+            is_current_published: pointers.0 == Some(row.id),
+            is_current_draft: pointers.1 == Some(row.id),
+            name: row.name,
+            description: row.description,
+            policy_type: row.policy_type,
+            config: row.config,
+            enabled: row.enabled_by_default.unwrap_or(true),
+            srg_ids: extract_srg_ids(compliance_meta),
+            cci_ids: extract_cci_ids(compliance_meta),
+            category: Some(inferred_category),
+            framework: fw,
+            severity: sev,
+            control_family: cf,
+            cmmc_level: cmmc,
+            cis_section: cis,
+            rationale: rat,
+            created_by: row.created_by,
+            created_by_display: row.created_by_display,
+            evidence_specs: extract_evidence_specs(compliance_meta)
+                .into_iter()
+                .filter_map(|spec| serde_json::from_value(spec).ok())
+                .collect(),
+        };
+        by_policy
+            .entry(summary.policy_id)
+            .or_default()
+            .push(summary);
+    }
+
+    Ok(by_policy)
 }
 
 /// Create a new deployment policy.

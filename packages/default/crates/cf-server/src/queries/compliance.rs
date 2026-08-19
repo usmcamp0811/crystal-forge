@@ -2582,9 +2582,7 @@ pub(crate) async fn determine_assignment_status_for_system(
                    WHERE cbv.bundle_id = $1 AND cba.scope_type = 'environment' AND cba.active = true
                    AND EXISTS (
                        SELECT 1 FROM systems s 
-                       WHERE s.id = $2 AND s.environment = (
-                           SELECT e.name FROM environments e WHERE e.id = cba.environment_id
-                       )
+                       WHERE s.id = $2 AND s.environment_id = cba.environment_id
                     )
                     LIMIT 1"#,
             )

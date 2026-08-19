@@ -5,7 +5,6 @@
 //! - POST/PUT endpoints: Available to Admin and Operator roles only
 //! - DELETE endpoint: Available to Admin role only
 
-use anyhow::Context;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -17,12 +16,9 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-use crate::api::models::{DeletionEligibility, DeploymentPolicyVersionSummary, EvidenceSpec};
+use crate::api::models::{DeletionEligibility, DeploymentPolicyVersionSummary};
 use crate::auth::extractors::{RequireAdmin, RequireAuth, RequireOperator};
-use crate::compliance::mappings::{
-    extract_cci_ids, extract_classification, extract_evidence_specs, extract_srg_ids,
-    infer_legacy_category, normalise_cci_ids, normalise_srg_ids,
-};
+use crate::compliance::mappings::{normalise_cci_ids, normalise_srg_ids};
 use crate::handlers::agent_request::CFState;
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
@@ -30,33 +26,6 @@ use crate::models::deployment_policies::{
 };
 use crate::queries::deployment_policies;
 use crate::queries::deployment_policies::PolicyDeleteOutcome;
-
-// =============================================================================
-// Helper Structs
-// =============================================================================
-
-/// Row struct for deserializing policy version rows with user display name
-#[derive(Debug, sqlx::FromRow)]
-struct PolicyVersionRow {
-    id: Uuid,
-    policy_id: Uuid,
-    version: String,
-    publication_state: String,
-    trust_state: String,
-    semantic_digest: String,
-    created_at: chrono::DateTime<chrono::Utc>,
-    published_at: Option<chrono::DateTime<chrono::Utc>>,
-    derived_from_version_id: Option<Uuid>,
-    name: String,
-    description: Option<String>,
-    policy_type: String,
-    config: Value,
-    enabled_by_default: Option<bool>,
-    compliance_metadata: Value,
-    created_by: Option<Uuid>,
-    #[sqlx(rename = "created_by_display")]
-    created_by_display: Option<String>,
-}
 
 // =============================================================================
 // Response Models
@@ -566,76 +535,37 @@ pub async fn list_deployment_policies(
     .into_iter()
     .collect();
 
-    let pointer_rows: HashMap<Uuid, (Option<Uuid>, Option<Uuid>)> = sqlx::query_as::<_, (Uuid, Option<Uuid>, Option<Uuid>)>(
-        "SELECT id, current_published_version_id, current_draft_version_id FROM deployment_policies WHERE id = ANY($1)",
-    )
-    .bind(&policy_ids)
-    .fetch_all(&state.pool)
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to load policy version pointers: {}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to retrieve policy version pointers".to_string())
-    })?
-    .into_iter()
-    .map(|(id, published, draft)| (id, (published, draft)))
-    .collect();
+    // Fetch full version summaries (users JOIN for display names, evidence
+    // specs from compliance_metadata, current-version pointers) in one batched
+    // production query. No N+1: one query covers all policies in the page.
+    let version_summaries =
+        deployment_policies::fetch_policy_version_summaries(&state.pool, &policy_ids)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load policy version history: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to retrieve policy version history".to_string(),
+                )
+            })?;
 
-     // Fetch all version rows in one query, including compliance_metadata for
-     // SRG/CCI extraction and user display names. No N+1: one query covers all policies in the page.
-     let version_rows = sqlx::query_as::<_, PolicyVersionRow>(
-         r#"
-         SELECT dpv.id, dpv.policy_id, dpv.version, dpv.publication_state, dpv.trust_state, dpv.semantic_digest, 
-                dpv.created_at, dpv.published_at, dpv.derived_from_version_id, dpv.name, dpv.description, 
-                dpv.policy_type, dpv.config, dpv.enabled_by_default, dpv.compliance_metadata, 
-                dpv.created_by, COALESCE(u.username, u.email) as created_by_display
-         FROM deployment_policy_versions dpv
-         LEFT JOIN users u ON dpv.created_by = u.id
-         WHERE dpv.policy_id = ANY($1) 
-         ORDER BY dpv.policy_id, dpv.created_at DESC, dpv.id DESC
-         "#,
-     )
-     .bind(&policy_ids)
-     .fetch_all(&state.pool)
-     .await
-     .map_err(|e| {
-         tracing::error!("Failed to load policy version history: {}", e);
-         (StatusCode::INTERNAL_SERVER_ERROR, "Failed to retrieve policy version history".to_string())
-     })?;
-
-    // Load requirement mapping counts per policy version
-    let requirement_counts: HashMap<Uuid, i64> = sqlx::query_as::<_, (Uuid, i64)>(
-        "SELECT policy_version_id, COUNT(DISTINCT requirement_version_id) FROM policy_requirement_mappings WHERE policy_version_id = ANY(SELECT id FROM deployment_policy_versions WHERE policy_id = ANY($1)) AND trust_state = 'trusted' GROUP BY policy_version_id",
-    )
-    .bind(&policy_ids)
-    .fetch_all(&state.pool)
-    .await
-    .context("Failed to load policy requirement mapping counts")
-    .map_err(|e| {
-        tracing::error!("Failed to load policy requirement mapping counts: {}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to load policy counts".to_string())
-    })?
-    .into_iter()
-    .collect();
-
-    // Load bundle usage counts per policy version
-    let bundle_usage_counts: HashMap<Uuid, i64> = sqlx::query_as::<_, (Uuid, i64)>(
-        r#"
-        SELECT cbvp.policy_version_id, COUNT(DISTINCT cbvp.bundle_version_id)
-        FROM compliance_bundle_version_policies cbvp
-        WHERE cbvp.policy_version_id = ANY(SELECT id FROM deployment_policy_versions WHERE policy_id = ANY($1))
-        GROUP BY cbvp.policy_version_id
-        "#,
-    )
-    .bind(&policy_ids)
-    .fetch_all(&state.pool)
-    .await
-    .context("Failed to load policy bundle usage counts")
-    .map_err(|e| {
-        tracing::error!("Failed to load policy bundle usage counts: {}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to load policy counts".to_string())
-    })?
-    .into_iter()
-    .collect();
+    // Load mapped requirement and bundle usage counts for every version in one
+    // batched query (no N+1, real data, errors propagated).
+    let all_version_ids: Vec<Uuid> = version_summaries
+        .values()
+        .flatten()
+        .map(|summary| summary.id)
+        .collect();
+    let usage_counts =
+        deployment_policies::load_policy_version_usage_counts(&state.pool, &all_version_ids)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load policy counts: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to load policy counts".to_string(),
+                )
+            })?;
 
     Ok(Json(DeploymentPoliciesListResponse {
         policies: policies
@@ -644,69 +574,24 @@ pub async fn list_deployment_policies(
                 let current_version_id = versions.get(&policy.id).copied();
                 // Get mapped requirement count from current version if available
                 let mapped_requirement_count = current_version_id
-                    .and_then(|vid| requirement_counts.get(&vid).copied())
+                    .and_then(|vid| usage_counts.get(&vid).map(|(mapped, _)| *mapped))
                     .unwrap_or(0);
                 // Get bundle usage count from current version if available
                 let bundle_usage_count = current_version_id
-                    .and_then(|vid| bundle_usage_counts.get(&vid).copied())
+                    .and_then(|vid| usage_counts.get(&vid).map(|(_, bundle)| *bundle))
                     .unwrap_or(0);
 
                 policy.mapped_requirement_count = mapped_requirement_count;
                 policy.bundle_usage_count = bundle_usage_count;
 
-                 DeploymentPolicyListItem {
-                     current_version_id,
-                     versions: version_rows
-                         .iter()
-                         .filter(|row| row.policy_id == policy.id)
-                         .map(|row| {
-                             let pointers = pointer_rows
-                                 .get(&policy.id)
-                                 .copied()
-                                 .unwrap_or((None, None));
-                             let compliance_meta = &row.compliance_metadata;
-                             let (cat, fw, sev, cf, cmmc, cis, rat) =
-                                 extract_classification(compliance_meta);
-                             let inferred_category = cat.clone().unwrap_or_else(|| {
-                                 infer_legacy_category(&row.policy_type, compliance_meta).to_string()
-                             });
-                             DeploymentPolicyVersionSummary {
-                                 id: row.id,
-                                 policy_id: row.policy_id,
-                                 version: row.version.clone(),
-                                 publication_state: row.publication_state.clone(),
-                                 trust_state: row.trust_state.clone(),
-                                 semantic_digest: row.semantic_digest.clone(),
-                                 created_at: row.created_at,
-                                 published_at: row.published_at,
-                                 derived_from_version_id: row.derived_from_version_id,
-                                 is_current_published: pointers.0 == Some(row.id),
-                                 is_current_draft: pointers.1 == Some(row.id),
-                                 name: row.name.clone(),
-                                 description: row.description.clone(),
-                                 policy_type: row.policy_type.clone(),
-                                 config: row.config.clone(),
-                                 enabled: row.enabled_by_default.unwrap_or(true),
-                                 srg_ids: extract_srg_ids(compliance_meta),
-                                 cci_ids: extract_cci_ids(compliance_meta),
-                                 category: Some(inferred_category),
-                                 framework: fw,
-                                 severity: sev,
-                                 control_family: cf,
-                                 cmmc_level: cmmc,
-                                 cis_section: cis,
-                                 rationale: rat,
-                                 created_by: row.created_by,
-                                 created_by_display: row.created_by_display.clone(),
-                                 evidence_specs: extract_evidence_specs(compliance_meta)
-                                     .into_iter()
-                                     .filter_map(|spec| serde_json::from_value(spec).ok())
-                                     .collect(),
-                             }
-                         })
-                         .collect(),
-                     policy,
-                 }
+                DeploymentPolicyListItem {
+                    current_version_id,
+                    versions: version_summaries
+                        .get(&policy.id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    policy,
+                }
             })
             .collect(),
         total: total as usize,
