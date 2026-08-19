@@ -1323,10 +1323,13 @@ pub struct DeploymentPolicySummary {
     /// Number of trusted/eligible policy_requirement_mappings for this policy version
     #[serde(default)]
     pub mapped_requirement_count: i64,
-    /// Number of distinct bundle lineages using this policy version
-    #[serde(default)]
-    pub bundle_usage_count: i64,
-}
+     /// Number of distinct bundle lineages using this policy version
+     #[serde(default)]
+     pub bundle_usage_count: i64,
+     /// Evidence collection specifications for this policy (for ATO audit trails)
+     #[serde(default)]
+     pub evidence_specs: Vec<EvidenceSpec>,
+ }
 
 /// A retained record that prevents permanent deletion. These are returned by
 /// deletion preflight endpoints; DELETE reruns the same checks transactionally
@@ -1405,9 +1408,42 @@ pub struct DeploymentPolicyVersionSummary {
     /// Human-readable rationale for this control
     #[serde(default)]
     pub rationale: Option<String>,
-    /// User UUID who created this version (if available)
+     /// User UUID who created this version (if available)
+     #[serde(default)]
+     pub created_by: Option<Uuid>,
+     /// Evidence collection specifications for ATO audits
+     #[serde(default)]
+     pub evidence_specs: Vec<EvidenceSpec>,
+ }
+
+/// Evidence collection specification for a control or policy.
+/// Describes the authoritative evidence needed to satisfy an ATO requirement.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "details")]
+pub enum EvidenceKind {
+    /// Command execution proof: cmd output must match expect pattern
+    Command { cmd: String, expect: String },
+    /// System journal or event log: unit/source with match_text filter
+    Log { source: String, unit: String, match_text: String },
+    /// File presence/state: path with optional annotation
+    File { path: String, note: Option<String> },
+    /// systemd/systemctl unit state: requires exact state value
+    UnitState { unit: String, state: String },
+    /// NixOS eval attribute: attr path to be evaluated
+    EvalAttr { attr: String },
+    /// Human attestation: reviewer assertion with optional note
+    Attestation { note: String },
+}
+
+/// Single versioned evidence spec within a policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceSpec {
+    /// Spec type and parameters
+    #[serde(flatten)]
+    pub kind: EvidenceKind,
+    /// Optional required-fields map (validation dictionary)
     #[serde(default)]
-    pub created_by: Option<Uuid>,
+    pub required_fields: std::collections::HashMap<String, String>,
 }
 
 /// An exact policy-version member of a selected bundle version.

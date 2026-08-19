@@ -651,6 +651,7 @@ pub async fn list_deployment_policies(
                                 cis_section: cis,
                                 rationale: rat,
                                 created_by: row.15,
+                                evidence_specs: Vec::new(),
                             }
                         })
                         .collect(),

@@ -765,26 +765,27 @@ pub async fn list_deployment_policies(pool: &PgPool) -> Result<Vec<DeploymentPol
         .fetch_one(pool)
         .await?;
 
-        summaries.push(DeploymentPolicySummary {
-            id: r.id,
-            version_id: r.version_id,
-            name: r.name,
-            description: r.description,
-            policy_type: r.policy_type,
-            config: r.config,
-            enabled: r.enabled,
-            // Classification metadata not loaded in this lightweight path.
-            // Callers needing classification should use the versioned policy API.
-            category: None,
-            framework: None,
-            severity: None,
-            control_family: None,
-            cmmc_level: None,
-            cis_section: None,
-            rationale: None,
-            mapped_requirement_count,
-            bundle_usage_count,
-        });
+         summaries.push(DeploymentPolicySummary {
+             id: r.id,
+             version_id: r.version_id,
+             name: r.name,
+             description: r.description,
+             policy_type: r.policy_type,
+             config: r.config,
+             enabled: r.enabled,
+             // Classification metadata not loaded in this lightweight path.
+             // Callers needing classification should use the versioned policy API.
+             category: None,
+             framework: None,
+             severity: None,
+             control_family: None,
+             cmmc_level: None,
+             cis_section: None,
+             rationale: None,
+             mapped_requirement_count,
+             bundle_usage_count,
+             evidence_specs: Vec::new(),
+         });
     }
 
     Ok(summaries)
