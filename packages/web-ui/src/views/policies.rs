@@ -1068,12 +1068,12 @@ pub fn PolicyDrawer(
                  div { class: "ed-stat", div { class: "ed-stat-label", "Rules" } div { class: "ed-stat-val", "{rules.len()}" } }
                  div { class: "ed-stat", div { class: "ed-stat-label", "Type" } div { class: "ed-stat-val", style: "font-size:12px;", "{type_display}" } }
                   div { class: "ed-stat", div { class: "ed-stat-label", "Modified" } div { class: "ed-stat-val", style: "font-size:12px;", "{modified_at}" } }
-                  // Owner is the user who created this policy version
-                  if let Some(selected_rev) = selected_revision {
-                      if let Some(display_name) = selected_rev.created_by_display.as_deref() {
-                          div { class: "ed-stat", div { class: "ed-stat-label", "Created by" } div { class: "ed-stat-val", style: "font-size:11px;", "{display_name}" } }
-                      }
-                  }
+                   // Owner is the user who created this policy version
+                   if let Some(selected_rev) = selected_revision {
+                       if let Some(display_name) = selected_rev.created_by_display.as_deref() {
+                           div { class: "ed-stat", div { class: "ed-stat-label", "Owner" } div { class: "ed-stat-val", style: "font-size:11px;", "{display_name}" } }
+                       }
+                   }
              }
             if revision_count > 1 {
                 div { class: "policy-drawer-tabs",
