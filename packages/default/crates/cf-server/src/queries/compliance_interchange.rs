@@ -1363,7 +1363,9 @@ pub async fn commit_foreign_import(
         .await
         .context("failed to verify STIG bundle membership cardinality")?;
         if membership_count != selected_rule_count {
-            bail!("IMPORT_FRAMEWORK_NORMALIZATION_FAILED: DISA STIG import selected {selected_rule_count} rules but produced {membership_count} selected bundle requirements");
+            bail!(
+                "IMPORT_FRAMEWORK_NORMALIZATION_FAILED: DISA STIG import selected {selected_rule_count} rules but produced {membership_count} selected bundle requirements"
+            );
         }
 
         let mut expected_pairs: Vec<(Uuid, Uuid)> = Vec::with_capacity(policy_records.len());
@@ -1377,12 +1379,14 @@ pub async fn commit_foreign_import(
                         rec.source_rule_id
                     )
                 })?;
-            let requirement = requirement_versions.get(&rec.source_rule_id).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "IMPORT_REQUIREMENT_NOT_FOUND: missing normalized requirement for rule {}",
-                    rec.source_rule_id
-                )
-            })?;
+            let requirement = requirement_versions
+                .get(&rec.source_rule_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "IMPORT_REQUIREMENT_NOT_FOUND: missing normalized requirement for rule {}",
+                        rec.source_rule_id
+                    )
+                })?;
             expected_pairs.push((requirement.requirement_version_id, policy_version_id));
         }
         expected_pairs.sort_unstable();
