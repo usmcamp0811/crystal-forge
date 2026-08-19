@@ -4880,6 +4880,25 @@ mod tests {
         assert_eq!(rollup.evaluated_total, 1);
         assert_eq!(rollup.score, 100);
     }
+
+    #[test]
+    fn assignment_status_passed_through_rollup() {
+        let sys = system("healthy", 0, 0);
+        let statuses = vec![ComplianceControlStatus::Pass];
+        
+        // Test that assignment_status is correctly passed through
+        let rollup = rollup_from_statuses(sys, &statuses, 0, Some("current".to_string()));
+        assert_eq!(rollup.assignment_status, Some("current".to_string()));
+        assert_eq!(rollup.pass, 1);
+        
+        // Test pinned status
+        let rollup2 = rollup_from_statuses(sys, &statuses, 0, Some("pinned".to_string()));
+        assert_eq!(rollup2.assignment_status, Some("pinned".to_string()));
+        
+        // Test no assignment
+        let rollup3 = rollup_from_statuses(sys, &statuses, 0, None);
+        assert_eq!(rollup3.assignment_status, None);
+    }
 }
 
 // Integration test cases for list_system_bundles (database-dependent)
