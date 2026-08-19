@@ -238,22 +238,35 @@ pub fn validate_evidence_spec(spec: &serde_json::Value) -> Result<()> {
     
     // Match case-insensitively to handle both serialization formats
     let kind_lower = kind.to_lowercase();
+    
+    // Helper: get field from either flattened format (top-level) or details-nested format
+    let get_field = |field_name: &str| {
+        obj.get(field_name)
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                obj.get("details")
+                    .and_then(|v| v.as_object())
+                    .and_then(|d| d.get(field_name))
+                    .and_then(|v| v.as_str())
+            })
+    };
+    
     match kind_lower.as_str() {
         "command" => {
-            let cmd = obj.get("cmd").and_then(|v| v.as_str());
+            let cmd = get_field("cmd");
             if cmd.is_none() || cmd.map_or(false, |s| s.is_empty()) {
                 bail!("evidence_specs: Command evidence must have non-empty 'cmd' field");
             }
         }
         "file" => {
-            let path = obj.get("path").and_then(|v| v.as_str());
+            let path = get_field("path");
             if path.is_none() || path.map_or(false, |s| s.is_empty()) {
                 bail!("evidence_specs: File evidence must have non-empty 'path' field");
             }
         }
-        "unit_state" => {
-            let unit = obj.get("unit").and_then(|v| v.as_str());
-            let state = obj.get("state").and_then(|v| v.as_str());
+        "unitstate" | "unit_state" => {
+            let unit = get_field("unit");
+            let state = get_field("state");
             if unit.is_none() || unit.map_or(false, |s| s.is_empty()) {
                 bail!("evidence_specs: UnitState evidence must have non-empty 'unit' field");
             }
@@ -261,20 +274,20 @@ pub fn validate_evidence_spec(spec: &serde_json::Value) -> Result<()> {
                 bail!("evidence_specs: UnitState evidence must have non-empty 'state' field");
             }
         }
-        "eval_attr" => {
-            let attr = obj.get("attr").and_then(|v| v.as_str());
+        "evalattr" | "eval_attr" => {
+            let attr = get_field("attr");
             if attr.is_none() || attr.map_or(false, |s| s.is_empty()) {
                 bail!("evidence_specs: EvalAttr evidence must have non-empty 'attr' field");
             }
         }
         "attestation" => {
-            let note = obj.get("note").and_then(|v| v.as_str());
+            let note = get_field("note");
             if note.is_none() || note.map_or(false, |s| s.is_empty()) {
                 bail!("evidence_specs: Attestation evidence must have non-empty 'note' field");
             }
         }
         "log" => {
-            let source = obj.get("source").and_then(|v| v.as_str());
+            let source = get_field("source");
             if source.is_none() || source.map_or(false, |s| s.is_empty()) {
                 bail!("evidence_specs: Log evidence must have non-empty 'source' field");
             }
