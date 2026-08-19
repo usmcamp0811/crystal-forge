@@ -1987,7 +1987,10 @@ async fn list_explicit_bundle_version_system_rows(
         FROM view_system_list v
         LEFT JOIN environments e ON e.name = v.environment
         JOIN compliance_bundle_assignments a
-          ON a.bundle_version_id = $2 AND a.active
+          ON a.bundle_id = $1 AND a.active
+        JOIN compliance_bundle_assignment_versions av
+          ON av.id = a.current_version_id
+         AND av.bundle_version_id = $2
          AND (
              (a.scope_type = 'system' AND a.system_id = v.id)
              OR (a.scope_type = 'environment' AND a.environment_id = e.id)

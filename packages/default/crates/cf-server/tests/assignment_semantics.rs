@@ -602,3 +602,82 @@ async fn test_bundle_systems_batched_query_count(pool: PgPool) {
         );
     }
 }
+
+#[sqlx::test]
+async fn test_exact_version_uses_immutable_assignment_snapshot(pool: PgPool) {
+    // CRITICAL REGRESSION: list_bundle_systems_for_version() must use the immutable
+    // assignment snapshot (compliance_bundle_assignment_versions), NOT the mutable
+    // lineage field (compliance_bundle_assignments.bundle_version_id).
+    //
+    // This test deliberately creates a mismatch where:
+    // - The immutable snapshot says the assignment targets V1
+    // - The mutable lineage field says the assignment targets V2
+    //
+    // The endpoint must use the snapshot, not the lineage.
+    // If it uses the lineage, the system will appear in the V2 query results
+    // (wrong) instead of V1 results (correct).
+
+    let bundle_id = create_bundle(&pool, "exact-version-snapshot-test", "NIST CSF").await;
+    let v1_id = create_bundle_version(&pool, bundle_id, "1.0", "accepted", "Version 1").await;
+    let v2_id = create_bundle_version(&pool, bundle_id, "2.0", "accepted", "Version 2").await;
+
+    // V2 is published
+    set_current_published(&pool, bundle_id, v2_id).await;
+
+    let system_id = create_system(&pool, "exact-version-test-system", None).await;
+
+    // Create assignment to V1 using the standard fixture
+    create_system_assignment(&pool, bundle_id, v1_id, system_id).await;
+
+    // Get the assignment record
+    let assignment_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM compliance_bundle_assignments WHERE system_id = $1 AND bundle_id = $2",
+    )
+    .bind(system_id)
+    .bind(bundle_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch assignment");
+
+    // NOW CORRUPT THE LINEAGE: Update the mutable field to V2
+    // This creates: lineage says V2, snapshot says V1
+    sqlx::query("UPDATE compliance_bundle_assignments SET bundle_version_id = $1 WHERE id = $2")
+        .bind(v2_id)
+        .bind(assignment_id)
+        .execute(&pool)
+        .await
+        .expect("corrupt lineage");
+
+    // Call the PRODUCTION ENDPOINT with V1
+    // If the endpoint uses lineage (wrong), system won't be returned (lineage says V2, not V1)
+    // If the endpoint uses snapshot (correct), system WILL be returned (snapshot says V1)
+    let response_v1 = list_bundle_systems_for_version(&pool, bundle_id, v1_id)
+        .await
+        .expect("query v1")
+        .expect("v1 exists");
+
+    assert!(
+        response_v1
+            .systems
+            .iter()
+            .any(|s| s.system_id == system_id),
+        "CRITICAL: Exact-version endpoint must use immutable snapshot, not mutable lineage field. \
+         System was assigned to V1 (snapshot), but lineage was corrupted to V2. \
+         The system MUST appear in V1 results."
+    );
+
+    // Verify the system does NOT appear in V2 (since snapshot says V1, not V2)
+    let response_v2 = list_bundle_systems_for_version(&pool, bundle_id, v2_id)
+        .await
+        .expect("query v2")
+        .expect("v2 exists");
+
+    assert!(
+        !response_v2
+            .systems
+            .iter()
+            .any(|s| s.system_id == system_id),
+        "System assigned to V1 (snapshot) should NOT appear in V2 results, \
+         even though lineage was corrupted to V2"
+    );
+}
