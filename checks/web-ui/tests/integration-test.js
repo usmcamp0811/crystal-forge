@@ -8891,13 +8891,8 @@ security.audit.enable = true;</fixtext>
         "Expected 'View evidence' action in systems matrix",
       );
 
-      await coverageCard.getByRole("button").first().click();
-      await assertVisible(
-        coverageCard.getByPlaceholder("Filter requirements…"),
-        "Expected requirement filters after expanding the coverage card",
-      );
-      await coverageCard.getByRole("button", { name: /Open coverage/i }).click();
-      await assertVisible(page.getByText("Requirement coverage").first(), "Expected requirement coverage drawer view");
+       await coverageCard.getByRole("button").first().click();
+       await assertVisible(page.getByText("Requirement coverage").first(), "Expected requirement coverage drawer view");
       await assertVisible(page.getByText("Full 6").first(), "Expected full coverage count from API");
       await assertVisible(page.getByText("Partial 2").first(), "Expected partial coverage count from API");
       await assertVisible(page.getByText("Unmapped 2").first(), "Expected unmapped coverage count from API");

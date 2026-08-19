@@ -528,18 +528,28 @@ pub fn ComplianceView() -> Element {
                     if let Some(bundle) = selected_bundle {
                         div { class: "fl-tray-backdrop", onclick: move |_| drawer_open.set(false) }
                         aside { class: "fl-tray", style: "width:min(900px,96vw);",
-                            header { class: "fl-tray-head",
-                                div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;", Icon { name: IconName::Shield, size: 18 }, span { style: "font-size:11px;color:var(--cf-text-muted);", "Compliance bundle" } }
-                                div { style: "display:flex;gap:6px;",
-                                    if is_admin { button { class: "btn btn-ghost focus-ring xs", onclick: move |_| show_edit_bundle.set(true), Icon { name: IconName::Edit, size: 12 }, " Edit bundle" } }
+                            if *coverage_view.read() {
+                                header { class: "fl-tray-head",
+                                    div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;",
+                                        button { class: "btn-icon focus-ring", onclick: move |_| coverage_view.set(false), Icon { name: IconName::ArrowLeft, size: 16 } }
+                                        div {
+                                            div { style: "font-size:11px;color:var(--cf-text-muted);", "Requirement coverage" }
+                                            div { style: "font-size:13px;font-weight:600;", "{bundle.name}" }
+                                        }
+                                    }
                                     button { class: "btn-icon focus-ring", onclick: move |_| drawer_open.set(false), Icon { name: IconName::X, size: 16 } }
+                                }
+                            } else {
+                                header { class: "fl-tray-head",
+                                    div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;", Icon { name: IconName::Shield, size: 18 }, span { style: "font-size:11px;color:var(--cf-text-muted);", "Compliance bundle" } }
+                                    div { style: "display:flex;gap:6px;",
+                                        if is_admin { button { class: "btn btn-ghost focus-ring xs", onclick: move |_| show_edit_bundle.set(true), Icon { name: IconName::Edit, size: 12 }, " Edit bundle" } }
+                                        button { class: "btn-icon focus-ring", onclick: move |_| drawer_open.set(false), Icon { name: IconName::X, size: 16 } }
+                                    }
                                 }
                             }
                             if *coverage_view.read() {
                                 div { style: "padding:14px 18px;overflow:auto;flex:1;",
-                                    button { class: "btn-icon focus-ring", onclick: move |_| coverage_view.set(false), Icon { name: IconName::ArrowLeft, size: 16 } }
-                                    h2 { style: "font-size:15px;margin:8px 0 2px;", "Requirement coverage" }
-                                    div { style: "font-size:11px;color:var(--cf-text-muted);margin-bottom:12px;", "{bundle.name}" }
                                     if *coverage_loading.read() {
                                         DashboardLoadingSpinner { label: "Loading requirement coverage…".to_string() }
                                     } else if let Some(error) = coverage_error.read().as_ref() {
@@ -553,6 +563,9 @@ pub fn ComplianceView() -> Element {
                             } else {
                             div { style: "overflow:auto;flex:1;",
                                 div { style: "padding:14px 18px;", BundleHeader { bundle: bundle.clone(), on_edit: move |_| show_edit_bundle.set(true), is_admin, cardless: true } }
+                                if let Some(resp) = systems.read().as_ref() {
+                                    ScoreStrip { totals: resp.totals.clone() }
+                                }
                                 if bundle.versions.len() > 1 {
                                     {
                                     let revisions_expanded = *revisions_open.read();
@@ -570,6 +583,44 @@ pub fn ComplianceView() -> Element {
                                             }
                                         }
                                     } }
+                                    }
+                                }
+                                if let Some(error) = coverage_error.read().as_ref() {
+                                    div { class: "card", "data-testid": "requirement-coverage-card",
+                                        div { style: "font-size:13px;font-weight:600;margin-bottom:8px;", "Requirement coverage" }
+                                        div { class: "sd-callout sd-callout-danger", Icon { name: IconName::X, size: 13 }, div { "Failed to load requirement coverage: {error}" } }
+                                    }
+                                } else if *coverage_loading.read() {
+                                    div { class: "card", "data-testid": "requirement-coverage-card",
+                                        div { style: "font-size:13px;font-weight:600;margin-bottom:8px;", "Requirement coverage" }
+                                        DashboardLoadingSpinner { label: "Loading requirement coverage…".to_string() }
+                                    }
+                                } else if let Some(report) = coverage_report.read().clone() {
+                                    RequirementCoverageCard {
+                                        report,
+                                        expanded: coverage_expanded,
+                                        on_open: move |_| { coverage_view.set(true); },
+                                        on_open_policy,
+                                    }
+                                } else {
+                                    div { class: "card", "data-testid": "requirement-coverage-card",
+                                        div { style: "font-size:13px;font-weight:600;", "Requirement coverage" }
+                                        div { class: "q-empty", "No requirement coverage is available for this revision." }
+                                    }
+                                }
+                                if let Some(err) = systems_error.read().as_ref() {
+                                    div { class: "card", "data-testid": "bundle-systems-card",
+                                        h3 { style: "margin:0 0 8px;font-size:13px;font-weight:600;", "Systems" }
+                                        div { class: "sd-callout sd-callout-danger", Icon { name: IconName::X, size: 13 }, div { "Failed to load systems: {err}" } }
+                                    }
+                                } else if *systems_loading.read() {
+                                    div { class: "card", "data-testid": "bundle-systems-card",
+                                        h3 { style: "margin:0 0 8px;font-size:13px;font-weight:600;", "Systems" }
+                                        div { class: "sd-callout sd-callout-info", Icon { name: IconName::Shield, size: 13 }, div { "Loading systems rollup…" } }
+                                    }
+                                } else if let Some(resp) = systems.read().as_ref() {
+                                    div { class: "card", "data-testid": "bundle-systems-card", style: "padding:0;overflow:hidden;",
+                                        SystemsMatrix { systems: resp.systems.clone(), on_evidence, filter: sys_filter.read().clone(), on_filter: move |filter| sys_filter.set(filter) }
                                     }
                                 }
                                 XccdfVersionSelector { bundle: bundle.clone(), selected_version_id: *selected_bundle_version_id.read(), on_select: move |version_id| { selected_bundle_version_id.set(version_id); if let Some(bundle_id) = *selected_bundle_id.read() { start_systems_fetch(bundle_id, version_id); } } }
@@ -628,47 +679,6 @@ pub fn ComplianceView() -> Element {
                                                 }
                                             });
                                         },
-                                    }
-                                }
-                                if let Some(resp) = systems.read().as_ref() {
-                                    ScoreStrip { totals: resp.totals.clone() }
-                                }
-                                if let Some(error) = coverage_error.read().as_ref() {
-                                    div { class: "card", "data-testid": "requirement-coverage-card",
-                                        div { style: "font-size:13px;font-weight:600;margin-bottom:8px;", "Requirement coverage" }
-                                        div { class: "sd-callout sd-callout-danger", Icon { name: IconName::X, size: 13 }, div { "Failed to load requirement coverage: {error}" } }
-                                    }
-                                } else if *coverage_loading.read() {
-                                    div { class: "card", "data-testid": "requirement-coverage-card",
-                                        div { style: "font-size:13px;font-weight:600;margin-bottom:8px;", "Requirement coverage" }
-                                        DashboardLoadingSpinner { label: "Loading requirement coverage…".to_string() }
-                                    }
-                                } else if let Some(report) = coverage_report.read().clone() {
-                                    RequirementCoverageCard {
-                                        report,
-                                        expanded: coverage_expanded,
-                                        on_open: move |_| { coverage_view.set(true); },
-                                        on_open_policy,
-                                    }
-                                } else {
-                                    div { class: "card", "data-testid": "requirement-coverage-card",
-                                        div { style: "font-size:13px;font-weight:600;", "Requirement coverage" }
-                                        div { class: "q-empty", "No requirement coverage is available for this revision." }
-                                    }
-                                }
-                                if let Some(err) = systems_error.read().as_ref() {
-                                    div { class: "card", "data-testid": "bundle-systems-card",
-                                        h3 { style: "margin:0 0 8px;font-size:13px;font-weight:600;", "Systems" }
-                                        div { class: "sd-callout sd-callout-danger", Icon { name: IconName::X, size: 13 }, div { "Failed to load systems: {err}" } }
-                                    }
-                                } else if *systems_loading.read() {
-                                    div { class: "card", "data-testid": "bundle-systems-card",
-                                        h3 { style: "margin:0 0 8px;font-size:13px;font-weight:600;", "Systems" }
-                                        div { class: "sd-callout sd-callout-info", Icon { name: IconName::Shield, size: 13 }, div { "Loading systems rollup…" } }
-                                    }
-                                } else if let Some(resp) = systems.read().as_ref() {
-                                    div { class: "card", "data-testid": "bundle-systems-card", style: "padding:0;overflow:hidden;",
-                                        SystemsMatrix { systems: resp.systems.clone(), on_evidence, filter: sys_filter.read().clone(), on_filter: move |filter| sys_filter.set(filter) }
                                     }
                                 }
                                 if is_admin {
@@ -5365,9 +5375,11 @@ fn RequirementCoverageCard(
                 class: "focus-ring",
                 style: "display:flex;align-items:center;justify-content:space-between;width:100%;padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer;",
                 onclick: move |_| {
-                    if !detail {
-                        let current = *expanded.read();
-                        expanded.set(!current);
+                    if detail {
+                        // Detail mode: no action on click
+                    } else {
+                        // Overview mode: navigate directly to coverage view
+                        on_open.call(());
                     }
                 },
                 div {
@@ -5422,9 +5434,6 @@ fn RequirementCoverageCard(
                         }
                     }
                     input { class: "q-search-input", placeholder: "Filter requirements…", value: "{query}", oninput: move |event| query.set(event.value()) }
-                    if !detail {
-                        button { class: "btn btn-ghost xs focus-ring", style: "margin-left:auto;", onclick: move |_| on_open.call(()), "Open coverage" }
-                    }
                 }
                 if visible_rows.is_empty() {
                     div { style: "font-size:12px;color:var(--cf-text-muted);text-align:center;padding:24px 0;", "No requirements match." }
