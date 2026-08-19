@@ -1320,6 +1320,12 @@ pub struct DeploymentPolicySummary {
     /// Human-readable rationale
     #[serde(default)]
     pub rationale: Option<String>,
+    /// Number of trusted/eligible policy_requirement_mappings for this policy version
+    #[serde(default)]
+    pub mapped_requirement_count: i64,
+    /// Number of distinct bundle lineages using this policy version
+    #[serde(default)]
+    pub bundle_usage_count: i64,
 }
 
 /// A retained record that prevents permanent deletion. These are returned by

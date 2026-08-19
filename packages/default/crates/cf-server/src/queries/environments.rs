@@ -737,9 +737,35 @@ pub async fn list_deployment_policies(pool: &PgPool) -> Result<Vec<DeploymentPol
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|r| DeploymentPolicySummary {
+    let mut summaries = Vec::new();
+    for r in rows {
+        let version_id = match r.version_id {
+            Some(v) => v,
+            None => continue, // Skip policies with no version
+        };
+
+        // Count trusted/eligible policy_requirement_mappings
+        let mapped_requirement_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM policy_requirement_mappings WHERE policy_version_id = $1 AND trusted = true",
+        )
+        .bind(version_id)
+        .fetch_one(pool)
+        .await?;
+
+        // Count distinct bundle lineages using this policy
+        let bundle_usage_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(DISTINCT cb.id)
+            FROM compliance_bundles cb
+            JOIN compliance_bundle_policies cbp ON cbp.bundle_id = cb.id
+            WHERE cbp.policy_id = $1
+            "#,
+        )
+        .bind(r.id)
+        .fetch_one(pool)
+        .await?;
+
+        summaries.push(DeploymentPolicySummary {
             id: r.id,
             version_id: r.version_id,
             name: r.name,
@@ -756,8 +782,12 @@ pub async fn list_deployment_policies(pool: &PgPool) -> Result<Vec<DeploymentPol
             cmmc_level: None,
             cis_section: None,
             rationale: None,
-        })
-        .collect())
+            mapped_requirement_count,
+            bundle_usage_count,
+        });
+    }
+
+    Ok(summaries)
 }
 
 /// Get required policy IDs for an environment (the baseline).

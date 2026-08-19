@@ -2193,6 +2193,8 @@ mod tests {
             enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
         };
 
         let parsed = parse_deployment_policy_record(&record).expect("policy should parse");
@@ -2213,6 +2215,8 @@ mod tests {
             enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
         };
 
         assert!(parse_deployment_policy_record(&record).is_none());
@@ -2229,6 +2233,8 @@ mod tests {
             enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
         };
 
         assert!(parse_deployment_policy_record(&record).is_none());
@@ -2264,6 +2270,8 @@ mod tests {
             enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
         };
 
         let parsed = parse_deployment_policy_record(&record).expect("policy should parse");

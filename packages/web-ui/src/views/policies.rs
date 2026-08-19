@@ -814,8 +814,8 @@ pub fn PolicyDrawer(
                 cmmc_level: revision.cmmc_level,
                 cis_section: revision.cis_section.clone(),
                 rationale: revision.rationale.clone(),
-                // TODO: Defect 2 - Get mapped_requirement_count and bundle_usage_count from server
-                // For now, these are placeholders (hardcoded 0) pending server-side count queries
+                // Draft policies inherit counts from their parent version at fetch time.
+                // When creating a new draft, use 0 as placeholder; real counts come from server.
                 mapped_requirement_count: 0,
                 bundle_usage_count: 0,
             }

@@ -4887,12 +4887,12 @@ mod tests {
         let statuses = vec![ComplianceControlStatus::Pass];
         
         // Test that assignment_status is correctly passed through
-        let rollup = rollup_from_statuses(sys, &statuses, 0, Some("current".to_string()));
+        let rollup = rollup_from_statuses(sys.clone(), &statuses, 0, Some("current".to_string()));
         assert_eq!(rollup.assignment_status, Some("current".to_string()));
         assert_eq!(rollup.pass, 1);
         
         // Test pinned status
-        let rollup2 = rollup_from_statuses(sys, &statuses, 0, Some("pinned".to_string()));
+        let rollup2 = rollup_from_statuses(sys.clone(), &statuses, 0, Some("pinned".to_string()));
         assert_eq!(rollup2.assignment_status, Some("pinned".to_string()));
         
         // Test no assignment

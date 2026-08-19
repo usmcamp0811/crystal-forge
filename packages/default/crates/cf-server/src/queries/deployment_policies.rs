@@ -148,6 +148,8 @@ impl ConfigPolicyRow {
             enabled: self.enabled,
             created_at: self.created_at,
             updated_at: self.updated_at,
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
         }
     }
 }
@@ -364,6 +366,8 @@ pub async fn get_deployment_policies_by_versions(
                         enabled,
                         created_at,
                         updated_at,
+                        mapped_requirement_count: 0,
+                        bundle_usage_count: 0,
                     },
                 )
             },

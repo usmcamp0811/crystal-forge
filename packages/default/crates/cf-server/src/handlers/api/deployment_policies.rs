@@ -565,55 +565,96 @@ pub async fn list_deployment_policies(
         (StatusCode::INTERNAL_SERVER_ERROR, "Failed to retrieve policy version history".to_string())
     })?;
 
+    // Load requirement mapping counts per policy version
+    let requirement_counts: HashMap<Uuid, i64> = sqlx::query_as::<_, (Uuid, i64)>(
+        "SELECT policy_version_id, COUNT(*) FROM policy_requirement_mappings WHERE policy_version_id = ANY(SELECT id FROM deployment_policy_versions WHERE policy_id = ANY($1)) AND trusted = true GROUP BY policy_version_id",
+    )
+    .bind(&policy_ids)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .collect();
+
+    // Load bundle usage counts per policy
+    let bundle_usage_counts: HashMap<Uuid, i64> = sqlx::query_as::<_, (Uuid, i64)>(
+        r#"
+        SELECT policy_id, COUNT(DISTINCT cb.id)
+        FROM compliance_bundle_policies cbp
+        JOIN compliance_bundles cb ON cb.id = cbp.bundle_id
+        WHERE cbp.policy_id = ANY($1)
+        GROUP BY cbp.policy_id
+        "#,
+    )
+    .bind(&policy_ids)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .collect();
+
     Ok(Json(DeploymentPoliciesListResponse {
         policies: policies
             .into_iter()
-            .map(|policy| DeploymentPolicyListItem {
-                current_version_id: versions.get(&policy.id).copied(),
-                versions: version_rows
-                    .iter()
-                    .filter(|row| row.1 == policy.id)
-                    .map(|row| {
-                        let pointers = pointer_rows
-                            .get(&policy.id)
-                            .copied()
-                            .unwrap_or((None, None));
-                        let compliance_meta = &row.14;
-                        let (cat, fw, sev, cf, cmmc, cis, rat) =
-                            extract_classification(compliance_meta);
-                        let inferred_category = cat.clone().unwrap_or_else(|| {
-                            infer_legacy_category(&row.11, compliance_meta).to_string()
-                        });
-                        DeploymentPolicyVersionSummary {
-                            id: row.0,
-                            policy_id: row.1,
-                            version: row.2.clone(),
-                            publication_state: row.3.clone(),
-                            trust_state: row.4.clone(),
-                            semantic_digest: row.5.clone(),
-                            created_at: row.6,
-                            published_at: row.7,
-                            derived_from_version_id: row.8,
-                            is_current_published: pointers.0 == Some(row.0),
-                            is_current_draft: pointers.1 == Some(row.0),
-                            name: row.9.clone(),
-                            description: row.10.clone(),
-                            policy_type: row.11.clone(),
-                            config: row.12.clone(),
-                            enabled: row.13,
-                            srg_ids: extract_srg_ids(compliance_meta),
-                            cci_ids: extract_cci_ids(compliance_meta),
-                            category: Some(inferred_category),
-                            framework: fw,
-                            severity: sev,
-                            control_family: cf,
-                            cmmc_level: cmmc,
-                            cis_section: cis,
-                            rationale: rat,
-                        }
-                    })
-                    .collect(),
-                policy,
+            .map(|mut policy| {
+                let current_version_id = versions.get(&policy.id).copied();
+                // Get mapped requirement count from current version if available
+                let mapped_requirement_count = current_version_id
+                    .and_then(|vid| requirement_counts.get(&vid).copied())
+                    .unwrap_or(0);
+                // Get bundle usage count
+                let bundle_usage_count = bundle_usage_counts.get(&policy.id).copied().unwrap_or(0);
+                
+                policy.mapped_requirement_count = mapped_requirement_count;
+                policy.bundle_usage_count = bundle_usage_count;
+                
+                DeploymentPolicyListItem {
+                    current_version_id,
+                    versions: version_rows
+                        .iter()
+                        .filter(|row| row.1 == policy.id)
+                        .map(|row| {
+                            let pointers = pointer_rows
+                                .get(&policy.id)
+                                .copied()
+                                .unwrap_or((None, None));
+                            let compliance_meta = &row.14;
+                            let (cat, fw, sev, cf, cmmc, cis, rat) =
+                                extract_classification(compliance_meta);
+                            let inferred_category = cat.clone().unwrap_or_else(|| {
+                                infer_legacy_category(&row.11, compliance_meta).to_string()
+                            });
+                            DeploymentPolicyVersionSummary {
+                                id: row.0,
+                                policy_id: row.1,
+                                version: row.2.clone(),
+                                publication_state: row.3.clone(),
+                                trust_state: row.4.clone(),
+                                semantic_digest: row.5.clone(),
+                                created_at: row.6,
+                                published_at: row.7,
+                                derived_from_version_id: row.8,
+                                is_current_published: pointers.0 == Some(row.0),
+                                is_current_draft: pointers.1 == Some(row.0),
+                                name: row.9.clone(),
+                                description: row.10.clone(),
+                                policy_type: row.11.clone(),
+                                config: row.12.clone(),
+                                enabled: row.13,
+                                srg_ids: extract_srg_ids(compliance_meta),
+                                cci_ids: extract_cci_ids(compliance_meta),
+                                category: Some(inferred_category),
+                                framework: fw,
+                                severity: sev,
+                                control_family: cf,
+                                cmmc_level: cmmc,
+                                cis_section: cis,
+                                rationale: rat,
+                            }
+                        })
+                        .collect(),
+                    policy,
+                }
             })
             .collect(),
         total: total as usize,

@@ -1339,6 +1339,14 @@ pub struct DeploymentPolicyRecord {
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Number of trusted/eligible policy_requirement_mappings for this policy version
+    #[sqlx(skip)]
+    #[serde(default)]
+    pub mapped_requirement_count: i64,
+    /// Number of distinct bundle lineages using this policy version
+    #[sqlx(skip)]
+    #[serde(default)]
+    pub bundle_usage_count: i64,
 }
 
 /// Request to create a new deployment policy

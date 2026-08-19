@@ -1349,6 +1349,12 @@ pub struct DeploymentPolicyRecord {
     pub current_version_id: Option<Uuid>,
     #[serde(default)]
     pub versions: Vec<DeploymentPolicyVersionSummary>,
+    /// Number of trusted/eligible policy_requirement_mappings for this policy version
+    #[serde(default)]
+    pub mapped_requirement_count: i64,
+    /// Number of distinct bundle lineages using this policy version
+    #[serde(default)]
+    pub bundle_usage_count: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
