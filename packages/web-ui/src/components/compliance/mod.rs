@@ -381,7 +381,7 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
                              let hostname = row.hostname.clone();
                              let env = row.environment.clone().unwrap_or_else(|| "—".to_string());
                              let env_color = "#6b7280";
-                             let assignment_status = row.assignment_status.clone().unwrap_or_else(|| row.resolution_state.clone().unwrap_or_else(|| "—".to_string()));
+                              let assignment_status = row.assignment_status.clone().unwrap_or_else(|| "Unassigned".to_string());
                              let is_pinned = row.assignment_status.as_deref() == Some("pinned");
                              let score = row.score;
                              let score_color = if score >= 90 { "#34d399" } else if score >= 70 { "#fbbf24" } else { "#f87171" };
