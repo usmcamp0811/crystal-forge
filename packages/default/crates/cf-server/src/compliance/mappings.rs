@@ -236,7 +236,9 @@ pub fn validate_evidence_spec(spec: &serde_json::Value) -> Result<()> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("evidence_specs: missing or invalid 'kind' field"))?;
     
-    match kind {
+    // Match case-insensitively to handle both serialization formats
+    let kind_lower = kind.to_lowercase();
+    match kind_lower.as_str() {
         "command" => {
             let cmd = obj.get("cmd").and_then(|v| v.as_str());
             if cmd.is_none() || cmd.map_or(false, |s| s.is_empty()) {
@@ -322,13 +324,21 @@ pub fn decode_evidence_specs_strict(
                 )
             })?;
             
-            // Decode each entry
+            // Decode and validate each entry
             let mut result = Vec::with_capacity(arr.len());
             for (idx, entry) in arr.iter().enumerate() {
                 let spec: crate::api::models::EvidenceSpec = serde_json::from_value(entry.clone())
                     .map_err(|e| {
                         anyhow::anyhow!(
                             "evidence_specs[{}]: failed to decode evidence spec: {}",
+                            idx, e
+                        )
+                    })?;
+                // Validate the decoded spec (fail-closed on semantic errors)
+                validate_evidence_spec(&serde_json::to_value(&spec)?)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "evidence_specs[{}]: {}",
                             idx, e
                         )
                     })?;

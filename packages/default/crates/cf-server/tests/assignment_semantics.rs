@@ -446,32 +446,55 @@ async fn test_immutable_assignment_version_supersedes_lineage(pool: PgPool) {
     // (which now properly creates both the assignment row and its immutable version)
     create_system_assignment(&pool, bundle_id, v2_id, system_id).await;
 
-    // Call the assignment status determination function directly
+    // DISCRIMINATING SCENARIO 1: Lineage and snapshot initially agree on V2
     let status = determine_assignment_status_for_system(&pool, bundle_id, system_id)
         .await
         .expect("query assignment status")
         .expect("status exists");
 
-    // CRITICAL ASSERTION:
-    // The status should be "current" because:
-    // - The assignment snapshot (via current_version_id) points to V2
-    // - V2 is the current_published_version_id of the bundle
-    //
-    // If the code uses the lineage field directly instead of joining to the
-    // assignment version, this test would still pass in this scenario.
-    // See test_assignment_status_pinned_version for the complementary test.
     assert_eq!(
         status, "current",
-        "DISCRIMINATING TEST: Assignment status must use authoritative assignment-version snapshot. \
-         Status should be 'current' when assignment targets current published version."
+        "Assignment to current version should show current"
     );
 
-    // Inverse scenario: test that pinned still works when lineage != snapshot
+    // DISCRIMINATING SCENARIO 2: NOW deliberately make lineage != snapshot
+    // This proves the code uses the immutable snapshot, not the mutable lineage field.
+    // Get the assignment row
+    let assignment_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM compliance_bundle_assignments WHERE system_id = $1 AND bundle_id = $2"
+    )
+    .bind(system_id)
+    .bind(bundle_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch assignment");
+    
+    // Update the lineage field to V1 (mismatch with snapshot which still says V2)
+    sqlx::query(
+        "UPDATE compliance_bundle_assignments SET bundle_version_id = $1 WHERE id = $2"
+    )
+    .bind(v1_id)
+    .bind(assignment_id)
+    .execute(&pool)
+    .await
+    .expect("corrupt lineage field for test");
+    
+    // Now query assignment status - it MUST still use the snapshot (V2) not the lineage (V1)
+    let status_after = determine_assignment_status_for_system(&pool, bundle_id, system_id)
+        .await
+        .expect("query after corruption")
+        .expect("status exists");
+    
+    assert_eq!(
+        status_after, "current",
+        "DISCRIMINATING: Must use snapshot V2, not corrupt lineage V1"
+    );
+
+    // SCENARIO 3: Verify pinned behavior when current version changes
     let v3_id = create_bundle_version(&pool, bundle_id, "3.0", "accepted", "Version 3").await;
     set_current_published(&pool, bundle_id, v3_id).await;
 
-    // The earlier system assignment to V2 is still active (via its snapshot)
-    // Now V3 is current, so the assignment to V2 should be "pinned"
+    // Same assignment (V2) now appears pinned because V3 became current
     let pinned_status = determine_assignment_status_for_system(&pool, bundle_id, system_id)
         .await
         .expect("query pinned status")
@@ -479,7 +502,7 @@ async fn test_immutable_assignment_version_supersedes_lineage(pool: PgPool) {
 
     assert_eq!(
         pinned_status, "pinned",
-        "When bundle's current published version changes, existing assignment should become 'pinned'"
+        "After current version changes to V3, assignment to V2 should show pinned"
     );
 }
 
