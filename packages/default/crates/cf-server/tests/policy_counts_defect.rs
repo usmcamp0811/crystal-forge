@@ -5,7 +5,7 @@
 /// 2. bundle_usage_count is computed from compliance_bundle_version_policies (not hardcoded)
 /// 3. Counts are loaded via a single batched query (not N+1)
 /// 4. SQL errors are propagated (not swallowed with unwrap_or_default)
-/// 5. All production handlers return real counts
+/// 5. All production handlers return real counts via the actual handler invocation
 ///
 /// Run with: cargo test -p cf-server --test policy_counts_defect -- --ignored
 use serde_json::json;
@@ -152,7 +152,7 @@ async fn create_test_bundle_with_policy(
 #[ignore]
 async fn test_policy_counts_non_zero_for_mapped_requirements(pool: PgPool) {
     // Create a policy with 3 requirements mapped to it
-    let (_policy_id, policy_version_id) = create_test_policy(&pool, "mapped-req-test").await;
+    let (policy_id, policy_version_id) = create_test_policy(&pool, "mapped-req-test").await;
 
     let framework_id = Uuid::new_v4();
     let req1 = create_test_requirement(&pool, framework_id).await;
@@ -164,40 +164,54 @@ async fn test_policy_counts_non_zero_for_mapped_requirements(pool: PgPool) {
     create_test_mapping(&pool, policy_version_id, req2).await;
     create_test_mapping(&pool, policy_version_id, req3).await;
 
-    // Query the policy and verify count
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT requirement_version_id) FROM policy_requirement_mappings WHERE policy_version_id = $1"
-    )
-    .bind(policy_version_id)
-    .fetch_one(&pool)
-    .await
-    .expect("query mapped count");
+    // Call the production handler to get the policy with counts
+    let state = CFState { pool: pool.clone() };
+    let result = cf_server::queries::deployment_policies::list_deployment_policies(&pool, 100, 0)
+        .await
+        .expect("handler failed");
 
-    assert_eq!(count, 3, "Should have 3 mapped requirements");
+    // Find the test policy in the results
+    let test_policy = result
+        .iter()
+        .find(|p| p.id == policy_id)
+        .expect("test policy not found in results");
+
+    // Verify that mapped_requirement_count reflects the 3 mappings
+    assert_eq!(
+        test_policy.mapped_requirement_count, 3,
+        "Handler should return mapped_requirement_count = 3 from policy_requirement_mappings"
+    );
 }
 
 #[sqlx::test]
 #[ignore]
 async fn test_policy_counts_zero_no_mappings(pool: PgPool) {
     // Create a policy with no mappings
-    let (_policy_id, policy_version_id) = create_test_policy(&pool, "no-mappings-test").await;
+    let (policy_id, _policy_version_id) = create_test_policy(&pool, "no-mappings-test").await;
 
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT requirement_version_id) FROM policy_requirement_mappings WHERE policy_version_id = $1"
-    )
-    .bind(policy_version_id)
-    .fetch_one(&pool)
-    .await
-    .expect("query mapped count");
+    // Call the production handler to get the policy with counts
+    let result = cf_server::queries::deployment_policies::list_deployment_policies(&pool, 100, 0)
+        .await
+        .expect("handler failed");
 
-    assert_eq!(count, 0, "Should have 0 mapped requirements");
+    // Find the test policy in the results
+    let test_policy = result
+        .iter()
+        .find(|p| p.id == policy_id)
+        .expect("test policy not found in results");
+
+    // Verify that mapped_requirement_count is 0
+    assert_eq!(
+        test_policy.mapped_requirement_count, 0,
+        "Handler should return mapped_requirement_count = 0 when no mappings exist"
+    );
 }
 
 #[sqlx::test]
 #[ignore]
 async fn test_bundle_usage_count_distinct_bundles(pool: PgPool) {
     // Create a policy
-    let (_policy_id, policy_version_id) = create_test_policy(&pool, "bundle-usage-test").await;
+    let (policy_id, policy_version_id) = create_test_policy(&pool, "bundle-usage-test").await;
 
     let framework_id = Uuid::new_v4();
 
@@ -207,29 +221,162 @@ async fn test_bundle_usage_count_distinct_bundles(pool: PgPool) {
     let (_bundle2_id, _bv2_id) =
         create_test_bundle_with_policy(&pool, framework_id, policy_version_id).await;
 
-    // Count distinct bundles using this policy
-    let count: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(DISTINCT cbvp.bundle_version_id)
-           FROM compliance_bundle_version_policies cbvp
-           WHERE cbvp.policy_version_id = $1"#,
-    )
-    .bind(policy_version_id)
-    .fetch_one(&pool)
-    .await
-    .expect("query bundle count");
+    // Call the production handler to get the policy with counts
+    let result = cf_server::queries::deployment_policies::list_deployment_policies(&pool, 100, 0)
+        .await
+        .expect("handler failed");
 
-    assert_eq!(count, 2, "Should have 2 distinct bundles using this policy");
+    // Find the test policy in the results
+    let test_policy = result
+        .iter()
+        .find(|p| p.id == policy_id)
+        .expect("test policy not found in results");
+
+    // Verify that bundle_usage_count reflects the 2 bundles
+    assert_eq!(
+        test_policy.bundle_usage_count, 2,
+        "Handler should return bundle_usage_count = 2 from compliance_bundle_version_policies"
+    );
 }
 
 #[sqlx::test]
 #[ignore]
-async fn test_hardcoded_zeros_detected_in_handler(pool: PgPool) {
-    // This is a placeholder test to ensure the actual handler returns
-    // non-zero counts when data is present.
-    // The handler integration test will verify this.
+async fn test_defect_3_created_by_display_shows_username(pool: PgPool) {
+    // Defect 3: PolicyDrawer Owner should show display name instead of UUID
+    // Create a user and a policy created by that user
+    let user_id = Uuid::new_v4();
+    let username = "test-creator";
+    
+    sqlx::query(
+        "INSERT INTO users (id, username, email, first_name, last_name, user_type, is_active, created_at, updated_at) 
+         VALUES ($1, $2, $3, $4, $5, 'native', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )
+    .bind(user_id)
+    .bind(username)
+    .bind("test@example.com")
+    .bind("Test")
+    .bind("Creator")
+    .execute(&pool)
+    .await
+    .ok();
 
-    let (_policy_id, _policy_version_id) = create_test_policy(&pool, "hardcoded-check").await;
+    // Create a policy version with created_by set to the user
+    let policy_id = Uuid::new_v4();
+    let version_id = Uuid::new_v4();
 
-    // Verify that we can at least create the data without errors
-    assert!(true, "Test infrastructure works");
+    sqlx::query(
+        r#"INSERT INTO deployment_policies 
+           (id, name, enabled, created_at, updated_at)
+           VALUES ($1, $2, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
+    )
+    .bind(policy_id)
+    .bind("creator-test-policy")
+    .execute(&pool)
+    .await
+    .expect("create policy");
+
+    sqlx::query(
+        r#"INSERT INTO deployment_policy_versions 
+           (id, policy_id, version, publication_state, policy_type, config, 
+            compliance_metadata, created_at, updated_at, created_by)
+           VALUES ($1, $2, '1.0', 'draft', 'require_packages', '{}', '{}', 
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $3)"#,
+    )
+    .bind(version_id)
+    .bind(policy_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .expect("create version");
+
+    // Call the production handler
+    let result = cf_server::queries::deployment_policies::list_deployment_policies(&pool, 100, 0)
+        .await
+        .expect("handler failed");
+
+    // Find the test policy in results
+    let test_policy = result
+        .iter()
+        .find(|p| p.id == policy_id)
+        .expect("test policy not found");
+
+    // Verify the version has created_by_display set to the username (not empty, not UUID)
+    assert!(!test_policy.versions.is_empty(), "Policy should have versions");
+    let test_version = &test_policy.versions[0];
+    
+    assert_eq!(
+        test_version.created_by, Some(user_id),
+        "created_by UUID should be present"
+    );
+    assert_eq!(
+        test_version.created_by_display.as_deref(),
+        Some(username),
+        "created_by_display should show username instead of UUID"
+    );
+}
+
+#[sqlx::test]
+#[ignore]
+async fn test_defect_4_evidence_specs_populated_from_compliance_metadata(pool: PgPool) {
+    // Defect 4: Evidence for ATO should be populated from compliance_metadata
+    let policy_id = Uuid::new_v4();
+    let version_id = Uuid::new_v4();
+
+    // Create compliance metadata with evidence specs
+    let evidence_json = json!({
+        "evidence_specs": [
+            {"kind": "Command", "cmd": "systemctl is-active ssh", "expect": "active"},
+            {"kind": "File", "path": "/etc/ssh/sshd_config", "note": "SSH config present"}
+        ]
+    });
+
+    sqlx::query(
+        r#"INSERT INTO deployment_policies 
+           (id, name, enabled, created_at, updated_at)
+           VALUES ($1, $2, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
+    )
+    .bind(policy_id)
+    .bind("evidence-test-policy")
+    .execute(&pool)
+    .await
+    .expect("create policy");
+
+    sqlx::query(
+        r#"INSERT INTO deployment_policy_versions 
+           (id, policy_id, version, publication_state, policy_type, config, 
+            compliance_metadata, created_at, updated_at)
+           VALUES ($1, $2, '1.0', 'draft', 'require_packages', '{}', $3, 
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
+    )
+    .bind(version_id)
+    .bind(policy_id)
+    .bind(evidence_json)
+    .execute(&pool)
+    .await
+    .expect("create version");
+
+    // Call the production handler
+    let result = cf_server::queries::deployment_policies::list_deployment_policies(&pool, 100, 0)
+        .await
+        .expect("handler failed");
+
+    // Find the test policy
+    let test_policy = result
+        .iter()
+        .find(|p| p.id == policy_id)
+        .expect("test policy not found");
+
+    // Verify evidence_specs is populated (not empty)
+    assert!(!test_policy.versions.is_empty(), "Policy should have versions");
+    let test_version = &test_policy.versions[0];
+    
+    assert!(
+        !test_version.evidence_specs.is_empty(),
+        "evidence_specs should be populated from compliance_metadata (not empty)"
+    );
+    assert_eq!(
+        test_version.evidence_specs.len(),
+        2,
+        "Should have 2 evidence specs"
+    );
 }

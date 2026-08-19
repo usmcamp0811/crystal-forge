@@ -1067,13 +1067,13 @@ pub fn PolicyDrawer(
                  div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", if usage_loading() { "—" } else { "{resolved_system_count}" } } }
                  div { class: "ed-stat", div { class: "ed-stat-label", "Rules" } div { class: "ed-stat-val", "{rules.len()}" } }
                  div { class: "ed-stat", div { class: "ed-stat-label", "Type" } div { class: "ed-stat-val", style: "font-size:12px;", "{type_display}" } }
-                 div { class: "ed-stat", div { class: "ed-stat-label", "Modified" } div { class: "ed-stat-val", style: "font-size:12px;", "{modified_at}" } }
-                 // Owner is the user who created this policy version
-                 if let Some(selected_rev) = selected_revision {
-                     if let Some(created_by_uuid) = selected_rev.created_by {
-                         div { class: "ed-stat", div { class: "ed-stat-label", "Created by" } div { class: "ed-stat-val", style: "font-size:11px;", "{created_by_uuid}" } }
-                     }
-                 }
+                  div { class: "ed-stat", div { class: "ed-stat-label", "Modified" } div { class: "ed-stat-val", style: "font-size:12px;", "{modified_at}" } }
+                  // Owner is the user who created this policy version
+                  if let Some(selected_rev) = selected_revision {
+                      if let Some(display_name) = selected_rev.created_by_display.as_deref() {
+                          div { class: "ed-stat", div { class: "ed-stat-label", "Created by" } div { class: "ed-stat-val", style: "font-size:11px;", "{display_name}" } }
+                      }
+                  }
              }
             if revision_count > 1 {
                 div { class: "policy-drawer-tabs",
@@ -1188,14 +1188,21 @@ pub fn PolicyDrawer(
                             }
                         }
                     }
-                    // TODO: Defect 4 - Evidence for ATO section from design spec PoliciesView.jsx:1054-1070
-                    // Evidence specs are collected during STIG import, not stored per-policy in the
-                    // normalized model. Implementing this would require:
-                    // 1. Add evidence_specs field to deployment_policy_versions.compliance_metadata
-                    // 2. Expose evidence field in DeploymentPolicyVersionSummary DTO
-                    // 3. Add rendering for "Evidence for ATO · N" section
-                    // Currently correctly omitted per spec guidance: "ImportedEvidenceRequirement belongs to
-                    // STIG import, not policy-normalized-model; no authoritative backend field exists".
+                    // Defect 4 - Evidence for ATO section rendering
+                    if let Some(selected_rev) = selected_revision {
+                        if !selected_rev.evidence_specs.is_empty() {
+                            section {
+                                h3 { class: "policy-drawer-section-title", "Evidence for ATO · {selected_rev.evidence_specs.len()}" }
+                                div { style: "display:flex;flex-direction:column;gap:6px;",
+                                    for spec in selected_rev.evidence_specs.iter() {
+                                        div { style: "padding:8px 10px;border:1px solid var(--cf-divider);border-radius:8px;background:var(--cf-subtle-bg);font-size:12px;",
+                                            "{spec_display_label(spec)}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     section {
                         h3 { class: "policy-drawer-section-title", "Used by bundles" }
                         if usage_loading() || loaded_usage_version() != displayed_policy.version_id {
@@ -1263,6 +1270,21 @@ pub fn PolicyDrawer(
             }
         }
     }
+}
+
+/// Display label for an evidence spec based on its kind.
+fn spec_display_label(spec: &crate::api::models::EvidenceSpec) -> String {
+    use crate::api::models::EvidenceKind;
+    
+    let kind_label = match &spec.kind {
+        EvidenceKind::Command { cmd, .. } => format!("Command: {cmd}"),
+        EvidenceKind::Log { source, unit, .. } => format!("Log: {source} ({unit})"),
+        EvidenceKind::File { path, .. } => format!("File: {path}"),
+        EvidenceKind::UnitState { unit, .. } => format!("Unit: {unit}"),
+        EvidenceKind::EvalAttr { attr } => format!("Eval: {attr}"),
+        EvidenceKind::Attestation { note } => format!("Attestation: {note}"),
+    };
+    kind_label
 }
 
 fn mapping_relationship_label(relationship: &str) -> &str {

@@ -1411,6 +1411,9 @@ pub struct DeploymentPolicyVersionSummary {
     /// User UUID who created this version (if available)
     #[serde(default)]
     pub created_by: Option<Uuid>,
+    /// Human-readable display name of the user who created this version (username or email)
+    #[serde(default)]
+    pub created_by_display: Option<String>,
     /// Evidence collection specifications for ATO audits
     #[serde(default)]
     pub evidence_specs: Vec<EvidenceSpec>,

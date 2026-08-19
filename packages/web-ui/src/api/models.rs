@@ -1354,7 +1354,41 @@ pub struct DeploymentPolicyRecord {
     pub mapped_requirement_count: i64,
     /// Number of distinct bundle lineages using this policy version
     #[serde(default)]
-    pub bundle_usage_count: i64,
+     pub bundle_usage_count: i64,
+}
+
+/// Evidence collection specification for a control or policy.
+/// Describes the authoritative evidence needed to satisfy an ATO requirement.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "details")]
+pub enum EvidenceKind {
+    /// Command execution proof: cmd output must match expect pattern
+    Command { cmd: String, expect: String },
+    /// System journal or event log: unit/source with match_text filter
+    Log {
+        source: String,
+        unit: String,
+        match_text: String,
+    },
+    /// File presence/state: path with optional annotation
+    File { path: String, note: Option<String> },
+    /// systemd/systemctl unit state: requires exact state value
+    UnitState { unit: String, state: String },
+    /// NixOS eval attribute: attr path to be evaluated
+    EvalAttr { attr: String },
+    /// Human attestation: reviewer assertion with optional note
+    Attestation { note: String },
+}
+
+/// Single versioned evidence spec within a policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceSpec {
+    /// Spec type and parameters
+    #[serde(flatten)]
+    pub kind: EvidenceKind,
+    /// Optional required-fields map (validation dictionary)
+    #[serde(default)]
+    pub required_fields: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1413,6 +1447,12 @@ pub struct DeploymentPolicyVersionSummary {
     /// User UUID who created this version (if available)
     #[serde(default)]
     pub created_by: Option<Uuid>,
+    /// Human-readable display name of the user who created this version (username or email)
+    #[serde(default)]
+    pub created_by_display: Option<String>,
+    /// Evidence collection specifications for ATO audits
+    #[serde(default)]
+    pub evidence_specs: Vec<EvidenceSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
