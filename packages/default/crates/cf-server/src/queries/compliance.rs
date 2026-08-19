@@ -983,18 +983,6 @@ async fn list_bundle_summary_aggregates(
             .push(system);
     }
 
-    // Batch-load assignment status for all bundle versions.
-    let mut assignment_status_by_version = std::collections::HashMap::<Uuid, Option<String>>::new();
-    for (_, version_id) in &pairs {
-        if !assignment_status_by_version.contains_key(version_id) {
-            let status = determine_assignment_status_for_bundle_version(pool, *version_id)
-                .await
-                .ok()
-                .flatten();
-            assignment_status_by_version.insert(*version_id, status);
-        }
-    }
-
     // Resolve each distinct version once for all systems that need it. This is
     // the bounded batch path; no bundle calls the detailed systems endpoint.
     let mut system_ids_by_version = std::collections::HashMap::<Uuid, Vec<Uuid>>::new();
@@ -1020,9 +1008,10 @@ async fn list_bundle_summary_aggregates(
             continue;
         };
         for system in systems {
-            let assignment_status = assignment_status_by_version
-                .get(&version_id)
-                .cloned()
+            // Determine assignment status for this specific system and bundle
+            let assignment_status = determine_assignment_status_for_system(pool, bundle_id, system.id)
+                .await
+                .ok()
                 .flatten();
             let rollup = match effective_by_version_system.get(&(version_id, system.id)) {
                 Some(ResolutionOutcome::Resolved(set)) if set.bundle_version_id == version_id => {
@@ -1040,7 +1029,7 @@ async fn list_bundle_summary_aggregates(
                         .first()
                         .map(|conflict| conflict.code.as_str())
                         .unwrap_or("conflict"),
-                    assignment_status.clone(),
+                    assignment_status,
                 )),
                 _ => Some(unresolved_system_rollup(
                     system.clone(),
@@ -1058,10 +1047,12 @@ async fn list_bundle_summary_aggregates(
         }
     }
 
+    // Note: assignment_status is now determined per-system inside the batch function
+    let dummy_assignment_status = std::collections::HashMap::new();
     let batched_rollups = effective_policy_rollups_with_evidence_batch(
         pool,
         &evidence_work,
-        &assignment_status_by_version,
+        &dummy_assignment_status,
     )
     .await?;
     let mut rollups_by_pair = unresolved_by_pair;
@@ -2027,20 +2018,21 @@ pub async fn list_bundle_systems_for_version(
     let systems =
         list_explicit_bundle_version_system_rows(pool, bundle_id, bundle_version_id).await?;
     let system_ids: Vec<Uuid> = systems.iter().map(|system| system.id).collect();
-    let effective = resolve_systems_effective_policies_for_bundle_version_batch(
+     let effective = resolve_systems_effective_policies_for_bundle_version_batch(
         pool,
         &system_ids,
         bundle_version_id,
     )
     .await?;
-    // Determine assignment status once for this bundle version
-    let assignment_status = determine_assignment_status_for_bundle_version(pool, bundle_version_id)
-        .await
-        .ok()
-        .flatten();
 
     let mut rollups = Vec::with_capacity(systems.len());
     for system in systems {
+        // Determine assignment status for this specific system
+        let assignment_status = determine_assignment_status_for_system(pool, bundle_id, system.id)
+            .await
+            .ok()
+            .flatten();
+
         let rollup = match effective.get(&system.id) {
             Some(ResolutionOutcome::Resolved(set))
                 if set.bundle_version_id == bundle_version_id =>
@@ -2049,7 +2041,7 @@ pub async fn list_bundle_systems_for_version(
                     pool,
                     &system,
                     &set.policies,
-                    assignment_status.clone(),
+                    assignment_status,
                 )
                 .await?
             }
@@ -2060,7 +2052,7 @@ pub async fn list_bundle_systems_for_version(
                     .first()
                     .map(|c| c.code.as_str())
                     .unwrap_or("conflict"),
-                assignment_status.clone(),
+                assignment_status,
             ),
             // Missing or mismatched resolution has no authoritative effective
             // set. Never substitute lineage/current membership for this view.
@@ -2068,7 +2060,7 @@ pub async fn list_bundle_systems_for_version(
                 system,
                 policies.len() as i64,
                 "not_applicable",
-                assignment_status.clone(),
+                assignment_status,
             ),
         };
         rollups.push(rollup);
@@ -2266,15 +2258,15 @@ pub async fn list_system_bundles(
     let (mut policies_by_bundle, direct_policies) =
         partition_effective_policies_by_bundle(&effective.policies);
 
-    // Determine assignment status from the effective policy set
-    let assignment_status =
-        determine_assignment_status_for_bundle_version(pool, effective.bundle_version_id)
+    // The effective policy set's bundle_id is from the effective resolution,
+    // which may not match all visible bundles. Determine assignment per bundle.
+    let mut bundles = Vec::with_capacity(visible_bundles.len());
+    for bundle in visible_bundles {
+        // Determine assignment status for this specific bundle and system
+        let assignment_status = determine_assignment_status_for_system(pool, bundle.id, system.id)
             .await
             .ok()
             .flatten();
-
-    let mut bundles = Vec::with_capacity(visible_bundles.len());
-    for bundle in visible_bundles {
         let policies = policies_by_bundle.remove(&bundle.id).unwrap_or_default();
         bundles.push((
             bundle,
@@ -2282,18 +2274,32 @@ pub async fn list_system_bundles(
                 pool,
                 &system,
                 &policies,
-                assignment_status.clone(),
+                assignment_status,
             )
             .await?,
         ));
     }
     let direct_rollup =
         effective_policy_rollup_with_evidence(pool, &system, &direct_policies, None).await?;
+    // For overall rollup, determine assignment from the effective policy set's bundle version
+    let bundle_for_effective: Option<Uuid> = sqlx::query_scalar(
+        "SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1"
+    )
+    .bind(effective.bundle_version_id)
+    .fetch_optional(pool)
+    .await?;
+    let overall_assignment_status = match bundle_for_effective {
+        Some(bundle_id) => determine_assignment_status_for_system(pool, bundle_id, system.id)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
     let overall_rollup = effective_policy_rollup_with_evidence(
         pool,
         &system,
         &effective.policies,
-        assignment_status,
+        overall_assignment_status,
     )
     .await?;
 
@@ -2534,10 +2540,81 @@ async fn list_applicable_system_rows(pool: &PgPool, bundle_id: Uuid) -> Result<V
 
 /// Determine assignment status for a system assigned to a bundle version.
 ///
+/// Determine assignment status for a specific system and bundle.
+/// Queries the compliance_bundle_assignments table to find if the system has an
+/// active assignment and determines if it targets the current published version.
+///
 /// Returns:
-/// - "current" if the assignment targets the bundle's current published version
-/// - "pinned" if the assignment targets an accepted but non-current version
-/// - None if no active assignment applies or system doesn't apply
+/// - "current" if the system has an active assignment to the bundle's current published version
+/// - "pinned" if the system has an active assignment to an older accepted version  
+/// - None if no active assignment exists for the system
+pub(crate) async fn determine_assignment_status_for_system(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    system_id: Uuid,
+) -> Result<Option<String>> {
+    // Get the bundle's current published version
+    let current_published_version: Option<Uuid> =
+        sqlx::query_scalar("SELECT current_published_version_id FROM compliance_bundles WHERE id = $1")
+            .bind(bundle_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+
+    // Check for active assignment targeting this system (system scope takes precedence)
+    // Note: compliance_bundle_assignments table doesn't have bundle_id directly,
+    // only bundle_version_id, so we need to join to get bundles
+    let assigned_version: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT cba.bundle_version_id FROM compliance_bundle_assignments cba
+           JOIN compliance_bundle_versions cbv ON cbv.id = cba.bundle_version_id
+           WHERE cbv.bundle_id = $1 AND cba.system_id = $2 AND cba.active = true
+           LIMIT 1"#,
+    )
+    .bind(bundle_id)
+    .bind(system_id)
+    .fetch_optional(pool)
+    .await?;
+
+    // If system has no direct assignment, check for environment scope assignment
+    let assigned_version = match assigned_version {
+        Some(v) => Some(v),
+        None => {
+            // Check for environment-scoped assignment
+            sqlx::query_scalar(
+                r#"SELECT cba.bundle_version_id FROM compliance_bundle_assignments cba
+                   JOIN compliance_bundle_versions cbv ON cbv.id = cba.bundle_version_id
+                   WHERE cbv.bundle_id = $1 AND cba.scope_type = 'environment' AND cba.active = true
+                   AND EXISTS (
+                       SELECT 1 FROM systems s 
+                       WHERE s.id = $2 AND s.environment = (
+                           SELECT e.name FROM environments e WHERE e.id = cba.environment_id
+                       )
+                    )
+                    LIMIT 1"#,
+            )
+            .bind(bundle_id)
+            .bind(system_id)
+            .fetch_optional(pool)
+            .await?
+        }
+    };
+
+    // Determine status based on which version we're assigned to
+    match assigned_version {
+        Some(v) => {
+            // System has an assignment; determine if it's current or pinned
+            match current_published_version {
+                Some(current) if v == current => Ok(Some("current".to_string())),
+                Some(_) => Ok(Some("pinned".to_string())),
+                None => Ok(Some("pinned".to_string())), // No current published, but assigned to something
+            }
+        }
+        None => Ok(None), // No assignment for this system
+    }
+}
+
+/// Legacy function that determined status per bundle version (kept for backwards compatibility).
+/// Deprecated: Use determine_assignment_status_for_system() instead.
 pub(crate) async fn determine_assignment_status_for_bundle_version(
     pool: &PgPool,
     bundle_version_id: Uuid,
@@ -2879,7 +2956,7 @@ async fn effective_policy_rollups_with_evidence_batch(
         SystemRow,
         Vec<crate::compliance::resolver::EffectivePolicy>,
     )],
-    assignment_status_by_version: &std::collections::HashMap<Uuid, Option<String>>,
+    _assignment_status_by_version: &std::collections::HashMap<Uuid, Option<String>>,
 ) -> Result<Vec<((Uuid, Uuid), ComplianceSystemRollup)>> {
     if work.is_empty() {
         return Ok(Vec::new());
@@ -2957,10 +3034,11 @@ async fn effective_policy_rollups_with_evidence_batch(
 
     let mut result = Vec::with_capacity(work.len());
     for (pair, system, policies) in work {
-        let (bundle_version_id, _) = pair;
-        let assignment_status = assignment_status_by_version
-            .get(bundle_version_id)
-            .cloned()
+        let (bundle_id, _version_id) = pair;
+        // Determine assignment status for this specific system and bundle
+        let assignment_status = determine_assignment_status_for_system(pool, *bundle_id, system.id)
+            .await
+            .ok()
             .flatten();
         let context = contexts.get(&system.id);
         let mut statuses = Vec::with_capacity(policies.len());

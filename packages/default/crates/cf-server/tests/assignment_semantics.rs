@@ -1,7 +1,7 @@
 /// Live-DB regression tests for assignment_status semantics.
 ///
 /// These tests verify that assignment_status field is:
-/// 1. Correctly determined based on compliance_bundle_assignments
+/// 1. Correctly determined based on compliance_bundle_assignments by calling production handlers
 /// 2. Marked "current" when assignment targets current_published_version_id
 /// 3. Marked "pinned" when assignment targets another accepted version
 /// 4. Null/None when no active assignment exists
@@ -10,6 +10,9 @@
 /// Run with: cargo test -p cf-server --test assignment_semantics -- --ignored
 use sqlx::PgPool;
 use uuid::Uuid;
+
+// Use the production queries module
+use crystal_forge::queries::compliance::list_bundle_systems_for_version;
 
 #[sqlx::test]
 async fn test_assignment_status_current_version(pool: PgPool) {
@@ -75,35 +78,22 @@ async fn test_assignment_status_current_version(pool: PgPool) {
     .await
     .expect("create assignment");
 
-    // Verify: Query the current_published_version_id and check the assignment
-    let current_version: Option<Uuid> = sqlx::query_scalar(
-        "SELECT current_published_version_id FROM compliance_bundles WHERE id = $1",
-    )
-    .bind(bundle_id)
-    .fetch_one(&pool)
-    .await
-    .expect("get current version");
+    // Call production handler and verify assignment_status
+    let response = list_bundle_systems_for_version(&pool, bundle_id, version_id)
+        .await
+        .expect("query systems")
+        .expect("bundle/version exists");
 
+    assert_eq!(response.systems.len(), 1, "Should have exactly one system");
+    let rollup = &response.systems[0];
     assert_eq!(
-        current_version,
-        Some(version_id),
-        "current_published_version should be set to our version"
+        rollup.system_id, system_id,
+        "Should be the assigned system"
     );
-
-    // Verify assignment exists and targets the current version
-    let assigned_version: Option<Uuid> = sqlx::query_scalar(
-        "SELECT bundle_version_id FROM compliance_bundle_assignments WHERE bundle_id = $1 AND system_id = $2 AND active = true",
-    )
-    .bind(bundle_id)
-    .bind(system_id)
-    .fetch_optional(&pool)
-    .await
-    .expect("query assignment");
-
     assert_eq!(
-        assigned_version,
-        Some(version_id),
-        "assignment should target the current published version"
+        rollup.assignment_status,
+        Some("current".to_string()),
+        "System assigned to current published version should have status 'current'"
     );
 }
 
@@ -186,36 +176,18 @@ async fn test_assignment_status_pinned_version(pool: PgPool) {
     .await
     .expect("create assignment");
 
-    // Verify: Current version is new, but assignment targets old version
-    let current_version: Uuid = sqlx::query_scalar(
-        "SELECT current_published_version_id FROM compliance_bundles WHERE id = $1",
-    )
-    .bind(bundle_id)
-    .fetch_one(&pool)
-    .await
-    .expect("get current version");
+    // Query the old version - system should show as "pinned" because new is current
+    let response = list_bundle_systems_for_version(&pool, bundle_id, old_version_id)
+        .await
+        .expect("query systems")
+        .expect("bundle/version exists");
 
+    assert_eq!(response.systems.len(), 1, "Should have exactly one system");
+    let rollup = &response.systems[0];
     assert_eq!(
-        current_version, new_version_id,
-        "current should be new version"
-    );
-
-    let assigned_version: Uuid = sqlx::query_scalar(
-        "SELECT bundle_version_id FROM compliance_bundle_assignments WHERE bundle_id = $1 AND system_id = $2 AND active = true",
-    )
-    .bind(bundle_id)
-    .bind(system_id)
-    .fetch_one(&pool)
-    .await
-    .expect("get assignment");
-
-    assert_eq!(
-        assigned_version, old_version_id,
-        "assignment should target old version (pinned)"
-    );
-    assert_ne!(
-        assigned_version, current_version,
-        "pinned assignment != current"
+        rollup.assignment_status,
+        Some("pinned".to_string()),
+        "System assigned to older version should have status 'pinned' when newer version is current"
     );
 }
 
@@ -255,25 +227,37 @@ async fn test_assignment_status_unassigned(pool: PgPool) {
         .await
         .expect("set current published");
 
-    // Verify: No assignments exist for this bundle
-    let assignment_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM compliance_bundle_assignments WHERE bundle_id = $1 AND active = true",
+    // Create system but NO assignment
+    let system_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO systems (id, hostname, environment, health_status, critical_cve_count, 
+                   high_cve_count, created_at, updated_at)
+           VALUES ($1, $2, NULL, 'healthy', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
     )
-    .bind(bundle_id)
-    .fetch_one(&pool)
+    .bind(system_id)
+    .bind("test-system-unassigned")
+    .execute(&pool)
     .await
-    .expect("count assignments");
+    .expect("create system");
 
-    assert_eq!(assignment_count, 0, "no assignments should exist");
+    // Query - no systems should be returned because none are assigned
+    let response = list_bundle_systems_for_version(&pool, bundle_id, version_id)
+        .await
+        .expect("query systems");
+
+    // Response should be None since no systems are applicable (no assignments exist)
+    // This verifies that systems without assignments do not appear in the results
+    assert!(
+        response.is_none() || response.unwrap().systems.is_empty(),
+        "Unassigned system should not appear in results"
+    );
 }
 
 #[sqlx::test]
 async fn test_assignment_independent_from_resolution(pool: PgPool) {
     // This test verifies that assignment_status is computed independently
     // from resolution_state (no mixing of concerns).
-    // We create an assignment and verify it can be determined regardless
-    // of any resolver state.
-
+    
     let bundle_id = Uuid::new_v4();
     let version_id = Uuid::new_v4();
 
@@ -333,20 +317,23 @@ async fn test_assignment_independent_from_resolution(pool: PgPool) {
     .await
     .expect("create assignment");
 
-    // Verify: Assignment is correctly set
-    let has_assignment: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM compliance_bundle_assignments WHERE bundle_id = $1 AND bundle_version_id = $2 AND active = true)",
-    )
-    .bind(bundle_id)
-    .bind(version_id)
-    .fetch_one(&pool)
-    .await
-    .expect("check assignment");
+    // Call production handler
+    let response = list_bundle_systems_for_version(&pool, bundle_id, version_id)
+        .await
+        .expect("query systems")
+        .expect("bundle/version exists");
 
-    assert!(
-        has_assignment,
-        "assignment should exist regardless of resolution state"
+    assert_eq!(response.systems.len(), 1, "Should have exactly one system");
+    let rollup = &response.systems[0];
+    
+    // Verify assignment_status and resolution_state are independent
+    assert_eq!(
+        rollup.assignment_status,
+        Some("current".to_string()),
+        "Assignment status should be determined independently"
     );
+    // resolution_state should not be mixed with assignment_status
+    // They represent different concerns
 }
 
 #[sqlx::test]
@@ -408,72 +395,138 @@ async fn test_environment_scoped_assignment(pool: PgPool) {
     .bind(env_id)
     .execute(&pool)
     .await
-    .expect("create env assignment");
+    .expect("create environment assignment");
 
-    // Verify: Environment-scoped assignment exists and is active
-    let env_assignment_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM compliance_bundle_assignments WHERE bundle_id = $1 AND environment_id = $2 AND active = true)",
+    // Create system in that environment
+    let system_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO systems (id, hostname, environment, health_status, critical_cve_count, 
+                   high_cve_count, created_at, updated_at)
+           VALUES ($1, $2, $3, 'healthy', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
     )
-    .bind(bundle_id)
-    .bind(env_id)
-    .fetch_one(&pool)
+    .bind(system_id)
+    .bind("test-system-in-env")
+    .bind("test-env-scoped")
+    .execute(&pool)
     .await
-    .expect("check env assignment");
+    .expect("create system");
 
+    // Call production handler
+    let response = list_bundle_systems_for_version(&pool, bundle_id, version_id)
+        .await
+        .expect("query systems")
+        .expect("bundle/version exists");
+
+    // Should include the system because it's in the environment that has assignment
     assert!(
-        env_assignment_exists,
-        "environment-scoped assignment should exist"
+        response.systems.iter().any(|r| r.system_id == system_id),
+        "System in assigned environment should be included"
+    );
+    
+    let rollup = response
+        .systems
+        .iter()
+        .find(|r| r.system_id == system_id)
+        .expect("system found");
+    assert_eq!(
+        rollup.assignment_status,
+        Some("current".to_string()),
+        "Environment-scoped assignment should result in 'current' status"
     );
 }
 
 #[sqlx::test]
-async fn test_system_scoped_assignment_precedence(pool: PgPool) {
+async fn test_system_assignment_precedence(pool: PgPool) {
+    // Test that system-scoped assignment takes precedence over environment-scoped
     let bundle_id = Uuid::new_v4();
-    let version_id = Uuid::new_v4();
+    let old_version_id = Uuid::new_v4();
+    let new_version_id = Uuid::new_v4();
 
     sqlx::query(
         r#"INSERT INTO compliance_bundles (id, name, description, created_at, updated_at)
            VALUES ($1, $2, 'Test bundle', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
     )
     .bind(bundle_id)
-    .bind("assignment-test-sys-precedence")
+    .bind("assignment-test-precedence")
     .execute(&pool)
     .await
     .expect("create bundle");
 
+    // Create two versions
     sqlx::query(
         r#"INSERT INTO compliance_bundle_versions (id, bundle_id, version, publication_state, 
                    framework, description, created_at, updated_at)
-           VALUES ($1, $2, '1.0', 'accepted', 'NIST CSF', 'Test version', 
+           VALUES ($1, $2, '1.0', 'accepted', 'NIST CSF', 'Old version', 
                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
     )
-    .bind(version_id)
+    .bind(old_version_id)
     .bind(bundle_id)
     .execute(&pool)
     .await
-    .expect("create version");
+    .expect("create old version");
 
+    sqlx::query(
+        r#"INSERT INTO compliance_bundle_versions (id, bundle_id, version, publication_state, 
+                   framework, description, created_at, updated_at)
+           VALUES ($1, $2, '2.0', 'accepted', 'NIST CSF', 'New version', 
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
+    )
+    .bind(new_version_id)
+    .bind(bundle_id)
+    .execute(&pool)
+    .await
+    .expect("create new version");
+
+    // Set new version as current published
     sqlx::query("UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2")
-        .bind(version_id)
+        .bind(new_version_id)
         .bind(bundle_id)
         .execute(&pool)
         .await
         .expect("set current published");
 
-    // Create system
+    // Create environment
+    let env_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO environments (id, name, description, created_at, updated_at)
+           VALUES ($1, $2, 'Test environment', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
+    )
+    .bind(env_id)
+    .bind("test-env-precedence")
+    .execute(&pool)
+    .await
+    .expect("create environment");
+
+    // Create environment-scoped assignment to new version
+    sqlx::query(
+        r#"INSERT INTO compliance_bundle_assignments 
+           (id, bundle_id, bundle_version_id, environment_id, scope_type, active, 
+            created_at, updated_at)
+           VALUES ($1, $2, $3, $4, 'environment', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(bundle_id)
+    .bind(new_version_id)
+    .bind(env_id)
+    .execute(&pool)
+    .await
+    .expect("create environment assignment");
+
+    // Create system in that environment
     let system_id = Uuid::new_v4();
     sqlx::query(
         r#"INSERT INTO systems (id, hostname, environment, health_status, critical_cve_count, 
                    high_cve_count, created_at, updated_at)
-           VALUES ($1, $2, NULL, 'healthy', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
+           VALUES ($1, $2, $3, 'healthy', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
     )
     .bind(system_id)
-    .bind("test-system-sys-precedence")
+    .bind("test-system-precedence")
+    .bind("test-env-precedence")
     .execute(&pool)
     .await
     .expect("create system");
 
-    // Create system-scoped assignment
+    // Now create a system-scoped assignment to OLD version
     sqlx::query(
         r#"INSERT INTO compliance_bundle_assignments 
            (id, bundle_id, bundle_version_id, system_id, scope_type, active, 
@@ -482,24 +535,27 @@ async fn test_system_scoped_assignment_precedence(pool: PgPool) {
     )
     .bind(Uuid::new_v4())
     .bind(bundle_id)
-    .bind(version_id)
+    .bind(old_version_id)
     .bind(system_id)
     .execute(&pool)
     .await
-    .expect("create assignment");
+    .expect("create system assignment");
 
-    // Verify: System-scoped assignment exists
-    let sys_assignment_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM compliance_bundle_assignments WHERE bundle_id = $1 AND system_id = $2 AND active = true)",
-    )
-    .bind(bundle_id)
-    .bind(system_id)
-    .fetch_one(&pool)
-    .await
-    .expect("check sys assignment");
+    // Query the old version
+    let response = list_bundle_systems_for_version(&pool, bundle_id, old_version_id)
+        .await
+        .expect("query systems")
+        .expect("bundle/version exists");
 
-    assert!(
-        sys_assignment_exists,
-        "system-scoped assignment should exist"
+    let rollup = response
+        .systems
+        .iter()
+        .find(|r| r.system_id == system_id)
+        .expect("system found");
+    
+    assert_eq!(
+        rollup.assignment_status,
+        Some("pinned".to_string()),
+        "System-scoped assignment should take precedence and show 'pinned' because new is current"
     );
 }
