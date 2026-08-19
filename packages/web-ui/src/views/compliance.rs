@@ -645,7 +645,7 @@ pub fn ComplianceView() -> Element {
                                     RequirementCoverageCard {
                                         report,
                                         expanded: coverage_expanded,
-                                        on_open: move |_| { coverage_expanded.set(true); coverage_view.set(true); },
+                                        on_open: move |_| { coverage_view.set(true); },
                                         on_open_policy,
                                     }
                                 } else {
@@ -5293,6 +5293,73 @@ fn RequirementCoverageCard(
         })
         .collect();
 
+    // Group rows by their top-level parent for hierarchy rendering
+    let mut row_map: std::collections::HashMap<uuid::Uuid, &BundleCoverageRow> =
+        std::collections::HashMap::new();
+    for row in report.rows.iter() {
+        row_map.insert(row.requirement_version_id, row);
+    }
+
+    let mut groups: Vec<(Option<&BundleCoverageRow>, Vec<&BundleCoverageRow>)> = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+
+    for row in visible_rows.iter() {
+        if seen_ids.contains(&row.requirement_version_id) {
+            continue;
+        }
+
+        // Walk up the parent chain to find the root
+        let mut current_id = row.requirement_version_id;
+        let mut root_row: Option<&BundleCoverageRow> = None;
+
+        loop {
+            if let Some(r) = row_map.get(&current_id) {
+                root_row = Some(r);
+                if let Some(parent_id) = r.parent_requirement_version_id {
+                    current_id = parent_id;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Collect all rows with this root
+        let mut group_rows: Vec<&BundleCoverageRow> = Vec::new();
+        for vr in visible_rows.iter() {
+            // Check if this row belongs to this root
+            let mut check_id = vr.requirement_version_id;
+            let mut check_root: Option<uuid::Uuid> = None;
+
+            loop {
+                if let Some(r) = row_map.get(&check_id) {
+                    if r.parent_requirement_version_id.is_none() {
+                        check_root = Some(r.requirement_version_id);
+                        break;
+                    }
+                    if let Some(parent_id) = r.parent_requirement_version_id {
+                        check_id = parent_id;
+                    } else {
+                        check_root = Some(r.requirement_version_id);
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            if let Some(root_id) = check_root {
+                if root_row.map(|r| r.requirement_version_id) == Some(root_id) {
+                    group_rows.push(vr);
+                    seen_ids.insert(vr.requirement_version_id);
+                }
+            }
+        }
+
+        groups.push((root_row, group_rows));
+    }
+
     rsx! {
         div { class: "card", "data-testid": "requirement-coverage-card", style: "display:flex;flex-direction:column;gap:10px;",
             button {
@@ -5363,41 +5430,56 @@ fn RequirementCoverageCard(
                 if visible_rows.is_empty() {
                     div { style: "font-size:12px;color:var(--cf-text-muted);text-align:center;padding:24px 0;", "No requirements match." }
                 } else {
-                    div { style: "display:flex;flex-direction:column;gap:2px;max-height:360px;overflow-y:auto;",
-                        for row in visible_rows.iter() {
+                    div { style: "display:flex;flex-direction:column;gap:16px;",
+                        for (group_root, group_rows) in groups.iter() {
                         {
-                            let row_id = row.requirement_version_id;
-                            let coverage_color = match row.coverage {
-                                RequirementCoverage::Full => "var(--cf-success)",
-                                RequirementCoverage::Partial => "var(--cf-warn)",
-                                RequirementCoverage::Unmapped => "var(--cf-text-muted)",
-                                RequirementCoverage::RecoveryRequired => "var(--cf-error)",
-                            };
-                            let coverage_label = match row.coverage {
-                                RequirementCoverage::Full => "Full",
-                                RequirementCoverage::Partial => "Partial",
-                                RequirementCoverage::Unmapped => "Unmapped",
-                                RequirementCoverage::RecoveryRequired => "Recovery required",
-                            };
+                            // Render group heading only if: group has >1 row OR the single row is not the root
+                            let should_show_heading = group_rows.len() > 1 || group_root.map(|r| r.requirement_version_id) != group_rows.first().map(|r| r.requirement_version_id);
                             rsx! {
-                                 div { key: "{row_id}", "data-testid": "requirement-coverage-row",
-                                    style: "display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;padding:5px 8px;border-radius:6px;font-size:11px;background:var(--cf-subtle-bg);",
-                                    span { class: "mono", style: "color:var(--cf-text-secondary);", "{row.external_id}" }
-                                    span { style: "color:var(--cf-text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
-                                        {row.title.as_deref().unwrap_or("-")}
+                                if should_show_heading {
+                                    if let Some(root) = group_root {
+                                        div { style: "font-size:11.5px;font-weight:700;margin-bottom:6px;", "{root.external_id} — {root.title.as_deref().unwrap_or(\"-\")}" }
                                     }
-                                     div { style: "display:flex;flex-direction:column;align-items:flex-end;gap:3px;",
-                                         span { style: "color:{coverage_color};font-weight:600;white-space:nowrap;", "{coverage_label}" }
-                                          for mapping in row.mappings.iter() {
-                                              {
-                                                   let policy_id = mapping.policy_id;
-                                                   let policy_version_id = mapping.policy_version_id;
-                                                  let policy_name = mapping.policy_name.clone();
-                                                   rsx! { button { class: "cf-policy-link", onclick: move |_| on_open_policy.call((policy_id, policy_version_id)), Icon { name: IconName::File, size: 10 }, "{policy_name}", Icon { name: IconName::ArrowRight, size: 10 } } }
-                                              }
-                                          }
-                                     }
-                                 }
+                                }
+                                div { style: "display:flex;flex-direction:column;gap:2px;",
+                                    for row in group_rows.iter() {
+                                    {
+                                        let row_id = row.requirement_version_id;
+                                        let coverage_color = match row.coverage {
+                                            RequirementCoverage::Full => "var(--cf-success)",
+                                            RequirementCoverage::Partial => "var(--cf-warn)",
+                                            RequirementCoverage::Unmapped => "var(--cf-text-muted)",
+                                            RequirementCoverage::RecoveryRequired => "var(--cf-error)",
+                                        };
+                                        let coverage_label = match row.coverage {
+                                            RequirementCoverage::Full => "Full",
+                                            RequirementCoverage::Partial => "Partial",
+                                            RequirementCoverage::Unmapped => "Unmapped",
+                                            RequirementCoverage::RecoveryRequired => "Recovery required",
+                                        };
+                                        rsx! {
+                                             div { key: "{row_id}", "data-testid": "requirement-coverage-row",
+                                                style: "display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;padding:5px 8px;border-radius:6px;font-size:11px;background:var(--cf-subtle-bg);",
+                                                span { class: "mono", style: "color:var(--cf-text-secondary);", "{row.external_id}" }
+                                                span { style: "color:var(--cf-text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                                                    {row.title.as_deref().unwrap_or("-")}
+                                                }
+                                                 div { style: "display:flex;flex-direction:column;align-items:flex-end;gap:3px;",
+                                                     span { style: "color:{coverage_color};font-weight:600;white-space:nowrap;", "{coverage_label}" }
+                                                      for mapping in row.mappings.iter() {
+                                                          {
+                                                               let policy_id = mapping.policy_id;
+                                                               let policy_version_id = mapping.policy_version_id;
+                                                              let policy_name = mapping.policy_name.clone();
+                                                               rsx! { button { class: "cf-policy-link", onclick: move |_| on_open_policy.call((policy_id, policy_version_id)), Icon { name: IconName::File, size: 10 }, "{policy_name}", Icon { name: IconName::ArrowRight, size: 10 } } }
+                                                          }
+                                                      }
+                                                 }
+                                             }
+                                        }
+                                    }
+                                    }
+                                }
                             }
                         }
                         }
