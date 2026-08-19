@@ -392,8 +392,9 @@ pub async fn get_deployment_policies_by_versions(
 ///
 /// - mapped_requirement_count: COUNT(DISTINCT requirement_version_id) from
 ///   policy_requirement_mappings for this exact policy_version_id
-/// - bundle_usage_count: COUNT(DISTINCT bundle_version_id) from
-///   compliance_bundle_version_policies for this exact policy_version_id
+/// - bundle_usage_count: COUNT(DISTINCT bundle_id) lineage from
+///   compliance_bundle_version_policies for this exact policy_version_id,
+///   counting only selected=true memberships.
 pub async fn load_policy_version_usage_counts(
     pool: &PgPool,
     policy_version_ids: &[Uuid],
@@ -414,13 +415,16 @@ pub async fn load_policy_version_usage_counts(
         SELECT
             pv.id AS policy_version_id,
             COALESCE(COUNT(DISTINCT prm.requirement_version_id), 0) AS mapped_requirement_count,
-            COALESCE(COUNT(DISTINCT cbvp.bundle_version_id), 0) AS bundle_usage_count
+            COALESCE(COUNT(DISTINCT bv.bundle_id), 0) AS bundle_usage_count
         FROM (SELECT UNNEST($1::uuid[]) AS id) pv(id)
         LEFT JOIN policy_requirement_mappings prm
             ON prm.policy_version_id = pv.id
             AND prm.trust_state = 'trusted'
         LEFT JOIN compliance_bundle_version_policies cbvp
             ON cbvp.policy_version_id = pv.id
+            AND cbvp.selected = true
+        LEFT JOIN compliance_bundle_versions bv
+            ON bv.id = cbvp.bundle_version_id
         GROUP BY pv.id
         "#,
     )

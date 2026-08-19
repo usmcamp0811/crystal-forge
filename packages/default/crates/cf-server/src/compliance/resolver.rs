@@ -1268,12 +1268,13 @@ async fn resolve_systems_effective_policies_batch(
         Option<Uuid>,
         Option<Uuid>,
     )> = sqlx::query_as(
-        r#"SELECT a.id, a.current_version_id, a.bundle_id, a.bundle_version_id,
+        r#"SELECT a.id, a.current_version_id, a.bundle_id, av.bundle_version_id,
                       a.scope_type, a.enforcement_mode, a.assignment_overlay_digest,
                       a.environment_id, a.system_id
                FROM compliance_bundle_assignments a
+               JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
                WHERE a.active AND a.current_version_id IS NOT NULL
-                 AND ($3::uuid[] IS NULL OR a.bundle_version_id = ANY($3))
+                 AND ($3::uuid[] IS NULL OR av.bundle_version_id = ANY($3))
                  AND (
                    (a.scope_type = 'environment' AND a.environment_id = ANY($1))
                    OR (a.scope_type = 'system' AND a.system_id = ANY($2))
@@ -2154,23 +2155,25 @@ async fn resolve_system_effective_policies_with_options(
     let env_id = env_id.flatten();
 
     // Load all active bundle assignments with explicit semantic ordering.
+    // Use the authoritative assignment snapshot: current_version_id -> compliance_bundle_assignment_versions -> bundle_version_id
     let assignments: Vec<_> =
         sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid, String, String, String)>(
-            r#"SELECT a.id, a.current_version_id, a.bundle_id, a.bundle_version_id,
+            r#"SELECT a.id, a.current_version_id, a.bundle_id, av.bundle_version_id,
                   a.scope_type, a.enforcement_mode, a.assignment_overlay_digest
-           FROM compliance_bundle_assignments a
-           WHERE a.active AND a.current_version_id IS NOT NULL
-             AND ((a.scope_type = 'environment' AND a.environment_id = $2)
-               OR (a.scope_type = 'system' AND a.system_id = $1)
-             )
-           ORDER BY
-             CASE a.scope_type
-               WHEN 'environment' THEN 1
-               WHEN 'system' THEN 2
-               ELSE 3
-             END,
-             a.bundle_id,
-             a.id"#,
+            FROM compliance_bundle_assignments a
+            JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
+            WHERE a.active AND a.current_version_id IS NOT NULL
+              AND ((a.scope_type = 'environment' AND a.environment_id = $2)
+                OR (a.scope_type = 'system' AND a.system_id = $1)
+              )
+            ORDER BY
+              CASE a.scope_type
+                WHEN 'environment' THEN 1
+                WHEN 'system' THEN 2
+                ELSE 3
+              END,
+              a.bundle_id,
+              a.id"#,
         )
         .bind(system_id)
         .bind(env_id)

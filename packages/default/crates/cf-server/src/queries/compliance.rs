@@ -666,18 +666,19 @@ pub async fn load_policy_version_usage(
         r#"
         WITH candidate_assignments AS (
             SELECT a.bundle_id,
-                   a.bundle_version_id,
+                   av.bundle_version_id,
                    a.scope_type,
                    a.environment_id,
                    a.system_id
             FROM compliance_bundle_assignments a
+            JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
             WHERE a.active
               AND a.current_version_id IS NOT NULL
               AND (
                   EXISTS (
                       SELECT 1
                       FROM compliance_bundle_version_policies bvp
-                      WHERE bvp.bundle_version_id = a.bundle_version_id
+                      WHERE bvp.bundle_version_id = av.bundle_version_id
                         AND bvp.policy_version_id = $1
                         AND bvp.selected = true
                   )
@@ -940,15 +941,16 @@ async fn list_bundle_summary_aggregates(
          JOIN view_system_list v ON EXISTS (
              SELECT 1
              FROM compliance_bundle_assignments a
+             JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
              LEFT JOIN environments system_env ON system_env.name = v.environment
              WHERE a.bundle_id = b.id
-               AND a.bundle_version_id = requested.bundle_version_id
+               AND av.bundle_version_id = requested.bundle_version_id
                AND a.active
                AND (
                    (a.scope_type = 'system' AND a.system_id = v.id)
                    OR (a.scope_type = 'environment' AND a.environment_id = system_env.id)
                )
-         )
+          )
         ORDER BY requested.bundle_id, requested.bundle_version_id, v.hostname
         "#,
     )
@@ -2543,7 +2545,7 @@ async fn list_applicable_system_rows(pool: &PgPool, bundle_id: Uuid) -> Result<V
 /// - "current" if the system has an active assignment to the bundle's current published version
 /// - "pinned" if the system has an active assignment to an older accepted version  
 /// - None if no active assignment exists for the system
-pub(crate) async fn determine_assignment_status_for_system(
+pub async fn determine_assignment_status_for_system(
     pool: &PgPool,
     bundle_id: Uuid,
     system_id: Uuid,
@@ -2558,12 +2560,12 @@ pub(crate) async fn determine_assignment_status_for_system(
     .flatten();
 
     // Check for active assignment targeting this system (system scope takes precedence)
-    // Note: compliance_bundle_assignments table doesn't have bundle_id directly,
-    // only bundle_version_id, so we need to join to get bundles
+    // Use the authoritative assignment snapshot: current_version_id -> compliance_bundle_assignment_versions -> bundle_version_id
     let assigned_version: Option<Uuid> = sqlx::query_scalar(
-        r#"SELECT cba.bundle_version_id FROM compliance_bundle_assignments cba
-           JOIN compliance_bundle_versions cbv ON cbv.id = cba.bundle_version_id
-           WHERE cbv.bundle_id = $1 AND cba.system_id = $2 AND cba.active = true
+        r#"SELECT av.bundle_version_id 
+           FROM compliance_bundle_assignments cba
+           JOIN compliance_bundle_assignment_versions av ON av.id = cba.current_version_id
+           WHERE cba.bundle_id = $1 AND cba.system_id = $2 AND cba.active = true
            LIMIT 1"#,
     )
     .bind(bundle_id)
@@ -2576,10 +2578,12 @@ pub(crate) async fn determine_assignment_status_for_system(
         Some(v) => Some(v),
         None => {
             // Check for environment-scoped assignment
+            // Use the authoritative assignment snapshot
             sqlx::query_scalar(
-                r#"SELECT cba.bundle_version_id FROM compliance_bundle_assignments cba
-                   JOIN compliance_bundle_versions cbv ON cbv.id = cba.bundle_version_id
-                   WHERE cbv.bundle_id = $1 AND cba.scope_type = 'environment' AND cba.active = true
+                r#"SELECT av.bundle_version_id 
+                   FROM compliance_bundle_assignments cba
+                   JOIN compliance_bundle_assignment_versions av ON av.id = cba.current_version_id
+                   WHERE cba.bundle_id = $1 AND cba.scope_type = 'environment' AND cba.active = true
                    AND EXISTS (
                        SELECT 1 FROM systems s 
                        WHERE s.id = $2 AND s.environment_id = cba.environment_id

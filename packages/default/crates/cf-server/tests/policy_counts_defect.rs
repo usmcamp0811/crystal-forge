@@ -367,3 +367,190 @@ async fn test_defect_4_evidence_specs_populated_from_compliance_metadata(pool: P
         "first evidence spec should decode as a Command"
     );
 }
+
+#[sqlx::test]
+async fn test_bundle_usage_count_distinct_bundle_lineages_selected_only(pool: PgPool) {
+    /// DISCRIMINATING REGRESSION: Verifies that bundle_usage_count counts DISTINCT
+    /// bundle lineages (bundle_id), not bundle versions (bundle_version_id), and only
+    /// counts selected=true memberships.
+    ///
+    /// Fixture:
+    /// - Policy P
+    /// - Bundle A with 2 versions (A1, A2): both selected=true
+    /// - Bundle B with 1 version (B1): selected=true
+    /// - Bundle C with 1 version (C1): selected=false
+    ///
+    /// Expected bundle_usage_count = 2 (A and B only; C is excluded because unselected)
+    /// Defective behavior (old code): count = 3 (A1, A2, B1 as distinct versions without filter)
+
+    let (_policy_id, policy_version_id) = create_test_policy(&pool, "bundle-lineage-test").await;
+
+    // Bundle A (lineage 1)
+    let bundle_a_id = Uuid::new_v4();
+    let bundle_a_v1_id = Uuid::new_v4();
+    let bundle_a_v2_id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"INSERT INTO compliance_bundles (id, name, framework, version, layer, owner)
+           VALUES ($1, $2, 'NIST CSF', '1.0', 'fleet', 'Platform Security')"#,
+    )
+    .bind(bundle_a_id)
+    .bind("bundle-a-lineage")
+    .execute(&pool)
+    .await
+    .expect("create bundle A");
+
+    // Bundle A version 1
+    sqlx::query(
+        r#"INSERT INTO compliance_bundle_versions 
+           (id, bundle_id, version, publication_state, name, framework, framework_version,
+            description, layer, owner, semantic_digest)
+           VALUES ($1, $2, '1.0', 'draft', $3, 'NIST CSF', '1.0',
+                   'bundle A v1', 'fleet', 'Platform Security', 'sha256-a1')"#,
+    )
+    .bind(bundle_a_v1_id)
+    .bind(bundle_a_id)
+    .bind("bundle-a-1.0")
+    .execute(&pool)
+    .await
+    .expect("create bundle A v1");
+
+    sqlx::query(
+        r#"INSERT INTO compliance_bundle_version_policies 
+           (bundle_version_id, policy_version_id, selected, policy_order)
+           VALUES ($1, $2, true, 1)"#,
+    )
+    .bind(bundle_a_v1_id)
+    .bind(policy_version_id)
+    .execute(&pool)
+    .await
+    .expect("select policy in bundle A v1");
+
+    // Bundle A version 2 (same lineage)
+    sqlx::query(
+        r#"INSERT INTO compliance_bundle_versions 
+           (id, bundle_id, version, publication_state, name, framework, framework_version,
+            description, layer, owner, semantic_digest)
+           VALUES ($1, $2, '2.0', 'draft', $3, 'NIST CSF', '1.0',
+                   'bundle A v2', 'fleet', 'Platform Security', 'sha256-a2')"#,
+    )
+    .bind(bundle_a_v2_id)
+    .bind(bundle_a_id)
+    .bind("bundle-a-2.0")
+    .execute(&pool)
+    .await
+    .expect("create bundle A v2");
+
+    sqlx::query(
+        r#"INSERT INTO compliance_bundle_version_policies 
+           (bundle_version_id, policy_version_id, selected, policy_order)
+           VALUES ($1, $2, true, 1)"#,
+    )
+    .bind(bundle_a_v2_id)
+    .bind(policy_version_id)
+    .execute(&pool)
+    .await
+    .expect("select policy in bundle A v2");
+
+    // Bundle B (lineage 2)
+    let bundle_b_id = Uuid::new_v4();
+    let bundle_b_v1_id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"INSERT INTO compliance_bundles (id, name, framework, version, layer, owner)
+           VALUES ($1, $2, 'NIST CSF', '1.0', 'fleet', 'Platform Security')"#,
+    )
+    .bind(bundle_b_id)
+    .bind("bundle-b-lineage")
+    .execute(&pool)
+    .await
+    .expect("create bundle B");
+
+    sqlx::query(
+        r#"INSERT INTO compliance_bundle_versions 
+           (id, bundle_id, version, publication_state, name, framework, framework_version,
+            description, layer, owner, semantic_digest)
+           VALUES ($1, $2, '1.0', 'draft', $3, 'NIST CSF', '1.0',
+                   'bundle B v1', 'fleet', 'Platform Security', 'sha256-b1')"#,
+    )
+    .bind(bundle_b_v1_id)
+    .bind(bundle_b_id)
+    .bind("bundle-b-1.0")
+    .execute(&pool)
+    .await
+    .expect("create bundle B v1");
+
+    sqlx::query(
+        r#"INSERT INTO compliance_bundle_version_policies 
+           (bundle_version_id, policy_version_id, selected, policy_order)
+           VALUES ($1, $2, true, 1)"#,
+    )
+    .bind(bundle_b_v1_id)
+    .bind(policy_version_id)
+    .execute(&pool)
+    .await
+    .expect("select policy in bundle B v1");
+
+    // Bundle C (lineage 3, unselected)
+    let bundle_c_id = Uuid::new_v4();
+    let bundle_c_v1_id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"INSERT INTO compliance_bundles (id, name, framework, version, layer, owner)
+           VALUES ($1, $2, 'NIST CSF', '1.0', 'fleet', 'Platform Security')"#,
+    )
+    .bind(bundle_c_id)
+    .bind("bundle-c-lineage")
+    .execute(&pool)
+    .await
+    .expect("create bundle C");
+
+    sqlx::query(
+        r#"INSERT INTO compliance_bundle_versions 
+           (id, bundle_id, version, publication_state, name, framework, framework_version,
+            description, layer, owner, semantic_digest)
+           VALUES ($1, $2, '1.0', 'draft', $3, 'NIST CSF', '1.0',
+                   'bundle C v1', 'fleet', 'Platform Security', 'sha256-c1')"#,
+    )
+    .bind(bundle_c_v1_id)
+    .bind(bundle_c_id)
+    .bind("bundle-c-1.0")
+    .execute(&pool)
+    .await
+    .expect("create bundle C v1");
+
+    sqlx::query(
+        r#"INSERT INTO compliance_bundle_version_policies 
+           (bundle_version_id, policy_version_id, selected, policy_order)
+           VALUES ($1, $2, false, 1)"#, // selected = false
+    )
+    .bind(bundle_c_v1_id)
+    .bind(policy_version_id)
+    .execute(&pool)
+    .await
+    .expect("add policy to bundle C v1 (unselected)");
+
+    // Load the counts
+    let counts = load_policy_version_usage_counts(&pool, &[policy_version_id])
+        .await
+        .expect("production count loader failed");
+    let (mapped, bundles) = counts
+        .get(&policy_version_id)
+        .copied()
+        .expect("counts present for version");
+
+    // CRITICAL ASSERTION:
+    // If the code counts distinct bundle_version_id (old), it would return:
+    //   - A1, A2, B1 (selected only) = 3 (or 4 if C1 were also counted)
+    // If the code counts distinct bundle_id with selected=true filter (fixed), it returns:
+    //   - A (lineage), B (lineage) = 2 (C is excluded because selected=false)
+    assert_eq!(
+        bundles, 2,
+        "DISCRIMINATING TEST: bundle_usage_count must count DISTINCT bundle lineages with selected=true filter. \
+         Expected 2 (Bundle A and B lineages only; C is unselected). \
+         Failure indicates the query still counts distinct bundle_version_id or doesn't filter selected=true."
+    );
+
+    assert_eq!(mapped, 0, "no requirements mapped in this test");
+}
+
