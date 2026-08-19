@@ -2175,8 +2175,9 @@ pub async fn list_system_bundles(
           AND EXISTS (
               SELECT 1
               FROM compliance_bundle_assignments a
+              JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
               WHERE a.bundle_id = b.id
-                AND a.bundle_version_id = COALESCE(b.current_published_version_id, b.current_draft_version_id)
+                AND av.bundle_version_id = COALESCE(b.current_published_version_id, b.current_draft_version_id)
                 AND a.active
                 AND (
                     (a.scope_type = 'system' AND a.system_id = $3)
@@ -2470,8 +2471,9 @@ async fn find_applicable_system_row(
           AND EXISTS (
               SELECT 1
               FROM compliance_bundle_assignments a
+              JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
               WHERE a.bundle_id = $1
-                AND a.bundle_version_id = bv.id
+                AND av.bundle_version_id = bv.id
                 AND a.active
                 AND (
                     (a.scope_type = 'system' AND a.system_id = v.id)
@@ -2519,8 +2521,9 @@ async fn list_applicable_system_rows(pool: &PgPool, bundle_id: Uuid) -> Result<V
         WHERE EXISTS (
             SELECT 1
             FROM compliance_bundle_assignments a
+            JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
             WHERE a.bundle_id = b.id
-              AND a.bundle_version_id = bv.id
+              AND av.bundle_version_id = bv.id
               AND a.active
               AND (
                   (a.scope_type = 'system' AND a.system_id = v.id)
