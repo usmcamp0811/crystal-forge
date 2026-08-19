@@ -2293,14 +2293,41 @@ pub async fn list_system_bundles(
     let (mut policies_by_bundle, direct_policies) =
         partition_effective_policies_by_bundle(&effective.policies);
 
+    // Batch load assignment statuses for all visible bundles and the effective bundle
+    // in a single query to avoid N+1 per-bundle lookups
+    let mut all_pairs = Vec::new();
+    for bundle in &visible_bundles {
+        all_pairs.push((bundle.id, system.id));
+    }
+    
+    // Also include the overall effective bundle if it differs from visible bundles
+    let bundle_for_effective: Option<Uuid> =
+        sqlx::query_scalar("SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1")
+            .bind(effective.bundle_version_id)
+            .fetch_optional(pool)
+            .await?;
+    if let Some(eff_bundle_id) = bundle_for_effective {
+        // Only add if not already in visible_bundles
+        if !all_pairs.iter().any(|(bid, _)| *bid == eff_bundle_id) {
+            all_pairs.push((eff_bundle_id, system.id));
+        }
+    }
+    
+    // Load all assignment statuses in one batch query
+    let assignment_statuses = if !all_pairs.is_empty() {
+        load_assignment_statuses_for_pairs(pool, &all_pairs).await?
+    } else {
+        std::collections::HashMap::new()
+    };
+
     // The effective policy set's bundle_id is from the effective resolution,
-    // which may not match all visible bundles. Determine assignment per bundle.
+    // which may not match all visible bundles. Use preloaded assignment statuses.
     let mut bundles = Vec::with_capacity(visible_bundles.len());
     for bundle in visible_bundles {
-        // Determine assignment status for this specific bundle and system
-        let assignment_status = determine_assignment_status_for_system(pool, bundle.id, system.id)
-            .await
-            .ok()
+        // Look up pre-loaded assignment status
+        let assignment_status = assignment_statuses
+            .get(&(bundle.id, system.id))
+            .cloned()
             .flatten();
         let policies = policies_by_bundle.remove(&bundle.id).unwrap_or_default();
         bundles.push((
@@ -2311,18 +2338,15 @@ pub async fn list_system_bundles(
     }
     let direct_rollup =
         effective_policy_rollup_with_evidence(pool, &system, &direct_policies, None).await?;
-    // For overall rollup, determine assignment from the effective policy set's bundle version
-    let bundle_for_effective: Option<Uuid> =
-        sqlx::query_scalar("SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1")
-            .bind(effective.bundle_version_id)
-            .fetch_optional(pool)
-            .await?;
-    let overall_assignment_status = match bundle_for_effective {
-        Some(bundle_id) => determine_assignment_status_for_system(pool, bundle_id, system.id)
-            .await
-            .ok()
-            .flatten(),
-        None => None,
+    
+    // For overall rollup, use the preloaded assignment status
+    let overall_assignment_status = if let Some(eff_bundle_id) = bundle_for_effective {
+        assignment_statuses
+            .get(&(eff_bundle_id, system.id))
+            .cloned()
+            .flatten()
+    } else {
+        None
     };
     let overall_rollup = effective_policy_rollup_with_evidence(
         pool,
