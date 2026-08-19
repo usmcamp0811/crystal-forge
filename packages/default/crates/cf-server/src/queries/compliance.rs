@@ -216,6 +216,7 @@ pub async fn ensure_bundle_draft(
         name: String,
         framework: String,
         framework_version: Option<String>,
+        framework_version_id: Option<Uuid>,
         description: Option<String>,
         layer: String,
         owner: String,
@@ -223,7 +224,7 @@ pub async fn ensure_bundle_draft(
     }
     let pub_ver: PublishedBundleVersion = sqlx::query_as(
         r#"
-        SELECT name, framework, framework_version, description, layer, owner, version
+        SELECT name, framework, framework_version, framework_version_id, description, layer, owner, version
         FROM compliance_bundle_versions
         WHERE id = $1
         "#,
@@ -241,10 +242,10 @@ pub async fn ensure_bundle_draft(
     let new_draft_id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO compliance_bundle_versions (
-            bundle_id, version, name, framework, framework_version,
+            bundle_id, version, name, framework, framework_version, framework_version_id,
             description, layer, owner, semantic_digest, derived_from_version_id,
             created_by
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11)
         RETURNING id
         "#,
     )
@@ -253,6 +254,7 @@ pub async fn ensure_bundle_draft(
     .bind(&pub_ver.name)
     .bind(&pub_ver.framework)
     .bind(&pub_ver.framework_version)
+    .bind(pub_ver.framework_version_id)
     .bind(&pub_ver.description)
     .bind(&pub_ver.layer)
     .bind(&pub_ver.owner)
