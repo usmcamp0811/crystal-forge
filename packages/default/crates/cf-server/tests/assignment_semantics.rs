@@ -7,76 +7,193 @@
 /// 4. Null/None when no active assignment exists
 /// 5. Kept completely independent from resolution_state
 ///
-/// Run with: cargo test -p cf-server --test assignment_semantics -- --ignored
+/// Run with: cargo test -p cf-server --test assignment_semantics
+///
+/// These tests call the production queries module:
+///   crystal_forge::queries::compliance::list_bundle_systems_for_version
 use sqlx::PgPool;
 use uuid::Uuid;
 
-// Use the production queries module
 use crystal_forge::queries::compliance::list_bundle_systems_for_version;
 
-#[sqlx::test]
-async fn test_assignment_status_current_version(pool: PgPool) {
-    // Create bundle with one version (which becomes current_published)
-    let bundle_id = Uuid::new_v4();
-    let version_id = Uuid::new_v4();
+// ---------------------------------------------------------------------------
+// Schema-accurate fixtures. Every INSERT below matches the current migrations:
+//   compliance_bundles   : name, framework, version, layer, owner are NOT NULL
+//   compliance_bundle_versions : name, framework, layer, owner, semantic_digest NOT NULL
+//   systems              : hostname, public_key, derivation NOT NULL
+//   environments         : name NOT NULL (varchar 50)
+//   compliance_bundle_assignments : bundle_version_id, scope_type,
+//                          assignment_overlay_digest, bundle_id NOT NULL
+// ---------------------------------------------------------------------------
 
+async fn create_bundle(pool: &PgPool, name: &str, framework: &str) -> Uuid {
+    let bundle_id = Uuid::new_v4();
     sqlx::query(
-        r#"INSERT INTO compliance_bundles (id, name, description, created_at, updated_at)
-           VALUES ($1, $2, 'Test bundle', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
+        r#"INSERT INTO compliance_bundles (id, name, framework, version, description, layer, owner, created_at, updated_at)
+           VALUES ($1, $2, $3, '1.0', 'Test bundle', 'fleet', 'Platform Security',
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
     )
     .bind(bundle_id)
-    .bind("assignment-test-current")
-    .execute(&pool)
+    .bind(name)
+    .bind(framework)
+    .execute(pool)
     .await
     .expect("create bundle");
+    bundle_id
+}
 
+async fn create_bundle_version(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    version: &str,
+    publication_state: &str,
+    description: &str,
+) -> Uuid {
+    let version_id = Uuid::new_v4();
     sqlx::query(
-        r#"INSERT INTO compliance_bundle_versions (id, bundle_id, version, publication_state, 
-                   framework, description, created_at, updated_at)
-           VALUES ($1, $2, '1.0', 'accepted', 'NIST CSF', 'Test version', 
-                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
+        r#"INSERT INTO compliance_bundle_versions
+           (id, bundle_id, version, publication_state, name, framework, framework_version,
+            description, layer, owner, semantic_digest, created_at)
+           VALUES ($1, $2, $3, 'draft', $4, $5, '1.0', $6, 'fleet', 'Platform Security',
+                   'sha256-test', CURRENT_TIMESTAMP)"#,
     )
     .bind(version_id)
     .bind(bundle_id)
-    .execute(&pool)
+    .bind(version)
+    .bind(format!("Bundle {version}"))
+    .bind("NIST CSF")
+    .bind(description)
+    .execute(pool)
     .await
-    .expect("create version");
+    .expect("create bundle version");
 
-    // Set as current published
+    // Versions must begin mutable (guard_version_insert_state). Promotion to an
+    // immutable state must clear the draft pointer, set the published pointer,
+    // and flip publication_state in ONE transaction: the deferred lineage
+    // constraint validates the published pointer at commit. This mirrors the
+    // production publish ordering (see publish_bundle_version_row).
+    if publication_state == "accepted" {
+        let mut tx = pool.begin().await.expect("begin tx");
+        sqlx::query(
+            "UPDATE compliance_bundles SET current_draft_version_id = NULL \
+             WHERE current_draft_version_id = $1",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("clear draft pointer");
+        sqlx::query(
+            "UPDATE compliance_bundle_versions SET publication_state = 'accepted', \
+             published_at = CURRENT_TIMESTAMP WHERE id = $1",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("accept bundle version");
+        sqlx::query(
+            "UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(version_id)
+        .bind(bundle_id)
+        .execute(&mut *tx)
+        .await
+        .expect("set published pointer");
+        tx.commit().await.expect("commit publish");
+    }
+    version_id
+}
+
+async fn set_current_published(pool: &PgPool, bundle_id: Uuid, version_id: Uuid) {
     sqlx::query("UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2")
         .bind(version_id)
         .bind(bundle_id)
-        .execute(&pool)
+        .execute(pool)
         .await
         .expect("set current published");
+}
 
-    // Create system for assignment
+async fn create_environment(pool: &PgPool, name: &str) -> Uuid {
+    let env_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO environments (id, name, description, created_at, updated_at)
+           VALUES ($1, $2, 'Test environment', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
+    )
+    .bind(env_id)
+    .bind(name)
+    .execute(pool)
+    .await
+    .expect("create environment");
+    env_id
+}
+
+async fn create_system(pool: &PgPool, hostname: &str, environment_id: Option<Uuid>) -> Uuid {
     let system_id = Uuid::new_v4();
     sqlx::query(
-        r#"INSERT INTO systems (id, hostname, environment, health_status, critical_cve_count, 
-                   high_cve_count, created_at, updated_at)
-           VALUES ($1, $2, NULL, 'healthy', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
+        r#"INSERT INTO systems (id, hostname, environment_id, is_active, public_key, derivation,
+                    reachability, created_at, updated_at)
+           VALUES ($1, $2, $3, true, $4, $4, 'direct', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
     )
     .bind(system_id)
-    .bind("test-system-current")
-    .execute(&pool)
+    .bind(hostname)
+    .bind(environment_id)
+    .bind(format!("ssh-key-{hostname}"))
+    .execute(pool)
     .await
     .expect("create system");
+    system_id
+}
 
-    // Create assignment to current published version
+async fn create_system_assignment(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    bundle_version_id: Uuid,
+    system_id: Uuid,
+) {
     sqlx::query(
-        r#"INSERT INTO compliance_bundle_assignments 
-           (id, bundle_id, bundle_version_id, system_id, scope_type, active, 
-            created_at, updated_at)
-           VALUES ($1, $2, $3, $4, 'system', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
+        r#"INSERT INTO compliance_bundle_assignments
+           (bundle_id, bundle_version_id, system_id, scope_type, active,
+            assignment_overlay_digest, created_at, updated_at)
+           VALUES ($1, $2, $3, 'system', true, 'test-digest',
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
     )
-    .bind(Uuid::new_v4())
     .bind(bundle_id)
-    .bind(version_id)
+    .bind(bundle_version_id)
     .bind(system_id)
-    .execute(&pool)
+    .execute(pool)
     .await
-    .expect("create assignment");
+    .expect("create system assignment");
+}
+
+async fn create_environment_assignment(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    bundle_version_id: Uuid,
+    environment_id: Uuid,
+) {
+    sqlx::query(
+        r#"INSERT INTO compliance_bundle_assignments
+           (bundle_id, bundle_version_id, environment_id, scope_type, active,
+            assignment_overlay_digest, created_at, updated_at)
+           VALUES ($1, $2, $3, 'environment', true, 'test-digest',
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
+    )
+    .bind(bundle_id)
+    .bind(bundle_version_id)
+    .bind(environment_id)
+    .execute(pool)
+    .await
+    .expect("create environment assignment");
+}
+
+#[sqlx::test]
+async fn test_assignment_status_current_version(pool: PgPool) {
+    let bundle_id = create_bundle(&pool, "assignment-test-current", "NIST CSF").await;
+    let version_id =
+        create_bundle_version(&pool, bundle_id, "1.0", "accepted", "Test version").await;
+    set_current_published(&pool, bundle_id, version_id).await;
+
+    let system_id = create_system(&pool, "test-system-current", None).await;
+    create_system_assignment(&pool, bundle_id, version_id, system_id).await;
 
     // Call production handler and verify assignment_status
     let response = list_bundle_systems_for_version(&pool, bundle_id, version_id)
@@ -96,84 +213,17 @@ async fn test_assignment_status_current_version(pool: PgPool) {
 
 #[sqlx::test]
 async fn test_assignment_status_pinned_version(pool: PgPool) {
-    // Create bundle with two versions
-    let bundle_id = Uuid::new_v4();
-    let old_version_id = Uuid::new_v4();
-    let new_version_id = Uuid::new_v4();
+    let bundle_id = create_bundle(&pool, "assignment-test-pinned", "NIST CSF").await;
+    let old_version_id =
+        create_bundle_version(&pool, bundle_id, "1.0", "accepted", "Old version").await;
+    let new_version_id =
+        create_bundle_version(&pool, bundle_id, "2.0", "accepted", "New version").await;
+    set_current_published(&pool, bundle_id, new_version_id).await;
 
-    sqlx::query(
-        r#"INSERT INTO compliance_bundles (id, name, description, created_at, updated_at)
-           VALUES ($1, $2, 'Test bundle', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(bundle_id)
-    .bind("assignment-test-pinned")
-    .execute(&pool)
-    .await
-    .expect("create bundle");
+    let system_id = create_system(&pool, "test-system-pinned", None).await;
+    // Assign to the OLD version (not current)
+    create_system_assignment(&pool, bundle_id, old_version_id, system_id).await;
 
-    // Create old version
-    sqlx::query(
-        r#"INSERT INTO compliance_bundle_versions (id, bundle_id, version, publication_state, 
-                   framework, description, created_at, updated_at)
-           VALUES ($1, $2, '1.0', 'accepted', 'NIST CSF', 'Old version', 
-                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(old_version_id)
-    .bind(bundle_id)
-    .execute(&pool)
-    .await
-    .expect("create old version");
-
-    // Create new version
-    sqlx::query(
-        r#"INSERT INTO compliance_bundle_versions (id, bundle_id, version, publication_state, 
-                   framework, description, created_at, updated_at)
-           VALUES ($1, $2, '2.0', 'accepted', 'NIST CSF', 'New version', 
-                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(new_version_id)
-    .bind(bundle_id)
-    .execute(&pool)
-    .await
-    .expect("create new version");
-
-    // Set new version as current published
-    sqlx::query("UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2")
-        .bind(new_version_id)
-        .bind(bundle_id)
-        .execute(&pool)
-        .await
-        .expect("set current published");
-
-    // Create system
-    let system_id = Uuid::new_v4();
-    sqlx::query(
-        r#"INSERT INTO systems (id, hostname, environment, health_status, critical_cve_count, 
-                   high_cve_count, created_at, updated_at)
-           VALUES ($1, $2, NULL, 'healthy', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(system_id)
-    .bind("test-system-pinned")
-    .execute(&pool)
-    .await
-    .expect("create system");
-
-    // Create assignment to OLD version (not current)
-    sqlx::query(
-        r#"INSERT INTO compliance_bundle_assignments 
-           (id, bundle_id, bundle_version_id, system_id, scope_type, active, 
-            created_at, updated_at)
-           VALUES ($1, $2, $3, $4, 'system', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(bundle_id)
-    .bind(old_version_id)
-    .bind(system_id)
-    .execute(&pool)
-    .await
-    .expect("create assignment");
-
-    // Query the old version - system should show as "pinned" because new is current
     let response = list_bundle_systems_for_version(&pool, bundle_id, old_version_id)
         .await
         .expect("query systems")
@@ -190,60 +240,19 @@ async fn test_assignment_status_pinned_version(pool: PgPool) {
 
 #[sqlx::test]
 async fn test_assignment_status_unassigned(pool: PgPool) {
-    // Create bundle without any assignments
-    let bundle_id = Uuid::new_v4();
-    let version_id = Uuid::new_v4();
+    let bundle_id = create_bundle(&pool, "assignment-test-unassigned", "NIST CSF").await;
+    let version_id =
+        create_bundle_version(&pool, bundle_id, "1.0", "accepted", "Test version").await;
+    set_current_published(&pool, bundle_id, version_id).await;
 
-    sqlx::query(
-        r#"INSERT INTO compliance_bundles (id, name, description, created_at, updated_at)
-           VALUES ($1, $2, 'Test bundle', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(bundle_id)
-    .bind("assignment-test-unassigned")
-    .execute(&pool)
-    .await
-    .expect("create bundle");
+    // System exists but has NO assignment
+    let _system_id = create_system(&pool, "test-system-unassigned", None).await;
 
-    sqlx::query(
-        r#"INSERT INTO compliance_bundle_versions (id, bundle_id, version, publication_state, 
-                   framework, description, created_at, updated_at)
-           VALUES ($1, $2, '1.0', 'accepted', 'NIST CSF', 'Test version', 
-                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(version_id)
-    .bind(bundle_id)
-    .execute(&pool)
-    .await
-    .expect("create version");
-
-    // Set as current published
-    sqlx::query("UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2")
-        .bind(version_id)
-        .bind(bundle_id)
-        .execute(&pool)
-        .await
-        .expect("set current published");
-
-    // Create system but NO assignment
-    let system_id = Uuid::new_v4();
-    sqlx::query(
-        r#"INSERT INTO systems (id, hostname, environment, health_status, critical_cve_count, 
-                   high_cve_count, created_at, updated_at)
-           VALUES ($1, $2, NULL, 'healthy', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(system_id)
-    .bind("test-system-unassigned")
-    .execute(&pool)
-    .await
-    .expect("create system");
-
-    // Query - no systems should be returned because none are assigned
     let response = list_bundle_systems_for_version(&pool, bundle_id, version_id)
         .await
         .expect("query systems");
 
     // Response should be None since no systems are applicable (no assignments exist)
-    // This verifies that systems without assignments do not appear in the results
     assert!(
         response.is_none() || response.unwrap().systems.is_empty(),
         "Unassigned system should not appear in results"
@@ -252,69 +261,14 @@ async fn test_assignment_status_unassigned(pool: PgPool) {
 
 #[sqlx::test]
 async fn test_assignment_independent_from_resolution(pool: PgPool) {
-    // This test verifies that assignment_status is computed independently
-    // from resolution_state (no mixing of concerns).
+    let bundle_id = create_bundle(&pool, "assignment-test-independent", "NIST CSF").await;
+    let version_id =
+        create_bundle_version(&pool, bundle_id, "1.0", "accepted", "Test version").await;
+    set_current_published(&pool, bundle_id, version_id).await;
 
-    let bundle_id = Uuid::new_v4();
-    let version_id = Uuid::new_v4();
+    let system_id = create_system(&pool, "test-system-independent", None).await;
+    create_system_assignment(&pool, bundle_id, version_id, system_id).await;
 
-    sqlx::query(
-        r#"INSERT INTO compliance_bundles (id, name, description, created_at, updated_at)
-           VALUES ($1, $2, 'Test bundle', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(bundle_id)
-    .bind("assignment-test-independent")
-    .execute(&pool)
-    .await
-    .expect("create bundle");
-
-    sqlx::query(
-        r#"INSERT INTO compliance_bundle_versions (id, bundle_id, version, publication_state, 
-                   framework, description, created_at, updated_at)
-           VALUES ($1, $2, '1.0', 'accepted', 'NIST CSF', 'Test version', 
-                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(version_id)
-    .bind(bundle_id)
-    .execute(&pool)
-    .await
-    .expect("create version");
-
-    sqlx::query("UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2")
-        .bind(version_id)
-        .bind(bundle_id)
-        .execute(&pool)
-        .await
-        .expect("set current published");
-
-    // Create system and assignment
-    let system_id = Uuid::new_v4();
-    sqlx::query(
-        r#"INSERT INTO systems (id, hostname, environment, health_status, critical_cve_count, 
-                   high_cve_count, created_at, updated_at)
-           VALUES ($1, $2, NULL, 'healthy', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(system_id)
-    .bind("test-system-independent")
-    .execute(&pool)
-    .await
-    .expect("create system");
-
-    sqlx::query(
-        r#"INSERT INTO compliance_bundle_assignments 
-           (id, bundle_id, bundle_version_id, system_id, scope_type, active, 
-            created_at, updated_at)
-           VALUES ($1, $2, $3, $4, 'system', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(bundle_id)
-    .bind(version_id)
-    .bind(system_id)
-    .execute(&pool)
-    .await
-    .expect("create assignment");
-
-    // Call production handler
     let response = list_bundle_systems_for_version(&pool, bundle_id, version_id)
         .await
         .expect("query systems")
@@ -323,98 +277,34 @@ async fn test_assignment_independent_from_resolution(pool: PgPool) {
     assert_eq!(response.systems.len(), 1, "Should have exactly one system");
     let rollup = &response.systems[0];
 
-    // Verify assignment_status and resolution_state are independent
+    // assignment_status derives purely from compliance_bundle_assignments.
+    // The resolution path (policies in the bundle version) may report
+    // not_applicable when no policies exist, but assignment must still be
+    // "current" - the two fields are independent concerns.
     assert_eq!(
         rollup.assignment_status,
         Some("current".to_string()),
-        "Assignment status should be determined independently"
+        "Assignment status should be determined independently of resolution"
     );
-    // resolution_state should not be mixed with assignment_status
-    // They represent different concerns
 }
 
 #[sqlx::test]
 async fn test_environment_scoped_assignment(pool: PgPool) {
-    let bundle_id = Uuid::new_v4();
-    let version_id = Uuid::new_v4();
+    let bundle_id = create_bundle(&pool, "assignment-test-env-scoped", "NIST CSF").await;
+    let version_id =
+        create_bundle_version(&pool, bundle_id, "1.0", "accepted", "Test version").await;
+    set_current_published(&pool, bundle_id, version_id).await;
 
-    sqlx::query(
-        r#"INSERT INTO compliance_bundles (id, name, description, created_at, updated_at)
-           VALUES ($1, $2, 'Test bundle', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(bundle_id)
-    .bind("assignment-test-env-scoped")
-    .execute(&pool)
-    .await
-    .expect("create bundle");
+    let env_id = create_environment(&pool, "test-env-scoped").await;
+    create_environment_assignment(&pool, bundle_id, version_id, env_id).await;
 
-    sqlx::query(
-        r#"INSERT INTO compliance_bundle_versions (id, bundle_id, version, publication_state, 
-                   framework, description, created_at, updated_at)
-           VALUES ($1, $2, '1.0', 'accepted', 'NIST CSF', 'Test version', 
-                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(version_id)
-    .bind(bundle_id)
-    .execute(&pool)
-    .await
-    .expect("create version");
+    let system_id = create_system(&pool, "test-system-in-env", Some(env_id)).await;
 
-    sqlx::query("UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2")
-        .bind(version_id)
-        .bind(bundle_id)
-        .execute(&pool)
-        .await
-        .expect("set current published");
-
-    // Create environment
-    let env_id = Uuid::new_v4();
-    sqlx::query(
-        r#"INSERT INTO environments (id, name, description, created_at, updated_at)
-           VALUES ($1, $2, 'Test environment', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(env_id)
-    .bind("test-env-scoped")
-    .execute(&pool)
-    .await
-    .expect("create environment");
-
-    // Create environment-scoped assignment
-    sqlx::query(
-        r#"INSERT INTO compliance_bundle_assignments 
-           (id, bundle_id, bundle_version_id, environment_id, scope_type, active, 
-            created_at, updated_at)
-           VALUES ($1, $2, $3, $4, 'environment', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(bundle_id)
-    .bind(version_id)
-    .bind(env_id)
-    .execute(&pool)
-    .await
-    .expect("create environment assignment");
-
-    // Create system in that environment
-    let system_id = Uuid::new_v4();
-    sqlx::query(
-        r#"INSERT INTO systems (id, hostname, environment, health_status, critical_cve_count, 
-                   high_cve_count, created_at, updated_at)
-           VALUES ($1, $2, $3, 'healthy', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(system_id)
-    .bind("test-system-in-env")
-    .bind("test-env-scoped")
-    .execute(&pool)
-    .await
-    .expect("create system");
-
-    // Call production handler
     let response = list_bundle_systems_for_version(&pool, bundle_id, version_id)
         .await
         .expect("query systems")
         .expect("bundle/version exists");
 
-    // Should include the system because it's in the environment that has assignment
     assert!(
         response.systems.iter().any(|r| r.system_id == system_id),
         "System in assigned environment should be included"
@@ -434,111 +324,20 @@ async fn test_environment_scoped_assignment(pool: PgPool) {
 
 #[sqlx::test]
 async fn test_system_assignment_precedence(pool: PgPool) {
-    // Test that system-scoped assignment takes precedence over environment-scoped
-    let bundle_id = Uuid::new_v4();
-    let old_version_id = Uuid::new_v4();
-    let new_version_id = Uuid::new_v4();
+    let bundle_id = create_bundle(&pool, "assignment-test-precedence", "NIST CSF").await;
+    let old_version_id =
+        create_bundle_version(&pool, bundle_id, "1.0", "accepted", "Old version").await;
+    let new_version_id =
+        create_bundle_version(&pool, bundle_id, "2.0", "accepted", "New version").await;
+    set_current_published(&pool, bundle_id, new_version_id).await;
 
-    sqlx::query(
-        r#"INSERT INTO compliance_bundles (id, name, description, created_at, updated_at)
-           VALUES ($1, $2, 'Test bundle', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(bundle_id)
-    .bind("assignment-test-precedence")
-    .execute(&pool)
-    .await
-    .expect("create bundle");
+    let env_id = create_environment(&pool, "test-env-precedence").await;
+    create_environment_assignment(&pool, bundle_id, new_version_id, env_id).await;
 
-    // Create two versions
-    sqlx::query(
-        r#"INSERT INTO compliance_bundle_versions (id, bundle_id, version, publication_state, 
-                   framework, description, created_at, updated_at)
-           VALUES ($1, $2, '1.0', 'accepted', 'NIST CSF', 'Old version', 
-                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(old_version_id)
-    .bind(bundle_id)
-    .execute(&pool)
-    .await
-    .expect("create old version");
+    let system_id = create_system(&pool, "test-system-precedence", Some(env_id)).await;
+    // System-scoped assignment to OLD version overrides env assignment to new
+    create_system_assignment(&pool, bundle_id, old_version_id, system_id).await;
 
-    sqlx::query(
-        r#"INSERT INTO compliance_bundle_versions (id, bundle_id, version, publication_state, 
-                   framework, description, created_at, updated_at)
-           VALUES ($1, $2, '2.0', 'accepted', 'NIST CSF', 'New version', 
-                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(new_version_id)
-    .bind(bundle_id)
-    .execute(&pool)
-    .await
-    .expect("create new version");
-
-    // Set new version as current published
-    sqlx::query("UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2")
-        .bind(new_version_id)
-        .bind(bundle_id)
-        .execute(&pool)
-        .await
-        .expect("set current published");
-
-    // Create environment
-    let env_id = Uuid::new_v4();
-    sqlx::query(
-        r#"INSERT INTO environments (id, name, description, created_at, updated_at)
-           VALUES ($1, $2, 'Test environment', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(env_id)
-    .bind("test-env-precedence")
-    .execute(&pool)
-    .await
-    .expect("create environment");
-
-    // Create environment-scoped assignment to new version
-    sqlx::query(
-        r#"INSERT INTO compliance_bundle_assignments 
-           (id, bundle_id, bundle_version_id, environment_id, scope_type, active, 
-            created_at, updated_at)
-           VALUES ($1, $2, $3, $4, 'environment', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(bundle_id)
-    .bind(new_version_id)
-    .bind(env_id)
-    .execute(&pool)
-    .await
-    .expect("create environment assignment");
-
-    // Create system in that environment
-    let system_id = Uuid::new_v4();
-    sqlx::query(
-        r#"INSERT INTO systems (id, hostname, environment, health_status, critical_cve_count, 
-                   high_cve_count, created_at, updated_at)
-           VALUES ($1, $2, $3, 'healthy', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(system_id)
-    .bind("test-system-precedence")
-    .bind("test-env-precedence")
-    .execute(&pool)
-    .await
-    .expect("create system");
-
-    // Now create a system-scoped assignment to OLD version
-    sqlx::query(
-        r#"INSERT INTO compliance_bundle_assignments 
-           (id, bundle_id, bundle_version_id, system_id, scope_type, active, 
-            created_at, updated_at)
-           VALUES ($1, $2, $3, $4, 'system', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(bundle_id)
-    .bind(old_version_id)
-    .bind(system_id)
-    .execute(&pool)
-    .await
-    .expect("create system assignment");
-
-    // Query the old version
     let response = list_bundle_systems_for_version(&pool, bundle_id, old_version_id)
         .await
         .expect("query systems")

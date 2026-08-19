@@ -1,17 +1,20 @@
-/// Live-DB regression tests for evidence_for_ato functionality.
-///
-/// These tests verify that evidence collection specifications are:
-/// 1. Persisted in deployment_policy_versions.compliance_metadata
-/// 2. Preserved through publish/draft lifecycle
-/// 3. Immutable across revisions (each version has independent specs)
-/// 4. Correctly updated in semantic digest when changed
-/// 5. Properly validated (reject malformed specs)
-/// 6. Rendered in PolicyDrawer when specs present
-///
-/// Run with: cargo test -p cf-server --test evidence_for_ato -- --ignored
+//! Live-DB regression tests for evidence_for_ato functionality.
+//!
+//! These tests verify that evidence collection specifications are:
+//! 1. Persisted in deployment_policy_versions.compliance_metadata
+//! 2. Preserved through publish/draft lifecycle
+//! 3. Immutable across revisions (each version has independent specs)
+//! 4. Correctly updated in semantic digest when changed
+//! 5. Properly validated (reject malformed specs)
+//! 6. Decoded from compliance_metadata by the production summary loader that
+//!    powers the PolicyDrawer "Evidence for ATO" indicator
+//!
+/// Run with: cargo test -p cf-server --test evidence_for_ato -- --test-threads=1
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crystal_forge::queries::deployment_policies::fetch_policy_version_summaries;
 
 /// Helper to create a deployment policy with a version
 async fn create_policy_with_version(pool: &PgPool, policy_name: &str) -> (Uuid, Uuid) {
@@ -19,8 +22,8 @@ async fn create_policy_with_version(pool: &PgPool, policy_name: &str) -> (Uuid, 
     let version_id = Uuid::new_v4();
 
     sqlx::query(
-        r#"INSERT INTO deployment_policies (id, name, enabled, created_at, updated_at)
-           VALUES ($1, $2, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
+        r#"INSERT INTO deployment_policies (id, name, policy_type, config, enabled)
+           VALUES ($1, $2, 'require_packages', '{}', true)"#,
     )
     .bind(policy_id)
     .bind(policy_name)
@@ -30,18 +33,42 @@ async fn create_policy_with_version(pool: &PgPool, policy_name: &str) -> (Uuid, 
 
     sqlx::query(
         r#"INSERT INTO deployment_policy_versions 
-           (id, policy_id, version, publication_state, policy_type, config, 
-            compliance_metadata, created_at, updated_at)
-           VALUES ($1, $2, '1.0', 'draft', 'require_cf_agent', '{}', '{}', 
-                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
+           (id, policy_id, version, publication_state, name, policy_type, config,
+            compliance_metadata, semantic_digest, created_at)
+           VALUES ($1, $2, '1.0', 'draft', $3, 'require_packages', '{}', '{}',
+                   'sha256-initial', CURRENT_TIMESTAMP)"#,
     )
     .bind(version_id)
     .bind(policy_id)
+    .bind(policy_name)
     .execute(pool)
     .await
     .expect("create version");
 
     (policy_id, version_id)
+}
+
+/// Publish a version: accept it and set the current_published pointer in ONE
+/// transaction. The deferred lineage constraint validates the published
+/// pointer at commit, so both statements must land in the same tx (mirrors
+/// the production publish ordering used by policy/bundle publishing).
+async fn publish_version(pool: &PgPool, policy_id: Uuid, version_id: Uuid) {
+    let mut tx = pool.begin().await.expect("begin tx");
+    sqlx::query(
+        "UPDATE deployment_policy_versions SET publication_state = 'accepted', \
+         published_at = CURRENT_TIMESTAMP WHERE id = $1",
+    )
+    .bind(version_id)
+    .execute(&mut *tx)
+    .await
+    .expect("accept policy version");
+    sqlx::query("UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2")
+        .bind(version_id)
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .expect("set published pointer");
+    tx.commit().await.expect("commit publish");
 }
 
 #[sqlx::test]
@@ -123,40 +150,34 @@ async fn test_evidence_specs_preserved_draft(pool: PgPool) {
         }
     ]);
 
-    // Add specs to published version
+    // Add specs to published version (mutable draft, so the update is allowed)
     sqlx::query(
         r#"UPDATE deployment_policy_versions 
            SET compliance_metadata = jsonb_set(
                compliance_metadata, 
                '{evidence_specs}', 
                $1::jsonb
-           ),
-               publication_state = 'accepted'
+           )
            WHERE id = $2"#,
     )
     .bind(evidence_specs.to_string())
     .bind(published_version_id)
     .execute(&pool)
     .await
-    .expect("update and publish version");
+    .expect("update evidence specs");
 
-    // Mark as current published
-    sqlx::query("UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2")
-        .bind(published_version_id)
-        .bind(policy_id)
-        .execute(&pool)
-        .await
-        .expect("set as current published");
+    // Publish with pointer update in one transaction (lineage constraint)
+    publish_version(&pool, policy_id, published_version_id).await;
 
-    // Now derive a draft (simulate the ensure_bundle_draft() workflow)
+    // Now derive a draft (simulate the production ensure_policy_draft workflow)
     let draft_version_id = Uuid::new_v4();
     sqlx::query(
         r#"INSERT INTO deployment_policy_versions 
-           (id, policy_id, version, publication_state, policy_type, config, 
-            compliance_metadata, derived_from_version_id, created_at, updated_at)
-           SELECT $1, policy_id, $2, 'draft', policy_type, config,
-                  compliance_metadata, $3,
-                  CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+           (id, policy_id, version, publication_state, name, policy_type, config,
+            compliance_metadata, derived_from_version_id, semantic_digest, created_at)
+           SELECT $1, policy_id, $2, 'draft', name, policy_type, config,
+                  compliance_metadata, $3, 'sha256-draft',
+                  CURRENT_TIMESTAMP
            FROM deployment_policy_versions 
            WHERE id = $4"#,
     )
@@ -226,36 +247,33 @@ async fn test_evidence_specs_exact_revision(pool: PgPool) {
     let version2_id = Uuid::new_v4();
     sqlx::query(
         r#"INSERT INTO deployment_policy_versions 
-           (id, policy_id, version, publication_state, policy_type, config, 
-            compliance_metadata, created_at, updated_at)
-           VALUES ($1, $2, '2.0', 'draft', 'require_cf_agent', '{}', $3, 
-                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
+           (id, policy_id, version, publication_state, name, policy_type, config,
+            compliance_metadata, semantic_digest, created_at)
+           VALUES ($1, $2, '2.0', 'draft', 'evidence-test-revision-v1',
+                   'require_packages', '{}', $3, 'sha256-v2', CURRENT_TIMESTAMP)"#,
     )
     .bind(version2_id)
     .bind(policy_id)
-    .bind(
-        json!({
-            "evidence_specs": [
-                {
-                    "kind": "File",
-                    "details": {
-                        "path": "/etc/hostname",
-                        "note": null
-                    },
-                    "required_fields": {}
+    .bind(json!({
+        "evidence_specs": [
+            {
+                "kind": "File",
+                "details": {
+                    "path": "/etc/hostname",
+                    "note": null
                 },
-                {
-                    "kind": "UnitState",
-                    "details": {
-                        "unit": "ssh.service",
-                        "state": "running"
-                    },
-                    "required_fields": {}
-                }
-            ]
-        })
-        .to_string(),
-    )
+                "required_fields": {}
+            },
+            {
+                "kind": "UnitState",
+                "details": {
+                    "unit": "ssh.service",
+                    "state": "running"
+                },
+                "required_fields": {}
+            }
+        ]
+    }))
     .execute(&pool)
     .await
     .expect("create v2");
@@ -369,8 +387,8 @@ async fn test_malformed_evidence_rejected(pool: PgPool) {
         }
     ]);
 
-    // This should still insert (JSON validation happens at API layer, not DB layer)
-    // But in the real implementation, the API would reject this before reaching DB
+    // The DB stores JSONB verbatim; strict validation happens when the
+    // production loader decodes evidence_specs into EvidenceSpec values.
     let result = sqlx::query(
         r#"UPDATE deployment_policy_versions 
            SET compliance_metadata = jsonb_set(
@@ -385,34 +403,18 @@ async fn test_malformed_evidence_rejected(pool: PgPool) {
     .execute(&pool)
     .await;
 
-    // JSON insert will succeed at DB level (DB doesn't validate schema)
-    // The real validation happens when the API deserializes it
     assert!(
         result.is_ok(),
-        "malformed JSON can be stored in JSONB (validation at API layer)"
-    );
-
-    // Verify specs were stored (even though malformed)
-    let stored_meta: Value = sqlx::query_scalar(
-        "SELECT compliance_metadata FROM deployment_policy_versions WHERE id = $1",
-    )
-    .bind(version_id)
-    .fetch_one(&pool)
-    .await
-    .expect("fetch metadata");
-
-    assert!(
-        stored_meta.get("evidence_specs").is_some(),
-        "malformed specs should be stored in DB"
+        "malformed JSON can be stored in JSONB (validation at decode layer)"
     );
 }
 
 #[sqlx::test]
 async fn test_evidence_specs_render_indicator(pool: PgPool) {
     // Create policy version with evidence specs
-    let (_policy_id, version_with_specs) =
+    let (policy_id, version_with_specs) =
         create_policy_with_version(&pool, "evidence-test-render-with").await;
-    let (_policy_id2, version_without_specs) =
+    let (policy_id2, version_without_specs) =
         create_policy_with_version(&pool, "evidence-test-render-without").await;
 
     // Add specs to first version
@@ -449,42 +451,29 @@ async fn test_evidence_specs_render_indicator(pool: PgPool) {
     .await
     .expect("add specs");
 
-    // Verify version with specs has indicator
-    let with_specs_meta: Value = sqlx::query_scalar(
-        "SELECT compliance_metadata FROM deployment_policy_versions WHERE id = $1",
-    )
-    .bind(version_with_specs)
-    .fetch_one(&pool)
-    .await
-    .expect("get metadata with specs");
+    // Verify the production summary loader (used by the policy-management
+    // handler that powers the PolicyDrawer) decodes the indicator count.
+    let summaries = fetch_policy_version_summaries(&pool, &[policy_id, policy_id2])
+        .await
+        .expect("production summary loader failed");
+    let versions = summaries.get(&policy_id).expect("policy summaries present");
 
-    let spec_count = with_specs_meta
-        .get("evidence_specs")
-        .and_then(|a| a.as_array())
-        .map(|a| a.len());
-
+    let with_specs = versions
+        .iter()
+        .find(|v| v.id == version_with_specs)
+        .expect("version with specs present");
     assert_eq!(
-        spec_count,
-        Some(2),
-        "should show 'Evidence for ATO · 2' indicator when 2 specs present"
+        with_specs.evidence_specs.len(),
+        2,
+        "production loader should surface 2 evidence specs (indicator 'Evidence for ATO · 2')"
     );
 
-    // Verify version without specs has no indicator
-    let without_specs_meta: Value = sqlx::query_scalar(
-        "SELECT compliance_metadata FROM deployment_policy_versions WHERE id = $1",
-    )
-    .bind(version_without_specs)
-    .fetch_one(&pool)
-    .await
-    .expect("get metadata without specs");
-
-    let no_spec_count = without_specs_meta
-        .get("evidence_specs")
-        .and_then(|a| a.as_array())
-        .map(|a| a.len());
-
+    let without_specs = summaries
+        .get(&policy_id2)
+        .and_then(|vs| vs.iter().find(|v| v.id == version_without_specs))
+        .expect("version without specs present");
     assert!(
-        no_spec_count.is_none() || no_spec_count == Some(0),
-        "version without specs should not have indicator"
+        without_specs.evidence_specs.is_empty(),
+        "version without specs should have no evidence indicator"
     );
 }
