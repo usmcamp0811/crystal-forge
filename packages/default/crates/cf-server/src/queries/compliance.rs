@@ -2011,28 +2011,32 @@ pub async fn list_bundle_systems_for_version(
         bundle_version_id,
     )
     .await?;
-    let mut rollups = Vec::with_capacity(systems.len());
-    for system in systems {
-        let rollup = match effective.get(&system.id) {
-            Some(ResolutionOutcome::Resolved(set))
-                if set.bundle_version_id == bundle_version_id =>
-            {
-                effective_policy_rollup_with_evidence(pool, &system, &set.policies).await?
-            }
-            Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup(
-                system,
-                policies.len() as i64,
-                conflicts
-                    .first()
-                    .map(|c| c.code.as_str())
-                    .unwrap_or("conflict"),
-            ),
-            // Missing or mismatched resolution has no authoritative effective
-            // set. Never substitute lineage/current membership for this view.
-            _ => unresolved_system_rollup(system, policies.len() as i64, "not_applicable"),
-        };
-        rollups.push(rollup);
-    }
+     let mut rollups = Vec::with_capacity(systems.len());
+     for system in systems {
+         let rollup = match effective.get(&system.id) {
+             Some(ResolutionOutcome::Resolved(set))
+                 if set.bundle_version_id == bundle_version_id =>
+             {
+                 let assignment_status = determine_assignment_status_for_bundle_version(
+                     pool,
+                     bundle_version_id,
+                 ).await.ok().flatten();
+                 effective_policy_rollup_with_evidence(pool, &system, &set.policies, assignment_status).await?
+             }
+             Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup(
+                 system,
+                 policies.len() as i64,
+                 conflicts
+                     .first()
+                     .map(|c| c.code.as_str())
+                     .unwrap_or("conflict"),
+             ),
+             // Missing or mismatched resolution has no authoritative effective
+             // set. Never substitute lineage/current membership for this view.
+             _ => unresolved_system_rollup(system, policies.len() as i64, "not_applicable"),
+         };
+         rollups.push(rollup);
+     }
     let totals = totals_for_rollups(&rollups);
     Ok(Some(ComplianceBundleSystemsResponse {
         bundle_id,
@@ -2226,18 +2230,24 @@ pub async fn list_system_bundles(
     let (mut policies_by_bundle, direct_policies) =
         partition_effective_policies_by_bundle(&effective.policies);
 
+    // Determine assignment status from the effective policy set
+    let assignment_status = determine_assignment_status_for_bundle_version(
+        pool,
+        effective.bundle_version_id,
+    ).await.ok().flatten();
+
     let mut bundles = Vec::with_capacity(visible_bundles.len());
     for bundle in visible_bundles {
         let policies = policies_by_bundle.remove(&bundle.id).unwrap_or_default();
         bundles.push((
             bundle,
-            effective_policy_rollup_with_evidence(pool, &system, &policies).await?,
+            effective_policy_rollup_with_evidence(pool, &system, &policies, assignment_status.clone()).await?,
         ));
     }
     let direct_rollup =
-        effective_policy_rollup_with_evidence(pool, &system, &direct_policies).await?;
+        effective_policy_rollup_with_evidence(pool, &system, &direct_policies, None).await?;
     let overall_rollup =
-        effective_policy_rollup_with_evidence(pool, &system, &effective.policies).await?;
+        effective_policy_rollup_with_evidence(pool, &system, &effective.policies, assignment_status).await?;
 
     Ok(Some(SystemBundleRollups {
         bundles,
@@ -2473,6 +2483,42 @@ async fn list_applicable_system_rows(pool: &PgPool, bundle_id: Uuid) -> Result<V
     .await?)
 }
 
+/// Determine assignment status for a system assigned to a bundle version.
+/// 
+/// Returns:
+/// - "current" if the assignment targets the bundle's current published version
+/// - "pinned" if the assignment targets an accepted but non-current version
+/// - None if no active assignment applies or system doesn't apply
+pub(crate) async fn determine_assignment_status_for_bundle_version(
+    pool: &PgPool,
+    bundle_version_id: Uuid,
+) -> Result<Option<String>> {
+    // Get the current published version of the bundle
+    let current_published_version: Option<Uuid> = sqlx::query_scalar(
+        "SELECT current_published_version_id FROM compliance_bundles WHERE id = (SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1)",
+    )
+    .bind(bundle_version_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+
+    let current_published = match current_published_version {
+        Some(v) => v,
+        None => {
+            // Bundle has no published version yet; assignment cannot be "current"
+            return Ok(Some("pinned".to_string()));
+        }
+    };
+
+    // Determine the status based on which version we're assigned to
+    if bundle_version_id == current_published {
+        Ok(Some("current".to_string()))
+    } else {
+        // Assignment targets an older/other accepted version
+        Ok(Some("pinned".to_string()))
+    }
+}
+
 pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> ComplianceSystemRollup {
     let statuses = policies
         .iter()
@@ -2481,7 +2527,7 @@ pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> Compli
             PolicyEval::Disabled | PolicyEval::Unsupported => ComplianceControlStatus::NotChecked,
         })
         .collect::<Vec<_>>();
-    rollup_from_statuses(system, &statuses, 0)
+    rollup_from_statuses(system, &statuses, 0, None)
 }
 
 async fn system_rollup_with_evidence(
@@ -2497,13 +2543,14 @@ async fn system_rollup_with_evidence(
                 .status,
         );
     }
-    Ok(rollup_from_statuses(system, &statuses, 0))
+    Ok(rollup_from_statuses(system, &statuses, 0, None))
 }
 
 fn rollup_from_statuses(
     system: SystemRow,
     statuses: &[ComplianceControlStatus],
     report_only: i64,
+    assignment_status: Option<String>,
 ) -> ComplianceSystemRollup {
     let mut pass = 0i64;
     let mut warn = 0i64;
@@ -2577,7 +2624,7 @@ fn rollup_from_statuses(
         report_only,
         score,
         resolution_state: None,
-        assignment_status: None,
+        assignment_status,
         assignment_reason: None,
         assignment_approved_by: None,
         assignment_deadline: None,
@@ -2741,6 +2788,7 @@ pub(crate) async fn effective_policy_rollup_with_evidence(
     pool: &PgPool,
     system: &SystemRow,
     effective_policies: &[crate::compliance::resolver::EffectivePolicy],
+    assignment_status: Option<String>,
 ) -> Result<ComplianceSystemRollup> {
     let policies = materialize_effective_policies(pool, effective_policies).await?;
     let report_only = effective_policies
@@ -2753,11 +2801,11 @@ pub(crate) async fn effective_policy_rollup_with_evidence(
         })
         .count() as i64;
 
-    let mut statuses = Vec::with_capacity(policies.len());
-    for policy in policies {
-        statuses.push(resolve_control_evidence(pool, system, policy).await?.status);
-    }
-    Ok(rollup_from_statuses(system.clone(), &statuses, report_only))
+     let mut statuses = Vec::with_capacity(policies.len());
+     for policy in policies {
+         statuses.push(resolve_control_evidence(pool, system, policy).await?.status);
+     }
+     Ok(rollup_from_statuses(system.clone(), &statuses, report_only, assignment_status))
 }
 
 /// Batch the evidence inputs needed by catalog aggregates. The detail path is
@@ -2873,13 +2921,13 @@ async fn effective_policy_rollups_with_evidence_batch(
                 context,
                 context.and_then(|context| scans.get(&context.derivation_id)),
             ));
-        }
-        result.push((
-            *pair,
-            rollup_from_statuses(system.clone(), &statuses, report_only),
-        ));
-    }
-    Ok(result)
+         }
+         result.push((
+             *pair,
+             rollup_from_statuses(system.clone(), &statuses, report_only, None),
+         ));
+     }
+     Ok(result)
 }
 
 fn batch_evidence_status(
