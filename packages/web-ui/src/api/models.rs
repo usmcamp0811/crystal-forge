@@ -1163,6 +1163,16 @@ pub struct ComplianceSystemRollup {
     pub score: i64,
     #[serde(default)]
     pub resolution_state: Option<String>,
+    #[serde(default)]
+    pub assignment_status: Option<String>,
+    #[serde(default)]
+    pub assignment_reason: Option<String>,
+    #[serde(default)]
+    pub assignment_approved_by: Option<String>,
+    #[serde(default)]
+    pub assignment_deadline: Option<String>,
+    #[serde(default)]
+    pub assignment_poam: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

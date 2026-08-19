@@ -2577,6 +2577,11 @@ fn rollup_from_statuses(
         report_only,
         score,
         resolution_state: None,
+        assignment_status: None,
+        assignment_reason: None,
+        assignment_approved_by: None,
+        assignment_deadline: None,
+        assignment_poam: None,
     }
 }
 
@@ -2602,6 +2607,11 @@ fn unresolved_system_rollup(
         report_only: 0,
         score: 0,
         resolution_state: Some(state.to_string()),
+        assignment_status: None,
+        assignment_reason: None,
+        assignment_approved_by: None,
+        assignment_deadline: None,
+        assignment_poam: None,
     }
 }
 
@@ -2716,6 +2726,11 @@ pub(crate) fn effective_policy_rollup(
         report_only,
         score,
         resolution_state: None,
+        assignment_status: None,
+        assignment_reason: None,
+        assignment_approved_by: None,
+        assignment_deadline: None,
+        assignment_poam: None,
     }
 }
 

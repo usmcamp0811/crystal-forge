@@ -375,39 +375,45 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
                     th { style: "text-align:right;" }
                 } }
                 tbody {
-                    for row in visible.iter() {
-                        {
-                            let system_id = row.system_id;
-                            let hostname = row.hostname.clone();
-                            let env = row.environment.clone().unwrap_or_else(|| "—".to_string());
-                            let env_color = "#6b7280";
-                            let resolution_state = row.resolution_state.clone().unwrap_or_else(|| "—".to_string());
-                            let score = row.score;
-                            let score_color = if score >= 90 { "#34d399" } else if score >= 70 { "#fbbf24" } else { "#f87171" };
-                            let pass = row.pass;
-                            let warn = row.warn;
-                            let fail = row.fail;
-                            let waiver = row.waiver;
-                            rsx! {
-                                tr {
-                                    style: "cursor:pointer;",
-                                    onclick: move |_| props.on_evidence.call(system_id),
-                                     td {
-                                        div { style: "display:flex;align-items:center;gap:8px;",
-                                            span {
-                                                class: "status-dot",
-                                                style: "--status-color:{score_color};",
-                                            }
-                                            span { class: "mono", style: "font-weight:600;font-size:13px;", "{hostname}" }
-                                        }
-                                     }
-                                     td {
-                                         span {
-                                             style: "padding:2px 8px;border-radius:99px;font-size:11px;border:1px solid {env_color};background:color-mix(in oklab,{env_color} 14%,var(--cf-card-bg));color:{env_color};",
-                                             "{env}"
+                     for row in visible.iter() {
+                         {
+                             let system_id = row.system_id;
+                             let hostname = row.hostname.clone();
+                             let env = row.environment.clone().unwrap_or_else(|| "—".to_string());
+                             let env_color = "#6b7280";
+                             let assignment_status = row.assignment_status.clone().unwrap_or_else(|| row.resolution_state.clone().unwrap_or_else(|| "—".to_string()));
+                             let is_pinned = row.assignment_status.as_deref() == Some("pinned");
+                             let score = row.score;
+                             let score_color = if score >= 90 { "#34d399" } else if score >= 70 { "#fbbf24" } else { "#f87171" };
+                             let pass = row.pass;
+                             let warn = row.warn;
+                             let fail = row.fail;
+                             let waiver = row.waiver;
+                             rsx! {
+                                 tr {
+                                     style: "cursor:pointer;",
+                                     onclick: move |_| props.on_evidence.call(system_id),
+                                      td {
+                                         div { style: "display:flex;align-items:center;gap:8px;",
+                                             span {
+                                                 class: "status-dot",
+                                                 style: "--status-color:{score_color};",
+                                             }
+                                             span { class: "mono", style: "font-weight:600;font-size:13px;", "{hostname}" }
+                                             if is_pinned {
+                                                 span { style: "color:#fbbf24;display:inline-flex;",
+                                                     Icon { name: IconName::Warn, size: 12 }
+                                                 }
+                                             }
                                          }
-                                     }
-                                     td { span { class: "chip chip-info", "{resolution_state}" } }
+                                      }
+                                      td {
+                                          span {
+                                              style: "padding:2px 8px;border-radius:99px;font-size:11px;border:1px solid {env_color};background:color-mix(in oklab,{env_color} 14%,var(--cf-card-bg));color:{env_color};",
+                                              "{env}"
+                                          }
+                                      }
+                                      td { span { class: "chip chip-info", "{assignment_status}" } }
                                     td {
                                         div { style: "display:flex;align-items:center;gap:8px;",
                                             div {
@@ -694,7 +700,9 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                         if let Some(environment) = system.environment.as_deref() {
                             span { class: "chip chip-neutral", "{environment}" }
                         }
-                        if let Some(resolution_state) = system.resolution_state.as_deref() {
+                        if let Some(status) = system.assignment_status.as_deref() {
+                            span { class: if status == "pinned" { "chip chip-warning" } else { "chip chip-info" }, "{status}" }
+                        } else if let Some(resolution_state) = system.resolution_state.as_deref() {
                             span { class: "chip chip-info", "{resolution_state}" }
                         }
                         Link {
@@ -791,6 +799,44 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                 // Right: evidence detail
                 div {
                     style: "overflow:auto;padding:20px;display:flex;flex-direction:column;gap:16px;",
+                    if let Some(system_ref) = system.as_ref() {
+                        if let Some(status) = system_ref.assignment_status.as_deref() {
+                            if status != "current" {
+                                {
+                                    let color = if status == "pinned" { "#fbbf24" } else { "#60a5fa" };
+                                    let label = if status == "pinned" { "Pinned to older revision" } else { "Special assignment" };
+                                    rsx! {
+                                        div { class: "sd-callout sd-callout-warn",
+                                            style: "background:color-mix(in oklab, {color} 8%, transparent);border-color:color-mix(in oklab, {color} 30%, transparent);",
+                                            span { style: "color:{color};display:inline-flex;",
+                                                Icon { name: IconName::Warn, size: 13 }
+                                            }
+                                            div { style: "font-size:12px;",
+                                                div {
+                                                    strong { style: "color:{color};", "{label}" }
+                                                    " — assigned to this specific revision instead of the current baseline."
+                                                }
+                                                if let Some(reason) = system_ref.assignment_reason.as_deref() {
+                                                    div { style: "margin-top:4px;color:var(--cf-text-secondary);", "{reason}" }
+                                                }
+                                                div { style: "margin-top:4px;display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--cf-text-muted);",
+                                                    if let Some(approved_by) = system_ref.assignment_approved_by.as_deref() {
+                                                        span { "Approved by ", span { class: "mono", "{approved_by}" } }
+                                                    }
+                                                    if let Some(deadline) = system_ref.assignment_deadline.as_deref() {
+                                                        span { "Migration deadline ", span { class: "mono", "{deadline}" } }
+                                                    }
+                                                    if let Some(poam) = system_ref.assignment_poam.as_deref() {
+                                                        span { "POA&M ", span { class: "mono", "{poam}" } }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if let Some(ctrl) = active_control {
                         ControlEvidenceCard {
                             control: ctrl,

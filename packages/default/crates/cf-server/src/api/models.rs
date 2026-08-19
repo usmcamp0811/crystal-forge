@@ -1670,6 +1670,22 @@ pub struct ComplianceSystemRollup {
     /// exact revision must not be presented as a baseline compliance score.
     #[serde(default)]
     pub resolution_state: Option<String>,
+    /// Assignment status: "current" = assigned to latest bundle version, "pinned" = assigned to specific older version,
+    /// or null if no assignment exists or system doesn't apply.
+    #[serde(default)]
+    pub assignment_status: Option<String>,
+    /// Reason for the assignment (e.g. "migration in progress", "vendor testing").
+    #[serde(default)]
+    pub assignment_reason: Option<String>,
+    /// User who approved the assignment.
+    #[serde(default)]
+    pub assignment_approved_by: Option<String>,
+    /// Deadline for completing the migration to current revision.
+    #[serde(default)]
+    pub assignment_deadline: Option<String>,
+    /// Plan of Action and Milestones reference.
+    #[serde(default)]
+    pub assignment_poam: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
