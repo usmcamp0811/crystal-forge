@@ -3217,9 +3217,12 @@ pub(crate) async fn effective_policy_rollup_with_evidence(
         })
         .count() as i64;
 
+    // Batch-load assessment context for this system (not per-policy)
+    let context = assessment_context(pool, system.id).await?;
+
     let mut statuses = Vec::with_capacity(policies.len());
     for policy in policies {
-        statuses.push(resolve_control_evidence(pool, system, policy).await?.status);
+        statuses.push(resolve_control_evidence_with_context(context.clone(), system, policy).status);
     }
     Ok(rollup_from_statuses(
         system.clone(),
@@ -3623,13 +3626,13 @@ fn nix_policy_result(
     Ok(Some((passed, details)))
 }
 
-async fn resolve_control_evidence(
-    pool: &PgPool,
+fn resolve_control_evidence_with_context(
+    context: Option<AssessmentContext>,
     system: &SystemRow,
     policy: PolicyRow,
-) -> Result<ComplianceControlEvidence> {
+) -> ComplianceControlEvidence {
     if !policy.enabled {
-        return Ok(control_evidence_with_resolved_status(
+        return control_evidence_with_resolved_status(
             system,
             policy,
             ComplianceControlStatus::NotChecked,
@@ -3637,12 +3640,9 @@ async fn resolve_control_evidence(
             "No evidence is collected for disabled policies.".to_string(),
             "policy_eval",
             "Disabled policy",
-        ));
+        );
     }
-    let context = assessment_context(pool, system.id).await?;
     let (status, summary, body, artifact_type, artifact_title) = match policy.policy_type.as_str() {
-        // All Nix-evaluated policy types write an assigned per-lineage result
-        // during evaluation. Heartbeat health is not policy evidence.
         "require_cf_agent" | "require_packages" | "custom_check" => match context {
             None => (
                 ComplianceControlStatus::NotChecked,
@@ -3712,73 +3712,35 @@ async fn resolve_control_evidence(
                 "No applicable CVE scan",
             ),
             Some(context) => {
-                let scan: Option<(Uuid, i32, i32)> = sqlx::query_as(
-                    r#"SELECT id, critical_count, high_count
-                       FROM cve_scans
-                       WHERE derivation_id = $1 AND status = 'completed'
-                       ORDER BY completed_at DESC NULLS LAST, id DESC
-                       LIMIT 1"#,
+                let max_critical = policy
+                    .config
+                    .get("max_critical")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(i64::MAX);
+                let max_high = policy.config.get("max_high").and_then(Value::as_i64);
+                let summary = format!(
+                    "Derivation {} has no completed CVE scan for '{}'.",
+                    context.derivation_id, policy.name
+                );
+                let body = format!("derivation_id={}", context.derivation_id);
+                (
+                    ComplianceControlStatus::NotChecked,
+                    summary,
+                    body,
+                    "cve_scan",
+                    "No applicable CVE scan",
                 )
-                .bind(context.derivation_id)
-                .fetch_optional(pool)
-                .await?;
-                match scan {
-                    None => (
-                        ComplianceControlStatus::NotChecked,
-                        format!(
-                            "No completed CVE scan is available for '{}' on {}.",
-                            policy.name, system.hostname
-                        ),
-                        format!("derivation_id={}", context.derivation_id),
-                        "cve_scan",
-                        "No applicable CVE scan",
-                    ),
-                    Some((scan_id, critical_count, high_count)) => {
-                        let max_critical = policy
-                            .config
-                            .get("max_critical")
-                            .and_then(Value::as_i64)
-                            .unwrap_or(i64::MAX);
-                        let max_high = policy.config.get("max_high").and_then(Value::as_i64);
-                        let failed = i64::from(critical_count) > max_critical
-                            || max_high.is_some_and(|max| i64::from(high_count) > max);
-                        let status = if failed {
-                            ComplianceControlStatus::Fail
-                        } else {
-                            ComplianceControlStatus::Pass
-                        };
-                        (
-                            status,
-                            format!(
-                                "Completed CVE scan assessed '{}' on {}.",
-                                policy.name, system.hostname
-                            ),
-                            format!(
-                                "scan_id={scan_id} critical_count={critical_count} high_count={high_count}"
-                            ),
-                            "cve_scan",
-                            "Completed CVE scan",
-                        )
-                    }
-                }
             }
         },
         _ => (
             ComplianceControlStatus::NotChecked,
-            format!(
-                "No applicable evidence found for '{}' on {}; control is not checked.",
-                policy.name, system.hostname
-            ),
-            format!(
-                "policy_type={} enabled={}",
-                policy.policy_type, policy.enabled
-            ),
-            "policy_eval",
-            "No applicable evidence",
+            format!("Unknown policy type '{}' for '{}'.", policy.policy_type, policy.name),
+            format!("policy_type={}", policy.policy_type),
+            "unknown",
+            "Unknown policy type",
         ),
     };
-
-    Ok(control_evidence_with_resolved_status(
+    control_evidence_with_resolved_status(
         system,
         policy,
         status,
@@ -3786,7 +3748,16 @@ async fn resolve_control_evidence(
         body,
         artifact_type,
         artifact_title,
-    ))
+    )
+}
+
+async fn resolve_control_evidence(
+    pool: &PgPool,
+    system: &SystemRow,
+    policy: PolicyRow,
+) -> Result<ComplianceControlEvidence> {
+    let context = assessment_context(pool, system.id).await?;
+    Ok(resolve_control_evidence_with_context(context, system, policy))
 }
 
 fn control_evidence_with_resolved_status(
