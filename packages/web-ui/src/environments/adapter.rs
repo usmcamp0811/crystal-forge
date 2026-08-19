@@ -104,7 +104,9 @@ pub async fn load_environments_with_fallback(
                 redirect_to_login: false,
             }
         }
-        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) if should_redirect_to_login(&error) => {
+        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error))
+            if should_redirect_to_login(&error) =>
+        {
             EnvironmentsLoadResult {
                 environments: Vec::new(),
                 notice: None,
@@ -458,7 +460,10 @@ pub fn diff_environment_bundle_assignments(
 
     // Check for removals: in original but not in desired (by assignment_id).
     for orig in original {
-        if !desired.iter().any(|d| d.assignment_id == orig.assignment_id) {
+        if !desired
+            .iter()
+            .any(|d| d.assignment_id == orig.assignment_id)
+        {
             changes.push(BundleAssignmentChange::Remove {
                 assignment_id: orig.assignment_id,
             });
@@ -575,7 +580,11 @@ pub async fn create_environment_via_api(
     };
 
     match create_environment(&request).await {
-        Ok(env) => Ok(api_to_environment_item(env, vec![default_required_policy], &[])),
+        Ok(env) => Ok(api_to_environment_item(
+            env,
+            vec![default_required_policy],
+            &[],
+        )),
         Err(ApiClientError::Status {
             code: 401 | 403, ..
         }) => Err("Authentication required. Please log in.".to_string()),
@@ -847,7 +856,14 @@ mod tests {
     #[test]
     fn removing_a_bundle_produces_deactivate_change() {
         let aid = Uuid::new_v4();
-        let orig = make_assignment(aid, Uuid::new_v4(), Uuid::new_v4(), "enforce", vec![], vec![]);
+        let orig = make_assignment(
+            aid,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "enforce",
+            vec![],
+            vec![],
+        );
         let changes = diff_environment_bundle_assignments(&[orig], &[]);
         assert_eq!(changes.len(), 1);
         assert!(matches!(changes[0], BundleAssignmentChange::Remove { .. }));
@@ -855,7 +871,14 @@ mod tests {
 
     #[test]
     fn new_assignment_with_nil_id_produces_add_change() {
-        let mut new_a = make_assignment(Uuid::nil(), Uuid::new_v4(), Uuid::new_v4(), "enforce", vec![], vec![]);
+        let mut new_a = make_assignment(
+            Uuid::nil(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "enforce",
+            vec![],
+            vec![],
+        );
         new_a.assignment_id = Uuid::nil();
         let changes = diff_environment_bundle_assignments(&[], &[new_a]);
         assert_eq!(changes.len(), 1);
@@ -895,10 +918,25 @@ mod tests {
         let mut desired = make_assignment(aid, bid, vid, "report_only", vec![], vec![]);
         desired.assignment_id = aid;
         let changes = diff_environment_bundle_assignments(&[orig], &[desired]);
-        if let BundleAssignmentChange::UpdateMode { exclusions, additions, value_overrides, .. } = &changes[0] {
-            assert_eq!(exclusions, &excl, "Exclusions must be preserved from original");
-            assert_eq!(additions, &adds, "Additions must be preserved from original");
-            assert_eq!(value_overrides, &overrides, "Value overrides must be preserved from original");
+        if let BundleAssignmentChange::UpdateMode {
+            exclusions,
+            additions,
+            value_overrides,
+            ..
+        } = &changes[0]
+        {
+            assert_eq!(
+                exclusions, &excl,
+                "Exclusions must be preserved from original"
+            );
+            assert_eq!(
+                additions, &adds,
+                "Additions must be preserved from original"
+            );
+            assert_eq!(
+                value_overrides, &overrides,
+                "Value overrides must be preserved from original"
+            );
         } else {
             panic!("Expected UpdateMode");
         }
@@ -908,8 +946,22 @@ mod tests {
     fn save_with_no_changes_is_noop_for_two_bundles() {
         let a1 = Uuid::new_v4();
         let a2 = Uuid::new_v4();
-        let orig1 = make_assignment(a1, Uuid::new_v4(), Uuid::new_v4(), "enforce", vec![], vec![]);
-        let orig2 = make_assignment(a2, Uuid::new_v4(), Uuid::new_v4(), "report_only", vec![], vec![]);
+        let orig1 = make_assignment(
+            a1,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "enforce",
+            vec![],
+            vec![],
+        );
+        let orig2 = make_assignment(
+            a2,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "report_only",
+            vec![],
+            vec![],
+        );
         let desired1 = orig1.clone();
         let desired2 = orig2.clone();
         let changes = diff_environment_bundle_assignments(&[orig1, orig2], &[desired1, desired2]);
@@ -942,8 +994,14 @@ mod tests {
         ];
         let changes = diff_environment_bundle_assignments(&original, &desired);
         assert_eq!(changes.len(), 2, "Should have one Remove and one Add");
-        let removes = changes.iter().filter(|c| matches!(c, BundleAssignmentChange::Remove { .. })).count();
-        let adds = changes.iter().filter(|c| matches!(c, BundleAssignmentChange::Add { .. })).count();
+        let removes = changes
+            .iter()
+            .filter(|c| matches!(c, BundleAssignmentChange::Remove { .. }))
+            .count();
+        let adds = changes
+            .iter()
+            .filter(|c| matches!(c, BundleAssignmentChange::Add { .. }))
+            .count();
         assert_eq!(removes, 1);
         assert_eq!(adds, 1);
     }

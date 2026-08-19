@@ -4,8 +4,8 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use super::{
-    AssignmentLoadState, EnvBundleAssignment, EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentItem,
-    PolicyOption, looks_like_hex_color,
+    AssignmentLoadState, EnvBundleAssignment, EnvironmentDeploymentPolicy, EnvironmentFormDraft,
+    EnvironmentItem, PolicyOption, looks_like_hex_color,
 };
 use crate::api::models::ComplianceBundleSummary;
 use crate::components::icon::{Icon, IconName};

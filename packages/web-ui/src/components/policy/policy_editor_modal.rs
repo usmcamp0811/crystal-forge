@@ -13,21 +13,19 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use crate::api::client::{
-    create_deployment_policy, delete_deployment_policy,
-    fetch_compliance_frameworks, fetch_compliance_framework_versions,
-    fetch_policy_requirement_mappings, create_policy_mapping, delete_policy_mapping,
+    create_deployment_policy, create_policy_mapping, delete_deployment_policy,
+    delete_policy_mapping, fetch_compliance_framework_versions, fetch_compliance_frameworks,
+    fetch_policy_requirement_mappings, search_requirements, update_deployment_policy,
     update_policy_mapping,
-    search_requirements, update_deployment_policy,
 };
 use crate::api::models::{
-    ComplianceFrameworkSummary, ComplianceFrameworkVersionSummary,
-    CreateDeploymentPolicyRequest, CreatePolicyMappingRequest,
-    PolicyMappingRow, RequirementVersionSummary, UpdateDeploymentPolicyRequest,
-    UpdatePolicyMappingRequest,
+    ComplianceFrameworkSummary, ComplianceFrameworkVersionSummary, CreateDeploymentPolicyRequest,
+    CreatePolicyMappingRequest, PolicyMappingRow, RequirementVersionSummary,
+    UpdateDeploymentPolicyRequest, UpdatePolicyMappingRequest,
 };
 use crate::views::policies_api;
 
-use super::types::{is_policy_version_editable, PolicyCategory, PolicyDefinition, PolicyFormat};
+use super::types::{PolicyCategory, PolicyDefinition, PolicyFormat, is_policy_version_editable};
 
 #[derive(Clone, Debug, PartialEq)]
 struct PendingPolicyMapping {
@@ -119,9 +117,21 @@ fn remove_pending_mapping(mappings: &mut Vec<PendingPolicyMapping>, requirement_
 const STANDARD_FRAMEWORKS: [&str; 4] = ["DISA STIG", "NIST 800-53", "CMMC 2.0", "CIS Benchmark"];
 const NIST_CONTROL_FAMILIES: [&str; 7] = ["AC", "AU", "CM", "IA", "SC", "SI", "MP"];
 const MAPPING_RELATIONSHIPS: [(&str, &str, &str); 3] = [
-    ("implements", "Implements", "The policy directly satisfies this requirement."),
-    ("supports", "Supports", "The policy contributes to satisfying the requirement but does not satisfy it alone."),
-    ("provides_evidence_for", "Provides evidence for", "The policy gathers or produces evidence relevant to determining compliance."),
+    (
+        "implements",
+        "Implements",
+        "The policy directly satisfies this requirement.",
+    ),
+    (
+        "supports",
+        "Supports",
+        "The policy contributes to satisfying the requirement but does not satisfy it alone.",
+    ),
+    (
+        "provides_evidence_for",
+        "Provides evidence for",
+        "The policy gathers or produces evidence relevant to determining compliance.",
+    ),
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -435,10 +445,12 @@ fn custom_check_config_is_representable(config: &serde_json::Value) -> bool {
 
     if let Some(entries) = config.get("rules").and_then(|value| value.as_array()) {
         return entries.iter().all(|entry| {
-            object_keys_are_subset(entry, &["expression", "description", "field_name", "strict"])
-                && entry
-                    .get("description")
-                    .is_none_or(|value| value.as_str().is_some())
+            object_keys_are_subset(
+                entry,
+                &["expression", "description", "field_name", "strict"],
+            ) && entry
+                .get("description")
+                .is_none_or(|value| value.as_str().is_some())
                 && entry
                     .get("strict")
                     .is_none_or(|value| value.as_bool() == Some(true))
@@ -642,11 +654,8 @@ fn PolicyMappingsTab(
     mut mappings: Signal<Vec<PolicyMappingRow>>,
     mut pending_mappings: Signal<Vec<PendingPolicyMapping>>,
 ) -> Element {
-    let mapping_target = mapping_editor_target(
-        is_editing,
-        editing_policy_version_id,
-        mappings_editable,
-    );
+    let mapping_target =
+        mapping_editor_target(is_editing, editing_policy_version_id, mappings_editable);
     let mut loaded = use_signal(|| false);
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut frameworks: Signal<Vec<ComplianceFrameworkSummary>> = use_signal(Vec::new);
@@ -1041,9 +1050,8 @@ pub fn PolicyEditorModal(
     let mut pending_mappings: Signal<Vec<PendingPolicyMapping>> = use_signal(Vec::new);
 
     // Capture the editing policy version ID for mapping API calls.
-    let editing_policy_version_id: Option<Uuid> = existing_policy
-        .as_ref()
-        .and_then(|p| p.version_id);
+    let editing_policy_version_id: Option<Uuid> =
+        existing_policy.as_ref().and_then(|p| p.version_id);
     let mappings_editable = existing_policy
         .as_ref()
         .is_some_and(is_policy_version_editable);
@@ -1973,7 +1981,15 @@ mod tests {
 
     fn pending(id: u128) -> PendingPolicyMapping {
         PendingPolicyMapping {
-            requirement_version_id: Uuid::from_u128(id), framework_name: "NIST 800-53".into(), framework_version: "Rev 5".into(), requirement_external_id: "SC-45".into(), requirement_kind: "control".into(), requirement_title: Some("System time synchronization".into()), relationship: "supports".into(), coverage: "partial".into(), rationale: Some("reviewed mapping".into()),
+            requirement_version_id: Uuid::from_u128(id),
+            framework_name: "NIST 800-53".into(),
+            framework_version: "Rev 5".into(),
+            requirement_external_id: "SC-45".into(),
+            requirement_kind: "control".into(),
+            requirement_title: Some("System time synchronization".into()),
+            relationship: "supports".into(),
+            coverage: "partial".into(),
+            rationale: Some("reviewed mapping".into()),
         }
     }
 
@@ -1996,24 +2012,74 @@ mod tests {
     #[test]
     fn mapping_editor_target_distinguishes_create_edit_and_immutable_modes() {
         let version = Uuid::from_u128(7);
-        assert_eq!(mapping_editor_target(false, None, false), MappingEditorTarget::Pending);
-        assert_eq!(mapping_editor_target(true, Some(version), true), MappingEditorTarget::Persisted(version));
-        assert_eq!(mapping_editor_target(true, Some(version), false), MappingEditorTarget::Unavailable);
-        assert_eq!(mapping_editor_target(true, None, true), MappingEditorTarget::Unavailable);
+        assert_eq!(
+            mapping_editor_target(false, None, false),
+            MappingEditorTarget::Pending
+        );
+        assert_eq!(
+            mapping_editor_target(true, Some(version), true),
+            MappingEditorTarget::Persisted(version)
+        );
+        assert_eq!(
+            mapping_editor_target(true, Some(version), false),
+            MappingEditorTarget::Unavailable
+        );
+        assert_eq!(
+            mapping_editor_target(true, None, true),
+            MappingEditorTarget::Unavailable
+        );
     }
 
     #[test]
     fn pending_mapping_builder_captures_selection_metadata() {
-        let framework = ComplianceFrameworkSummary { id: Uuid::from_u128(1), name: "NIST 800-53".into(), publisher: None, canonical_source_key: "nist".into(), description: None, version_count: 1 };
-        let version = ComplianceFrameworkVersionSummary { id: Uuid::from_u128(2), framework_id: framework.id, version: "Rev 5".into(), canonical_release_key: "rev5".into(), title: None, published_at: None, semantic_digest: "digest".into(), migration_recovery_status: "finalized".into(), migration_recovery_reason: None, requirement_count: 1 };
-        let requirement = RequirementVersionSummary { id: Uuid::from_u128(3), requirement_id: Uuid::from_u128(4), framework_version_id: version.id, external_id: "SC-45".into(), title: Some("System time synchronization".into()), kind: "control".into(), severity: None, parent_requirement_version_id: None, semantic_digest: "req".into() };
-        let mapping = pending_mapping_from_selection(&framework, &version, &requirement, "supports".into(), "partial".into(), Some("reviewed".into()));
+        let framework = ComplianceFrameworkSummary {
+            id: Uuid::from_u128(1),
+            name: "NIST 800-53".into(),
+            publisher: None,
+            canonical_source_key: "nist".into(),
+            description: None,
+            version_count: 1,
+        };
+        let version = ComplianceFrameworkVersionSummary {
+            id: Uuid::from_u128(2),
+            framework_id: framework.id,
+            version: "Rev 5".into(),
+            canonical_release_key: "rev5".into(),
+            title: None,
+            published_at: None,
+            semantic_digest: "digest".into(),
+            migration_recovery_status: "finalized".into(),
+            migration_recovery_reason: None,
+            requirement_count: 1,
+        };
+        let requirement = RequirementVersionSummary {
+            id: Uuid::from_u128(3),
+            requirement_id: Uuid::from_u128(4),
+            framework_version_id: version.id,
+            external_id: "SC-45".into(),
+            title: Some("System time synchronization".into()),
+            kind: "control".into(),
+            severity: None,
+            parent_requirement_version_id: None,
+            semantic_digest: "req".into(),
+        };
+        let mapping = pending_mapping_from_selection(
+            &framework,
+            &version,
+            &requirement,
+            "supports".into(),
+            "partial".into(),
+            Some("reviewed".into()),
+        );
         assert_eq!(mapping.requirement_version_id, requirement.id);
         assert_eq!(mapping.framework_name, "NIST 800-53");
         assert_eq!(mapping.framework_version, "Rev 5");
         assert_eq!(mapping.requirement_external_id, "SC-45");
         assert_eq!(mapping.requirement_kind, "control");
-        assert_eq!(mapping.requirement_title.as_deref(), Some("System time synchronization"));
+        assert_eq!(
+            mapping.requirement_title.as_deref(),
+            Some("System time synchronization")
+        );
         assert_eq!(mapping.relationship, "supports");
         assert_eq!(mapping.coverage, "partial");
         assert_eq!(mapping.rationale.as_deref(), Some("reviewed"));

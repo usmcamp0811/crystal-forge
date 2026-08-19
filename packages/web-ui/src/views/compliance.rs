@@ -22,10 +22,10 @@ use crate::api::models::{
     XccdfImportPlan, XccdfImportResponse, XccdfPreviewResponse, XccdfRuleImportAction,
 };
 use crate::components::compliance::{
-    BundleCatalog, BundleHeader, EvidenceDrawer, ImportReview, RefinePolicyStep,
-    RefinedPolicyDraft, RefinedRuleAction, RefinedStigRule, ScoreStrip, SourceCheck,
-    SourceCheckBodyPart, SourceStigRule, SystemsMatrix, TypedPolicyValue, ComparisonOperator,
-    PolicyAssertionDraft, action_to_import, mapping_semantics_for,
+    BundleCatalog, BundleHeader, ComparisonOperator, EvidenceDrawer, ImportReview,
+    PolicyAssertionDraft, RefinePolicyStep, RefinedPolicyDraft, RefinedRuleAction, RefinedStigRule,
+    ScoreStrip, SourceCheck, SourceCheckBodyPart, SourceStigRule, SystemsMatrix, TypedPolicyValue,
+    action_to_import, mapping_semantics_for,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::components::io_menu::{IOMenu, IOMenuItem};
@@ -348,7 +348,9 @@ pub fn ComplianceView() -> Element {
         policy_loading.set(true);
         policy_error.set(None);
         spawn(async move {
-            match crate::views::policies_api::load_policy_version(policy_id, policy_version_id).await {
+            match crate::views::policies_api::load_policy_version(policy_id, policy_version_id)
+                .await
+            {
                 Ok(policy) => {
                     policy_drawer.set(Some(policy));
                     policy_loading.set(false);
@@ -1879,9 +1881,7 @@ fn inferred_assertion_from_json(value: &serde_json::Value) -> Option<PolicyAsser
     let typed_value = match value_type {
         "boolean" => TypedPolicyValue::Boolean(expected.get("value")?.as_bool()?),
         "integer" => TypedPolicyValue::Integer(expected.get("value")?.as_i64()?.to_string()),
-        "string_literal" => {
-            TypedPolicyValue::String(expected.get("value")?.as_str()?.to_string())
-        }
+        "string_literal" => TypedPolicyValue::String(expected.get("value")?.as_str()?.to_string()),
         _ => return None,
     };
     Some(PolicyAssertionDraft::NixosOption {
@@ -2232,7 +2232,6 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
     let mut draft_loaded = use_signal(|| false);
     let mut draft_save_error = use_signal(|| Option::<String>::None);
 
-
     let draft_environments = props.environments.clone();
     use_effect(move || {
         if *draft_loaded.read() {
@@ -2244,9 +2243,15 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
         };
         bundle_name.set(draft.bundle_name);
         file_name.set(draft.original_filename);
-        selected_envs.set(environment_names_for_ids(&draft_environments, &draft.environment_ids));
+        selected_envs.set(environment_names_for_ids(
+            &draft_environments,
+            &draft.environment_ids,
+        ));
         cursor.set(draft.refine_cursor);
-        parse_error.set(Some("Paused import found. Re-select the original source file to restore and continue.".to_string()));
+        parse_error.set(Some(
+            "Paused import found. Re-select the original source file to restore and continue."
+                .to_string(),
+        ));
     });
 
     // Derived counts
@@ -2275,8 +2280,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
     // can_advance: need at least one rule selected and a bundle name. An empty
     // environment selection is intentional: it creates an unassigned bundle
     // that must apply to zero systems until an assignment is created.
-    let can_advance = sel_count > 0
-        && !bundle_name.read().trim().is_empty();
+    let can_advance = sel_count > 0 && !bundle_name.read().trim().is_empty();
     let foreign_reconciliation = preview_response
         .read()
         .as_ref()
@@ -5237,12 +5241,7 @@ fn RequirementCoverageCard(
         report
             .source_framework
             .as_ref()
-            .map(|source| {
-                format!(
-                    "{} ({})",
-                    source.framework_name, source.framework_version
-                )
-            })
+            .map(|source| format!("{} ({})", source.framework_name, source.framework_version))
             .unwrap_or_else(|| "this framework".to_string())
     } else {
         report

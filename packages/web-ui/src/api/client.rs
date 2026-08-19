@@ -1157,8 +1157,8 @@ pub async fn fetch_compliance_bundles() -> Result<Vec<ComplianceBundleSummary>, 
 }
 
 /// Fetch custom policy grouping schemes visible to the authenticated user.
-pub async fn fetch_compliance_grouping_schemes(
-) -> Result<Vec<ComplianceGroupingScheme>, ApiClientError> {
+pub async fn fetch_compliance_grouping_schemes()
+-> Result<Vec<ComplianceGroupingScheme>, ApiClientError> {
     let url = format!("{}/compliance/grouping-schemes", base_url());
     fetch_json(&url).await
 }
@@ -1351,7 +1351,11 @@ pub async fn delete_deployment_policy(id: &Uuid) -> Result<(), ApiClientError> {
 pub async fn fetch_policy_deletion_eligibility(
     id: &Uuid,
 ) -> Result<DeletionEligibility, ApiClientError> {
-    let url = format!("{}/deployment-policies/{}/deletion-eligibility", base_url(), id);
+    let url = format!(
+        "{}/deployment-policies/{}/deletion-eligibility",
+        base_url(),
+        id
+    );
     fetch_json(&url).await
 }
 
@@ -2545,8 +2549,8 @@ pub async fn fetch_system_effective_policies(
 // ── TASK-418: Frameworks, requirements, mappings, coverage ────────────────────
 
 /// List all compliance framework lineages.
-pub async fn fetch_compliance_frameworks(
-) -> Result<Vec<ComplianceFrameworkSummary>, ApiClientError> {
+pub async fn fetch_compliance_frameworks() -> Result<Vec<ComplianceFrameworkSummary>, ApiClientError>
+{
     let url = format!("{}/compliance/frameworks", base_url());
     fetch_json(&url).await
 }
@@ -2555,7 +2559,11 @@ pub async fn fetch_compliance_frameworks(
 pub async fn fetch_compliance_framework_versions(
     framework_id: &Uuid,
 ) -> Result<Vec<ComplianceFrameworkVersionSummary>, ApiClientError> {
-    let url = format!("{}/compliance/frameworks/{}/versions", base_url(), framework_id);
+    let url = format!(
+        "{}/compliance/frameworks/{}/versions",
+        base_url(),
+        framework_id
+    );
     fetch_json(&url).await
 }
 
@@ -2582,10 +2590,7 @@ pub async fn search_requirements(
     limit: u32,
     offset: u32,
 ) -> Result<Vec<RequirementVersionSummary>, ApiClientError> {
-    let mut params = vec![
-        format!("limit={}", limit),
-        format!("offset={}", offset),
-    ];
+    let mut params = vec![format!("limit={}", limit), format!("offset={}", offset)];
     if let Some(q_str) = q {
         params.push(format!("q={}", encode_uri_component(q_str)));
     }

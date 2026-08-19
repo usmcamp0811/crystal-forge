@@ -20,11 +20,26 @@ pub fn GroupingSchemesModal(
     on_select: EventHandler<Option<Uuid>>,
     on_changed: EventHandler<Vec<ComplianceGroupingScheme>>,
 ) -> Element {
-    let initial = selected_scheme_id.and_then(|id| schemes.iter().find(|scheme| scheme.id == id).cloned());
+    let initial =
+        selected_scheme_id.and_then(|id| schemes.iter().find(|scheme| scheme.id == id).cloned());
     let mut selected_id = use_signal(|| initial.as_ref().map(|scheme| scheme.id));
-    let mut name = use_signal(|| initial.as_ref().map(|scheme| scheme.name.clone()).unwrap_or_default());
-    let mut description = use_signal(|| initial.as_ref().and_then(|scheme| scheme.description.clone()).unwrap_or_default());
-    let mut groups = use_signal(|| initial.map(|scheme| scheme.groups).unwrap_or_else(|| vec![blank_group(1)]));
+    let mut name = use_signal(|| {
+        initial
+            .as_ref()
+            .map(|scheme| scheme.name.clone())
+            .unwrap_or_default()
+    });
+    let mut description = use_signal(|| {
+        initial
+            .as_ref()
+            .and_then(|scheme| scheme.description.clone())
+            .unwrap_or_default()
+    });
+    let mut groups = use_signal(|| {
+        initial
+            .map(|scheme| scheme.groups)
+            .unwrap_or_else(|| vec![blank_group(1)])
+    });
     let mut error = use_signal(|| None::<String>);
     let mut busy = use_signal(|| false);
 
@@ -91,7 +106,14 @@ pub fn GroupingSchemesModal(
 }
 
 fn blank_group(number: usize) -> ComplianceGroupingSchemeGroup {
-    ComplianceGroupingSchemeGroup { id: format!("group-{number}"), name: format!("Group {number}"), description: None, query: String::new(), pinned_policy_ids: Vec::new(), excluded_policy_ids: Vec::new() }
+    ComplianceGroupingSchemeGroup {
+        id: format!("group-{number}"),
+        name: format!("Group {number}"),
+        description: None,
+        query: String::new(),
+        pinned_policy_ids: Vec::new(),
+        excluded_policy_ids: Vec::new(),
+    }
 }
 
 fn nonempty(value: String) -> Option<String> {
@@ -99,6 +121,10 @@ fn nonempty(value: String) -> Option<String> {
 }
 
 fn toggle_id(ids: &mut Vec<Uuid>, id: Uuid, checked: bool) {
-    if checked && !ids.contains(&id) { ids.push(id); }
-    if !checked { ids.retain(|value| *value != id); }
+    if checked && !ids.contains(&id) {
+        ids.push(id);
+    }
+    if !checked {
+        ids.retain(|value| *value != id);
+    }
 }

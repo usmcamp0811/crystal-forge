@@ -3,11 +3,11 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use crate::components::{Icon, IconName};
 use super::types::{
     PolicyDefinition, is_core_policy, is_policy_enabled, is_policy_version_editable,
     policy_category, policy_rule_summaries,
 };
+use crate::components::{Icon, IconName};
 
 /// Card component for displaying a policy definition with design-parity rule summaries.
 #[component]
