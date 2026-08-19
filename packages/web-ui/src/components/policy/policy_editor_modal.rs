@@ -1608,46 +1608,48 @@ pub fn PolicyEditorModal(
                                 spawn(async move {
                                     let result = if let Some(policy_id) = editing_id {
                                         let request = UpdateDeploymentPolicyRequest {
-                                            name: Some(name.clone()),
-                                            description: Some(description.clone()),
-                                            policy_type: Some(policy_type),
-                                            config: Some(config),
-                                            enabled: None,
-                                            // Always send Some(...) so the server replaces
-                                            // the curated mapping (Some([]) clears it).
-                                            srg_ids: Some(srg_raw),
-                                            cci_ids: Some(cci_raw),
-                                            category: selected_category,
-                                            framework: selected_framework,
-                                            severity: selected_severity,
-                                            control_family: selected_control_family,
-                                            cmmc_level: selected_cmmc_level,
-                                            cis_section: selected_cis_section,
-                                            rationale: selected_rationale,
-                                        };
+                                             name: Some(name.clone()),
+                                             description: Some(description.clone()),
+                                             policy_type: Some(policy_type),
+                                             config: Some(config),
+                                             enabled: None,
+                                             // Always send Some(...) so the server replaces
+                                             // the curated mapping (Some([]) clears it).
+                                             srg_ids: Some(srg_raw),
+                                             cci_ids: Some(cci_raw),
+                                             category: selected_category,
+                                             framework: selected_framework,
+                                             severity: selected_severity,
+                                             control_family: selected_control_family,
+                                             cmmc_level: selected_cmmc_level,
+                                             cis_section: selected_cis_section,
+                                             rationale: selected_rationale,
+                                             evidence_specs: None, // Omit to preserve existing evidence
+                                         };
                                         update_deployment_policy(&policy_id, &request).await.map(|_| None)
                                     } else {
                                         let request = CreateDeploymentPolicyRequest {
-                                            name: name.clone(),
-                                            description: Some(description.clone()),
-                                            policy_type,
-                                            config,
-                                            enabled: Some(true),
-                                            srg_ids: srg_raw,
-                                            cci_ids: cci_raw,
-                                            category: selected_category,
-                                            framework: selected_framework,
-                                            severity: selected_severity,
-                                            control_family: selected_control_family,
-                                            cmmc_level: selected_cmmc_level,
-                                            cis_section: selected_cis_section,
-                                            rationale: selected_rationale,
-                                            requirement_mappings: pending_mappings
-                                                .read()
-                                                .iter()
-                                                .map(PendingPolicyMapping::mapping_request)
-                                                .collect(),
-                                        };
+                                             name: name.clone(),
+                                             description: Some(description.clone()),
+                                             policy_type,
+                                             config,
+                                             enabled: Some(true),
+                                             srg_ids: srg_raw,
+                                             cci_ids: cci_raw,
+                                             category: selected_category,
+                                             framework: selected_framework,
+                                             severity: selected_severity,
+                                             control_family: selected_control_family,
+                                             cmmc_level: selected_cmmc_level,
+                                             cis_section: selected_cis_section,
+                                             rationale: selected_rationale,
+                                             evidence_specs: Vec::new(), // No evidence for now (editor pending)
+                                             requirement_mappings: pending_mappings
+                                                 .read()
+                                                 .iter()
+                                                 .map(PendingPolicyMapping::mapping_request)
+                                                 .collect(),
+                                         };
                                         create_deployment_policy(&request).await.map(Some)
                                     };
 

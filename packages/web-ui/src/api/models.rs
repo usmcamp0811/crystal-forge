@@ -2223,6 +2223,9 @@ pub struct CreateDeploymentPolicyRequest {
     pub cis_section: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
+    /// Evidence collection specifications for ATO audits
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_specs: Vec<EvidenceSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requirement_mappings: Vec<CreatePolicyMappingRequest>,
 }
@@ -2262,6 +2265,10 @@ pub struct UpdateDeploymentPolicyRequest {
     pub cis_section: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
+    /// When `Some`, replace evidence specs; `Some([])` clears them.
+    /// `None` (omitted) preserves the existing value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_specs: Option<Vec<EvidenceSpec>>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
