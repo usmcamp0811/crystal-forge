@@ -814,6 +814,8 @@ pub fn PolicyDrawer(
                 cmmc_level: revision.cmmc_level,
                 cis_section: revision.cis_section.clone(),
                 rationale: revision.rationale.clone(),
+                // TODO: Defect 2 - Get mapped_requirement_count and bundle_usage_count from server
+                // For now, these are placeholders (hardcoded 0) pending server-side count queries
                 mapped_requirement_count: 0,
                 bundle_usage_count: 0,
             }
@@ -1066,7 +1068,10 @@ pub fn PolicyDrawer(
                 div { class: "ed-stat", div { class: "ed-stat-label", "Rules" } div { class: "ed-stat-val", "{rules.len()}" } }
                 div { class: "ed-stat", div { class: "ed-stat-label", "Type" } div { class: "ed-stat-val", style: "font-size:12px;", "{type_display}" } }
                 div { class: "ed-stat", div { class: "ed-stat-label", "Modified" } div { class: "ed-stat-val", style: "font-size:12px;", "{modified_at}" } }
-                div { class: "ed-stat", div { class: "ed-stat-label", "Owner" } div { class: "ed-stat-val", "—" } }
+                // TODO: Owner field requires created_by from policy version API (Defect 3)
+                if let Some(_owner) = None::<String> { 
+                    div { class: "ed-stat", div { class: "ed-stat-label", "Owner" } div { class: "ed-stat-val", "{_owner}" } }
+                }
             }
             if revision_count > 1 {
                 div { class: "policy-drawer-tabs",
@@ -1181,15 +1186,14 @@ pub fn PolicyDrawer(
                             }
                         }
                     }
-                    // NOTE: Evidence for ATO section from design spec PoliciesView.jsx:1054-1070 is
-                    // intentionally omitted. Evidence is collected during STIG import (ComplianceEvidenceItem),
-                    // not stored per-policy in the normalized model. Implementing this would require:
-                    // 1. Adding policy_evidence table to schema
-                    // 2. Adding evidence field to DeploymentPolicyVersionSummary API model
-                    // 3. New migrations and API queries
-                    // This was deferred per task note #15: "ImportedEvidenceRequirement belongs to
-                    // STIG import, not policy-normalized-model; no authoritative backend field exists;
-                    // correctly omitted per spec guidance."
+                    // TODO: Defect 4 - Evidence for ATO section from design spec PoliciesView.jsx:1054-1070
+                    // Evidence specs are collected during STIG import, not stored per-policy in the
+                    // normalized model. Implementing this would require:
+                    // 1. Add evidence_specs field to deployment_policy_versions.compliance_metadata
+                    // 2. Expose evidence field in DeploymentPolicyVersionSummary DTO
+                    // 3. Add rendering for "Evidence for ATO · N" section
+                    // Currently correctly omitted per spec guidance: "ImportedEvidenceRequirement belongs to
+                    // STIG import, not policy-normalized-model; no authoritative backend field exists".
                     section {
                         h3 { class: "policy-drawer-section-title", "Used by bundles" }
                         if usage_loading() || loaded_usage_version() != displayed_policy.version_id {

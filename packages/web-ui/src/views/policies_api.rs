@@ -196,6 +196,8 @@ fn policy_record_to_definition_with_count(
         cmmc_level: current_cmmc_level,
         cis_section: current_cis_section,
         rationale: current_rationale,
+        // TODO: Defect 2 - Get mapped_requirement_count and bundle_usage_count from server
+        // For now, these are placeholders (hardcoded 0) pending server-side count queries  
         mapped_requirement_count: 0,
         bundle_usage_count: 0,
     }
