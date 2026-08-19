@@ -8,7 +8,6 @@
 /// 5. Kept completely independent from resolution_state
 ///
 /// Run with: cargo test -p cf-server --test assignment_semantics -- --ignored
-
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -41,14 +40,12 @@ async fn test_assignment_status_current_version(pool: PgPool) {
     .expect("create version");
 
     // Set as current published
-    sqlx::query(
-        "UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2",
-    )
-    .bind(version_id)
-    .bind(bundle_id)
-    .execute(&pool)
-    .await
-    .expect("set current published");
+    sqlx::query("UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2")
+        .bind(version_id)
+        .bind(bundle_id)
+        .execute(&pool)
+        .await
+        .expect("set current published");
 
     // Create system for assignment
     let system_id = Uuid::new_v4();
@@ -88,7 +85,8 @@ async fn test_assignment_status_current_version(pool: PgPool) {
     .expect("get current version");
 
     assert_eq!(
-        current_version, Some(version_id),
+        current_version,
+        Some(version_id),
         "current_published_version should be set to our version"
     );
 
@@ -103,7 +101,8 @@ async fn test_assignment_status_current_version(pool: PgPool) {
     .expect("query assignment");
 
     assert_eq!(
-        assigned_version, Some(version_id),
+        assigned_version,
+        Some(version_id),
         "assignment should target the current published version"
     );
 }
@@ -152,14 +151,12 @@ async fn test_assignment_status_pinned_version(pool: PgPool) {
     .expect("create new version");
 
     // Set new version as current published
-    sqlx::query(
-        "UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2",
-    )
-    .bind(new_version_id)
-    .bind(bundle_id)
-    .execute(&pool)
-    .await
-    .expect("set current published");
+    sqlx::query("UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2")
+        .bind(new_version_id)
+        .bind(bundle_id)
+        .execute(&pool)
+        .await
+        .expect("set current published");
 
     // Create system
     let system_id = Uuid::new_v4();
@@ -198,7 +195,10 @@ async fn test_assignment_status_pinned_version(pool: PgPool) {
     .await
     .expect("get current version");
 
-    assert_eq!(current_version, new_version_id, "current should be new version");
+    assert_eq!(
+        current_version, new_version_id,
+        "current should be new version"
+    );
 
     let assigned_version: Uuid = sqlx::query_scalar(
         "SELECT bundle_version_id FROM compliance_bundle_assignments WHERE bundle_id = $1 AND system_id = $2 AND active = true",
@@ -213,7 +213,10 @@ async fn test_assignment_status_pinned_version(pool: PgPool) {
         assigned_version, old_version_id,
         "assignment should target old version (pinned)"
     );
-    assert_ne!(assigned_version, current_version, "pinned assignment != current");
+    assert_ne!(
+        assigned_version, current_version,
+        "pinned assignment != current"
+    );
 }
 
 #[sqlx::test]
@@ -245,14 +248,12 @@ async fn test_assignment_status_unassigned(pool: PgPool) {
     .expect("create version");
 
     // Set as current published
-    sqlx::query(
-        "UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2",
-    )
-    .bind(version_id)
-    .bind(bundle_id)
-    .execute(&pool)
-    .await
-    .expect("set current published");
+    sqlx::query("UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2")
+        .bind(version_id)
+        .bind(bundle_id)
+        .execute(&pool)
+        .await
+        .expect("set current published");
 
     // Verify: No assignments exist for this bundle
     let assignment_count: i64 = sqlx::query_scalar(
@@ -298,14 +299,12 @@ async fn test_assignment_independent_from_resolution(pool: PgPool) {
     .await
     .expect("create version");
 
-    sqlx::query(
-        "UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2",
-    )
-    .bind(version_id)
-    .bind(bundle_id)
-    .execute(&pool)
-    .await
-    .expect("set current published");
+    sqlx::query("UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2")
+        .bind(version_id)
+        .bind(bundle_id)
+        .execute(&pool)
+        .await
+        .expect("set current published");
 
     // Create system and assignment
     let system_id = Uuid::new_v4();
@@ -377,14 +376,12 @@ async fn test_environment_scoped_assignment(pool: PgPool) {
     .await
     .expect("create version");
 
-    sqlx::query(
-        "UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2",
-    )
-    .bind(version_id)
-    .bind(bundle_id)
-    .execute(&pool)
-    .await
-    .expect("set current published");
+    sqlx::query("UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2")
+        .bind(version_id)
+        .bind(bundle_id)
+        .execute(&pool)
+        .await
+        .expect("set current published");
 
     // Create environment
     let env_id = Uuid::new_v4();
@@ -456,14 +453,12 @@ async fn test_system_scoped_assignment_precedence(pool: PgPool) {
     .await
     .expect("create version");
 
-    sqlx::query(
-        "UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2",
-    )
-    .bind(version_id)
-    .bind(bundle_id)
-    .execute(&pool)
-    .await
-    .expect("set current published");
+    sqlx::query("UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2")
+        .bind(version_id)
+        .bind(bundle_id)
+        .execute(&pool)
+        .await
+        .expect("set current published");
 
     // Create system
     let system_id = Uuid::new_v4();

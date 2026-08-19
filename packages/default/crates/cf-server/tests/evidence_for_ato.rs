@@ -9,16 +9,12 @@
 /// 6. Rendered in PolicyDrawer when specs present
 ///
 /// Run with: cargo test -p cf-server --test evidence_for_ato -- --ignored
-
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Helper to create a deployment policy with a version
-async fn create_policy_with_version(
-    pool: &PgPool,
-    policy_name: &str,
-) -> (Uuid, Uuid) {
+async fn create_policy_with_version(pool: &PgPool, policy_name: &str) -> (Uuid, Uuid) {
     let policy_id = Uuid::new_v4();
     let version_id = Uuid::new_v4();
 
@@ -113,7 +109,8 @@ async fn test_evidence_specs_persisted(pool: PgPool) {
 #[sqlx::test]
 async fn test_evidence_specs_preserved_draft(pool: PgPool) {
     // Create published policy with evidence specs
-    let (policy_id, published_version_id) = create_policy_with_version(&pool, "evidence-test-draft").await;
+    let (policy_id, published_version_id) =
+        create_policy_with_version(&pool, "evidence-test-draft").await;
 
     let evidence_specs = json!([
         {
@@ -144,14 +141,12 @@ async fn test_evidence_specs_preserved_draft(pool: PgPool) {
     .expect("update and publish version");
 
     // Mark as current published
-    sqlx::query(
-        "UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2",
-    )
-    .bind(published_version_id)
-    .bind(policy_id)
-    .execute(&pool)
-    .await
-    .expect("set as current published");
+    sqlx::query("UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2")
+        .bind(published_version_id)
+        .bind(policy_id)
+        .execute(&pool)
+        .await
+        .expect("set as current published");
 
     // Now derive a draft (simulate the ensure_bundle_draft() workflow)
     let draft_version_id = Uuid::new_v4();
@@ -198,7 +193,8 @@ async fn test_evidence_specs_preserved_draft(pool: PgPool) {
 #[sqlx::test]
 async fn test_evidence_specs_exact_revision(pool: PgPool) {
     // Create two versions with different evidence specs
-    let (policy_id, version1_id) = create_policy_with_version(&pool, "evidence-test-revision-v1").await;
+    let (policy_id, version1_id) =
+        create_policy_with_version(&pool, "evidence-test-revision-v1").await;
 
     let specs_v1 = json!([
         {
@@ -237,26 +233,29 @@ async fn test_evidence_specs_exact_revision(pool: PgPool) {
     )
     .bind(version2_id)
     .bind(policy_id)
-    .bind(json!({
-        "evidence_specs": [
-            {
-                "kind": "File",
-                "details": {
-                    "path": "/etc/hostname",
-                    "note": null
+    .bind(
+        json!({
+            "evidence_specs": [
+                {
+                    "kind": "File",
+                    "details": {
+                        "path": "/etc/hostname",
+                        "note": null
+                    },
+                    "required_fields": {}
                 },
-                "required_fields": {}
-            },
-            {
-                "kind": "UnitState",
-                "details": {
-                    "unit": "ssh.service",
-                    "state": "running"
-                },
-                "required_fields": {}
-            }
-        ]
-    }).to_string())
+                {
+                    "kind": "UnitState",
+                    "details": {
+                        "unit": "ssh.service",
+                        "state": "running"
+                    },
+                    "required_fields": {}
+                }
+            ]
+        })
+        .to_string(),
+    )
     .execute(&pool)
     .await
     .expect("create v2");
@@ -271,7 +270,9 @@ async fn test_evidence_specs_exact_revision(pool: PgPool) {
     .expect("get v1 metadata");
 
     assert_eq!(
-        v1_meta.get("evidence_specs").map(|a| a.as_array().map(|arr| arr.len())),
+        v1_meta
+            .get("evidence_specs")
+            .map(|a| a.as_array().map(|arr| arr.len())),
         Some(Some(1)),
         "v1 should retain its original single spec"
     );
@@ -286,7 +287,9 @@ async fn test_evidence_specs_exact_revision(pool: PgPool) {
     .expect("get v2 metadata");
 
     assert_eq!(
-        v2_meta.get("evidence_specs").map(|a| a.as_array().map(|arr| arr.len())),
+        v2_meta
+            .get("evidence_specs")
+            .map(|a| a.as_array().map(|arr| arr.len())),
         Some(Some(2)),
         "v2 should have 2 specs (different from v1)"
     );
@@ -297,13 +300,12 @@ async fn test_evidence_specs_in_semantic_digest(pool: PgPool) {
     // Create policy version and capture initial digest
     let (_policy_id, version_id) = create_policy_with_version(&pool, "evidence-test-digest").await;
 
-    let initial_digest: String = sqlx::query_scalar(
-        "SELECT semantic_digest FROM deployment_policy_versions WHERE id = $1",
-    )
-    .bind(version_id)
-    .fetch_one(&pool)
-    .await
-    .expect("get initial digest");
+    let initial_digest: String =
+        sqlx::query_scalar("SELECT semantic_digest FROM deployment_policy_versions WHERE id = $1")
+            .bind(version_id)
+            .fetch_one(&pool)
+            .await
+            .expect("get initial digest");
 
     assert!(!initial_digest.is_empty(), "initial digest should exist");
 
@@ -338,13 +340,12 @@ async fn test_evidence_specs_in_semantic_digest(pool: PgPool) {
     .expect("update with new digest");
 
     // Verify digest changed
-    let new_digest: String = sqlx::query_scalar(
-        "SELECT semantic_digest FROM deployment_policy_versions WHERE id = $1",
-    )
-    .bind(version_id)
-    .fetch_one(&pool)
-    .await
-    .expect("get new digest");
+    let new_digest: String =
+        sqlx::query_scalar("SELECT semantic_digest FROM deployment_policy_versions WHERE id = $1")
+            .bind(version_id)
+            .fetch_one(&pool)
+            .await
+            .expect("get new digest");
 
     assert_ne!(
         initial_digest, new_digest,
@@ -355,7 +356,8 @@ async fn test_evidence_specs_in_semantic_digest(pool: PgPool) {
 #[sqlx::test]
 async fn test_malformed_evidence_rejected(pool: PgPool) {
     // Create policy version
-    let (_policy_id, version_id) = create_policy_with_version(&pool, "evidence-test-malformed").await;
+    let (_policy_id, version_id) =
+        create_policy_with_version(&pool, "evidence-test-malformed").await;
 
     // Try to store malformed JSON (missing required 'kind' field)
     let malformed_specs = json!([
@@ -385,7 +387,10 @@ async fn test_malformed_evidence_rejected(pool: PgPool) {
 
     // JSON insert will succeed at DB level (DB doesn't validate schema)
     // The real validation happens when the API deserializes it
-    assert!(result.is_ok(), "malformed JSON can be stored in JSONB (validation at API layer)");
+    assert!(
+        result.is_ok(),
+        "malformed JSON can be stored in JSONB (validation at API layer)"
+    );
 
     // Verify specs were stored (even though malformed)
     let stored_meta: Value = sqlx::query_scalar(
@@ -405,8 +410,10 @@ async fn test_malformed_evidence_rejected(pool: PgPool) {
 #[sqlx::test]
 async fn test_evidence_specs_render_indicator(pool: PgPool) {
     // Create policy version with evidence specs
-    let (_policy_id, version_with_specs) = create_policy_with_version(&pool, "evidence-test-render-with").await;
-    let (_policy_id2, version_without_specs) = create_policy_with_version(&pool, "evidence-test-render-without").await;
+    let (_policy_id, version_with_specs) =
+        create_policy_with_version(&pool, "evidence-test-render-with").await;
+    let (_policy_id2, version_without_specs) =
+        create_policy_with_version(&pool, "evidence-test-render-without").await;
 
     // Add specs to first version
     let evidence_specs = json!([

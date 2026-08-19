@@ -604,10 +604,10 @@ pub async fn list_deployment_policies(
                     .unwrap_or(0);
                 // Get bundle usage count
                 let bundle_usage_count = bundle_usage_counts.get(&policy.id).copied().unwrap_or(0);
-                
+
                 policy.mapped_requirement_count = mapped_requirement_count;
                 policy.bundle_usage_count = bundle_usage_count;
-                
+
                 DeploymentPolicyListItem {
                     current_version_id,
                     versions: version_rows

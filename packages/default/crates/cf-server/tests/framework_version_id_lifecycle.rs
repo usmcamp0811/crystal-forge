@@ -1,16 +1,15 @@
 /// Regression test for framework_version_id lifecycle preservation.
-/// 
+///
 /// This test verifies that when a STIG-backed bundle with framework_version_id is published
 /// and then used to derive a mutable draft, the framework_version_id is preserved through
 /// the entire production lifecycle.
-/// 
+///
 /// Requirements (Defect 5):
 /// 1. Create/import STIG-backed bundle with framework_version_id = F
 /// 2. Publish it
 /// 3. Derive mutable draft through production ensure_bundle_draft() path  
 /// 4. Load draft from PostgreSQL
 /// 5. Assert draft.framework_version_id == F
-
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -19,7 +18,7 @@ async fn framework_version_id_preserved_through_publish_draft_cycle(pool: PgPool
     // 1. Create bundle with framework_version_id
     let bundle_id: Uuid = sqlx::query_scalar(
         "INSERT INTO compliance_bundles (name, framework, version, layer) 
-         VALUES ($1, 'DISA STIG', '1.0', 'fleet') RETURNING id"
+         VALUES ($1, 'DISA STIG', '1.0', 'fleet') RETURNING id",
     )
     .bind(format!("framework-test-{}", Uuid::new_v4()))
     .fetch_one(&pool)
@@ -27,13 +26,12 @@ async fn framework_version_id_preserved_through_publish_draft_cycle(pool: PgPool
     .expect("create bundle");
 
     // 2. Set framework_version_id on draft
-    let draft_version_id: Uuid = sqlx::query_scalar(
-        "SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1"
-    )
-    .bind(bundle_id)
-    .fetch_one(&pool)
-    .await
-    .expect("get draft version");
+    let draft_version_id: Uuid =
+        sqlx::query_scalar("SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1")
+            .bind(bundle_id)
+            .fetch_one(&pool)
+            .await
+            .expect("get draft version");
 
     // Create a test framework_version_id value
     let test_framework_version_id = Uuid::new_v4();
@@ -80,7 +78,7 @@ async fn framework_version_id_preserved_through_publish_draft_cycle(pool: PgPool
 
     // 5. Verify framework_version_id is preserved in new draft
     let retrieved_framework_version_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT framework_version_id FROM compliance_bundle_versions WHERE id = $1"
+        "SELECT framework_version_id FROM compliance_bundle_versions WHERE id = $1",
     )
     .bind(new_draft_version_id)
     .fetch_optional(&pool)
@@ -89,7 +87,7 @@ async fn framework_version_id_preserved_through_publish_draft_cycle(pool: PgPool
     .flatten();
 
     assert_eq!(
-        retrieved_framework_version_id, 
+        retrieved_framework_version_id,
         Some(test_framework_version_id),
         "framework_version_id should be preserved through publish->draft cycle"
     );

@@ -3151,13 +3151,14 @@ pub async fn get_system_effective_policies(
 
     match crate::compliance::resolver::resolve_system_effective_policies(&pool, system_id).await {
         Ok(ResolutionOutcome::Resolved(set)) => {
-            let assignment_status = crate::queries::compliance::determine_assignment_status_for_bundle_version(
-                &pool,
-                set.bundle_version_id,
-            )
-            .await
-            .ok()
-            .flatten();
+            let assignment_status =
+                crate::queries::compliance::determine_assignment_status_for_bundle_version(
+                    &pool,
+                    set.bundle_version_id,
+                )
+                .await
+                .ok()
+                .flatten();
             let rollup = match crate::queries::compliance::effective_policy_rollup_with_evidence(
                 &pool,
                 &system,
