@@ -3,11 +3,11 @@ id: TASK-422
 title: >-
   Rebuild Compliance view UI/UX to match design commit 23c88aba (bundle table,
   detail drawer, requirement coverage, STIG import resume)
-status: Review
+status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-18 19:59'
+updated_date: '2026-08-19 13:15'
 labels: []
 milestone: m-22
 dependencies:
@@ -111,23 +111,78 @@ Spec §9 contains the endpoint/URL table a reviewer uses to put the running desi
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Phase 0 baseline: verify the merged TASK-418 API/model state in this worktree and run the existing compliance browser steps 29 through 29e if the focused web-ui harness is available; retain baseline failures as evidence before UI changes.
-2. Phase 1 server contract: add `applicable_system_count` and optional `aggregate_score` to bundle summaries and compute them from the existing version-specific systems rollup path without per-bundle queries; add `policy_id` to coverage mappings and mirror both contracts in web-ui models. Add focused server tests for score/count selection semantics and coverage serialization; regenerate SQLx metadata only if query shapes require it.
-3. Phase 2 shared policy/version foundations: extract the existing PolicyDrawer and its helper dependencies into a reusable policy component without changing PoliciesView behavior; make PoliciesView consume it; rename the existing `selected_export_version_id` signal to `selected_bundle_version_id` and route all version-sensitive systems, evidence, coverage, export, and lifecycle actions through it.
-4. Phase 3 compliance surface: replace the 320px BundleCatalog layout with the full-width searchable/framework-filtered bundle table, add deterministic filters and empty state, build the right-hand overview drawer, revisions disclosure, relocated existing version/assignment controls, and dense systems drilldown while preserving loading/error/admin/stale-response behavior.
-5. Phase 4 coverage: move coverage into the drawer, add exact-version generation-guarded loading, summary and grouped/filterable requirement rows, and lazy shared-policy-library drill-in with loading and unresolved-policy error states; restore the bundle drawer state on close.
-6. Phase 5 STIG pause/resume: wrap the existing TASK-418 upload/native-review/review/reconcile/refine/final-review/committing workflow with versioned browser-local metadata persistence, a 2 MiB payload guard, no raw bytes, source-file SHA reattachment before commit, corrupt/oversize recovery, paused callout, discard, and non-backdrop pause close.
-7. Phase 6 verification: add the specified CSS utilities, update compliance integration steps and coverage manifests, add/extend a focused NixOS web-ui check for table/drawer/coverage/paused-import states, run dark/light screenshots where the harness supports them, then run cargo fmt, git diff check, web-ui/server builds as applicable, and record objective results in TASK-422.
+## MR !316 Blocker Resolution
 
-P1 correctness refinement before browser proof: canonicalize each bundle's summary version as published-first then draft; make exact-version policy/requirement/control counts use that target. Replace the per-bundle `list_bundle_systems_for_version` aggregate loop with a dedicated batch summary path that loads exact-version membership, applicable assignment scope, and status-level inputs without constructing detailed evidence. Add published+draft, draft-only, multi-bundle, zero-evaluated, and no-system regression coverage while retaining commit 0994a8e9's 6/2/2 requirement-coverage browser fixture.
+This plan addresses the five remaining implementation gaps preventing MR !316 merge:
 
-MR !316 review remediation sequence: (1) persist and restore complete STIG refined-rule state after source SHA verification, (2) make catalog aggregate score use the same effective resolver/evidence semantics as bundle detail via batching rather than simplified pure rollup, (3) carry exact coverage policy_version_id into a direct non-paginated policy/version drill-in and initialize the drawer to that version, (4) replace blind cfg.config normalization with lexical-safe reference normalization and update all stale tests, (5) run real non-mocked preview/import browser coverage plus full server/web verification and refresh MR evidence.
+### 1. Assignment Semantics (Complete End-to-End)
+**Status**: Partial - assignment_status field exists but None values still in production paths
+**Approach**:
+- Identify all production ComplianceSystemRollup creation paths (system_rollup, unresolved_system_rollup, not_applicable_system_rollup)
+- Query compliance_bundle_assignments table for each system to determine actual assignment:
+  - Check if assignment targets bundle's current_published_version → "current"
+  - Check if assignment targets another accepted version → "pinned"
+  - No assignment → leave as null/unassigned
+- Reuse resolver's bundle_version_id and provenance (no second resolver implementation)
+- Keep assignment_status independent from resolution_state
+- Only populate assignment_reason/approved_by/deadline/POA&M if real data exists
+- **Tests**: 6 live-DB tests covering current/pinned/unassigned/independence/environment-scope/system-override cases
 
-Review remediation follow-up: fix indented-string `''\\X` lexical escaping in both interpolation scanners; deduplicate imported environment UUIDs before validation and association persistence; add duplicate-ID regression; run focused normalizer, live DB, browser, build, formatting, syntax, and diff verification; update MR verification results without claiming interrupted checks passed.
+### 2. PolicyCard Counts (Server-Side Implementation)
+**Status**: Not started - hardcoded zeros in web-ui
+**Approach**:
+- Add queries to count trusted/eligible policy_requirement_mappings per policy_version_id
+- Add queries to count distinct bundle lineage IDs using policy
+- Add mapped_requirement_count and bundle_usage_count to DeploymentPolicySummary DTO
+- Mirror in web-ui API models
+- Remove hardcoding from web-ui
+- **Tests**: 5 live-DB tests covering nonzero/distinct-lineage/zero/API-presence/web-ui cases
 
-Review regression follow-up: reproduce the real Anduril STIG import using `/home/mcamp/code/crystal-forge/U_Anduril_NixOS_V1R1_STIG.zip`, capture the import POST status and complete server response, fix the underlying backend failure, then extend `ImportReview` with committing/error props and add deterministic failure coverage plus full-Anduril regression coverage. Verify 20ad success, failure behavior, and real-STIG import behavior before pushing a new remediation commit.
+### 3. PolicyDrawer Owner (from created_by)
+**Status**: Partial - placeholder exists, no data
+**Approach**:
+- Query deployment_policy_versions.created_by for displayed revision
+- Join users table or batch-load to get display name/email
+- Prevent N+1 with batch loading for multiple revisions
+- Handle NULL created_by (legacy) cleanly without placeholder
+- **Tests**: 3 live-DB tests for created-by/exact-revision/null-created-by
 
-Drawer parity follow-up: (1) add authoritative framework/release identity to exact bundle-version coverage responses; (2) render score, independently loaded collapsed requirement coverage, then independently loaded Systems; (3) pass the selected system rollup into EvidenceDrawer and expose environment/Open system using existing routes; (4) add minimal server-backed exact policy-version usage for bundle and resolved system membership; (5) add focused regressions and run targeted Nix builds/hygiene checks before commit/push. Do not synthesize assignment/evidence metadata absent from current authoritative APIs.
+### 4. Evidence for ATO (Versioned Policy Config)
+**Status**: Commented out - no backend support
+**Approach**:
+- Inspect deployment_policy_versions.compliance_metadata structure
+- Design typed evidence-spec structure (kinds: command, log, file, unit_state, eval_attr, attestation)
+- Support preservation across create/edit/publish/derive/load
+- Render "Evidence for ATO · N" section when specs present
+- **Tests**: 5 live-DB tests covering persistence/derivation/exact-revision/digest-change/malformed-rejection
+
+### 5. framework_version_id Lifecycle Test
+**Status**: Template only - test compiles but does not execute
+**Approach**:
+- Convert template to executable live-DB test
+- Create STIG-backed bundle with framework_version_id = F
+- Publish it
+- Invoke ensure_bundle_draft() production path
+- Load draft and assert framework_version_id == F
+- Test fails if SELECT or INSERT loses field
+- **Tests**: 1 live-DB test with actual execution
+
+### 6-7. Verification & Sanity Gates
+**Approach**:
+- Run all new tests: `cargo test -p cf-server --lib -- --exact [test_names]`
+- Run live-DB tests: `cargo test -p cf-server --test '*' -- --ignored`
+- Verify no remaining production None values via rg patterns
+- Run full verification suite (format, check, builds, hygiene)
+
+### Implementation Sequence
+1. Assignment semantics - core system capability
+2. Policy counts - catalog display
+3. Policy owner - policy drawer
+4. Evidence specs - policy drawer
+5. framework_version_id test - regression coverage
+6. Full verification suite
+
+All changes are logical units suitable for single MR commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
