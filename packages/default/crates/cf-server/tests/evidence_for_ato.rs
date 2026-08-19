@@ -22,10 +22,11 @@ use crystal_forge::api::models::EvidenceSpec;
 use crystal_forge::models::deployment_policies::{
     CreateDeploymentPolicyRequest, UpdateDeploymentPolicyRequest,
 };
+use crystal_forge::queries::compliance::{PolicyDraftIntent, ensure_policy_draft};
 use crystal_forge::queries::deployment_policies::{
-    create_deployment_policy_with_mappings, fetch_policy_version_summaries, update_deployment_policy,
+    create_deployment_policy_with_mappings, fetch_policy_version_summaries,
+    update_deployment_policy,
 };
-use crystal_forge::queries::compliance::{ensure_policy_draft, PolicyDraftIntent};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -119,7 +120,8 @@ async fn test_evidence_create_read_regression(pool: PgPool) {
         },
     ];
 
-    let policy_id = create_policy_with_evidence(&pool, "evidence-create-read", evidence_specs.clone()).await;
+    let policy_id =
+        create_policy_with_evidence(&pool, "evidence-create-read", evidence_specs.clone()).await;
 
     // Load via production summary loader (used by UI)
     let summaries = fetch_policy_version_summaries(&pool, &[policy_id])
@@ -173,14 +175,19 @@ async fn test_evidence_update_replacement(pool: PgPool) {
         required_fields: Default::default(),
     }];
 
-    let policy_id = create_policy_with_evidence(&pool, "evidence-replace", initial_specs.clone()).await;
+    let policy_id =
+        create_policy_with_evidence(&pool, "evidence-replace", initial_specs.clone()).await;
 
     // Verify initial state
     let summaries = fetch_policy_version_summaries(&pool, &[policy_id])
         .await
         .expect("verify initial");
     let versions = summaries.get(&policy_id).unwrap();
-    assert_eq!(versions[0].evidence_specs.len(), 1, "Should start with 1 spec");
+    assert_eq!(
+        versions[0].evidence_specs.len(),
+        1,
+        "Should start with 1 spec"
+    );
 
     // Update with completely different evidence
     let replacement_specs = vec![
@@ -459,14 +466,12 @@ async fn test_evidence_ensure_policy_draft(pool: PgPool) {
     .execute(&mut *tx)
     .await
     .expect("accept version");
-    sqlx::query(
-        "UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2",
-    )
-    .bind(draft_version_id)
-    .bind(policy_id)
-    .execute(&mut *tx)
-    .await
-    .expect("set published");
+    sqlx::query("UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2")
+        .bind(draft_version_id)
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .expect("set published");
     tx.commit().await.expect("commit publish");
 
     // Verify published policy has evidence
@@ -550,17 +555,31 @@ async fn test_evidence_historical_isolation(pool: PgPool) {
 
     let mut tx = pool.begin().await.expect("begin publish");
     sqlx::query("UPDATE deployment_policies SET current_draft_version_id = NULL WHERE id = $1")
-        .bind(policy_id).execute(&mut *tx).await.expect("clear draft");
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .expect("clear draft");
     sqlx::query("UPDATE deployment_policy_versions SET publication_state = 'accepted', published_at = CURRENT_TIMESTAMP WHERE id = $1")
         .bind(v1_id).execute(&mut *tx).await.expect("accept");
     sqlx::query("UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2")
-        .bind(v1_id).bind(policy_id).execute(&mut *tx).await.expect("set pub");
+        .bind(v1_id)
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .expect("set pub");
     tx.commit().await.expect("commit");
 
     // V2: Derive and update with different evidence
     let mut tx = pool.begin().await.expect("begin v2");
-    let _v2_id = ensure_policy_draft(&mut tx, policy_id, None, None, PolicyDraftIntent::EnsureMutable)
-        .await.expect("ensure v2");
+    let _v2_id = ensure_policy_draft(
+        &mut tx,
+        policy_id,
+        None,
+        None,
+        PolicyDraftIntent::EnsureMutable,
+    )
+    .await
+    .expect("ensure v2");
     tx.commit().await.expect("commit v2 derive");
 
     let v2_specs = vec![EvidenceSpec {
@@ -583,11 +602,18 @@ async fn test_evidence_historical_isolation(pool: PgPool) {
 
     let mut tx = pool.begin().await.expect("begin publish v2");
     sqlx::query("UPDATE deployment_policies SET current_draft_version_id = NULL WHERE id = $1")
-        .bind(policy_id).execute(&mut *tx).await.expect("clear draft v2");
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .expect("clear draft v2");
     sqlx::query("UPDATE deployment_policy_versions SET publication_state = 'accepted', published_at = CURRENT_TIMESTAMP WHERE id = $1")
         .bind(v2_id).execute(&mut *tx).await.expect("accept v2");
     sqlx::query("UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2")
-        .bind(v2_id).bind(policy_id).execute(&mut *tx).await.expect("set pub v2");
+        .bind(v2_id)
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .expect("set pub v2");
     tx.commit().await.expect("commit pub v2");
 
     // Load and verify each version
@@ -597,14 +623,22 @@ async fn test_evidence_historical_isolation(pool: PgPool) {
     let versions = summaries.get(&policy_id).unwrap();
 
     let v1_loaded = versions.iter().find(|v| v.id == v1_id).expect("v1 present");
-    assert_eq!(v1_loaded.evidence_specs.len(), 1, "V1 should have Command evidence");
+    assert_eq!(
+        v1_loaded.evidence_specs.len(),
+        1,
+        "V1 should have Command evidence"
+    );
     match &v1_loaded.evidence_specs[0].kind {
         EvidenceKind::Command { .. } => {}
         _ => panic!("V1 spec should be Command"),
     }
 
     let v2_loaded = versions.iter().find(|v| v.id == v2_id).expect("v2 present");
-    assert_eq!(v2_loaded.evidence_specs.len(), 1, "V2 should have File evidence");
+    assert_eq!(
+        v2_loaded.evidence_specs.len(),
+        1,
+        "V2 should have File evidence"
+    );
     match &v2_loaded.evidence_specs[0].kind {
         EvidenceKind::File { .. } => {}
         _ => panic!("V2 spec should be File"),

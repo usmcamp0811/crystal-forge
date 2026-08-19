@@ -14,7 +14,9 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crystal_forge::queries::compliance::{determine_assignment_status_for_system, list_bundle_systems_for_version};
+use crystal_forge::queries::compliance::{
+    determine_assignment_status_for_system, list_bundle_systems_for_version,
+};
 
 // ---------------------------------------------------------------------------
 // Schema-accurate fixtures. Every INSERT below matches the current migrations:
@@ -461,30 +463,28 @@ async fn test_immutable_assignment_version_supersedes_lineage(pool: PgPool) {
     // This proves the code uses the immutable snapshot, not the mutable lineage field.
     // Get the assignment row
     let assignment_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM compliance_bundle_assignments WHERE system_id = $1 AND bundle_id = $2"
+        "SELECT id FROM compliance_bundle_assignments WHERE system_id = $1 AND bundle_id = $2",
     )
     .bind(system_id)
     .bind(bundle_id)
     .fetch_one(&pool)
     .await
     .expect("fetch assignment");
-    
+
     // Update the lineage field to V1 (mismatch with snapshot which still says V2)
-    sqlx::query(
-        "UPDATE compliance_bundle_assignments SET bundle_version_id = $1 WHERE id = $2"
-    )
-    .bind(v1_id)
-    .bind(assignment_id)
-    .execute(&pool)
-    .await
-    .expect("corrupt lineage field for test");
-    
+    sqlx::query("UPDATE compliance_bundle_assignments SET bundle_version_id = $1 WHERE id = $2")
+        .bind(v1_id)
+        .bind(assignment_id)
+        .execute(&pool)
+        .await
+        .expect("corrupt lineage field for test");
+
     // Now query assignment status - it MUST still use the snapshot (V2) not the lineage (V1)
     let status_after = determine_assignment_status_for_system(&pool, bundle_id, system_id)
         .await
         .expect("query after corruption")
         .expect("status exists");
-    
+
     assert_eq!(
         status_after, "current",
         "DISCRIMINATING: Must use snapshot V2, not corrupt lineage V1"
@@ -536,15 +536,16 @@ async fn test_bundle_systems_batched_query_count(pool: PgPool) {
     // This test validates BEHAVIORAL proof (row counts + assignment accuracy)
     // and relies on source-level inspection of load_assignment_statuses_for_systems()
     // being called before the systems loop as the authoritative Q.E.D.
-    
+
     let bundle_id = create_bundle(&pool, "batch-test", "NIST CSF").await;
-    let version_id = create_bundle_version(&pool, bundle_id, "1.0", "accepted", "Test version").await;
+    let version_id =
+        create_bundle_version(&pool, bundle_id, "1.0", "accepted", "Test version").await;
     set_current_published(&pool, bundle_id, version_id).await;
-    
+
     // Create 1 system for baseline
     let system_1 = create_system(&pool, "sys-1.test", None).await;
     create_system_assignment(&pool, bundle_id, version_id, system_1).await;
-    
+
     // Load with 1 system - baseline
     let result_1 = list_bundle_systems_for_version(&pool, bundle_id, version_id)
         .await
@@ -556,7 +557,7 @@ async fn test_bundle_systems_batched_query_count(pool: PgPool) {
         Some("current".to_string()),
         "Single system should have current assignment status"
     );
-    
+
     // Create 20 more systems and assign them all
     let mut system_ids = vec![system_1];
     for i in 2..=20 {
@@ -564,14 +565,18 @@ async fn test_bundle_systems_batched_query_count(pool: PgPool) {
         system_ids.push(sys_id);
         create_system_assignment(&pool, bundle_id, version_id, sys_id).await;
     }
-    
+
     // Load with 20 systems - should use same query count as 1 system due to batching
     let result_20 = list_bundle_systems_for_version(&pool, bundle_id, version_id)
         .await
         .expect("query 20 systems")
         .expect("bundle exists");
-    assert_eq!(result_20.systems.len(), 20, "Should have exactly 20 systems");
-    
+    assert_eq!(
+        result_20.systems.len(),
+        20,
+        "Should have exactly 20 systems"
+    );
+
     // Verify all statuses are correctly determined.
     // If assignment batching broke, some systems would return None or wrong status.
     // This proves the batch loader worked for all 20 systems.
@@ -583,12 +588,15 @@ async fn test_bundle_systems_batched_query_count(pool: PgPool) {
             idx + 1
         );
     }
-    
+
     // Additional proof: verify that ALL 20 system IDs from assignment creation are
     // present in the results (not just a subset).
     for expected_id in &system_ids {
         assert!(
-            result_20.systems.iter().any(|s| s.system_id == *expected_id),
+            result_20
+                .systems
+                .iter()
+                .any(|s| s.system_id == *expected_id),
             "All assigned systems must be returned (system {} missing)",
             expected_id
         );

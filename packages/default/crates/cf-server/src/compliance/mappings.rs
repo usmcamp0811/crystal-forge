@@ -227,30 +227,28 @@ pub fn extract_evidence_specs(metadata: &serde_json::Value) -> Vec<serde_json::V
 ///
 /// Returns an error if validation fails; returns Ok(()) if valid.
 pub fn validate_evidence_spec(spec: &serde_json::Value) -> Result<()> {
-    let obj = spec.as_object().ok_or_else(|| {
-        anyhow::anyhow!("evidence_specs: item must be an object")
-    })?;
-    
+    let obj = spec
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("evidence_specs: item must be an object"))?;
+
     let kind = obj
         .get("kind")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("evidence_specs: missing or invalid 'kind' field"))?;
-    
+
     // Match case-insensitively to handle both serialization formats
     let kind_lower = kind.to_lowercase();
-    
+
     // Helper: get field from either flattened format (top-level) or details-nested format
     let get_field = |field_name: &str| {
-        obj.get(field_name)
-            .and_then(|v| v.as_str())
-            .or_else(|| {
-                obj.get("details")
-                    .and_then(|v| v.as_object())
-                    .and_then(|d| d.get(field_name))
-                    .and_then(|v| v.as_str())
-            })
+        obj.get(field_name).and_then(|v| v.as_str()).or_else(|| {
+            obj.get("details")
+                .and_then(|v| v.as_object())
+                .and_then(|d| d.get(field_name))
+                .and_then(|v| v.as_str())
+        })
     };
-    
+
     match kind_lower.as_str() {
         "command" => {
             let cmd = get_field("cmd");
@@ -331,12 +329,9 @@ pub fn decode_evidence_specs_strict(
                     serde_json::Value::Array(_) => "array",
                     serde_json::Value::Object(_) => "object",
                 };
-                anyhow::anyhow!(
-                    "evidence_specs: field must be array, got {}",
-                    type_name
-                )
+                anyhow::anyhow!("evidence_specs: field must be array, got {}", type_name)
             })?;
-            
+
             // Decode and validate each entry
             let mut result = Vec::with_capacity(arr.len());
             for (idx, entry) in arr.iter().enumerate() {
@@ -344,17 +339,13 @@ pub fn decode_evidence_specs_strict(
                     .map_err(|e| {
                         anyhow::anyhow!(
                             "evidence_specs[{}]: failed to decode evidence spec: {}",
-                            idx, e
+                            idx,
+                            e
                         )
                     })?;
                 // Validate the decoded spec (fail-closed on semantic errors)
                 validate_evidence_spec(&serde_json::to_value(&spec)?)
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "evidence_specs[{}]: {}",
-                            idx, e
-                        )
-                    })?;
+                    .map_err(|e| anyhow::anyhow!("evidence_specs[{}]: {}", idx, e))?;
                 result.push(spec);
             }
             Ok(result)
@@ -380,9 +371,9 @@ pub fn merge_evidence_into_metadata(
         // Caller did not specify evidence; preserve existing
         return Ok(existing.clone());
     }
-    
+
     let mut obj = existing.as_object().cloned().unwrap_or_default();
-    
+
     if let Some(specs) = evidence_specs {
         // Validate all specs before updating
         for spec in specs {
@@ -390,15 +381,12 @@ pub fn merge_evidence_into_metadata(
             validate_evidence_spec(&spec_json)?;
         }
         // All valid; store the array
-        obj.insert(
-            "evidence_specs".to_string(),
-            serde_json::to_value(specs)?,
-        );
+        obj.insert("evidence_specs".to_string(), serde_json::to_value(specs)?);
     } else {
         // Empty array; clear evidence
         obj.insert("evidence_specs".to_string(), serde_json::json!([]));
     }
-    
+
     Ok(serde_json::Value::Object(obj))
 }
 

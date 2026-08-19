@@ -382,7 +382,6 @@ async fn test_bundle_usage_count_distinct_bundle_lineages_selected_only(pool: Pg
     ///
     /// Expected bundle_usage_count = 2 (A and B only; C is excluded because unselected)
     /// Defective behavior (old code): count = 3 (A1, A2, B1 as distinct versions without filter)
-
     let (_policy_id, policy_version_id) = create_test_policy(&pool, "bundle-lineage-test").await;
 
     // Bundle A (lineage 1)
@@ -553,4 +552,3 @@ async fn test_bundle_usage_count_distinct_bundle_lineages_selected_only(pool: Pg
 
     assert_eq!(mapped, 0, "no requirements mapped in this test");
 }
-

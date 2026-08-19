@@ -2299,7 +2299,7 @@ pub async fn list_system_bundles(
     for bundle in &visible_bundles {
         all_pairs.push((bundle.id, system.id));
     }
-    
+
     // Also include the overall effective bundle if it differs from visible bundles
     let bundle_for_effective: Option<Uuid> =
         sqlx::query_scalar("SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1")
@@ -2312,7 +2312,7 @@ pub async fn list_system_bundles(
             all_pairs.push((eff_bundle_id, system.id));
         }
     }
-    
+
     // Load all assignment statuses in one batch query
     let assignment_statuses = if !all_pairs.is_empty() {
         load_assignment_statuses_for_pairs(pool, &all_pairs).await?
@@ -2338,7 +2338,7 @@ pub async fn list_system_bundles(
     }
     let direct_rollup =
         effective_policy_rollup_with_evidence(pool, &system, &direct_policies, None).await?;
-    
+
     // For overall rollup, use the preloaded assignment status
     let overall_assignment_status = if let Some(eff_bundle_id) = bundle_for_effective {
         assignment_statuses
@@ -2670,12 +2670,12 @@ pub async fn determine_assignment_status_for_system(
 }
 
 /// Load assignment statuses for multiple systems in a single batch query.
-/// 
+///
 /// This is the production path for determining assignment status across many systems.
 /// Uses set-oriented queries to minimize database round trips.
-/// 
+///
 /// Returns a map of system_id -> assignment_status string (or None if no applicable assignment).
-/// 
+///
 /// Assignment precedence:
 /// 1. System-scoped assignments (take precedence over environment-scoped)
 /// 2. Environment-scoped assignments for the system's environment
@@ -2744,7 +2744,11 @@ pub async fn load_assignment_statuses_for_systems(
 
     // Build the result map
     let mut result = std::collections::HashMap::new();
-    for AssignmentRow { system_id, assigned_version_id } in assignments {
+    for AssignmentRow {
+        system_id,
+        assigned_version_id,
+    } in assignments
+    {
         let status = match current_published_version {
             Some(current) if assigned_version_id == current => Some("current".to_string()),
             Some(_) => Some("pinned".to_string()),
@@ -2766,7 +2770,7 @@ pub async fn load_assignment_statuses_for_systems(
 /// All requested pairs are present in the result; unassigned pairs have None.
 pub async fn load_assignment_statuses_for_pairs(
     pool: &PgPool,
-    pairs: &[(Uuid, Uuid)],  // (bundle_id, system_id)
+    pairs: &[(Uuid, Uuid)], // (bundle_id, system_id)
 ) -> Result<std::collections::HashMap<(Uuid, Uuid), Option<String>>> {
     if pairs.is_empty() {
         return Ok(std::collections::HashMap::new());
@@ -2849,17 +2853,30 @@ pub async fn load_assignment_statuses_for_pairs(
         "#,
     )
     .bind(
-        bundle_pairs.iter().map(|(b, _)| b).copied().collect::<Vec<_>>()
+        bundle_pairs
+            .iter()
+            .map(|(b, _)| b)
+            .copied()
+            .collect::<Vec<_>>(),
     )
     .bind(
-        bundle_pairs.iter().map(|(_, s)| s).copied().collect::<Vec<_>>()
+        bundle_pairs
+            .iter()
+            .map(|(_, s)| s)
+            .copied()
+            .collect::<Vec<_>>(),
     )
     .fetch_all(pool)
     .await?;
 
     // Build result map with status determination
     let mut result = std::collections::HashMap::new();
-    for AssignmentPair { bundle_id, system_id, assigned_version_id } in assignments {
+    for AssignmentPair {
+        bundle_id,
+        system_id,
+        assigned_version_id,
+    } in assignments
+    {
         let current_published = versions_by_bundle.get(&bundle_id).copied().flatten();
         let status = match current_published {
             Some(current) if assigned_version_id == current => Some("current".to_string()),
