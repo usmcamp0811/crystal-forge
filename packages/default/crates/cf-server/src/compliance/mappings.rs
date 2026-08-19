@@ -223,6 +223,107 @@ pub fn extract_evidence_specs(metadata: &serde_json::Value) -> Vec<serde_json::V
         .unwrap_or_default()
 }
 
+/// Validate a single evidence spec for required fields per kind.
+///
+/// Returns an error if validation fails; returns Ok(()) if valid.
+pub fn validate_evidence_spec(spec: &serde_json::Value) -> Result<()> {
+    let obj = spec.as_object().ok_or_else(|| {
+        anyhow::anyhow!("evidence_specs: item must be an object")
+    })?;
+    
+    let kind = obj
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("evidence_specs: missing or invalid 'kind' field"))?;
+    
+    match kind {
+        "command" => {
+            let cmd = obj.get("cmd").and_then(|v| v.as_str());
+            if cmd.is_none() || cmd.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: Command evidence must have non-empty 'cmd' field");
+            }
+        }
+        "file" => {
+            let path = obj.get("path").and_then(|v| v.as_str());
+            if path.is_none() || path.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: File evidence must have non-empty 'path' field");
+            }
+        }
+        "unit_state" => {
+            let unit = obj.get("unit").and_then(|v| v.as_str());
+            let state = obj.get("state").and_then(|v| v.as_str());
+            if unit.is_none() || unit.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: UnitState evidence must have non-empty 'unit' field");
+            }
+            if state.is_none() || state.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: UnitState evidence must have non-empty 'state' field");
+            }
+        }
+        "eval_attr" => {
+            let attr = obj.get("attr").and_then(|v| v.as_str());
+            if attr.is_none() || attr.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: EvalAttr evidence must have non-empty 'attr' field");
+            }
+        }
+        "attestation" => {
+            let note = obj.get("note").and_then(|v| v.as_str());
+            if note.is_none() || note.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: Attestation evidence must have non-empty 'note' field");
+            }
+        }
+        "log" => {
+            let source = obj.get("source").and_then(|v| v.as_str());
+            if source.is_none() || source.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: Log evidence must have non-empty 'source' field");
+            }
+        }
+        _ => {
+            bail!("evidence_specs: unknown kind '{}'", kind);
+        }
+    }
+    Ok(())
+}
+
+/// Merge evidence specs into an existing `compliance_metadata` JSON object.
+///
+/// Semantics:
+/// - `None` → caller did not touch this field; preserve existing value exactly.
+/// - `Some([])` → caller cleared evidence; store empty array.
+/// - `Some([...])` → validate and replace evidence array.
+///
+/// All other keys in `existing` survive unchanged.
+///
+/// Returns an error if any evidence spec is invalid.
+pub fn merge_evidence_into_metadata(
+    existing: &serde_json::Value,
+    evidence_specs: Option<&[crate::api::models::EvidenceSpec]>,
+) -> Result<serde_json::Value> {
+    if evidence_specs.is_none() {
+        // Caller did not specify evidence; preserve existing
+        return Ok(existing.clone());
+    }
+    
+    let mut obj = existing.as_object().cloned().unwrap_or_default();
+    
+    if let Some(specs) = evidence_specs {
+        // Validate all specs before updating
+        for spec in specs {
+            let spec_json = serde_json::to_value(spec)?;
+            validate_evidence_spec(&spec_json)?;
+        }
+        // All valid; store the array
+        obj.insert(
+            "evidence_specs".to_string(),
+            serde_json::to_value(specs)?,
+        );
+    } else {
+        // Empty array; clear evidence
+        obj.insert("evidence_specs".to_string(), serde_json::json!([]));
+    }
+    
+    Ok(serde_json::Value::Object(obj))
+}
+
 /// Merge SRG/CCI mappings into an existing `compliance_metadata` JSON object.
 ///
 /// Semantics:

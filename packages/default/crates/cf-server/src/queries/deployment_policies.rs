@@ -10,7 +10,7 @@ use crate::compliance::digest::{PolicyVersionCanonical, write_policy_version_dig
 use crate::compliance::mappings::{
     extract_cci_ids, extract_classification, extract_evidence_specs, extract_srg_ids,
     infer_legacy_category, initial_policy_metadata, merge_classification_into_metadata,
-    merge_policy_mappings,
+    merge_evidence_into_metadata, merge_policy_mappings,
 };
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
@@ -619,7 +619,7 @@ pub async fn create_deployment_policy_with_mappings(
     let base_metadata = initial_policy_metadata(srg_ids_opt, cci_ids_opt)
         .context("Failed to build compliance metadata for new policy")?;
     // Merge classification fields into the initial metadata.
-    let compliance_metadata = merge_classification_into_metadata(
+    let with_classification = merge_classification_into_metadata(
         &base_metadata,
         request.category.as_deref(),
         request.framework.as_deref(),
@@ -629,6 +629,14 @@ pub async fn create_deployment_policy_with_mappings(
         request.cis_section.as_deref(),
         request.rationale.as_deref(),
     );
+    // Merge evidence specs into the metadata.
+    let evidence_specs = if request.evidence_specs.is_empty() {
+        None
+    } else {
+        Some(request.evidence_specs.as_slice())
+    };
+    let compliance_metadata = merge_evidence_into_metadata(&with_classification, evidence_specs)
+        .context("Failed to validate and merge evidence specs")?;
 
     let canonical = PolicyVersionCanonical {
         name: policy.name.clone(),
@@ -785,7 +793,7 @@ pub async fn update_deployment_policy(
         let srg_cci_merged = merge_policy_mappings(&existing_meta, srg_opt, cci_opt)
             .context("Failed to merge SRG/CCI mappings")?;
         // Merge classification fields into the already-merged metadata.
-        let merged_meta = merge_classification_into_metadata(
+        let classified_meta = merge_classification_into_metadata(
             &srg_cci_merged,
             request.category.as_deref(),
             request.framework.as_deref(),
@@ -795,6 +803,10 @@ pub async fn update_deployment_policy(
             request.cis_section.as_deref(),
             request.rationale.as_deref(),
         );
+        // Merge evidence specs into the metadata.
+        let evidence_specs = request.evidence_specs.as_deref();
+        let merged_meta = merge_evidence_into_metadata(&classified_meta, evidence_specs)
+            .context("Failed to validate and merge evidence specs")?;
 
         let canonical = PolicyVersionCanonical {
             name: p.name.clone(),

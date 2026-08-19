@@ -1386,6 +1386,9 @@ pub struct CreateDeploymentPolicyRequest {
     /// Human-readable rationale for this control
     #[serde(default)]
     pub rationale: Option<String>,
+    /// Evidence collection specifications for ATO audits
+    #[serde(default)]
+    pub evidence_specs: Vec<crate::api::models::EvidenceSpec>,
     /// Normalized requirement mappings to persist with the initial draft.
     #[serde(default)]
     pub requirement_mappings: Vec<CreatePolicyRequirementMapping>,
@@ -1442,6 +1445,10 @@ pub struct UpdateDeploymentPolicyRequest {
     /// When `Some`, replace the rationale; `None` preserves existing.
     #[serde(default)]
     pub rationale: Option<String>,
+    /// When `Some`, replace evidence specs; `Some([])` clears them.
+    /// When `None`, the existing value is preserved.
+    #[serde(default)]
+    pub evidence_specs: Option<Vec<crate::api::models::EvidenceSpec>>,
 }
 
 // ============================================================================
