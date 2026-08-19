@@ -1275,7 +1275,7 @@ pub fn PolicyDrawer(
 /// Display label for an evidence spec based on its kind.
 fn spec_display_label(spec: &crate::api::models::EvidenceSpec) -> String {
     use crate::api::models::EvidenceKind;
-    
+
     let kind_label = match &spec.kind {
         EvidenceKind::Command { cmd, .. } => format!("Command: {cmd}"),
         EvidenceKind::Log { source, unit, .. } => format!("Log: {source} ({unit})"),
@@ -1793,6 +1793,8 @@ mod interchange_tests {
             cmmc_level: None,
             cis_section: Some("5.2".to_string()),
             rationale: None,
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
         }
     }
 

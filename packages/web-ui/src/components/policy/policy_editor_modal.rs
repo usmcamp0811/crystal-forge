@@ -2272,6 +2272,8 @@ mod tests {
             cmmc_level: None,
             cis_section: None,
             rationale: None,
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
         };
 
         let frameworks = custom_frameworks(&[

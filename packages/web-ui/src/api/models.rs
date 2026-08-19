@@ -1354,7 +1354,7 @@ pub struct DeploymentPolicyRecord {
     pub mapped_requirement_count: i64,
     /// Number of distinct bundle lineages using this policy version
     #[serde(default)]
-     pub bundle_usage_count: i64,
+    pub bundle_usage_count: i64,
 }
 
 /// Evidence collection specification for a control or policy.

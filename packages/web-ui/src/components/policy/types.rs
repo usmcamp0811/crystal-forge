@@ -87,15 +87,15 @@ pub struct PolicyRevisionSummary {
     pub cmmc_level: Option<i32>,
     /// CIS Benchmark section for this revision.
     pub cis_section: Option<String>,
-      /// Human-readable rationale for this revision.
-      pub rationale: Option<String>,
-      /// User who created this policy version (UUID from server, display name on server).
-      pub created_by: Option<uuid::Uuid>,
-      /// Human-readable display name of the user who created this version (username or email).
-      pub created_by_display: Option<String>,
-      /// Evidence collection specifications for ATO audits.
-      pub evidence_specs: Vec<crate::api::models::EvidenceSpec>,
-  }
+    /// Human-readable rationale for this revision.
+    pub rationale: Option<String>,
+    /// User who created this policy version (UUID from server, display name on server).
+    pub created_by: Option<uuid::Uuid>,
+    /// Human-readable display name of the user who created this version (username or email).
+    pub created_by_display: Option<String>,
+    /// Evidence collection specifications for ATO audits.
+    pub evidence_specs: Vec<crate::api::models::EvidenceSpec>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PolicyCategory {
