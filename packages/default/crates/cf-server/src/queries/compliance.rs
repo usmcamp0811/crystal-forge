@@ -983,21 +983,30 @@ async fn list_bundle_summary_aggregates(
             .push(system);
     }
 
-    // Resolve each distinct version once for all systems that need it. This is
-    // the bounded batch path; no bundle calls the detailed systems endpoint.
-    let mut system_ids_by_version = std::collections::HashMap::<Uuid, Vec<Uuid>>::new();
-    for ((_, version_id), systems) in &systems_by_pair {
-        let ids = system_ids_by_version.entry(*version_id).or_default();
-        ids.extend(systems.iter().map(|system| system.id));
-    }
-    for ids in system_ids_by_version.values_mut() {
-        ids.sort_unstable();
-        ids.dedup();
-    }
-    let resolver_requests: Vec<(Uuid, Vec<Uuid>)> = system_ids_by_version.into_iter().collect();
-    let effective_by_version_system =
-        resolve_systems_effective_policies_for_bundle_versions_batch(pool, &resolver_requests)
-            .await?;
+     // Batch-load assignment status for all bundle versions.
+     let mut assignment_status_by_version = std::collections::HashMap::<Uuid, Option<String>>::new();
+     for (_, version_id) in &pairs {
+         if !assignment_status_by_version.contains_key(version_id) {
+             let status = determine_assignment_status_for_bundle_version(pool, *version_id).await.ok().flatten();
+             assignment_status_by_version.insert(*version_id, status);
+         }
+     }
+
+     // Resolve each distinct version once for all systems that need it. This is
+     // the bounded batch path; no bundle calls the detailed systems endpoint.
+     let mut system_ids_by_version = std::collections::HashMap::<Uuid, Vec<Uuid>>::new();
+     for ((_, version_id), systems) in &systems_by_pair {
+         let ids = system_ids_by_version.entry(*version_id).or_default();
+         ids.extend(systems.iter().map(|system| system.id));
+     }
+     for ids in system_ids_by_version.values_mut() {
+         ids.sort_unstable();
+         ids.dedup();
+     }
+     let resolver_requests: Vec<(Uuid, Vec<Uuid>)> = system_ids_by_version.into_iter().collect();
+     let effective_by_version_system =
+         resolve_systems_effective_policies_for_bundle_versions_batch(pool, &resolver_requests)
+             .await?;
 
     let mut evidence_work = Vec::new();
     let mut unresolved_by_pair =
@@ -1007,41 +1016,44 @@ async fn list_bundle_summary_aggregates(
             unresolved_by_pair.insert((bundle_id, version_id), Vec::new());
             continue;
         };
-        for system in systems {
-            let rollup = match effective_by_version_system.get(&(version_id, system.id)) {
-                Some(ResolutionOutcome::Resolved(set)) if set.bundle_version_id == version_id => {
-                    evidence_work.push((
-                        (bundle_id, version_id),
-                        system.clone(),
-                        set.policies.clone(),
-                    ));
-                    None
-                }
-                Some(ResolutionOutcome::Conflict(conflicts)) => Some(unresolved_system_rollup(
-                    system.clone(),
-                    0,
-                    conflicts
-                        .first()
-                        .map(|conflict| conflict.code.as_str())
-                        .unwrap_or("conflict"),
-                )),
-                _ => Some(unresolved_system_rollup(
-                    system.clone(),
-                    0,
-                    "not_applicable",
-                )),
-            };
-            if let Some(rollup) = rollup {
-                unresolved_by_pair
-                    .entry((bundle_id, version_id))
-                    .or_default()
-                    .push(rollup);
-            }
-        }
+         for system in systems {
+             let assignment_status = assignment_status_by_version.get(&version_id).cloned().flatten();
+             let rollup = match effective_by_version_system.get(&(version_id, system.id)) {
+                 Some(ResolutionOutcome::Resolved(set)) if set.bundle_version_id == version_id => {
+                     evidence_work.push((
+                         (bundle_id, version_id),
+                         system.clone(),
+                         set.policies.clone(),
+                     ));
+                     None
+                 }
+                 Some(ResolutionOutcome::Conflict(conflicts)) => Some(unresolved_system_rollup(
+                     system.clone(),
+                     0,
+                     conflicts
+                         .first()
+                         .map(|conflict| conflict.code.as_str())
+                         .unwrap_or("conflict"),
+                     assignment_status.clone(),
+                 )),
+                 _ => Some(unresolved_system_rollup(
+                     system.clone(),
+                     0,
+                     "not_applicable",
+                     assignment_status,
+                 )),
+             };
+             if let Some(rollup) = rollup {
+                 unresolved_by_pair
+                     .entry((bundle_id, version_id))
+                     .or_default()
+                     .push(rollup);
+             }
+         }
     }
 
-    let batched_rollups =
-        effective_policy_rollups_with_evidence_batch(pool, &evidence_work).await?;
+     let batched_rollups =
+         effective_policy_rollups_with_evidence_batch(pool, &evidence_work, &assignment_status_by_version).await?;
     let mut rollups_by_pair = unresolved_by_pair;
     for (pair, rollup) in batched_rollups {
         rollups_by_pair.entry(pair).or_default().push(rollup);
@@ -2010,33 +2022,36 @@ pub async fn list_bundle_systems_for_version(
         &system_ids,
         bundle_version_id,
     )
-    .await?;
-     let mut rollups = Vec::with_capacity(systems.len());
-     for system in systems {
-         let rollup = match effective.get(&system.id) {
-             Some(ResolutionOutcome::Resolved(set))
-                 if set.bundle_version_id == bundle_version_id =>
-             {
-                 let assignment_status = determine_assignment_status_for_bundle_version(
-                     pool,
-                     bundle_version_id,
-                 ).await.ok().flatten();
-                 effective_policy_rollup_with_evidence(pool, &system, &set.policies, assignment_status).await?
-             }
-             Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup(
-                 system,
-                 policies.len() as i64,
-                 conflicts
-                     .first()
-                     .map(|c| c.code.as_str())
-                     .unwrap_or("conflict"),
-             ),
-             // Missing or mismatched resolution has no authoritative effective
-             // set. Never substitute lineage/current membership for this view.
-             _ => unresolved_system_rollup(system, policies.len() as i64, "not_applicable"),
-         };
-         rollups.push(rollup);
-     }
+     .await?;
+      // Determine assignment status once for this bundle version
+      let assignment_status = determine_assignment_status_for_bundle_version(
+          pool,
+          bundle_version_id,
+      ).await.ok().flatten();
+
+      let mut rollups = Vec::with_capacity(systems.len());
+      for system in systems {
+          let rollup = match effective.get(&system.id) {
+              Some(ResolutionOutcome::Resolved(set))
+                  if set.bundle_version_id == bundle_version_id =>
+              {
+                  effective_policy_rollup_with_evidence(pool, &system, &set.policies, assignment_status.clone()).await?
+              }
+              Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup(
+                  system,
+                  policies.len() as i64,
+                  conflicts
+                      .first()
+                      .map(|c| c.code.as_str())
+                      .unwrap_or("conflict"),
+                  assignment_status.clone(),
+              ),
+              // Missing or mismatched resolution has no authoritative effective
+              // set. Never substitute lineage/current membership for this view.
+              _ => unresolved_system_rollup(system, policies.len() as i64, "not_applicable", assignment_status.clone()),
+          };
+          rollups.push(rollup);
+      }
     let totals = totals_for_rollups(&rollups);
     Ok(Some(ComplianceBundleSystemsResponse {
         bundle_id,
@@ -2199,33 +2214,33 @@ pub async fn list_system_bundles(
         .filter(|bundle| applicable_bundle_ids.contains(&bundle.id))
         .collect();
 
-    let outcome = resolve_system_effective_policies(pool, system_id).await?;
-    let ResolutionOutcome::Resolved(effective) = outcome else {
-        let state = match outcome {
-            ResolutionOutcome::Conflict(conflicts) => conflicts
-                .first()
-                .map(|conflict| conflict.code.clone())
-                .unwrap_or_else(|| "conflict".to_string()),
-            ResolutionOutcome::Resolved(_) => unreachable!(),
-        };
-        let bundles = visible_bundles
-            .into_iter()
-            .map(|bundle| {
-                let total = policies_by_bundle
-                    .get(&bundle.id)
-                    .map_or(0, |policies| policies.len() as i64);
-                (
-                    bundle,
-                    unresolved_system_rollup(system.clone(), total, &state),
-                )
-            })
-            .collect();
-        return Ok(Some(SystemBundleRollups {
-            bundles,
-            direct_rollup: unresolved_system_rollup(system.clone(), 0, &state),
-            overall_rollup: unresolved_system_rollup(system, 0, &state),
-        }));
-    };
+     let outcome = resolve_system_effective_policies(pool, system_id).await?;
+     let ResolutionOutcome::Resolved(effective) = outcome else {
+         let state = match outcome {
+             ResolutionOutcome::Conflict(conflicts) => conflicts
+                 .first()
+                 .map(|conflict| conflict.code.clone())
+                 .unwrap_or_else(|| "conflict".to_string()),
+             ResolutionOutcome::Resolved(_) => unreachable!(),
+         };
+         let bundles = visible_bundles
+             .into_iter()
+             .map(|bundle| {
+                 let total = policies_by_bundle
+                     .get(&bundle.id)
+                     .map_or(0, |policies| policies.len() as i64);
+                 (
+                     bundle,
+                     unresolved_system_rollup(system.clone(), total, &state, None),
+                 )
+             })
+             .collect();
+         return Ok(Some(SystemBundleRollups {
+             bundles,
+             direct_rollup: unresolved_system_rollup(system.clone(), 0, &state, None),
+             overall_rollup: unresolved_system_rollup(system, 0, &state, None),
+         }));
+     };
 
     let (mut policies_by_bundle, direct_policies) =
         partition_effective_policies_by_bundle(&effective.policies);
@@ -2264,6 +2279,7 @@ pub async fn list_system_bundles(
 /// - All bundles
 /// - The set of applicable bundle IDs
 /// - Policies grouped by bundle_id
+/// - Optional assignment status for the bundle
 ///
 /// Returns bundles with computed rollups, filtered to only applicable bundles.
 pub(crate) fn assemble_system_compliance_bundles(
@@ -2285,7 +2301,7 @@ pub(crate) fn assemble_system_compliance_bundles(
             .unwrap_or_default();
 
         // system_rollup is pure deterministic computation with no fallible operations
-        let rollup = system_rollup(system.clone(), &policies);
+        let rollup = system_rollup(system.clone(), &policies, None);
         result.push((bundle, rollup));
     }
 
@@ -2519,7 +2535,11 @@ pub(crate) async fn determine_assignment_status_for_bundle_version(
     }
 }
 
-pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> ComplianceSystemRollup {
+pub(crate) fn system_rollup(
+    system: SystemRow,
+    policies: &[PolicyRow],
+    assignment_status: Option<String>,
+) -> ComplianceSystemRollup {
     let statuses = policies
         .iter()
         .map(|policy| match evaluate_policy(&system, policy) {
@@ -2527,7 +2547,7 @@ pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> Compli
             PolicyEval::Disabled | PolicyEval::Unsupported => ComplianceControlStatus::NotChecked,
         })
         .collect::<Vec<_>>();
-    rollup_from_statuses(system, &statuses, 0, None)
+    rollup_from_statuses(system, &statuses, 0, assignment_status)
 }
 
 async fn system_rollup_with_evidence(
@@ -2636,6 +2656,7 @@ fn unresolved_system_rollup(
     system: SystemRow,
     selected_controls: i64,
     state: &str,
+    assignment_status: Option<String>,
 ) -> ComplianceSystemRollup {
     ComplianceSystemRollup {
         system_id: system.id,
@@ -2654,7 +2675,7 @@ fn unresolved_system_rollup(
         report_only: 0,
         score: 0,
         resolution_state: Some(state.to_string()),
-        assignment_status: None,
+        assignment_status,
         assignment_reason: None,
         assignment_approved_by: None,
         assignment_deadline: None,
@@ -2670,6 +2691,7 @@ fn unresolved_system_rollup(
 pub(crate) fn effective_policy_rollup(
     system: &SystemRow,
     effective_policies: &[crate::compliance::resolver::EffectivePolicy],
+    assignment_status: Option<String>,
 ) -> ComplianceSystemRollup {
     let mut pass = 0i64;
     let mut warn = 0i64;
@@ -2773,7 +2795,7 @@ pub(crate) fn effective_policy_rollup(
         report_only,
         score,
         resolution_state: None,
-        assignment_status: None,
+        assignment_status,
         assignment_reason: None,
         assignment_approved_by: None,
         assignment_deadline: None,
@@ -2819,6 +2841,7 @@ async fn effective_policy_rollups_with_evidence_batch(
         SystemRow,
         Vec<crate::compliance::resolver::EffectivePolicy>,
     )],
+    assignment_status_by_version: &std::collections::HashMap<Uuid, Option<String>>,
 ) -> Result<Vec<((Uuid, Uuid), ComplianceSystemRollup)>> {
     if work.is_empty() {
         return Ok(Vec::new());
@@ -2894,40 +2917,42 @@ async fn effective_policy_rollups_with_evidence_batch(
     .map(|(id, derivation_id, critical, high)| (derivation_id, (id, critical, high)))
     .collect();
 
-    let mut result = Vec::with_capacity(work.len());
-    for (pair, system, policies) in work {
-        let context = contexts.get(&system.id);
-        let mut statuses = Vec::with_capacity(policies.len());
-        let report_only = policies
-            .iter()
-            .filter(|policy| {
-                matches!(
-                    policy.effective_mode,
-                    crate::compliance::resolver::AssignmentMode::ReportOnly
-                )
-            })
-            .count() as i64;
-        for effective in policies {
-            let mut policy = policies_by_version
-                .get(&effective.policy_version_id)
-                .context("missing materialized effective policy in batch evidence")?
-                .clone();
-            // Policy metadata is immutable and may be shared by many systems,
-            // but effective_config is runtime state after assignment overlays.
-            // Never let one system's override overwrite another's evaluation.
-            policy.config = effective.effective_config.clone();
-            statuses.push(batch_evidence_status(
-                &policy,
-                context,
-                context.and_then(|context| scans.get(&context.derivation_id)),
-            ));
-         }
-         result.push((
-             *pair,
-             rollup_from_statuses(system.clone(), &statuses, report_only, None),
-         ));
-     }
-     Ok(result)
+     let mut result = Vec::with_capacity(work.len());
+     for (pair, system, policies) in work {
+         let (bundle_version_id, _) = pair;
+         let assignment_status = assignment_status_by_version.get(bundle_version_id).cloned().flatten();
+         let context = contexts.get(&system.id);
+         let mut statuses = Vec::with_capacity(policies.len());
+         let report_only = policies
+             .iter()
+             .filter(|policy| {
+                 matches!(
+                     policy.effective_mode,
+                     crate::compliance::resolver::AssignmentMode::ReportOnly
+                 )
+             })
+             .count() as i64;
+         for effective in policies {
+             let mut policy = policies_by_version
+                 .get(&effective.policy_version_id)
+                 .context("missing materialized effective policy in batch evidence")?
+                 .clone();
+             // Policy metadata is immutable and may be shared by many systems,
+             // but effective_config is runtime state after assignment overlays.
+             // Never let one system's override overwrite another's evaluation.
+             policy.config = effective.effective_config.clone();
+             statuses.push(batch_evidence_status(
+                 &policy,
+                 context,
+                 context.and_then(|context| scans.get(&context.derivation_id)),
+             ));
+          }
+          result.push((
+              *pair,
+              rollup_from_statuses(system.clone(), &statuses, report_only, assignment_status),
+          ));
+      }
+      Ok(result)
 }
 
 fn batch_evidence_status(
@@ -4403,12 +4428,13 @@ mod tests {
     }
 
     #[test]
-    fn disabled_policy_is_excluded_from_score_denominator() {
-        let sys = system("healthy", 0, 0);
-        let rollup = system_rollup(
-            sys,
-            &[policy("require_cf_agent", serde_json::json!({}), false)],
-        );
+     fn disabled_policy_is_excluded_from_score_denominator() {
+         let sys = system("healthy", 0, 0);
+         let rollup = system_rollup(
+             sys,
+             &[policy("require_cf_agent", serde_json::json!({}), false)],
+             None,
+         );
         assert_eq!(
             rollup.not_checked, 1,
             "disabled policy increments not_checked"
@@ -4446,15 +4472,16 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_policy_excluded_from_score_denominator() {
-        let sys = system("healthy", 0, 0);
-        let rollup = system_rollup(
-            sys,
-            &[policy(
-                "custom_unsupported_type",
-                serde_json::json!({}),
-                true,
-            )],
+     fn unsupported_policy_excluded_from_score_denominator() {
+         let sys = system("healthy", 0, 0);
+         let rollup = system_rollup(
+             sys,
+             &[policy(
+                 "custom_unsupported_type",
+                 serde_json::json!({}),
+                 true,
+             )],
+             None,
         );
         assert_eq!(
             rollup.not_checked, 1,
@@ -4479,10 +4506,10 @@ mod tests {
             policy("require_cf_agent", serde_json::json!({}), true),
             // not evaluated → not_checked (excluded from denominator)
             policy("require_cf_agent", serde_json::json!({}), false),
-        ];
-        let rollup = system_rollup(sys, &policies);
+         ];
+         let rollup = system_rollup(sys, &policies, None);
 
-        assert_eq!(rollup.pass, 1, "one passing control");
+         assert_eq!(rollup.pass, 1, "one passing control");
         assert_eq!(rollup.not_checked, 1, "one disabled increments not_checked");
         assert_eq!(rollup.warn, 0, "no warn for disabled controls");
         assert_eq!(rollup.fail, 0);
@@ -4500,9 +4527,9 @@ mod tests {
             policy("require_cf_agent", serde_json::json!({}), true), // pass
             policy("require_cf_agent", serde_json::json!({}), false), // not_checked
             policy("custom_check", serde_json::json!({}), true),     // not_checked (unsupported)
-        ];
-        let rollup = system_rollup(sys, &policies);
-        let canonical_total = rollup.pass
+         ];
+         let rollup = system_rollup(sys, &policies, None);
+         let canonical_total = rollup.pass
             + rollup.warn
             + rollup.fail
             + rollup.waiver
@@ -4521,9 +4548,9 @@ mod tests {
         let policies = vec![
             policy("require_cf_agent", serde_json::json!({}), true), // pass
             policy("require_cf_agent", serde_json::json!({}), false), // disabled → not_checked
-        ];
-        let rollup = system_rollup(sys, &policies);
-        let totals = totals_for_rollups(&[rollup]);
+         ];
+         let rollup = system_rollup(sys, &policies, None);
+         let totals = totals_for_rollups(&[rollup]);
 
         // Overall score must use evaluated_controls (1) not total_controls (2).
         assert_eq!(
@@ -4555,9 +4582,9 @@ mod tests {
         let policies = vec![
             policy("require_cf_agent", serde_json::json!({}), true), // pass
             policy("require_cf_agent", serde_json::json!({}), false), // disabled → not_checked
-        ];
-        let rollup = system_rollup(sys, &policies);
-        // not_checked = 1 (from disabled), warn = 0.
+         ];
+         let rollup = system_rollup(sys, &policies, None);
+         // not_checked = 1 (from disabled), warn = 0.
         // All *evaluated* controls pass, so the host must count as fully compliant.
         assert_eq!(rollup.not_checked, 1, "disabled maps to not_checked");
         assert_eq!(rollup.warn, 0, "no warn for disabled");
@@ -4723,9 +4750,9 @@ mod tests {
         let sys = system_with_hostname("test-host-123", Some("staging"));
         let policies = vec![bundled_policy(Uuid::new_v4(), "test-policy", true)];
 
-        let rollup = system_rollup(sys.clone(), &policies);
+         let rollup = system_rollup(sys.clone(), &policies, None);
 
-        assert_eq!(rollup.hostname, "test-host-123");
+         assert_eq!(rollup.hostname, "test-host-123");
         assert_eq!(rollup.environment, Some("staging".to_string()));
         assert_eq!(rollup.system_id, sys.id);
     }
@@ -4769,13 +4796,13 @@ mod tests {
                 effective_mode: AssignmentMode::Enforce,
                 provenance: vec![],
             },
-        ];
+         ];
 
-        let rollup = effective_policy_rollup(&sys, &effective);
+         let rollup = effective_policy_rollup(&sys, &effective, None);
 
-        assert_eq!(rollup.total, 2);
-        assert_eq!(rollup.pass, 2);
-        assert_eq!(rollup.evaluated_total, 2);
+         assert_eq!(rollup.total, 2);
+         assert_eq!(rollup.pass, 2);
+         assert_eq!(rollup.evaluated_total, 2);
         assert!(
             effective
                 .iter()
@@ -4828,15 +4855,15 @@ mod tests {
                 effective_mode: AssignmentMode::ReportOnly,
                 provenance: vec![],
             },
-        ];
+         ];
 
-        let rollup = effective_policy_rollup(&sys, &effective);
+         let rollup = effective_policy_rollup(&sys, &effective, None);
 
-        assert_eq!(rollup.total, 2);
-        assert_eq!(rollup.pass, 1);
-        assert_eq!(rollup.fail, 1);
-        assert_eq!(rollup.report_only, 1);
-        assert_eq!(rollup.evaluated_total, 2);
+         assert_eq!(rollup.total, 2);
+         assert_eq!(rollup.pass, 1);
+         assert_eq!(rollup.fail, 1);
+         assert_eq!(rollup.report_only, 1);
+         assert_eq!(rollup.evaluated_total, 2);
         assert!(
             !effective
                 .iter()
@@ -4870,15 +4897,15 @@ mod tests {
             assignment_mode: AssignmentMode::Enforce,
             effective_mode: AssignmentMode::Enforce,
             provenance: vec![],
-        };
+         };
 
-        let rollup = effective_policy_rollup(&sys, &[effective]);
+         let rollup = effective_policy_rollup(&sys, &[effective], None);
 
-        assert_eq!(rollup.total, 1);
-        assert_eq!(rollup.pass, 1);
-        assert_eq!(rollup.fail, 0);
-        assert_eq!(rollup.evaluated_total, 1);
-        assert_eq!(rollup.score, 100);
+         assert_eq!(rollup.total, 1);
+         assert_eq!(rollup.pass, 1);
+         assert_eq!(rollup.fail, 0);
+         assert_eq!(rollup.evaluated_total, 1);
+         assert_eq!(rollup.score, 100);
     }
 
     #[test]
