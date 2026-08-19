@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::api::models::{DeletionEligibility, DeploymentPolicyVersionSummary};
 use crate::compliance::digest::{PolicyVersionCanonical, write_policy_version_digest};
 use crate::compliance::mappings::{
-    extract_cci_ids, extract_classification, extract_evidence_specs, extract_srg_ids,
+    decode_evidence_specs_strict, extract_cci_ids, extract_classification, extract_evidence_specs, extract_srg_ids,
     infer_legacy_category, initial_policy_metadata, merge_classification_into_metadata,
     merge_evidence_into_metadata, merge_policy_mappings,
 };
@@ -553,10 +553,11 @@ pub async fn fetch_policy_version_summaries(
             rationale: rat,
             created_by: row.created_by,
             created_by_display: row.created_by_display,
-            evidence_specs: extract_evidence_specs(compliance_meta)
-                .into_iter()
-                .filter_map(|spec| serde_json::from_value(spec).ok())
-                .collect(),
+            evidence_specs: decode_evidence_specs_strict(compliance_meta)
+                .with_context(|| format!(
+                    "failed to decode evidence_specs for policy version {}",
+                    row.id
+                ))?,
         };
         by_policy
             .entry(summary.policy_id)

@@ -284,6 +284,61 @@ pub fn validate_evidence_spec(spec: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+/// Strictly decode Evidence specs from compliance_metadata.
+///
+/// This is fail-closed: malformed persisted Evidence causes an error instead of silently disappearing.
+///
+/// Semantics:
+/// - key absent → Ok([])
+/// - key present as empty array → Ok([])
+/// - key present with valid specs → Ok(Vec<EvidenceSpec>)
+/// - key present but not array → Err
+/// - any array entry malformed/invalid → Err
+///
+/// This is used when loading stored policy versions where data integrity matters.
+/// Do not use filter_map or other lenient parsing.
+pub fn decode_evidence_specs_strict(
+    metadata: &serde_json::Value,
+) -> Result<Vec<crate::api::models::EvidenceSpec>> {
+    match metadata.get("evidence_specs") {
+        None => {
+            // Key absent: no evidence configured
+            Ok(Vec::new())
+        }
+        Some(evidence_value) => {
+            // Key present: must be an array
+            let arr = evidence_value.as_array().ok_or_else(|| {
+                let type_name = match evidence_value {
+                    serde_json::Value::Null => "null",
+                    serde_json::Value::Bool(_) => "bool",
+                    serde_json::Value::Number(_) => "number",
+                    serde_json::Value::String(_) => "string",
+                    serde_json::Value::Array(_) => "array",
+                    serde_json::Value::Object(_) => "object",
+                };
+                anyhow::anyhow!(
+                    "evidence_specs: field must be array, got {}",
+                    type_name
+                )
+            })?;
+            
+            // Decode each entry
+            let mut result = Vec::with_capacity(arr.len());
+            for (idx, entry) in arr.iter().enumerate() {
+                let spec: crate::api::models::EvidenceSpec = serde_json::from_value(entry.clone())
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "evidence_specs[{}]: failed to decode evidence spec: {}",
+                            idx, e
+                        )
+                    })?;
+                result.push(spec);
+            }
+            Ok(result)
+        }
+    }
+}
+
 /// Merge evidence specs into an existing `compliance_metadata` JSON object.
 ///
 /// Semantics:
