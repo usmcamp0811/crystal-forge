@@ -2880,19 +2880,28 @@ pub async fn load_assignment_metadata_for_systems(
     };
 
     // Build the result map
-    // Note: created_by is semantically the user who made/approved the assignment decision.
+    // Note: created_by is semantically the user who made the assignment decision.
+    // This maps to assignment_approved_by in the API.
     // 
-    // DESIGN GAP: assignment_reason is defined in the ComplianceSystemRollup API model
-    // but has no authoritative source in the current schema. The database tracks created_by
-    // and updated_by for auditing, but no reason/purpose/justification field for the assignment
-    // itself. The TASK-422 compliance redesign spec does not include assignment_reason in
-    // its UI mockups or acceptance criteria. Future work should:
-    // 1. Clarify whether assignment_reason is a design requirement
-    // 2. If yes, add a reason field to compliance_bundle_assignments schema
-    // 3. Wire it through the API response
-    // 
-    // assignment_deadline and assignment_poam have similar gaps - not in schema, not in
-    // design spec, likely placeholders for future ATO metadata extensions.
+    // CRITICAL P2 DESIGN GAP: assignment_reason is a DESIGN REQUIREMENT that remains
+    // UNIMPLEMENTED. The TASK-422 compliance redesign explicitly displays:
+    //
+    //   "pinned to this revision... {assignment.reason}"
+    //
+    // in the per-system evidence detail callout. Users are shown each host's assignment
+    // reason. However, the current schema has NO reason/justification field, the API has
+    // NO field to accept reason on create/update, and assignment_reason is hard-coded None.
+    //
+    // TASK-428 tracks full implementation:
+    // - Add reason: text field to compliance_bundle_assignment_versions
+    // - Add reason: Option<String> to CreateAssignmentRequest / UpdateAssignmentRequest
+    // - Populate reason when inserting assignment version rows
+    // - Load and wire through to ComplianceSystemRollup.assignment_reason
+    // - Add UI input component for reason during assignment creation/edit
+    //
+    // assignment_deadline and assignment_poam are unmodeled but not design requirements
+    // (they appear conditionally in the mock). Leave them None unless domain work
+    // explicitly requires them.
     let mut result = std::collections::HashMap::new();
     for AssignmentRow {
         system_id,
@@ -3208,12 +3217,13 @@ fn rollup_from_statuses_with_metadata(
         score,
         resolution_state: None,
         assignment_status,
-        // DESIGN GAP: assignment_reason has no source in current schema.
-        // See load_assignment_metadata_for_systems() comment for details.
+        // CRITICAL DESIGN GAP: assignment_reason is required by TASK-422 redesign but NOT
+        // implemented. See load_assignment_metadata_for_systems() for tracking (TASK-428).
         assignment_reason: None,
         assignment_approved_by,
-        // DESIGN GAP: assignment_deadline and assignment_poam are not modeled in schema
-        // and have no domain requirement. They are placeholders for future ATO extensions.
+        // Not modeled: assignment_deadline and assignment_poam are conditionally shown in
+        // the design mock but are not domain requirements. Implement only if explicitly
+        // required by a separate task.
         assignment_deadline: None,
         assignment_poam: None,
     }
