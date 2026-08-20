@@ -1063,6 +1063,7 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
     let mut enforcement_mode = use_signal(|| "enforce".to_string());
     let mut exclusions = use_signal(Vec::<uuid::Uuid>::new);
     let mut additions = use_signal(Vec::<uuid::Uuid>::new);
+    let mut reason = use_signal(String::new);
     let mut busy = use_signal(|| false);
     let mut success = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
@@ -1115,19 +1116,21 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
         .map(|version| version.publication_state.clone())
         .unwrap_or_else(|| "unknown".to_string());
 
-     let request = move || {
-         let scope_id = uuid::Uuid::parse_str(scope_id.read().trim()).ok()?;
-         Some(CreateAssignmentRequest {
-             bundle_version_id: props.bundle_version_id,
-             scope_type: scope_type.read().clone(),
-             scope_id,
-             enforcement_mode: Some(enforcement_mode.read().clone()),
-             exclusions: (!exclusions.read().is_empty()).then_some(exclusions.read().clone()),
-             additions: (!additions.read().is_empty()).then_some(additions.read().clone()),
-             value_overrides: None,
-             reason: None,
-         })
-     };
+      let request = move || {
+          let scope_id = uuid::Uuid::parse_str(scope_id.read().trim()).ok()?;
+          let reason_text = reason.read().clone();
+          let reason_value = reason_text.trim();
+          Some(CreateAssignmentRequest {
+              bundle_version_id: props.bundle_version_id,
+              scope_type: scope_type.read().clone(),
+              scope_id,
+              enforcement_mode: Some(enforcement_mode.read().clone()),
+              exclusions: (!exclusions.read().is_empty()).then_some(exclusions.read().clone()),
+              additions: (!additions.read().is_empty()).then_some(additions.read().clone()),
+              value_overrides: None,
+              reason: (!reason_value.is_empty()).then_some(reason_value.to_string()),
+          })
+      };
 
     let current_request = request();
     let can_preview = current_request.is_some() && !*preview_busy.read() && !*busy.read();
@@ -1210,6 +1213,26 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
                         }
                     }
                 }
+
+                // Reason / Justification field
+                div { class: "field",
+                    label { "Reason / Justification (optional)" }
+                    textarea {
+                        class: "input focus-ring",
+                        style: "resize:vertical;min-height:60px;font-family:monospace;font-size:12px;",
+                        placeholder: "Enter reason for this assignment (e.g., 'migration in progress', 'vendor validation')",
+                        value: "{reason.read()}",
+                        onchange: move |e| {
+                            reason.set(e.value());
+                            preview.set(None);
+                            previewed_request.set(None);
+                        },
+                    }
+                    div { style: "font-size:10px;color:var(--cf-text-muted);margin-top:4px;",
+                        "{reason.read().len()} / 2000 characters"
+                    }
+                }
+
                 div { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px;",
                     div { class: "field",
                         label { "Exclude baseline policies" }
@@ -1477,13 +1500,15 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                         .collect::<Vec<_>>()
                         .join(", ")
                 });
-                let mut edit_overrides = use_signal(|| current_overrides_text.clone());
-                let mut edit_busy = use_signal(|| false);
-                let mut edit_error = use_signal(|| None::<String>);
-                let edits_dirty = *edit_mode.read() != current_mode
-                    || *edit_exclusions.read() != current_exclusions_text
-                    || *edit_additions.read() != current_additions_text
-                    || *edit_overrides.read() != current_overrides_text;
+                 let mut edit_overrides = use_signal(|| current_overrides_text.clone());
+                 let mut edit_reason = use_signal(|| assignment.reason.clone().unwrap_or_default());
+                 let mut edit_busy = use_signal(|| false);
+                 let mut edit_error = use_signal(|| None::<String>);
+                 let edits_dirty = *edit_mode.read() != current_mode
+                     || *edit_exclusions.read() != current_exclusions_text
+                     || *edit_additions.read() != current_additions_text
+                     || *edit_overrides.read() != current_overrides_text
+                     || (*edit_reason.read() != assignment.reason.clone().unwrap_or_default());
                 rsx! {
                     div { class: "card", style: "padding:10px 14px;display:flex;flex-direction:column;gap:6px;",
                         div { style: "display:flex;justify-content:space-between;align-items:center;",
@@ -1569,6 +1594,14 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                     value: "{edit_overrides.read()}",
                                     oninput: move |e| edit_overrides.set(e.value()),
                                 }
+                                textarea {
+                                    class: "input xs",
+                                    style: "flex:1;",
+                                    rows: "2",
+                                    placeholder: "reason (leave empty to preserve)",
+                                    value: "{edit_reason.read()}",
+                                    oninput: move |e| edit_reason.set(e.value()),
+                                }
                                 button {
                                     class: "btn btn-primary xs focus-ring",
                                     style: "font-size:10px;",
@@ -1596,13 +1629,27 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                             };
                                             edit_busy.set(true);
                                             edit_error.set(None);
+                                            
+                                            // Handle reason tri-state:
+                                            // - empty string = Unset (preserve)
+                                            // - "null" = Clear
+                                            // - any other value = Set
+                                            let reason_val = edit_reason.read().clone();
+                                            let reason_update = if reason_val.trim().is_empty() {
+                                                crate::api::models::FieldUpdate::Unset
+                                            } else if reason_val.trim() == "null" {
+                                                crate::api::models::FieldUpdate::Clear
+                                            } else {
+                                                crate::api::models::FieldUpdate::Set(reason_val)
+                                            };
+
                                              let request = UpdateAssignmentRequest {
                                                  expected_version_id: cm,
                                                  enforcement_mode: Some((*edit_mode.read()).clone()),
                                                  exclusions: Some(exclusions),
                                                  additions: Some(additions),
                                                  value_overrides: Some(value_overrides),
-                                                 reason: crate::api::models::FieldUpdate::Unset,
+                                                 reason: reason_update,
                                              };
                                             let st = scope_type.clone();
                                             let si = scope_id;
