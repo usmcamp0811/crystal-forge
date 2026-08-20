@@ -218,6 +218,8 @@ struct PolicyEvidence {
     note: String,
     state: String,
     attr: String,
+    /// Preserved from original EvidenceSpec to prevent round-trip destruction
+    required_fields: std::collections::HashMap<String, String>,
 }
 
 impl PolicyEvidence {
@@ -233,13 +235,14 @@ impl PolicyEvidence {
             note: "Must contain USG banner text".to_string(),
             state: "active".to_string(),
             attr: "config.services.openssh.settings.PermitRootLogin".to_string(),
+            required_fields: std::collections::HashMap::new(),
         }
     }
 
     /// Convert EvidenceSpec to editable PolicyEvidence form.
     /// Handles all evidence kinds and reconstructs form fields for editing.
     fn from_evidence_spec(spec: &EvidenceSpec) -> Self {
-        match &spec.kind {
+        let mut evidence = match &spec.kind {
             EvidenceKind::Command { cmd, expect } => Self {
                 kind: "command".to_string(),
                 cmd: cmd.clone(),
@@ -279,7 +282,10 @@ impl PolicyEvidence {
                 note: note.clone(),
                 ..Self::new("attestation")
             },
-        }
+        };
+        // Preserve required_fields metadata from original spec
+        evidence.required_fields = spec.required_fields.clone();
+        evidence
     }
 
     /// Validate this evidence row and return error message if invalid.
@@ -332,6 +338,7 @@ impl PolicyEvidence {
 
     /// Convert PolicyEvidence to EvidenceSpec for the API.
     /// Does NOT validate - call validate() first.
+    /// Preserves required_fields metadata loaded from original spec.
     fn to_evidence_spec(&self) -> EvidenceSpec {
         let kind = match self.kind.as_str() {
             "command" => EvidenceKind::Command {
@@ -363,7 +370,7 @@ impl PolicyEvidence {
         };
         EvidenceSpec {
             kind,
-            required_fields: std::collections::HashMap::new(),
+            required_fields: self.required_fields.clone(),
         }
     }
 }
