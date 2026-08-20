@@ -657,10 +657,7 @@ async fn test_exact_version_uses_immutable_assignment_snapshot(pool: PgPool) {
         .expect("v1 exists");
 
     assert!(
-        response_v1
-            .systems
-            .iter()
-            .any(|s| s.system_id == system_id),
+        response_v1.systems.iter().any(|s| s.system_id == system_id),
         "CRITICAL: Exact-version endpoint must use immutable snapshot, not mutable lineage field. \
          System was assigned to V1 (snapshot), but lineage was corrupted to V2. \
          The system MUST appear in V1 results."
@@ -673,10 +670,7 @@ async fn test_exact_version_uses_immutable_assignment_snapshot(pool: PgPool) {
         .expect("v2 exists");
 
     assert!(
-        !response_v2
-            .systems
-            .iter()
-            .any(|s| s.system_id == system_id),
+        !response_v2.systems.iter().any(|s| s.system_id == system_id),
         "System assigned to V1 (snapshot) should NOT appear in V2 results, \
          even though lineage was corrupted to V2"
     );

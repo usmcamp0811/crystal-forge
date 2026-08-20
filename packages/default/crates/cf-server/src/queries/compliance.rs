@@ -2688,8 +2688,8 @@ pub async fn determine_assignment_status_for_system(
 /// Assignment metadata for compliance bundle assignment.
 #[derive(Clone, Debug)]
 pub struct AssignmentMetadata {
-    pub status: Option<String>,           // "current" or "pinned" when assigned
-    pub approved_by: Option<String>,      // User name who created the assignment version
+    pub status: Option<String>,      // "current" or "pinned" when assigned
+    pub approved_by: Option<String>, // User name who created the assignment version
 }
 
 /// 1. System-scoped assignments (take precedence over environment-scoped)
@@ -2701,7 +2701,13 @@ pub async fn load_assignment_statuses_for_systems(
     current_published_version: Option<Uuid>,
     system_ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, Option<String>>> {
-    let metadata = load_assignment_metadata_for_systems(pool, bundle_id, current_published_version, system_ids).await?;
+    let metadata = load_assignment_metadata_for_systems(
+        pool,
+        bundle_id,
+        current_published_version,
+        system_ids,
+    )
+    .await?;
     Ok(metadata.into_iter().map(|(k, v)| (k, v.status)).collect())
 }
 
@@ -2772,11 +2778,8 @@ pub async fn load_assignment_metadata_for_systems(
     .await?;
 
     // Collect user IDs for batched lookup
-    let user_ids: Vec<Uuid> = assignments
-        .iter()
-        .filter_map(|a| a.created_by)
-        .collect();
-    
+    let user_ids: Vec<Uuid> = assignments.iter().filter_map(|a| a.created_by).collect();
+
     // Batch load user names (email or name field)
     let users: std::collections::HashMap<Uuid, String> = if !user_ids.is_empty() {
         let user_rows: Vec<(Uuid, Option<String>)> = sqlx::query_as(
@@ -2785,7 +2788,10 @@ pub async fn load_assignment_metadata_for_systems(
         .bind(&user_ids)
         .fetch_all(pool)
         .await?;
-        user_rows.into_iter().filter_map(|(id, name)| name.map(|n| (id, n))).collect()
+        user_rows
+            .into_iter()
+            .filter_map(|(id, name)| name.map(|n| (id, n)))
+            .collect()
     } else {
         std::collections::HashMap::new()
     };
@@ -2804,12 +2810,21 @@ pub async fn load_assignment_metadata_for_systems(
             None => Some("pinned".to_string()),
         };
         let approved_by = created_by.and_then(|uid| users.get(&uid).cloned());
-        result.insert(system_id, AssignmentMetadata { status, approved_by });
+        result.insert(
+            system_id,
+            AssignmentMetadata {
+                status,
+                approved_by,
+            },
+        );
     }
 
     // Ensure all requested systems are in the map (with None status for unassigned)
     for &system_id in system_ids {
-        result.entry(system_id).or_insert(AssignmentMetadata { status: None, approved_by: None });
+        result.entry(system_id).or_insert(AssignmentMetadata {
+            status: None,
+            approved_by: None,
+        });
     }
 
     Ok(result)
@@ -3013,13 +3028,7 @@ fn rollup_from_statuses(
     report_only: i64,
     assignment_status: Option<String>,
 ) -> ComplianceSystemRollup {
-    rollup_from_statuses_with_metadata(
-        system,
-        statuses,
-        report_only,
-        assignment_status,
-        None,
-    )
+    rollup_from_statuses_with_metadata(system, statuses, report_only, assignment_status, None)
 }
 
 fn rollup_from_statuses_with_metadata(
@@ -3321,7 +3330,8 @@ pub(crate) async fn effective_policy_rollup_with_evidence_and_metadata(
 
     let mut statuses = Vec::with_capacity(policies.len());
     for policy in policies {
-        statuses.push(resolve_control_evidence_with_context(context.clone(), system, policy).status);
+        statuses
+            .push(resolve_control_evidence_with_context(context.clone(), system, policy).status);
     }
     Ok(rollup_from_statuses_with_metadata(
         system.clone(),
@@ -3834,7 +3844,10 @@ fn resolve_control_evidence_with_context(
         },
         _ => (
             ComplianceControlStatus::NotChecked,
-            format!("Unknown policy type '{}' for '{}'.", policy.policy_type, policy.name),
+            format!(
+                "Unknown policy type '{}' for '{}'.",
+                policy.policy_type, policy.name
+            ),
             format!("policy_type={}", policy.policy_type),
             "unknown",
             "Unknown policy type",
@@ -3857,7 +3870,9 @@ async fn resolve_control_evidence(
     policy: PolicyRow,
 ) -> Result<ComplianceControlEvidence> {
     let context = assessment_context(pool, system.id).await?;
-    Ok(resolve_control_evidence_with_context(context, system, policy))
+    Ok(resolve_control_evidence_with_context(
+        context, system, policy,
+    ))
 }
 
 fn control_evidence_with_resolved_status(
