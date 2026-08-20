@@ -2187,16 +2187,6 @@ async fn persist_assignment_inner(
         AssignmentMode::Enforce
     };
 
-    let input = EffectivePolicyResolutionInput {
-        target: target.clone(),
-        bundle_version_id: payload.bundle_version_id,
-        exclusions: exclusions.clone(),
-        additions: additions.clone(),
-        overrides: overrides.clone(),
-        assignment_mode: mode.clone(),
-        specificity: crate::compliance::resolver::PolicySpecificity::BundleBaseline,
-    };
-
     // Test-only barrier: both concurrent callers synchronize here after
     // validation is complete and before any transaction or lock is acquired.
     // This guarantees both operations attempt to acquire the advisory lock
@@ -2212,12 +2202,50 @@ async fn persist_assignment_inner(
         Err(_) => return Err(internal_error("Failed to start transaction")),
     };
 
+    // Updates must use the immutable snapshot selected by current_version_id.
+    // The mutable assignment lineage fields are deliberately not authoritative.
+    let (authoritative_bundle_version_id, current_snapshot_version_id) =
+        if let Some(assignment_id) = assignment_id_opt {
+            let snapshot = sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT a.current_version_id, av.bundle_version_id
+                 FROM compliance_bundle_assignments a
+                 JOIN compliance_bundle_assignment_versions av
+                   ON av.id = a.current_version_id
+                 WHERE a.id = $1 AND a.active AND a.current_version_id IS NOT NULL
+                 FOR UPDATE",
+            )
+            .bind(assignment_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| internal_error("Failed to load assignment snapshot"))?
+            .ok_or_else(|| not_found())?;
+            (snapshot.1, Some(snapshot.0))
+        } else {
+            (payload.bundle_version_id, None)
+        };
+
+    if let (Some(expected), Some(current)) = (expected_version_id, current_snapshot_version_id) {
+        if expected != current {
+            let _ = tx.rollback().await;
+            return Err((
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "Assignment stale update",
+                    "message": "The assignment has changed since it was read",
+                    "code": "ASSIGNMENT_STALE_UPDATE",
+                    "current_version_id": current,
+                })),
+            )
+                .into_response());
+        }
+    }
+
     // Every assignment mutation takes portable identity locks in the same
     // order. The advisory keys are transaction-scoped and also cover the
     // absent-row case where SELECT ... FOR UPDATE cannot lock a create race.
     let bundle_lineage_id: Uuid =
         sqlx::query_scalar("SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1")
-            .bind(payload.bundle_version_id)
+            .bind(authoritative_bundle_version_id)
             .fetch_optional(&mut *tx)
             .await
             .map_err(|_| internal_error("Failed to load bundle lineage"))?
@@ -2246,7 +2274,7 @@ async fn persist_assignment_inner(
         }
     }
 
-    if let Some(expected) = expected_version_id {
+    if let (Some(expected), None) = (expected_version_id, current_snapshot_version_id) {
         let current: Option<Uuid> = sqlx::query_scalar(
             "SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1 AND active",
         )
@@ -2269,6 +2297,16 @@ async fn persist_assignment_inner(
         }
     }
 
+    let input = EffectivePolicyResolutionInput {
+        target: target.clone(),
+        bundle_version_id: authoritative_bundle_version_id,
+        exclusions: exclusions.clone(),
+        additions: additions.clone(),
+        overrides: overrides.clone(),
+        assignment_mode: mode.clone(),
+        specificity: crate::compliance::resolver::PolicySpecificity::BundleBaseline,
+    };
+
     // Assignment uniqueness is defined by bundle lineage + target, not by a
     // mutable/draft bundle-version row. Lock the target identity while checking
     // it so concurrent creates cannot silently create ambiguous assignments.
@@ -2286,7 +2324,7 @@ async fn persist_assignment_inner(
               AND ($4::uuid IS NULL OR a.id <> $4)
            FOR UPDATE"#,
     )
-    .bind(payload.bundle_version_id)
+    .bind(authoritative_bundle_version_id)
     .bind(scope_type)
     .bind(payload.scope_id)
     .bind(assignment_id_opt)
@@ -2375,7 +2413,7 @@ async fn persist_assignment_inner(
                        $2, $3, $4, $5, $6, $7, $8, $8)"#,
         )
         .bind(assignment_id)
-        .bind(payload.bundle_version_id)
+        .bind(authoritative_bundle_version_id)
         .bind(scope_type)
         .bind(env_id_opt)
         .bind(sys_id_opt)
@@ -2417,7 +2455,7 @@ async fn persist_assignment_inner(
     .bind(assignment_id)
     .bind(previous_version_id)
     .bind(version_number)
-    .bind(payload.bundle_version_id)
+    .bind(authoritative_bundle_version_id)
     .bind(enforcement_mode)
     .bind(&effective_set_digest)
     .bind(user_id)
@@ -2521,7 +2559,7 @@ async fn persist_assignment_inner(
     )
     .bind(assignment_id)
     .bind(assignment_version_id)
-    .bind(payload.bundle_version_id)
+    .bind(authoritative_bundle_version_id)
     .bind(enforcement_mode)
     .bind(&effective_set_digest)
     .bind(user_id)
@@ -2539,7 +2577,7 @@ async fn persist_assignment_inner(
         "previous_assignment_version_id": previous_version_id,
         "target_type": scope_type,
         "target_id": payload.scope_id,
-        "bundle_version_id": payload.bundle_version_id,
+        "bundle_version_id": authoritative_bundle_version_id,
         "enforcement_mode": enforcement_mode,
         "exclusion_count": exclusions.len(),
         "addition_count": additions.len(),
@@ -2589,7 +2627,7 @@ async fn persist_assignment_inner(
     let now = chrono::Utc::now();
     let bundle_id: Uuid =
         sqlx::query_scalar("SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1")
-            .bind(payload.bundle_version_id)
+            .bind(authoritative_bundle_version_id)
             .fetch_one(pool)
             .await
             .map_err(|_| internal_error("Failed to load assignment bundle lineage"))?;
@@ -2597,7 +2635,7 @@ async fn persist_assignment_inner(
         id: assignment_id,
         current_version_id: assignment_version_id,
         bundle_id,
-        bundle_version_id: payload.bundle_version_id,
+        bundle_version_id: authoritative_bundle_version_id,
         scope_type: scope_type.to_string(),
         scope_id: payload.scope_id,
         enforcement_mode: enforcement_mode.to_string(),
