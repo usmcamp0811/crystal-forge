@@ -8385,7 +8385,7 @@ mod tests {
             Utc::now() + chrono::Duration::hours(1),
             Some("test-agent".to_string()),
             Some("127.0.0.1".to_string()),
-            "test".to_string(),
+            "local".to_string(),
         )
         .await
         .expect("create_user_session");
@@ -11002,6 +11002,245 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
             bundle_version_id.to_string()
         );
         assert_eq!(effective["policies"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn assignment_reason_uses_current_snapshot_through_http_paths() {
+        let pool = test_pool_from_env().await;
+        let (_admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (_policy_id, policy_version_id, policy_digest) = make_draft_policy(
+            &pool,
+            &format!("assignment-reason-policy-{}", Uuid::new_v4().simple()),
+        )
+        .await;
+        let (bundle_id, bundle_version_id, _bundle_digest) = make_draft_bundle(
+            &pool,
+            &format!("assignment-reason-bundle-{}", Uuid::new_v4().simple()),
+            &[policy_version_id],
+        )
+        .await;
+        let base = spawn_assignment_test_server(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let trust_policy = client
+            .post(format!(
+                "{base}/api/v1/policy-versions/{policy_version_id}/trust"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({"trusted": true}))
+            .send()
+            .await
+            .expect("trust policy");
+        assert_eq!(trust_policy.status().as_u16(), 200);
+        let publish_policy = client
+            .post(format!(
+                "{base}/api/v1/policy-versions/{policy_version_id}/publish"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({"expected_semantic_digest": policy_digest}))
+            .send()
+            .await
+            .expect("publish policy");
+        assert_eq!(publish_policy.status().as_u16(), 200);
+        let mut publish_tx = pool.begin().await.expect("begin bundle publication");
+        sqlx::query("UPDATE compliance_bundles SET current_draft_version_id = NULL WHERE id = $1")
+            .bind(bundle_id)
+            .execute(&mut *publish_tx)
+            .await
+            .expect("clear draft pointer");
+        sqlx::query(
+            "UPDATE compliance_bundle_versions SET publication_state = 'accepted', trust_state = 'trusted', published_at = CURRENT_TIMESTAMP WHERE id = $1",
+        )
+        .bind(bundle_version_id)
+        .execute(&mut *publish_tx)
+        .await
+        .expect("accept bundle version");
+        sqlx::query(
+            "UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(bundle_version_id)
+        .bind(bundle_id)
+        .execute(&mut *publish_tx)
+        .await
+        .expect("set published pointer");
+        publish_tx
+            .commit()
+            .await
+            .expect("commit bundle publication");
+
+        // Keep a second version in the same lineage so the mutable lineage pointer
+        // can disagree with the immutable snapshot without inserting assignment
+        // versions directly. The assignment itself is created and updated via HTTP.
+        let lineage_version_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO compliance_bundle_versions
+               (id, bundle_id, version, name, framework, layer, owner,
+                semantic_digest, publication_state, trust_state)
+               VALUES ($1, $2, '2.0.0', $3, 'NIST', 'nixos', 'test-owner',
+                       'lineage-test-digest', 'draft', 'untrusted')"#,
+        )
+        .bind(lineage_version_id)
+        .bind(bundle_id)
+        .bind("lineage-only version")
+        .execute(&pool)
+        .await
+        .expect("insert lineage-only bundle version");
+
+        let environment_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(environment_id)
+            .bind(format!("assignment-reason-{}", environment_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert environment");
+
+        let invalid = client
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bundle_version_id,
+                "scope_type": "environment",
+                "scope_id": environment_id,
+                "reason": " \t\n "
+            }))
+            .send()
+            .await
+            .expect("whitespace reason request");
+        assert_eq!(invalid.status().as_u16(), 422);
+
+        let too_long = client
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bundle_version_id,
+                "scope_type": "environment",
+                "scope_id": environment_id,
+                "reason": "x".repeat(2001)
+            }))
+            .send()
+            .await
+            .expect("long reason request");
+        assert_eq!(too_long.status().as_u16(), 422);
+
+        let create = client
+            .post(format!("{base}/api/v1/compliance/assignments"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "bundle_version_id": bundle_version_id,
+                "scope_type": "environment",
+                "scope_id": environment_id,
+                "reason": "  Reason A  "
+            }))
+            .send()
+            .await
+            .expect("create assignment");
+        let create_status = create.status();
+        let create_body = create.text().await.expect("create response body");
+        assert_eq!(
+            create_status.as_u16(),
+            201,
+            "create response: {create_body}"
+        );
+        let created: serde_json::Value =
+            serde_json::from_str(&create_body).expect("created assignment json");
+        let assignment_id: Uuid = created["id"]
+            .as_str()
+            .and_then(|value| value.parse().ok())
+            .expect("assignment id");
+        let initial_version_id: Uuid = created["current_version_id"]
+            .as_str()
+            .and_then(|value| value.parse().ok())
+            .expect("initial assignment version id");
+        assert_eq!(created["reason"], "Reason A");
+
+        let assignment_url = format!("{base}/api/v1/compliance/assignments/{assignment_id}");
+        let fetched: serde_json::Value = client
+            .get(&assignment_url)
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("get assignment")
+            .json()
+            .await
+            .expect("fetched assignment json");
+        assert_eq!(fetched["reason"], "Reason A");
+
+        // This is the regression discriminator for c2fa2522: old update_assignment
+        // loaded bundle_version_id from this mutable field and would try to update
+        // against the draft version, instead of using the current immutable snapshot.
+        sqlx::query(
+            "UPDATE compliance_bundle_assignments SET bundle_version_id = $1 WHERE id = $2",
+        )
+        .bind(lineage_version_id)
+        .bind(assignment_id)
+        .execute(&pool)
+        .await
+        .expect("corrupt mutable lineage pointer");
+
+        let preserve = client
+            .put(format!(
+                "{base}/api/v1/compliance/assignments/{assignment_id}"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "expected_version_id": initial_version_id,
+                "enforcement_mode": "report_only"
+            }))
+            .send()
+            .await
+            .expect("preserving update");
+        assert_eq!(preserve.status().as_u16(), 200);
+        let preserved: serde_json::Value = client
+            .get(&assignment_url)
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("get assignment after update")
+            .json()
+            .await
+            .expect("preserved assignment json");
+        assert_eq!(
+            preserved["bundle_version_id"],
+            bundle_version_id.to_string()
+        );
+        assert_eq!(preserved["reason"], "Reason A");
+        let current_version_id: Uuid = preserved["current_version_id"]
+            .as_str()
+            .and_then(|value| value.parse().ok())
+            .expect("current assignment version id");
+
+        let change = client
+            .put(format!(
+                "{base}/api/v1/compliance/assignments/{assignment_id}"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "expected_version_id": current_version_id,
+                "reason": "  Reason B  "
+            }))
+            .send()
+            .await
+            .expect("reason change");
+        assert_eq!(change.status().as_u16(), 200);
+        let changed: serde_json::Value = change.json().await.expect("changed assignment json");
+        assert_eq!(changed["reason"], "Reason B");
+        let changed_version_id = changed["current_version_id"].clone();
+
+        let clear = client
+            .put(format!(
+                "{base}/api/v1/compliance/assignments/{assignment_id}"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .json(&serde_json::json!({
+                "expected_version_id": changed_version_id,
+                "reason": null
+            }))
+            .send()
+            .await
+            .expect("reason clear");
+        assert_eq!(clear.status().as_u16(), 200);
+        let cleared: serde_json::Value = clear.json().await.expect("cleared assignment json");
+        assert!(cleared["reason"].is_null());
     }
 
     #[tokio::test]
