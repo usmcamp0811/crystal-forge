@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-20 21:59'
+updated_date: '2026-08-20 22:33'
 labels: []
 milestone: m-22
 dependencies:
@@ -197,6 +197,8 @@ Current-head maintainer audit remediation: fix get_assignment_effective_policies
 Focused deletion-invariant remediation from pushed SHA 009b5738: (1) restore bundle deletion eligibility to classify every compliance_bundle_assignment_versions row as immutable regardless of referenced bundle publication state; (2) retain cleanup only for versionless draft assignment lineages so imported unpublished drafts with trigger-created legacy rows remain deletable; (3) add migration 0231 restoring strict assignment-version and assignment-child DELETE immutability because migration 0228 has already been applied and must not be edited; (4) strengthen live-DB coverage to prove active and inactive draft assignments block deletion, direct deletion of mutable assignment history is rejected, and a versionless draft assignment can still be removed atomically; (5) run the focused deletion lifecycle suite before proceeding to backend-backed coverage and imported-draft browser regressions.
 
 Real-backend coverage browser conversion exposed a production grouping defect: imported STIG rule rows may reference a parent requirement not present in the selected bundle report. RequirementCoverageCard currently emits the missing parent as a heading but drops the child because its second root walk returns no root. Within acceptance criterion #9, treat the last known row as the group root when its parent is absent so backend rows and Enforced-by links remain visible; cover this through the focused 20ae + 29a browser flow.
+
+The same real mapping flow exposed the lazy exact-version API mismatch in acceptance criterion #10: `GET /deployment-policies/:id` returns only the lineage record, while the web DTO and `load_policy_version` require `current_version_id` and `versions`. Make the detail endpoint return the additive `DeploymentPolicyListItem` shape already used by the paginated list, using the existing batched version-summary and usage-count helpers for the single lineage. This preserves existing fields while making lazy exact-version drill-in work without waiting for the catalog load.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -263,6 +265,8 @@ At clean pushed SHA 009b5738, reproduced `deletion_lifecycle_database_matrix` ag
 Deletion invariant remediation completed, committed, and pushed as `899b491d` (`fix(policies): preserve immutable assignment history on deletion`). Migration 0231 restores strict assignment snapshot/child immutability; bundle eligibility counts all assignment-version history while retaining deletion of versionless legacy draft assignment rows. Live isolated DB verification after applying migration 0231: `deletion_lifecycle` ignored suite passed 2/2, including active/inactive blockers, direct snapshot DELETE rejection, versionless draft cleanup, and imported draft policy cleanup. Server cargo fmt, offline cargo check, and git diff check passed.
 
 Focused `CF_UI_TEST_STEPS=20ae-anduril-nixos-stig-import-roundtrip,29a-compliance-populated` runs confirmed the real backend report has 103/103 coverage and a mapping for `SV-268078r1130947_rule`, but the coverage detail rendered only that row's heading and no row/link. Root cause is RequirementCoverageCard's second parent walk: an imported rule whose parent is not included in the report leaves `check_root=None`, producing an empty group. This was hidden by the synthetic flat coverage fixture.
+
+After fixing orphan-parent grouping, the real Enforced-by link rendered and clicked, but PolicyDrawer did not open. The mapped version is present in the paginated policy API. The lazy fallback calls `GET /deployment-policies/:id`; that server handler serializes bare `DeploymentPolicyRecord`, so web-ui deserializes default empty `versions` and correctly rejects the mapped version. The prior browser mock supplied non-production `versions`, hiding this contract mismatch.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
