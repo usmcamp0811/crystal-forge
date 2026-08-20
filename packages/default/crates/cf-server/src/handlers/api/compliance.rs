@@ -2424,7 +2424,20 @@ async fn persist_assignment_inner(
     .bind(&payload.reason)
     .fetch_one(&mut *tx)
     .await
-    .map_err(|_| internal_error("Failed to create assignment version"))?;
+    .map_err(|error| {
+        if let Some(database_error) = error.as_database_error() {
+            tracing::error!(
+                code = ?database_error.code(),
+                message = database_error.message(),
+                constraint = ?database_error.constraint(),
+                table = ?database_error.table(),
+                "failed to create assignment version"
+            );
+        } else {
+            tracing::error!(error = %error, "failed to create assignment version");
+        }
+        internal_error("Failed to create assignment version")
+    })?;
     if failure_point == Some("after_version_insert") {
         let _ = tx.rollback().await;
         return Err(internal_error("Injected assignment mutation failure"));

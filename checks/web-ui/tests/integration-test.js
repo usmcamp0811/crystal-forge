@@ -9169,6 +9169,58 @@ security.audit.enable = true;</fixtext>
       const assignmentVersionId = "99999999-9999-4999-8999-999999999999";
       let reason = null;
       let versionNumber = 1;
+
+      // The standalone profile has no authenticated server or seeded target.
+      // The server-backed harness runs this same UI flow against the real
+      // assignment endpoints and uses the bundle created by 20ab.
+      if (process.env.CF_UI_TEST_STANDALONE !== "1") {
+        const liveFixture = await page.evaluate(async (base) => {
+          const response = await fetch(`${base}/api/v1/compliance/bundles`, { credentials: "include" });
+          const bundles = await response.json();
+          if (!response.ok) throw new Error(`Live bundle list failed: HTTP ${response.status} ${JSON.stringify(bundles)}`);
+          const candidates = bundles.filter((item) => item.name?.startsWith("UI requirement-only baseline "));
+          const bundle = candidates.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
+          if (!bundle) throw new Error("Live assignment step requires the bundle created by 20ab");
+          const environmentsResponse = await fetch(`${base}/api/v1/environments`, { credentials: "include" });
+          const environments = await environmentsResponse.json();
+          if (!environmentsResponse.ok || !environments[0]) {
+            throw new Error(`Live environment list failed: HTTP ${environmentsResponse.status}`);
+          }
+          return { bundle, environment: environments[0] };
+        }, apiBaseUrl);
+        const liveBundle = liveFixture.bundle;
+        const liveEnvironment = liveFixture.environment;
+        if (!liveBundle.current_draft_version_id && !liveBundle.current_published_version_id) {
+          throw new Error("Live assignment bundle has no assignable version");
+        }
+
+        await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+        await page.getByText(liveBundle.name, { exact: true }).first().click();
+        await page.getByRole("button", { name: /Assign bundle/i }).click();
+        await page.getByPlaceholder(/Enter reason for this assignment/i).fill("Reason A");
+        await page.locator("select").filter({ has: page.locator(`option[value="${liveEnvironment.id}"]`) }).last().selectOption(liveEnvironment.id);
+        await page.getByRole("button", { name: /Preview effective set/i }).click();
+        const createResponse = page.waitForResponse(
+          (response) => response.url().endsWith("/api/v1/compliance/assignments") && response.request().method() === "POST",
+        );
+        await page.getByRole("button", { name: /Create assignment/i }).click();
+        const created = await createResponse;
+        if (created.status() !== 201) throw new Error(`Live assignment create returned HTTP ${created.status()}: ${await created.text()}`);
+
+        await page.getByRole("button", { name: "Edit mode", exact: true }).click();
+        await assertValue(page.getByPlaceholder("reason (leave empty to preserve)"), "Reason A", "Live create did not persist reason A");
+        await page.locator("select").filter({ has: page.locator("option", { hasText: "Report only" }) }).first().selectOption("report_only");
+        const unrelatedUpdate = page.waitForResponse(
+          (response) => response.url().includes("/api/v1/compliance/assignments/") && response.request().method() === "PUT",
+        );
+        await page.getByRole("button", { name: "Save", exact: true }).click();
+        const updated = await unrelatedUpdate;
+        if (updated.status() !== 200) throw new Error(`Live unrelated assignment update returned HTTP ${updated.status()}`);
+        await page.getByRole("button", { name: "Edit mode", exact: true }).click();
+        await assertValue(page.getByPlaceholder("reason (leave empty to preserve)"), "Reason A", "Live unrelated edit changed reason A");
+        return;
+      }
+
       const assignment = () => ({
         id: assignmentId,
         current_version_id: assignmentVersionId,
@@ -9274,7 +9326,6 @@ security.audit.enable = true;</fixtext>
           await route.continue();
         }
       });
-
       await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
       await page.getByText("Assignment reason fixture", { exact: true }).first().click();
       await page.getByRole("button", { name: /Assign bundle/i }).click();
