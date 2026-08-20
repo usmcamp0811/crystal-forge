@@ -2409,18 +2409,19 @@ async fn persist_assignment_inner(
     .ok_or_else(|| not_found())?;
 
     let assignment_version_id: Uuid = sqlx::query_scalar(
-        r#"INSERT INTO compliance_bundle_assignment_versions
-           (assignment_id, previous_version_id, version_number, bundle_version_id,
-            enforcement_mode, assignment_overlay_digest, created_by)
-           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id"#,
-    )
-    .bind(assignment_id)
-    .bind(previous_version_id)
-    .bind(version_number)
-    .bind(payload.bundle_version_id)
-    .bind(enforcement_mode)
-    .bind(&effective_set_digest)
-    .bind(user_id)
+         r#"INSERT INTO compliance_bundle_assignment_versions
+            (assignment_id, previous_version_id, version_number, bundle_version_id,
+             enforcement_mode, assignment_overlay_digest, created_by, reason)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id"#,
+     )
+     .bind(assignment_id)
+     .bind(previous_version_id)
+     .bind(version_number)
+     .bind(payload.bundle_version_id)
+     .bind(enforcement_mode)
+     .bind(&effective_set_digest)
+     .bind(user_id)
+     .bind(&payload.reason)
     .fetch_one(&mut *tx)
     .await
     .map_err(|_| internal_error("Failed to create assignment version"))?;
@@ -2654,15 +2655,16 @@ pub async fn update_assignment(
 
     let scope_id = env_id.or(sys_id).unwrap_or_default();
 
-    let create_payload = crate::api::models::CreateAssignmentRequest {
-        bundle_version_id: bv_id,
-        scope_type,
-        scope_id,
-        enforcement_mode: payload.enforcement_mode.clone(),
-        exclusions: payload.exclusions.clone(),
-        additions: payload.additions.clone(),
-        value_overrides: payload.value_overrides.clone(),
-    };
+     let create_payload = crate::api::models::CreateAssignmentRequest {
+         bundle_version_id: bv_id,
+         scope_type,
+         scope_id,
+         enforcement_mode: payload.enforcement_mode.clone(),
+         exclusions: payload.exclusions.clone(),
+         additions: payload.additions.clone(),
+         value_overrides: payload.value_overrides.clone(),
+         reason: payload.reason.clone(),
+     };
 
     match persist_assignment(
         &pool,

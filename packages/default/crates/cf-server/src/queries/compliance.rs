@@ -2128,6 +2128,7 @@ pub async fn list_bundle_systems_for_version(
         let metadata = assignment_metadata.get(&system.id).cloned();
         let assignment_status = metadata.as_ref().and_then(|m| m.status.clone());
         let assignment_approved_by = metadata.as_ref().and_then(|m| m.approved_by.clone());
+        let assignment_reason = metadata.as_ref().and_then(|m| m.reason.clone());
 
         let rollup = match effective.get(&system.id) {
             Some(ResolutionOutcome::Resolved(set))
@@ -2166,6 +2167,7 @@ pub async fn list_bundle_systems_for_version(
                     report_only,
                     assignment_status,
                     assignment_approved_by,
+                    assignment_reason,
                 )
             }
             Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup_with_metadata(
@@ -2771,8 +2773,9 @@ pub async fn determine_assignment_status_for_system(
 /// Assignment metadata for compliance bundle assignment.
 #[derive(Clone, Debug)]
 pub struct AssignmentMetadata {
-    pub status: Option<String>,      // "current" or "pinned" when assigned
-    pub approved_by: Option<String>, // User name who created the assignment version
+    pub status: Option<String>,       // "current" or "pinned" when assigned
+    pub approved_by: Option<String>,  // User name who created the assignment version
+    pub reason: Option<String>,       // User-provided reason for the pinned assignment
 }
 
 /// 1. System-scoped assignments (take precedence over environment-scoped)
@@ -2813,6 +2816,7 @@ pub async fn load_assignment_metadata_for_systems(
         system_id: Uuid,
         assigned_version_id: Uuid,
         created_by: Option<Uuid>,
+        reason: Option<String>,
     }
 
     let assignments: Vec<AssignmentRow> = sqlx::query_as(
@@ -2825,7 +2829,8 @@ pub async fn load_assignment_metadata_for_systems(
             SELECT DISTINCT ON (sys.id)
                 sys.id AS system_id,
                 av.bundle_version_id AS assigned_version_id,
-                av.created_by
+                av.created_by,
+                av.reason
             FROM requested_systems rs
             JOIN systems sys ON sys.id = rs.system_id
             JOIN compliance_bundle_assignments cba ON cba.system_id = sys.id 
@@ -2838,7 +2843,8 @@ pub async fn load_assignment_metadata_for_systems(
             SELECT DISTINCT ON (sys.id)
                 sys.id AS system_id,
                 av.bundle_version_id AS assigned_version_id,
-                av.created_by
+                av.created_by,
+                av.reason
             FROM requested_systems rs
             JOIN systems sys ON sys.id = rs.system_id
             JOIN compliance_bundle_assignments cba ON cba.bundle_id = $1 
@@ -2852,7 +2858,7 @@ pub async fn load_assignment_metadata_for_systems(
                   AND cba_sys.scope_type = 'system' AND cba_sys.system_id = sys.id
             )
         )
-        SELECT system_id, assigned_version_id, created_by FROM system_assignments
+        SELECT system_id, assigned_version_id, created_by, reason FROM system_assignments
         "#,
     )
     .bind(bundle_id)
@@ -2907,6 +2913,7 @@ pub async fn load_assignment_metadata_for_systems(
         system_id,
         assigned_version_id,
         created_by,
+        reason,
     } in assignments
     {
         let status = match current_published_version {
@@ -2921,6 +2928,7 @@ pub async fn load_assignment_metadata_for_systems(
             AssignmentMetadata {
                 status,
                 approved_by,
+                reason,
             },
         );
     }
@@ -2930,6 +2938,7 @@ pub async fn load_assignment_metadata_for_systems(
         result.entry(system_id).or_insert(AssignmentMetadata {
             status: None,
             approved_by: None,
+            reason: None,
         });
     }
 
@@ -3134,7 +3143,7 @@ fn rollup_from_statuses(
     report_only: i64,
     assignment_status: Option<String>,
 ) -> ComplianceSystemRollup {
-    rollup_from_statuses_with_metadata(system, statuses, report_only, assignment_status, None)
+     rollup_from_statuses_with_metadata(system, statuses, report_only, assignment_status, None, None)
 }
 
 fn rollup_from_statuses_with_metadata(
@@ -3143,6 +3152,7 @@ fn rollup_from_statuses_with_metadata(
     report_only: i64,
     assignment_status: Option<String>,
     assignment_approved_by: Option<String>,
+    assignment_reason: Option<String>,
 ) -> ComplianceSystemRollup {
     let mut pass = 0i64;
     let mut warn = 0i64;
@@ -3217,9 +3227,7 @@ fn rollup_from_statuses_with_metadata(
         score,
         resolution_state: None,
         assignment_status,
-        // CRITICAL DESIGN GAP: assignment_reason is required by TASK-422 redesign but NOT
-        // implemented. See load_assignment_metadata_for_systems() for tracking (TASK-428).
-        assignment_reason: None,
+        assignment_reason,
         assignment_approved_by,
         // Not modeled: assignment_deadline and assignment_poam are conditionally shown in
         // the design mock but are not domain requirements. Implement only if explicitly
@@ -3441,13 +3449,14 @@ pub(crate) async fn effective_policy_rollup_with_evidence_and_metadata(
         statuses
             .push(resolve_control_evidence_with_context(context.clone(), system, policy).status);
     }
-    Ok(rollup_from_statuses_with_metadata(
-        system.clone(),
-        &statuses,
-        report_only,
-        assignment_status,
-        assignment_approved_by,
-    ))
+     Ok(rollup_from_statuses_with_metadata(
+         system.clone(),
+         &statuses,
+         report_only,
+         assignment_status,
+         assignment_approved_by,
+         None,
+     ))
 }
 
 /// Batch the evidence inputs needed by catalog aggregates. The detail path is

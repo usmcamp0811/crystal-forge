@@ -3437,6 +3437,10 @@ pub struct CreateAssignmentRequest {
     pub additions: Option<Vec<Uuid>>,
     /// Value overrides targeting policies in the effective set.
     pub value_overrides: Option<Vec<PolicyValueOverride>>,
+    /// User-provided reason/justification for the assignment.
+    /// Displayed to explain why the system/environment is pinned to this version.
+    /// Optional; if not provided, assignment.reason will be None in the response.
+    pub reason: Option<String>,
 }
 
 /// Response when an assignment is created.
@@ -3472,6 +3476,11 @@ pub struct UpdateAssignmentRequest {
     pub exclusions: Option<Vec<Uuid>>,
     pub additions: Option<Vec<Uuid>>,
     pub value_overrides: Option<Vec<PolicyValueOverride>>,
+    /// User-provided reason/justification for the updated assignment.
+    /// Displayed to explain why the system/environment is pinned to this version.
+    /// When provided, creates a new immutable assignment version with this reason.
+    /// Optional; if not provided, new version's reason will be None.
+    pub reason: Option<String>,
 }
 
 /// Request to preview an assignment before saving.
@@ -3484,6 +3493,7 @@ pub struct PreviewAssignmentRequest {
     pub exclusions: Option<Vec<Uuid>>,
     pub additions: Option<Vec<Uuid>>,
     pub value_overrides: Option<Vec<PolicyValueOverride>>,
+    pub reason: Option<String>,
 }
 
 /// A single resolved policy in the effective set.
