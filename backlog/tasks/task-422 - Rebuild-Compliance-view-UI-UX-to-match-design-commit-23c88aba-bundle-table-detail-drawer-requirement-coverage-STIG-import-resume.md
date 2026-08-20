@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-20 14:49'
+updated_date: '2026-08-20 14:50'
 labels: []
 milestone: m-22
 dependencies:
@@ -189,6 +189,8 @@ Follow-up blocker slice from 9898ac66: reproduce the valid live HTTP assignment 
 P1 assignment mutation remediation: in persist_assignment_inner, after beginning the transaction load the active assignment's current immutable snapshot with current_version_id JOIN compliance_bundle_assignment_versions av FOR UPDATE for update mutations. Use av.bundle_version_id for lineage locking, expected-version coherence, resolver input, uniqueness, assignment-version insertion, mutable pointer update, audit, and response; retain payload.bundle_version_id for creates. Verify with targeted assignment_semantics and cargo check, then commit and push the focused change.
 
 Follow-up P2 list API fix: in list_assignments_for_scope, join compliance_bundle_assignments.current_version_id to compliance_bundle_assignment_versions and source bundle_version_id, enforcement_mode, assignment_overlay_digest, and reason from av; load exclusions, additions, and value_overrides for all returned current_version_ids with three ANY($1) queries; group results by assignment version and build the unchanged AssignmentResponse shape. Add a focused live-DB regression if the existing assignment_semantics patterns can exercise the handler, then run targeted server formatting/check/tests and commit/push the verified SHA.
+
+Follow-up assignment mutation error audit: propagate SQL failures in deactivate_assignment_inner, assignment audit actor lookup, system effective-policy assignment status, assignment effective-policy overlay loads, and preview target existence; preserve nullable query semantics and avoid unrelated paths. Verify with server fmt/check and assignment_semantics tests, then commit/push and record the resulting SHA.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -241,6 +243,8 @@ P1 remediation committed as f21b50953458c45a63284641b5e638f709424147 and pushed 
 Starting the P2 list API remediation from f21b5095. Scope is limited to list_assignments_for_scope and focused assignment-list regression coverage.
 
 P2 list API remediation completed in commit 3acb2a0b1da534c5bc10cd904618d600db976ea5 and pushed to origin/TASK-422-compliance-view-redesign. list_assignments_for_scope now joins current_version_id to av for authoritative bundle_version_id, enforcement_mode, assignment_overlay_digest, and reason; exclusions, additions, and value_overrides are loaded in three set-wise ANY($1) queries and grouped by version. Verification passed: nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all -- --check; nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-server --offline; nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server --test assignment_semantics (10 passed); git diff --check. Local/tracking/remote SHA verified equal. Task remains In Progress; no merge-ready claim made.
+
+Starting focused assignment SQL error propagation follow-up from 3acb2a0b. Scope is limited to production assignment handlers; nullable SQL values remain nullable, while query failures become internal errors.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
