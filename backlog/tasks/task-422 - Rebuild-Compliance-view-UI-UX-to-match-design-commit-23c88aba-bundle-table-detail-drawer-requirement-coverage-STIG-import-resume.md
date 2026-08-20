@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-20 16:19'
+updated_date: '2026-08-20 20:43'
 labels: []
 milestone: m-22
 dependencies:
@@ -193,6 +193,8 @@ Follow-up P2 list API fix: in list_assignments_for_scope, join compliance_bundle
 Follow-up assignment mutation error audit: propagate SQL failures in deactivate_assignment_inner, assignment audit actor lookup, system effective-policy assignment status, assignment effective-policy overlay loads, and preview target existence; preserve nullable query semantics and avoid unrelated paths. Verify with server fmt/check and assignment_semantics tests, then commit/push and record the resulting SHA.
 
 Current-head maintainer audit remediation: fix get_assignment_effective_policies to load bundle_version_id and enforcement_mode from current immutable assignment version; extend pair assignment metadata loading so conflict/unresolved bundle rollups preserve reason and status; add discriminating production-path tests for lineage V1 versus current immutable V2 and conflict reason preservation. Then run direct browser steps 20ab, 29f, and 30d on TASK-422 and origin/dev, followed by exact-head flake/CI verification.
+
+Focused deletion-invariant remediation from pushed SHA 009b5738: (1) restore bundle deletion eligibility to classify every compliance_bundle_assignment_versions row as immutable regardless of referenced bundle publication state; (2) retain cleanup only for versionless draft assignment lineages so imported unpublished drafts with trigger-created legacy rows remain deletable; (3) add migration 0231 restoring strict assignment-version and assignment-child DELETE immutability because migration 0228 has already been applied and must not be edited; (4) strengthen live-DB coverage to prove active and inactive draft assignments block deletion, direct deletion of mutable assignment history is rejected, and a versionless draft assignment can still be removed atomically; (5) run the focused deletion lifecycle suite before proceeding to backend-backed coverage and imported-draft browser regressions.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -253,6 +255,8 @@ Assignment SQL error propagation follow-up committed and pushed as 51b0343e. Pro
 Follow-up verification at pushed SHA 05e2e364bc562d2199611c18a3e3072abf656a35: committed packages/default/default.nix cargoTestFlags fix (--lib and --bins) and pushed; local and origin branch SHAs match. nix build .#server --no-link -L --option eval-cache false passed; nix build .#web-ui --no-link -L --option eval-cache false passed; focused nix build .#checks.x86_64-linux.web-ui-reconciliation --no-link -L --option eval-cache false passed. Live DB at 127.0.0.1:3042 passed assignment_semantics 10/10, evidence_for_ato 10/10, framework_version_id_lifecycle 1/1. nix develop cargo test for packages/web-ui passed 181/181 with 1 ignored; backend cargo fmt --all -- --check and git diff --check passed.
 
 The broad nix build .#checks.x86_64-linux.web-ui run did not provide a clean result: it was interrupted after the mega integration reported many unrelated prerequisite failures; 29f failed only because its required bundle from 20ab was absent after 20ab failed. nix flake check -L was also interrupted by the same broad-check run and is not claimed green. Focused reconciliation check is green; no code change was made for the broad unrelated failures. Task remains In Progress and not merge-ready.
+
+At clean pushed SHA 009b5738, reproduced `deletion_lifecycle_database_matrix` against isolated PostgreSQL `crystal_forge_task422_test` with `--ignored --exact --nocapture --test-threads=1`: failed at the active draft assignment assertion because `delete_bundle` returned `Deleted`. Root cause confirmed: TASK eligibility joins bundle versions and counts assignment versions only for accepted/deprecated states, unlike origin/dev which counts every assignment-version row. Migration 0228 also permits direct deletion of mutable assignment versions/children. The existing assignment-row cleanup is still needed for versionless rows created by the legacy bundle-environment trigger, so remediation will narrow rather than remove that cleanup.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
