@@ -2073,13 +2073,13 @@ pub async fn list_bundle_systems_for_version(
             _ => Vec::new(),
         })
         .collect();
-    
+
     let materialized_policies = if !all_effective_policies.is_empty() {
         materialize_effective_policies(pool, &all_effective_policies).await?
     } else {
         Vec::new()
     };
-    
+
     // Index materialized policies by version ID for fast lookup
     let policies_by_version: std::collections::HashMap<Uuid, PolicyRow> = all_effective_policies
         .into_iter()
@@ -2109,7 +2109,7 @@ pub async fn list_bundle_systems_for_version(
         .bind(&system_ids)
         .fetch_all(pool)
         .await?;
-        
+
         context_rows.into_iter().fold(
             std::collections::HashMap::new(),
             |mut contexts, (system_id, derivation_id, policy_results)| {
@@ -2132,23 +2132,24 @@ pub async fn list_bundle_systems_for_version(
                 if set.bundle_version_id == bundle_version_id =>
             {
                 // Construct rollup from pre-loaded data (no DB queries in loop)
-                let system_policies: Vec<PolicyRow> = set.policies
+                let system_policies: Vec<PolicyRow> = set
+                    .policies
                     .iter()
                     .filter_map(|ep| policies_by_version.get(&ep.policy_version_id).cloned())
                     .collect();
-                
+
                 let mut statuses = Vec::with_capacity(system_policies.len());
                 let context = contexts.get(&system.id).cloned();
-                
+
                 for policy in system_policies {
-                    statuses.push(resolve_control_evidence_with_context(
-                        context.clone(),
-                        &system,
-                        policy
-                    ).status);
+                    statuses.push(
+                        resolve_control_evidence_with_context(context.clone(), &system, policy)
+                            .status,
+                    );
                 }
-                
-                let report_only = set.policies
+
+                let report_only = set
+                    .policies
                     .iter()
                     .filter(|policy| {
                         matches!(
@@ -2157,31 +2158,26 @@ pub async fn list_bundle_systems_for_version(
                         )
                     })
                     .count() as i64;
-                
-                rollup_from_statuses_with_metadata(
-                    system.clone(),
-                    &statuses,
-                    report_only,
-                    metadata,
-                )
+
+                rollup_from_statuses_with_metadata(system.clone(), &statuses, report_only, metadata)
             }
-             Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup_with_metadata(
-                 system,
-                 policies.len() as i64,
-                 conflicts
-                     .first()
-                     .map(|c| c.code.as_str())
-                     .unwrap_or("conflict"),
-                 metadata,
-             ),
-             // Missing or mismatched resolution has no authoritative effective
-             // set. Never substitute lineage/current membership for this view.
-             _ => unresolved_system_rollup_with_metadata(
-                 system,
-                 policies.len() as i64,
-                 "not_applicable",
-                 metadata,
-             ),
+            Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup_with_metadata(
+                system,
+                policies.len() as i64,
+                conflicts
+                    .first()
+                    .map(|c| c.code.as_str())
+                    .unwrap_or("conflict"),
+                metadata,
+            ),
+            // Missing or mismatched resolution has no authoritative effective
+            // set. Never substitute lineage/current membership for this view.
+            _ => unresolved_system_rollup_with_metadata(
+                system,
+                policies.len() as i64,
+                "not_applicable",
+                metadata,
+            ),
         };
         rollups.push(rollup);
     }
@@ -2766,9 +2762,9 @@ pub async fn determine_assignment_status_for_system(
 /// Assignment metadata for compliance bundle assignment.
 #[derive(Clone, Debug)]
 pub struct AssignmentMetadata {
-    pub status: Option<String>,       // "current" or "pinned" when assigned
-    pub approved_by: Option<String>,  // User name who created the assignment version
-    pub reason: Option<String>,       // User-provided reason for the pinned assignment
+    pub status: Option<String>,      // "current" or "pinned" when assigned
+    pub approved_by: Option<String>, // User name who created the assignment version
+    pub reason: Option<String>,      // User-provided reason for the pinned assignment
 }
 
 /// 1. System-scoped assignments (take precedence over environment-scoped)
@@ -2881,7 +2877,7 @@ pub async fn load_assignment_metadata_for_systems(
     // Build the result map
     // Note: created_by is semantically the user who made the assignment decision.
     // This maps to assignment_approved_by in the API.
-    // 
+    //
     // CRITICAL P2 DESIGN GAP: assignment_reason is a DESIGN REQUIREMENT that remains
     // UNIMPLEMENTED. The TASK-422 compliance redesign explicitly displays:
     //
@@ -3136,13 +3132,13 @@ fn rollup_from_statuses(
     report_only: i64,
     assignment_status: Option<String>,
 ) -> ComplianceSystemRollup {
-     // Wrapper for legacy use cases; convert status to metadata for consistency
-     let metadata = assignment_status.map(|status| AssignmentMetadata {
-         status: Some(status),
-         approved_by: None,
-         reason: None,
-     });
-     rollup_from_statuses_with_metadata(system, statuses, report_only, metadata.as_ref())
+    // Wrapper for legacy use cases; convert status to metadata for consistency
+    let metadata = assignment_status.map(|status| AssignmentMetadata {
+        status: Some(status),
+        approved_by: None,
+        reason: None,
+    });
+    rollup_from_statuses_with_metadata(system, statuses, report_only, metadata.as_ref())
 }
 
 fn rollup_from_statuses_with_metadata(
@@ -3223,9 +3219,18 @@ fn rollup_from_statuses_with_metadata(
         report_only,
         score,
         resolution_state: None,
-        assignment_status: assignment_metadata.as_ref().map(|m| m.status.clone()).flatten(),
-        assignment_reason: assignment_metadata.as_ref().map(|m| m.reason.clone()).flatten(),
-        assignment_approved_by: assignment_metadata.as_ref().map(|m| m.approved_by.clone()).flatten(),
+        assignment_status: assignment_metadata
+            .as_ref()
+            .map(|m| m.status.clone())
+            .flatten(),
+        assignment_reason: assignment_metadata
+            .as_ref()
+            .map(|m| m.reason.clone())
+            .flatten(),
+        assignment_approved_by: assignment_metadata
+            .as_ref()
+            .map(|m| m.approved_by.clone())
+            .flatten(),
         // Not modeled: assignment_deadline and assignment_poam are conditionally shown in
         // the design mock but are not domain requirements. Implement only if explicitly
         // required by a separate task.
@@ -3246,12 +3251,7 @@ fn unresolved_system_rollup(
         approved_by: None,
         reason: None,
     });
-    unresolved_system_rollup_with_metadata(
-        system,
-        selected_controls,
-        state,
-        metadata.as_ref(),
-    )
+    unresolved_system_rollup_with_metadata(system, selected_controls, state, metadata.as_ref())
 }
 
 fn unresolved_system_rollup_with_metadata(
@@ -3277,9 +3277,18 @@ fn unresolved_system_rollup_with_metadata(
         report_only: 0,
         score: 0,
         resolution_state: Some(state.to_string()),
-        assignment_status: assignment_metadata.as_ref().map(|m| m.status.clone()).flatten(),
-        assignment_reason: assignment_metadata.as_ref().map(|m| m.reason.clone()).flatten(),
-        assignment_approved_by: assignment_metadata.as_ref().map(|m| m.approved_by.clone()).flatten(),
+        assignment_status: assignment_metadata
+            .as_ref()
+            .map(|m| m.status.clone())
+            .flatten(),
+        assignment_reason: assignment_metadata
+            .as_ref()
+            .map(|m| m.reason.clone())
+            .flatten(),
+        assignment_approved_by: assignment_metadata
+            .as_ref()
+            .map(|m| m.approved_by.clone())
+            .flatten(),
         assignment_deadline: None,
         assignment_poam: None,
     }
@@ -3454,12 +3463,12 @@ pub(crate) async fn effective_policy_rollup_with_evidence_and_metadata(
         statuses
             .push(resolve_control_evidence_with_context(context.clone(), system, policy).status);
     }
-     Ok(rollup_from_statuses_with_metadata(
-         system.clone(),
-         &statuses,
-         report_only,
-         assignment_metadata,
-     ))
+    Ok(rollup_from_statuses_with_metadata(
+        system.clone(),
+        &statuses,
+        report_only,
+        assignment_metadata,
+    ))
 }
 
 /// Batch the evidence inputs needed by catalog aggregates. The detail path is

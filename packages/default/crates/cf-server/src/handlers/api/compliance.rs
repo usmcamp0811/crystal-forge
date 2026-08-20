@@ -2409,19 +2409,19 @@ async fn persist_assignment_inner(
     .ok_or_else(|| not_found())?;
 
     let assignment_version_id: Uuid = sqlx::query_scalar(
-         r#"INSERT INTO compliance_bundle_assignment_versions
+        r#"INSERT INTO compliance_bundle_assignment_versions
             (assignment_id, previous_version_id, version_number, bundle_version_id,
              enforcement_mode, assignment_overlay_digest, created_by, reason)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id"#,
-     )
-     .bind(assignment_id)
-     .bind(previous_version_id)
-     .bind(version_number)
-     .bind(payload.bundle_version_id)
-     .bind(enforcement_mode)
-     .bind(&effective_set_digest)
-     .bind(user_id)
-     .bind(&payload.reason)
+    )
+    .bind(assignment_id)
+    .bind(previous_version_id)
+    .bind(version_number)
+    .bind(payload.bundle_version_id)
+    .bind(enforcement_mode)
+    .bind(&effective_set_digest)
+    .bind(user_id)
+    .bind(&payload.reason)
     .fetch_one(&mut *tx)
     .await
     .map_err(|_| internal_error("Failed to create assignment version"))?;
@@ -2580,42 +2580,44 @@ async fn persist_assignment_inner(
             .fetch_one(pool)
             .await
             .map_err(|_| internal_error("Failed to load assignment bundle lineage"))?;
-     Ok(crate::api::models::AssignmentResponse {
-         id: assignment_id,
-         current_version_id: assignment_version_id,
-         bundle_id,
-         bundle_version_id: payload.bundle_version_id,
-         scope_type: scope_type.to_string(),
-         scope_id: payload.scope_id,
-         enforcement_mode: enforcement_mode.to_string(),
-         exclusions,
-         additions,
-         value_overrides: overrides
-             .into_iter()
-             .map(|o| crate::api::models::PolicyValueOverride {
-                 policy_version_id: o.policy_version_id,
-                 value_path: o.value_path,
-                 value: o.value,
-             })
-             .collect(),
-         assignment_overlay_digest: effective_set_digest,
-         active: true,
-         reason: payload.reason.clone(),
-         created_at: now,
-          updated_at: now,
-      })
+    Ok(crate::api::models::AssignmentResponse {
+        id: assignment_id,
+        current_version_id: assignment_version_id,
+        bundle_id,
+        bundle_version_id: payload.bundle_version_id,
+        scope_type: scope_type.to_string(),
+        scope_id: payload.scope_id,
+        enforcement_mode: enforcement_mode.to_string(),
+        exclusions,
+        additions,
+        value_overrides: overrides
+            .into_iter()
+            .map(|o| crate::api::models::PolicyValueOverride {
+                policy_version_id: o.policy_version_id,
+                value_path: o.value_path,
+                value: o.value,
+            })
+            .collect(),
+        assignment_overlay_digest: effective_set_digest,
+        active: true,
+        reason: payload.reason.clone(),
+        created_at: now,
+        updated_at: now,
+    })
 }
 
 /// Validate and normalize an assignment reason field.
 /// Returns the trimmed reason if valid, or an error response if invalid.
-fn validate_assignment_reason(reason: &Option<String>) -> Result<Option<String>, axum::response::Response> {
+fn validate_assignment_reason(
+    reason: &Option<String>,
+) -> Result<Option<String>, axum::response::Response> {
     const MAX_REASON_LENGTH: usize = 2000;
 
     match reason {
         None => Ok(None),
         Some(r) => {
             let trimmed = r.trim();
-            
+
             // Reject whitespace-only input
             if trimmed.is_empty() {
                 return Err((
@@ -2691,34 +2693,39 @@ pub async fn update_assignment(
         return forbidden();
     }
 
-    // Load existing assignment to get bundle_version_id and scope
-    let existing = sqlx::query_as::<_, (Uuid, String, Option<Uuid>, Option<Uuid>, String)>(
-        "SELECT bundle_version_id, scope_type, environment_id, system_id, enforcement_mode \
-         FROM compliance_bundle_assignments WHERE id = $1",
+    // Load existing assignment and its current immutable snapshot atomically
+    // The current_version_id pointer and all immutable state come from the snapshot,
+    // never from the mutable lineage fields
+    let existing = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            Option<Uuid>,
+            Option<Uuid>,
+            Uuid,
+            Option<String>,
+        ),
+    >(
+        "SELECT a.id, a.scope_type, a.environment_id, a.system_id, av.bundle_version_id, av.reason \
+         FROM compliance_bundle_assignments a \
+         JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id \
+         WHERE a.id = $1 AND a.active",
     )
     .bind(assignment_id)
     .fetch_optional(&pool)
     .await;
 
-    let (bv_id, scope_type, env_id, sys_id, _) = match existing {
+    let (_, scope_type, env_id, sys_id, bv_id, current_reason) = match existing {
         Ok(Some(row)) => row,
         Ok(None) => return not_found(),
-        Err(_) => return internal_error("Failed to load assignment"),
+        Err(e) => {
+            tracing::error!(error = %e, %assignment_id, "failed to load assignment with current snapshot");
+            return internal_error("Failed to load assignment");
+        }
     };
 
     let scope_id = env_id.or(sys_id).unwrap_or_default();
-
-    // Load current assignment version's reason for tri-state resolution
-    let current_reason: Option<String> = sqlx::query_scalar(
-        "SELECT reason FROM compliance_bundle_assignment_versions \
-         WHERE id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1) \
-         AND current_version_id IS NOT NULL",
-    )
-    .bind(assignment_id)
-    .fetch_optional(&pool)
-    .await
-    .unwrap_or(None)
-    .flatten();
 
     // Resolve FieldUpdate tri-state: omitted=preserve, null=clear, value=set
     let resolved_reason = match payload.reason.clone() {
@@ -2865,7 +2872,7 @@ pub async fn get_assignment(
             value: val,
         },
     )
-     .collect();
+    .collect();
 
     let bundle_id: Uuid = match sqlx::query_scalar(
         "SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1",
@@ -2886,7 +2893,8 @@ pub async fn get_assignment(
     )
     .bind(current_version_id)
     .fetch_optional(&pool)
-    .await {
+    .await
+    {
         Ok(reason_opt) => reason_opt.flatten(),
         Err(error) => {
             tracing::error!(error = %error, %assignment_id, "failed to load assignment reason");
@@ -3137,38 +3145,38 @@ async fn list_assignments_for_scope(
             value,
         })
         .collect();
-         let assignment_overlay_digest: String = sqlx::query_scalar(
-             "SELECT assignment_overlay_digest FROM compliance_bundle_assignments WHERE id = $1",
-         )
-         .bind(id)
-         .fetch_one(pool)
-         .await?;
+        let assignment_overlay_digest: String = sqlx::query_scalar(
+            "SELECT assignment_overlay_digest FROM compliance_bundle_assignments WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await?;
 
-         let reason: Option<String> = sqlx::query_scalar(
-             "SELECT reason FROM compliance_bundle_assignment_versions WHERE id = $1",
-         )
-         .bind(current_version_id)
-         .fetch_optional(pool)
-         .await?
-         .flatten();
+        let reason: Option<String> = sqlx::query_scalar(
+            "SELECT reason FROM compliance_bundle_assignment_versions WHERE id = $1",
+        )
+        .bind(current_version_id)
+        .fetch_optional(pool)
+        .await?
+        .flatten();
 
-         assignments.push(AssignmentResponse {
-             id,
-             current_version_id,
-             bundle_id,
-             bundle_version_id,
-             scope_type: scope_type.to_string(),
-             scope_id,
-             enforcement_mode,
-             exclusions,
-             additions,
-             value_overrides,
-             assignment_overlay_digest,
-             active,
-             reason,
-             created_at,
-             updated_at,
-         });
+        assignments.push(AssignmentResponse {
+            id,
+            current_version_id,
+            bundle_id,
+            bundle_version_id,
+            scope_type: scope_type.to_string(),
+            scope_id,
+            enforcement_mode,
+            exclusions,
+            additions,
+            value_overrides,
+            assignment_overlay_digest,
+            active,
+            reason,
+            created_at,
+            updated_at,
+        });
     }
     Ok(assignments)
 }
@@ -11485,7 +11493,7 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
                 exclusions: None,
                 additions: None,
                 value_overrides: None,
-            reason: None,
+                reason: None,
             };
 
             let race_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
@@ -11831,12 +11839,12 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
             enforcement_mode: None,
             exclusions: Some(vec![baseline_b_version]),
             additions: Some(vec![addition_version]),
-             value_overrides: Some(vec![crate::api::models::PolicyValueOverride {
-                 policy_version_id: baseline_a_version,
-                 value_path: "max_critical".to_string(),
-                 value: serde_json::json!(1),
-             }]),
-             reason: None,
+            value_overrides: Some(vec![crate::api::models::PolicyValueOverride {
+                policy_version_id: baseline_a_version,
+                value_path: "max_critical".to_string(),
+                value: serde_json::json!(1),
+            }]),
+            reason: None,
         };
         let points = [
             AssignmentMutationFailurePoint::AfterLineageInsert,

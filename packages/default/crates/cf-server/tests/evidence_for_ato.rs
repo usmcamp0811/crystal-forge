@@ -685,7 +685,7 @@ async fn test_evidence_digest_changes_with_evidence(pool: PgPool) {
 }
 
 /// Regression test: required_fields metadata survives UI round-trip
-/// 
+///
 /// This test verifies that EvidenceSpec.required_fields (versioned metadata
 /// set by the server) is preserved when:
 /// 1. Loaded from persisted compliance_metadata
@@ -709,7 +709,8 @@ async fn test_evidence_required_fields_preserved_through_edit(pool: PgPool) {
         required_fields: initial_fields.clone(),
     };
 
-    let policy_id = create_policy_with_evidence(&pool, "required_fields_test", vec![initial_spec]).await;
+    let policy_id =
+        create_policy_with_evidence(&pool, "required_fields_test", vec![initial_spec]).await;
 
     // Fetch the persisted evidence from compliance_metadata
     let persisted_metadata: serde_json::Value = sqlx::query_scalar(
@@ -725,7 +726,10 @@ async fn test_evidence_required_fields_preserved_through_edit(pool: PgPool) {
         .and_then(|v| v.as_array())
         .expect("evidence_specs array");
 
-    assert!(!evidence_specs.is_empty(), "evidence_specs should be persisted");
+    assert!(
+        !evidence_specs.is_empty(),
+        "evidence_specs should be persisted"
+    );
 
     // Extract the first spec and verify required_fields survived persistence
     let persisted_spec = &evidence_specs[0];

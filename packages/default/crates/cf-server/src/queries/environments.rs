@@ -188,47 +188,47 @@ async fn list_active_environment_assignments(
             });
     }
 
-     let mut result: HashMap<Uuid, Vec<AssignmentResponse>> = HashMap::new();
-     for (
-         id,
-         current_version_id,
-         bundle_id,
-         bundle_version_id,
-         environment_id,
-         enforcement_mode,
-         assignment_overlay_digest,
-         created_at,
-         updated_at,
-         reason,
-     ) in assignments
-     {
-         result
-             .entry(environment_id)
-             .or_default()
-             .push(AssignmentResponse {
-                 id,
-                 current_version_id,
-                 bundle_id,
-                 bundle_version_id,
-                 scope_type: "environment".to_string(),
-                 scope_id: environment_id,
-                 enforcement_mode,
-                 exclusions: exclusions_by_version
-                     .remove(&current_version_id)
-                     .unwrap_or_default(),
-                 additions: additions_by_version
-                     .remove(&current_version_id)
-                     .unwrap_or_default(),
-                 value_overrides: overrides_by_version
-                     .remove(&current_version_id)
-                     .unwrap_or_default(),
-                 assignment_overlay_digest,
-                 active: true,
-                 reason,
-                 created_at,
-                 updated_at,
-             });
-     }
+    let mut result: HashMap<Uuid, Vec<AssignmentResponse>> = HashMap::new();
+    for (
+        id,
+        current_version_id,
+        bundle_id,
+        bundle_version_id,
+        environment_id,
+        enforcement_mode,
+        assignment_overlay_digest,
+        created_at,
+        updated_at,
+        reason,
+    ) in assignments
+    {
+        result
+            .entry(environment_id)
+            .or_default()
+            .push(AssignmentResponse {
+                id,
+                current_version_id,
+                bundle_id,
+                bundle_version_id,
+                scope_type: "environment".to_string(),
+                scope_id: environment_id,
+                enforcement_mode,
+                exclusions: exclusions_by_version
+                    .remove(&current_version_id)
+                    .unwrap_or_default(),
+                additions: additions_by_version
+                    .remove(&current_version_id)
+                    .unwrap_or_default(),
+                value_overrides: overrides_by_version
+                    .remove(&current_version_id)
+                    .unwrap_or_default(),
+                assignment_overlay_digest,
+                active: true,
+                reason,
+                created_at,
+                updated_at,
+            });
+    }
     Ok(result)
 }
 
