@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-19 13:15'
+updated_date: '2026-08-20 13:40'
 labels: []
 milestone: m-22
 dependencies:
@@ -183,6 +183,8 @@ This plan addresses the five remaining implementation gaps preventing MR !316 me
 6. Full verification suite
 
 All changes are logical units suitable for single MR commit.
+
+Follow-up blocker slice from 9898ac66: reproduce the valid live HTTP assignment create against the repository harness, capture only safe structured DB error context, verify migration/test-DB setup, fix a confirmed production defect if present; then revise step 29f to use the real assignment UI/API flow where the harness supports it and run the repository-supported focused check. Do not claim completion if Playwright or isolated PostgreSQL infrastructure remains unavailable.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
