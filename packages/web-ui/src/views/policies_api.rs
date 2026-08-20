@@ -173,33 +173,34 @@ fn policy_record_to_definition_with_count(
         })
         .collect();
 
-    PolicyDefinition {
-        id: record.id,
-        lineage_id: record.id,
-        version_id: current_version_id,
-        revision,
-        publication_state,
-        semantic_digest,
-        revisions,
-        name: record.name,
-        description: record
-            .description
-            .unwrap_or_else(|| "No description".to_string()),
-        format: PolicyFormat::Json,
-        body,
-        policy_type: Some(record.policy_type),
-        updated_at: record.updated_at.to_rfc3339(),
-        system_count,
-        srg_ids: current_srg_ids,
-        cci_ids: current_cci_ids,
-        category: current_category,
-        framework: current_framework,
-        severity: current_severity,
-        control_family: current_control_family,
-        cmmc_level: current_cmmc_level,
-        cis_section: current_cis_section,
-        rationale: current_rationale,
-        mapped_requirement_count: record.mapped_requirement_count,
-        bundle_usage_count: record.bundle_usage_count,
-    }
+     PolicyDefinition {
+         id: record.id,
+         lineage_id: record.id,
+         version_id: current_version_id,
+         revision,
+         publication_state,
+         semantic_digest,
+         revisions,
+         name: record.name,
+         description: record
+             .description
+             .unwrap_or_else(|| "No description".to_string()),
+         format: PolicyFormat::Json,
+         body,
+         policy_type: Some(record.policy_type),
+         updated_at: record.updated_at.to_rfc3339(),
+         system_count,
+         srg_ids: current_srg_ids,
+         cci_ids: current_cci_ids,
+         category: current_category,
+         framework: current_framework,
+         severity: current_severity,
+         control_family: current_control_family,
+         cmmc_level: current_cmmc_level,
+         cis_section: current_cis_section,
+         rationale: current_rationale,
+         mapped_requirement_count: record.mapped_requirement_count,
+         bundle_usage_count: record.bundle_usage_count,
+         evidence_specs: None,
+     }
 }

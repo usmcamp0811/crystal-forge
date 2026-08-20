@@ -786,39 +786,40 @@ pub fn PolicyDrawer(
                 "config": revision.config,
             }))
             .unwrap_or_else(|_| "{}".to_string());
-            PolicyDefinition {
-                id: policy.id,
-                lineage_id: policy.lineage_id,
-                version_id: Some(revision.id),
-                revision: Some(revision.version.clone()),
-                publication_state: Some(revision.publication_state.clone()),
-                semantic_digest: Some(revision.semantic_digest.clone()),
-                revisions: policy.revisions.clone(),
-                name: revision.name.clone(),
-                description: revision
-                    .description
-                    .clone()
-                    .unwrap_or_else(|| "No description".to_string()),
-                format: policy.format,
-                body,
-                policy_type: Some(revision.policy_type.clone()),
-                updated_at: policy.updated_at.clone(),
-                system_count: policy.system_count,
-                // Use the selected revision's exact mappings (not the lineage current).
-                srg_ids: revision.srg_ids.clone(),
-                cci_ids: revision.cci_ids.clone(),
-                category: revision.category.clone(),
-                framework: revision.framework.clone(),
-                severity: revision.severity.clone(),
-                control_family: revision.control_family.clone(),
-                cmmc_level: revision.cmmc_level,
-                cis_section: revision.cis_section.clone(),
-                rationale: revision.rationale.clone(),
-                // Draft policies inherit counts from their parent version at fetch time.
-                // When creating a new draft, use 0 as placeholder; real counts come from server.
-                mapped_requirement_count: 0,
-                bundle_usage_count: 0,
-            }
+             PolicyDefinition {
+                 id: policy.id,
+                 lineage_id: policy.lineage_id,
+                 version_id: Some(revision.id),
+                 revision: Some(revision.version.clone()),
+                 publication_state: Some(revision.publication_state.clone()),
+                 semantic_digest: Some(revision.semantic_digest.clone()),
+                 revisions: policy.revisions.clone(),
+                 name: revision.name.clone(),
+                 description: revision
+                     .description
+                     .clone()
+                     .unwrap_or_else(|| "No description".to_string()),
+                 format: policy.format,
+                 body,
+                 policy_type: Some(revision.policy_type.clone()),
+                 updated_at: policy.updated_at.clone(),
+                 system_count: policy.system_count,
+                 // Use the selected revision's exact mappings (not the lineage current).
+                 srg_ids: revision.srg_ids.clone(),
+                 cci_ids: revision.cci_ids.clone(),
+                 category: revision.category.clone(),
+                 framework: revision.framework.clone(),
+                 severity: revision.severity.clone(),
+                 control_family: revision.control_family.clone(),
+                 cmmc_level: revision.cmmc_level,
+                 cis_section: revision.cis_section.clone(),
+                 rationale: revision.rationale.clone(),
+                 // Draft policies inherit counts from their parent version at fetch time.
+                 // When creating a new draft, use 0 as placeholder; real counts come from server.
+                 mapped_requirement_count: 0,
+                 bundle_usage_count: 0,
+                 evidence_specs: Some(revision.evidence_specs.clone()),
+             }
         },
     );
     let category = policy_category(&displayed_policy);

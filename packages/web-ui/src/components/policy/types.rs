@@ -54,6 +54,8 @@ pub struct PolicyDefinition {
     pub mapped_requirement_count: i64,
     /// Count of bundles (compliance frameworks) this policy is used by.
     pub bundle_usage_count: i64,
+    /// Evidence specs from the current version's deployment policy.
+    pub evidence_specs: Option<Vec<crate::api::models::EvidenceSpec>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
