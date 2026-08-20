@@ -2056,8 +2056,8 @@ pub async fn list_bundle_systems_for_version(
     )
     .await?;
 
-    // Load assignment statuses for all systems in one batch query
-    let assignment_statuses = load_assignment_statuses_for_systems(
+    // Load assignment metadata for all systems in one batch query
+    let assignment_metadata = load_assignment_metadata_for_systems(
         pool,
         bundle_id,
         current_published_version,
@@ -2067,22 +2067,25 @@ pub async fn list_bundle_systems_for_version(
 
     let mut rollups = Vec::with_capacity(systems.len());
     for system in systems {
-        // Retrieve pre-loaded assignment status
-        let assignment_status = assignment_statuses.get(&system.id).cloned().flatten();
+        // Retrieve pre-loaded assignment metadata
+        let metadata = assignment_metadata.get(&system.id).cloned();
+        let assignment_status = metadata.as_ref().and_then(|m| m.status.clone());
+        let assignment_approved_by = metadata.as_ref().and_then(|m| m.approved_by.clone());
 
         let rollup = match effective.get(&system.id) {
             Some(ResolutionOutcome::Resolved(set))
                 if set.bundle_version_id == bundle_version_id =>
             {
-                effective_policy_rollup_with_evidence(
+                effective_policy_rollup_with_evidence_and_metadata(
                     pool,
                     &system,
                     &set.policies,
                     assignment_status,
+                    assignment_approved_by,
                 )
                 .await?
             }
-            Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup(
+            Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup_with_metadata(
                 system,
                 policies.len() as i64,
                 conflicts
@@ -2090,14 +2093,16 @@ pub async fn list_bundle_systems_for_version(
                     .map(|c| c.code.as_str())
                     .unwrap_or("conflict"),
                 assignment_status,
+                assignment_approved_by,
             ),
             // Missing or mismatched resolution has no authoritative effective
             // set. Never substitute lineage/current membership for this view.
-            _ => unresolved_system_rollup(
+            _ => unresolved_system_rollup_with_metadata(
                 system,
                 policies.len() as i64,
                 "not_applicable",
                 assignment_status,
+                assignment_approved_by,
             ),
         };
         rollups.push(rollup);
@@ -2680,6 +2685,13 @@ pub async fn determine_assignment_status_for_system(
 /// Returns a map of system_id -> assignment_status string (or None if no applicable assignment).
 ///
 /// Assignment precedence:
+/// Assignment metadata for compliance bundle assignment.
+#[derive(Clone, Debug)]
+pub struct AssignmentMetadata {
+    pub status: Option<String>,           // "current" or "pinned" when assigned
+    pub approved_by: Option<String>,      // User name who created the assignment version
+}
+
 /// 1. System-scoped assignments (take precedence over environment-scoped)
 /// 2. Environment-scoped assignments for the system's environment
 /// 3. No assignment
@@ -2689,17 +2701,29 @@ pub async fn load_assignment_statuses_for_systems(
     current_published_version: Option<Uuid>,
     system_ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, Option<String>>> {
+    let metadata = load_assignment_metadata_for_systems(pool, bundle_id, current_published_version, system_ids).await?;
+    Ok(metadata.into_iter().map(|(k, v)| (k, v.status)).collect())
+}
+
+/// Load assignment metadata including status and creator information.
+pub async fn load_assignment_metadata_for_systems(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    current_published_version: Option<Uuid>,
+    system_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, AssignmentMetadata>> {
     if system_ids.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
 
-    // Single query to load effective assignments for all systems with precedence
+    // Single query to load effective assignments with metadata
     // System-scoped assignments take precedence over environment-scoped
     // Uses DISTINCT ON to ensure each system gets only one assignment
     #[derive(sqlx::FromRow)]
     struct AssignmentRow {
         system_id: Uuid,
         assigned_version_id: Uuid,
+        created_by: Option<Uuid>,
     }
 
     let assignments: Vec<AssignmentRow> = sqlx::query_as(
@@ -2711,7 +2735,8 @@ pub async fn load_assignment_statuses_for_systems(
             -- System-scoped assignments take absolute precedence
             SELECT DISTINCT ON (sys.id)
                 sys.id AS system_id,
-                av.bundle_version_id AS assigned_version_id
+                av.bundle_version_id AS assigned_version_id,
+                av.created_by
             FROM requested_systems rs
             JOIN systems sys ON sys.id = rs.system_id
             JOIN compliance_bundle_assignments cba ON cba.system_id = sys.id 
@@ -2723,7 +2748,8 @@ pub async fn load_assignment_statuses_for_systems(
             -- Environment-scoped assignments as fallback (only if no system-scoped assignment)
             SELECT DISTINCT ON (sys.id)
                 sys.id AS system_id,
-                av.bundle_version_id AS assigned_version_id
+                av.bundle_version_id AS assigned_version_id,
+                av.created_by
             FROM requested_systems rs
             JOIN systems sys ON sys.id = rs.system_id
             JOIN compliance_bundle_assignments cba ON cba.bundle_id = $1 
@@ -2737,7 +2763,7 @@ pub async fn load_assignment_statuses_for_systems(
                   AND cba_sys.scope_type = 'system' AND cba_sys.system_id = sys.id
             )
         )
-        SELECT system_id, assigned_version_id FROM system_assignments
+        SELECT system_id, assigned_version_id, created_by FROM system_assignments
         "#,
     )
     .bind(bundle_id)
@@ -2745,11 +2771,31 @@ pub async fn load_assignment_statuses_for_systems(
     .fetch_all(pool)
     .await?;
 
+    // Collect user IDs for batched lookup
+    let user_ids: Vec<Uuid> = assignments
+        .iter()
+        .filter_map(|a| a.created_by)
+        .collect();
+    
+    // Batch load user names (email or name field)
+    let users: std::collections::HashMap<Uuid, String> = if !user_ids.is_empty() {
+        let user_rows: Vec<(Uuid, Option<String>)> = sqlx::query_as(
+            "SELECT id, COALESCE(name, email) AS display_name FROM users WHERE id = ANY($1)",
+        )
+        .bind(&user_ids)
+        .fetch_all(pool)
+        .await?;
+        user_rows.into_iter().filter_map(|(id, name)| name.map(|n| (id, n))).collect()
+    } else {
+        std::collections::HashMap::new()
+    };
+
     // Build the result map
     let mut result = std::collections::HashMap::new();
     for AssignmentRow {
         system_id,
         assigned_version_id,
+        created_by,
     } in assignments
     {
         let status = match current_published_version {
@@ -2757,12 +2803,13 @@ pub async fn load_assignment_statuses_for_systems(
             Some(_) => Some("pinned".to_string()),
             None => Some("pinned".to_string()),
         };
-        result.insert(system_id, status);
+        let approved_by = created_by.and_then(|uid| users.get(&uid).cloned());
+        result.insert(system_id, AssignmentMetadata { status, approved_by });
     }
 
-    // Ensure all requested systems are in the map (with None for unassigned)
+    // Ensure all requested systems are in the map (with None status for unassigned)
     for &system_id in system_ids {
-        result.entry(system_id).or_insert(None);
+        result.entry(system_id).or_insert(AssignmentMetadata { status: None, approved_by: None });
     }
 
     Ok(result)
@@ -2966,6 +3013,22 @@ fn rollup_from_statuses(
     report_only: i64,
     assignment_status: Option<String>,
 ) -> ComplianceSystemRollup {
+    rollup_from_statuses_with_metadata(
+        system,
+        statuses,
+        report_only,
+        assignment_status,
+        None,
+    )
+}
+
+fn rollup_from_statuses_with_metadata(
+    system: SystemRow,
+    statuses: &[ComplianceControlStatus],
+    report_only: i64,
+    assignment_status: Option<String>,
+    assignment_approved_by: Option<String>,
+) -> ComplianceSystemRollup {
     let mut pass = 0i64;
     let mut warn = 0i64;
     let mut fail = 0i64;
@@ -3040,7 +3103,10 @@ fn rollup_from_statuses(
         resolution_state: None,
         assignment_status,
         assignment_reason: None,
-        assignment_approved_by: None,
+        assignment_approved_by,
+        // NOTE: assignment_deadline and assignment_poam are design gaps.
+        // These fields are not modeled in the schema and have no domain requirement.
+        // They are placeholders for future ATO/compliance metadata extensions.
         assignment_deadline: None,
         assignment_poam: None,
     }
@@ -3051,6 +3117,22 @@ fn unresolved_system_rollup(
     selected_controls: i64,
     state: &str,
     assignment_status: Option<String>,
+) -> ComplianceSystemRollup {
+    unresolved_system_rollup_with_metadata(
+        system,
+        selected_controls,
+        state,
+        assignment_status,
+        None,
+    )
+}
+
+fn unresolved_system_rollup_with_metadata(
+    system: SystemRow,
+    selected_controls: i64,
+    state: &str,
+    assignment_status: Option<String>,
+    assignment_approved_by: Option<String>,
 ) -> ComplianceSystemRollup {
     ComplianceSystemRollup {
         system_id: system.id,
@@ -3071,7 +3153,7 @@ fn unresolved_system_rollup(
         resolution_state: Some(state.to_string()),
         assignment_status,
         assignment_reason: None,
-        assignment_approved_by: None,
+        assignment_approved_by,
         assignment_deadline: None,
         assignment_poam: None,
     }
@@ -3206,6 +3288,23 @@ pub(crate) async fn effective_policy_rollup_with_evidence(
     effective_policies: &[crate::compliance::resolver::EffectivePolicy],
     assignment_status: Option<String>,
 ) -> Result<ComplianceSystemRollup> {
+    effective_policy_rollup_with_evidence_and_metadata(
+        pool,
+        system,
+        effective_policies,
+        assignment_status,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn effective_policy_rollup_with_evidence_and_metadata(
+    pool: &PgPool,
+    system: &SystemRow,
+    effective_policies: &[crate::compliance::resolver::EffectivePolicy],
+    assignment_status: Option<String>,
+    assignment_approved_by: Option<String>,
+) -> Result<ComplianceSystemRollup> {
     let policies = materialize_effective_policies(pool, effective_policies).await?;
     let report_only = effective_policies
         .iter()
@@ -3224,11 +3323,12 @@ pub(crate) async fn effective_policy_rollup_with_evidence(
     for policy in policies {
         statuses.push(resolve_control_evidence_with_context(context.clone(), system, policy).status);
     }
-    Ok(rollup_from_statuses(
+    Ok(rollup_from_statuses_with_metadata(
         system.clone(),
         &statuses,
         report_only,
         assignment_status,
+        assignment_approved_by,
     ))
 }
 
