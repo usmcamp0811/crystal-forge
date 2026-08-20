@@ -683,3 +683,127 @@ async fn test_evidence_digest_changes_with_evidence(pool: PgPool) {
         "Digest should change when evidence is updated"
     );
 }
+
+/// Regression test: required_fields metadata survives UI round-trip
+/// 
+/// This test verifies that EvidenceSpec.required_fields (versioned metadata
+/// set by the server) is preserved when:
+/// 1. Loaded from persisted compliance_metadata
+/// 2. Edited in the UI (PolicyEvidence::from -> to_evidence_spec)
+/// 3. Sent back via API
+/// 4. Re-persisted
+///
+/// This prevents silent destruction of metadata when editing unrelated Evidence fields.
+#[sqlx::test]
+async fn test_evidence_required_fields_preserved_through_edit(pool: PgPool) {
+    // Create policy with initial evidence including required_fields
+    let mut initial_fields = std::collections::HashMap::new();
+    initial_fields.insert("version".to_string(), "1.0".to_string());
+    initial_fields.insert("source".to_string(), "policy_engine_v3".to_string());
+
+    let initial_spec = EvidenceSpec {
+        kind: EvidenceKind::Command {
+            cmd: "systemctl status ssh".to_string(),
+            expect: "active".to_string(),
+        },
+        required_fields: initial_fields.clone(),
+    };
+
+    let policy_id = create_policy_with_evidence(&pool, "required_fields_test", vec![initial_spec]).await;
+
+    // Fetch the persisted evidence from compliance_metadata
+    let persisted_metadata: serde_json::Value = sqlx::query_scalar(
+        "SELECT compliance_metadata FROM deployment_policy_versions WHERE policy_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(policy_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch persisted metadata");
+
+    let evidence_specs = persisted_metadata
+        .get("evidence_specs")
+        .and_then(|v| v.as_array())
+        .expect("evidence_specs array");
+
+    assert!(!evidence_specs.is_empty(), "evidence_specs should be persisted");
+
+    // Extract the first spec and verify required_fields survived persistence
+    let persisted_spec = &evidence_specs[0];
+    let persisted_fields = persisted_spec
+        .get("required_fields")
+        .and_then(|v| v.as_object())
+        .expect("required_fields object");
+
+    assert_eq!(
+        persisted_fields.len(),
+        2,
+        "required_fields should have 2 entries after persistence"
+    );
+    assert_eq!(
+        persisted_fields.get("version").and_then(|v| v.as_str()),
+        Some("1.0"),
+        "version field should survive persistence"
+    );
+    assert_eq!(
+        persisted_fields.get("source").and_then(|v| v.as_str()),
+        Some("policy_engine_v3"),
+        "source field should survive persistence"
+    );
+
+    // Simulate edit: update unrelated field (description) without touching evidence
+    // This tests that required_fields is not destroyed by the save path
+    let update_request = UpdateDeploymentPolicyRequest {
+        name: None,
+        description: Some("Updated description without evidence change".to_string()),
+        policy_type: None,
+        config: None,
+        enabled: None,
+        srg_ids: None,
+        cci_ids: None,
+        category: None,
+        framework: None,
+        severity: None,
+        control_family: None,
+        cmmc_level: None,
+        cis_section: None,
+        rationale: None,
+        evidence_specs: None, // Not changing evidence, just description
+    };
+
+    update_deployment_policy(&pool, &policy_id, &update_request, None)
+        .await
+        .expect("update policy with new description");
+
+    // Fetch the updated version and verify required_fields still exists
+    let updated_metadata: serde_json::Value = sqlx::query_scalar(
+        "SELECT compliance_metadata FROM deployment_policy_versions WHERE policy_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(policy_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch updated metadata");
+
+    let updated_evidence_specs = updated_metadata
+        .get("evidence_specs")
+        .and_then(|v| v.as_array())
+        .expect("evidence_specs should still exist after unrelated edit");
+
+    let updated_spec = &updated_evidence_specs[0];
+    let updated_fields = updated_spec
+        .get("required_fields")
+        .and_then(|v| v.as_object())
+        .expect("required_fields should survive unrelated edit");
+
+    assert_eq!(
+        updated_fields.len(),
+        2,
+        "required_fields must not be destroyed by unrelated field edit"
+    );
+    assert_eq!(
+        updated_fields.get("version").and_then(|v| v.as_str()),
+        Some("1.0"),
+        "version must survive unrelated edit"
+    );
+
+    println!("✓ required_fields metadata survived: creation → edit → persistence");
+}

@@ -2499,4 +2499,58 @@ mod tests {
 
         assert_eq!(frameworks, vec!["Internal Baseline"]);
     }
+
+    #[test]
+    fn evidence_required_fields_round_trip_preserves_metadata() {
+        use std::collections::HashMap;
+
+        // Create an EvidenceSpec with non-empty required_fields metadata
+        let mut required_fields = HashMap::new();
+        required_fields.insert("field1".to_string(), "value1".to_string());
+        required_fields.insert("field2".to_string(), "value2".to_string());
+
+        let original_spec = EvidenceSpec {
+            kind: EvidenceKind::Command {
+                cmd: "systemctl status ssh".to_string(),
+                expect: "active".to_string(),
+            },
+            required_fields: required_fields.clone(),
+        };
+
+        // Round-trip: EvidenceSpec -> PolicyEvidence -> EvidenceSpec
+        let evidence = PolicyEvidence::from_evidence_spec(&original_spec);
+        assert_eq!(evidence.required_fields, required_fields, "from_evidence_spec should preserve required_fields");
+
+        let round_tripped_spec = evidence.to_evidence_spec();
+        
+        // Assert the required_fields map survived intact
+        assert_eq!(
+            round_tripped_spec.required_fields, original_spec.required_fields,
+            "required_fields must be exactly equal after round-trip"
+        );
+        
+        // Assert the metadata is not empty (regression guard)
+        assert!(!round_tripped_spec.required_fields.is_empty(),
+            "required_fields must not be destroyed to empty HashMap");
+    }
+
+    #[test]
+    fn evidence_required_fields_empty_round_trip_preserves_empty() {
+        // Verify that empty required_fields also round-trips correctly
+        let original_spec = EvidenceSpec {
+            kind: EvidenceKind::File {
+                path: "/etc/ssh/sshd_config".to_string(),
+                note: Some("SSH config".to_string()),
+            },
+            required_fields: std::collections::HashMap::new(),
+        };
+
+        let evidence = PolicyEvidence::from_evidence_spec(&original_spec);
+        let round_tripped_spec = evidence.to_evidence_spec();
+
+        assert!(
+            round_tripped_spec.required_fields.is_empty(),
+            "empty required_fields must remain empty after round-trip"
+        );
+    }
 }
