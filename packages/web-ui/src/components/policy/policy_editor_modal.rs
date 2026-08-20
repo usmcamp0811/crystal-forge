@@ -282,51 +282,89 @@ impl PolicyEvidence {
         }
     }
 
+    /// Validate this evidence row and return error message if invalid.
+    /// Returns None if valid, Some(error_msg) if invalid.
+    fn validate(&self) -> Option<String> {
+        match self.kind.as_str() {
+            "command" => {
+                if self.cmd.is_empty() {
+                    return Some("Command is required".to_string());
+                }
+                if self.expect.is_empty() {
+                    return Some("Expected output is required".to_string());
+                }
+            }
+            "log" => {
+                if self.unit.is_empty() {
+                    return Some("Unit/source is required".to_string());
+                }
+                if self.r#match.is_empty() {
+                    return Some("Match pattern is required".to_string());
+                }
+            }
+            "file" => {
+                if self.path.is_empty() {
+                    return Some("File path is required".to_string());
+                }
+            }
+            "unit_state" => {
+                if self.unit.is_empty() {
+                    return Some("Unit is required".to_string());
+                }
+                if self.state.is_empty() {
+                    return Some("State is required".to_string());
+                }
+            }
+            "eval_attr" => {
+                if self.attr.is_empty() {
+                    return Some("Attribute path is required".to_string());
+                }
+            }
+            "attestation" => {
+                if self.note.is_empty() {
+                    return Some("Attestation text is required".to_string());
+                }
+            }
+            _ => return Some(format!("Unknown evidence kind: {}", self.kind)),
+        }
+        None
+    }
+
     /// Convert PolicyEvidence to EvidenceSpec for the API.
-    /// Returns None if required fields are missing (validation error).
-    fn to_evidence_spec(&self) -> Option<EvidenceSpec> {
+    /// Does NOT validate - call validate() first.
+    fn to_evidence_spec(&self) -> EvidenceSpec {
         let kind = match self.kind.as_str() {
-            "command" if !self.cmd.is_empty() && !self.expect.is_empty() => {
-                EvidenceKind::Command {
-                    cmd: self.cmd.clone(),
-                    expect: self.expect.clone(),
-                }
-            }
-            "log" if !self.unit.is_empty() && !self.r#match.is_empty() => {
-                EvidenceKind::Log {
-                    source: self.source.clone(),
-                    unit: self.unit.clone(),
-                    match_text: self.r#match.clone(),
-                }
-            }
-            "file" if !self.path.is_empty() => {
-                EvidenceKind::File {
-                    path: self.path.clone(),
-                    note: if self.note.is_empty() { None } else { Some(self.note.clone()) },
-                }
-            }
-            "unit_state" if !self.unit.is_empty() && !self.state.is_empty() => {
-                EvidenceKind::UnitState {
-                    unit: self.unit.clone(),
-                    state: self.state.clone(),
-                }
-            }
-            "eval_attr" if !self.attr.is_empty() => {
-                EvidenceKind::EvalAttr {
-                    attr: self.attr.clone(),
-                }
-            }
-            "attestation" if !self.note.is_empty() => {
-                EvidenceKind::Attestation {
-                    note: self.note.clone(),
-                }
-            }
-            _ => return None,
+            "command" => EvidenceKind::Command {
+                cmd: self.cmd.clone(),
+                expect: self.expect.clone(),
+            },
+            "log" => EvidenceKind::Log {
+                source: self.source.clone(),
+                unit: self.unit.clone(),
+                match_text: self.r#match.clone(),
+            },
+            "file" => EvidenceKind::File {
+                path: self.path.clone(),
+                note: if self.note.is_empty() { None } else { Some(self.note.clone()) },
+            },
+            "unit_state" => EvidenceKind::UnitState {
+                unit: self.unit.clone(),
+                state: self.state.clone(),
+            },
+            "eval_attr" => EvidenceKind::EvalAttr {
+                attr: self.attr.clone(),
+            },
+            "attestation" => EvidenceKind::Attestation {
+                note: self.note.clone(),
+            },
+            _ => EvidenceKind::Attestation {
+                note: "invalid".to_string(),
+            },
         };
-        Some(EvidenceSpec {
+        EvidenceSpec {
             kind,
             required_fields: std::collections::HashMap::new(),
-        })
+        }
     }
 }
 
@@ -1720,8 +1758,26 @@ pub fn PolicyEditorModal(
                                 let selected_cis_section = if is_security && selected_framework.as_deref() == Some("CIS Benchmark") { non_empty(cis_section.read().clone()) } else { None };
                                 let selected_rationale = non_empty(rationale.read().clone());
 
-                                save_error.set(String::new());
+                                 save_error.set(String::new());
                                 is_saving.set(true);
+
+                                 // Validate evidence rows BEFORE async block
+                                 {
+                                     let current_evidence = evidence.read();
+                                     let validation_errors: Vec<String> = current_evidence
+                                         .iter()
+                                         .enumerate()
+                                         .filter_map(|(idx, ev)| {
+                                             ev.validate().map(|err| format!("Evidence row {}: {}", idx + 1, err))
+                                         })
+                                         .collect();
+                                     
+                                     if !validation_errors.is_empty() {
+                                         save_error.set(validation_errors.join("; "));
+                                         is_saving.set(false);
+                                         return;
+                                     }
+                                 }
 
                                  let initial_evidence_clone = initial_evidence.clone();
                                  spawn(async move {
@@ -1743,7 +1799,7 @@ pub fn PolicyEditorModal(
                                                   // Changed: convert and send (including empty array if cleared)
                                                   let specs: Vec<EvidenceSpec> = current_evidence
                                                       .iter()
-                                                      .filter_map(|ev| ev.to_evidence_spec())
+                                                      .map(|ev| ev.to_evidence_spec())
                                                       .collect();
                                                   Some(specs)
                                               }
