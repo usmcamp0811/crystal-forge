@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-20 15:55'
+updated_date: '2026-08-20 16:19'
 labels: []
 milestone: m-22
 dependencies:
@@ -191,6 +191,8 @@ P1 assignment mutation remediation: in persist_assignment_inner, after beginning
 Follow-up P2 list API fix: in list_assignments_for_scope, join compliance_bundle_assignments.current_version_id to compliance_bundle_assignment_versions and source bundle_version_id, enforcement_mode, assignment_overlay_digest, and reason from av; load exclusions, additions, and value_overrides for all returned current_version_ids with three ANY($1) queries; group results by assignment version and build the unchanged AssignmentResponse shape. Add a focused live-DB regression if the existing assignment_semantics patterns can exercise the handler, then run targeted server formatting/check/tests and commit/push the verified SHA.
 
 Follow-up assignment mutation error audit: propagate SQL failures in deactivate_assignment_inner, assignment audit actor lookup, system effective-policy assignment status, assignment effective-policy overlay loads, and preview target existence; preserve nullable query semantics and avoid unrelated paths. Verify with server fmt/check and assignment_semantics tests, then commit/push and record the resulting SHA.
+
+Current-head maintainer audit remediation: fix get_assignment_effective_policies to load bundle_version_id and enforcement_mode from current immutable assignment version; extend pair assignment metadata loading so conflict/unresolved bundle rollups preserve reason and status; add discriminating production-path tests for lineage V1 versus current immutable V2 and conflict reason preservation. Then run direct browser steps 20ab, 29f, and 30d on TASK-422 and origin/dev, followed by exact-head flake/CI verification.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
