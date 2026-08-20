@@ -2065,6 +2065,63 @@ pub async fn list_bundle_systems_for_version(
     )
     .await?;
 
+    // Collect all effective policies from all systems and materialize once
+    let all_effective_policies: Vec<crate::compliance::resolver::EffectivePolicy> = effective
+        .values()
+        .flat_map(|outcome| match outcome {
+            ResolutionOutcome::Resolved(set) => set.policies.iter().cloned().collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+    
+    let materialized_policies = if !all_effective_policies.is_empty() {
+        materialize_effective_policies(pool, &all_effective_policies).await?
+    } else {
+        Vec::new()
+    };
+    
+    // Index materialized policies by version ID for fast lookup
+    let policies_by_version: std::collections::HashMap<Uuid, PolicyRow> = all_effective_policies
+        .into_iter()
+        .zip(materialized_policies)
+        .map(|(effective, policy)| (effective.policy_version_id, policy))
+        .collect();
+
+    // Load assessment context for all systems in one batch
+    let contexts: std::collections::HashMap<Uuid, AssessmentContext> = {
+        let context_rows: Vec<(Uuid, i32, Value)> = sqlx::query_as(
+            r#"
+            SELECT s.id, d.id AS derivation_id, d.policy_results
+            FROM systems s
+            JOIN LATERAL (
+                SELECT ss.store_path
+                FROM system_states ss
+                WHERE ss.hostname = s.hostname
+                ORDER BY ss.timestamp DESC, ss.id DESC
+                LIMIT 1
+            ) deployed ON true
+            JOIN derivations d ON COALESCE(d.store_path, d.expected_store_path) = deployed.store_path
+            WHERE s.id = ANY($1)
+              AND d.derivation_type = 'nixos'
+            ORDER BY s.id, d.completed_at DESC NULLS LAST, d.id DESC
+            "#,
+        )
+        .bind(&system_ids)
+        .fetch_all(pool)
+        .await?;
+        
+        context_rows.into_iter().fold(
+            std::collections::HashMap::new(),
+            |mut contexts, (system_id, derivation_id, policy_results)| {
+                contexts.entry(system_id).or_insert(AssessmentContext {
+                    derivation_id,
+                    policy_results,
+                });
+                contexts
+            },
+        )
+    };
+
     let mut rollups = Vec::with_capacity(systems.len());
     for system in systems {
         // Retrieve pre-loaded assignment metadata
@@ -2076,14 +2133,40 @@ pub async fn list_bundle_systems_for_version(
             Some(ResolutionOutcome::Resolved(set))
                 if set.bundle_version_id == bundle_version_id =>
             {
-                effective_policy_rollup_with_evidence_and_metadata(
-                    pool,
-                    &system,
-                    &set.policies,
+                // Construct rollup from pre-loaded data (no DB queries in loop)
+                let system_policies: Vec<PolicyRow> = set.policies
+                    .iter()
+                    .filter_map(|ep| policies_by_version.get(&ep.policy_version_id).cloned())
+                    .collect();
+                
+                let mut statuses = Vec::with_capacity(system_policies.len());
+                let context = contexts.get(&system.id).cloned();
+                
+                for policy in system_policies {
+                    statuses.push(resolve_control_evidence_with_context(
+                        context.clone(),
+                        &system,
+                        policy
+                    ).status);
+                }
+                
+                let report_only = set.policies
+                    .iter()
+                    .filter(|policy| {
+                        matches!(
+                            policy.effective_mode,
+                            crate::compliance::resolver::AssignmentMode::ReportOnly
+                        )
+                    })
+                    .count() as i64;
+                
+                rollup_from_statuses_with_metadata(
+                    system.clone(),
+                    &statuses,
+                    report_only,
                     assignment_status,
                     assignment_approved_by,
                 )
-                .await?
             }
             Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup_with_metadata(
                 system,
