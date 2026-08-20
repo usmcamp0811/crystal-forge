@@ -1983,6 +1983,19 @@
       "baseline": "advisory"
     },
     {
+      "name": "30d-evidence-lifecycle",
+      "description": "Evidence editor lifecycle: create → add → save → reopen → edit → clear → save",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
       "name": "31-not-found",
       "description": "Catch-all 404 page renders for unknown routes inside the app shell",
       "route": "/:..route",

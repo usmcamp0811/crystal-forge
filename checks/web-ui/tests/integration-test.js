@@ -9310,6 +9310,110 @@ security.audit.enable = true;</fixtext>
     },
   },
   {
+    name: "30d-evidence-lifecycle",
+    description: "Evidence editor lifecycle: create → add → save → reopen → edit → clear → save",
+    action: async (page) => {
+      // Navigate to policies and open a modal to create a new policy
+      await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+      await page.getByRole("button", { name: /New policy/i }).click();
+      
+      // Fill in basic policy details
+      const nameInput = page.getByLabel("Policy name", { exact: true });
+      await nameInput.fill("Evidence Test Policy");
+      
+      const typeSelect = page.locator("select").first();
+      await typeSelect.selectOption("require_packages");
+      
+      // Navigate to Evidence tab and add evidence
+      const evidenceTab = page.getByTestId("policy-editor-tab-evidence");
+      if (!evidenceTab) throw new Error("Evidence tab not found");
+      await evidenceTab.click();
+      
+      // Verify empty state
+      await assertVisible(
+        page.getByText("No evidence defined", { exact: false }),
+        "Expected empty evidence state before adding",
+      );
+      
+      // Add Command evidence
+      const addEvidenceSelect = page.locator("select").filter({ has: page.getByText("Add evidence") }).last();
+      await addEvidenceSelect.selectOption("command");
+      
+      // Fill in evidence fields
+      const inputs = page.locator("input[class*='mono']");
+      await inputs.first().fill("systemctl status ssh");
+      await inputs.nth(1).fill("active");
+      
+      // Save policy with evidence
+      await page.getByRole("button", { name: /Create policy/i }).click();
+      await assertVisible(
+        page.getByText(/Evidence Test Policy/),
+        "Expected policy created with evidence",
+      );
+      await page.waitForTimeout(500);
+      
+      // Verify evidence persisted and reload
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      const policyRow = page.getByText("Evidence Test Policy").first();
+      await policyRow.click();
+      
+      // Check Evidence tab shows our spec
+      const evidenceTabAfterReload = page.getByTestId("policy-editor-tab-evidence");
+      if (evidenceTabAfterReload) await evidenceTabAfterReload.click();
+      
+      await assertVisible(
+        page.getByText("Command output", { exact: false }),
+        "Expected Command evidence after reload",
+      );
+      
+      // Edit evidence: add file evidence
+      const addEvidenceSelectAgain = page.locator("select").filter({ has: page.getByText("Add evidence") }).last();
+      await addEvidenceSelectAgain.selectOption("file");
+      
+      const fileInputs = page.locator("input[class*='mono']").filter({ hasNot: page.getByText("systemctl") });
+      await fileInputs.first().fill("/etc/ssh/sshd_config");
+      
+      // Save updated policy
+      await page.getByRole("button", { name: /Update|Save/i }).click();
+      await assertVisible(
+        page.getByText("saved", { exact: false }),
+        "Expected evidence update saved",
+      );
+      await page.waitForTimeout(500);
+      
+      // Verify two evidence specs persisted and clear all
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      const policyRowAfter = page.getByText("Evidence Test Policy").first();
+      await policyRowAfter.click();
+      
+      const evidenceTabFinal = page.getByTestId("policy-editor-tab-evidence");
+      if (evidenceTabFinal) await evidenceTabFinal.click();
+      
+      // Find and click Clear All button
+      const clearAllBtn = page.getByRole("button", { name: /Clear all/i });
+      if (await clearAllBtn.isVisible()) {
+        await clearAllBtn.click();
+      }
+      
+      // Save with cleared evidence
+      await page.getByRole("button", { name: /Update|Save/i }).click();
+      await page.waitForTimeout(500);
+      
+      // Verify evidence cleared after reload
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      const finalRow = page.getByText("Evidence Test Policy").first();
+      await finalRow.click();
+      
+      const evidenceTabVerify = page.getByTestId("policy-editor-tab-evidence");
+      if (evidenceTabVerify) await evidenceTabVerify.click();
+      
+      await assertVisible(
+        page.getByText("No evidence defined", { exact: false }),
+        "Expected evidence cleared after save and reload",
+      );
+    },
+  },
+  {
     name: "31-not-found",
     description: "Catch-all 404 page renders for unknown routes inside the app shell",
     action: async (page) => {
