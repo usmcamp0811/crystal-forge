@@ -251,9 +251,14 @@ pub fn validate_evidence_spec(spec: &serde_json::Value) -> Result<()> {
 
     match kind_lower.as_str() {
         "command" => {
+            // Command requires both cmd and expect (matching editor validation)
             let cmd = get_field("cmd");
             if cmd.is_none() || cmd.map_or(false, |s| s.is_empty()) {
                 bail!("evidence_specs: Command evidence must have non-empty 'cmd' field");
+            }
+            let expect = get_field("expect");
+            if expect.is_none() || expect.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: Command evidence must have non-empty 'expect' field");
             }
         }
         "file" => {
@@ -285,9 +290,18 @@ pub fn validate_evidence_spec(spec: &serde_json::Value) -> Result<()> {
             }
         }
         "log" => {
+            // Log requires unit and match_text in addition to source (matching editor validation)
             let source = get_field("source");
             if source.is_none() || source.map_or(false, |s| s.is_empty()) {
                 bail!("evidence_specs: Log evidence must have non-empty 'source' field");
+            }
+            let unit = get_field("unit");
+            if unit.is_none() || unit.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: Log evidence must have non-empty 'unit' field");
+            }
+            let match_text = get_field("match_text");
+            if match_text.is_none() || match_text.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: Log evidence must have non-empty 'match_text' field");
             }
         }
         _ => {
@@ -981,5 +995,128 @@ mod tests {
         assert!(merged["references"].is_array());
         assert!(merged["checks"].is_array());
         assert!(merged["fixes"].is_array());
+    }
+
+    // ── Evidence validation ──────────────────────────────────────────────────────
+
+    #[test]
+    fn evidence_command_requires_expect() {
+        // Valid: both cmd and expect
+        let valid = serde_json::json!({
+            "kind": "command",
+            "cmd": "systemctl status ssh",
+            "expect": "active"
+        });
+        assert!(validate_evidence_spec(&valid).is_ok());
+
+        // Invalid: missing expect
+        let missing_expect = serde_json::json!({
+            "kind": "command",
+            "cmd": "systemctl status ssh"
+        });
+        assert!(validate_evidence_spec(&missing_expect).is_err());
+
+        // Invalid: empty expect
+        let empty_expect = serde_json::json!({
+            "kind": "command",
+            "cmd": "systemctl status ssh",
+            "expect": ""
+        });
+        assert!(validate_evidence_spec(&empty_expect).is_err());
+    }
+
+    #[test]
+    fn evidence_log_requires_unit_and_match_text() {
+        // Valid: all three fields
+        let valid = serde_json::json!({
+            "kind": "log",
+            "source": "journald",
+            "unit": "auditd.service",
+            "match_text": "audit: rules loaded"
+        });
+        assert!(validate_evidence_spec(&valid).is_ok());
+
+        // Invalid: missing unit
+        let missing_unit = serde_json::json!({
+            "kind": "log",
+            "source": "journald",
+            "match_text": "audit: rules loaded"
+        });
+        assert!(validate_evidence_spec(&missing_unit).is_err());
+
+        // Invalid: missing match_text
+        let missing_match = serde_json::json!({
+            "kind": "log",
+            "source": "journald",
+            "unit": "auditd.service"
+        });
+        assert!(validate_evidence_spec(&missing_match).is_err());
+
+        // Invalid: empty unit
+        let empty_unit = serde_json::json!({
+            "kind": "log",
+            "source": "journald",
+            "unit": "",
+            "match_text": "audit: rules loaded"
+        });
+        assert!(validate_evidence_spec(&empty_unit).is_err());
+    }
+
+    #[test]
+    fn evidence_file_requires_path() {
+        let valid = serde_json::json!({
+            "kind": "file",
+            "path": "/etc/ssh/sshd_config"
+        });
+        assert!(validate_evidence_spec(&valid).is_ok());
+
+        let missing_path = serde_json::json!({
+            "kind": "file"
+        });
+        assert!(validate_evidence_spec(&missing_path).is_err());
+    }
+
+    #[test]
+    fn evidence_eval_attr_requires_attr() {
+        let valid = serde_json::json!({
+            "kind": "eval_attr",
+            "attr": "config.services.openssh.settings.PermitRootLogin"
+        });
+        assert!(validate_evidence_spec(&valid).is_ok());
+
+        let missing_attr = serde_json::json!({
+            "kind": "eval_attr"
+        });
+        assert!(validate_evidence_spec(&missing_attr).is_err());
+    }
+
+    #[test]
+    fn evidence_unit_state_requires_unit_and_state() {
+        let valid = serde_json::json!({
+            "kind": "unit_state",
+            "unit": "auditd.service",
+            "state": "active"
+        });
+        assert!(validate_evidence_spec(&valid).is_ok());
+
+        let missing_state = serde_json::json!({
+            "kind": "unit_state",
+            "unit": "auditd.service"
+        });
+        assert!(validate_evidence_spec(&missing_state).is_err());
+    }
+
+    #[test]
+    fn evidence_attestation_requires_note() {
+        let valid = serde_json::json!({
+            "kind": "attestation",
+            "note": "Manually verified and approved"
+        });
+        assert!(validate_evidence_spec(&valid).is_ok());
+
+        let missing_note = serde_json::json!({
+            "kind": "attestation"
+        });
+        assert!(validate_evidence_spec(&missing_note).is_err());
     }
 }
