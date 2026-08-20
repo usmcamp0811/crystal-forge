@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-20 13:55'
+updated_date: '2026-08-20 14:40'
 labels: []
 milestone: m-22
 dependencies:
@@ -185,6 +185,8 @@ This plan addresses the five remaining implementation gaps preventing MR !316 me
 All changes are logical units suitable for single MR commit.
 
 Follow-up blocker slice from 9898ac66: reproduce the valid live HTTP assignment create against the repository harness, capture only safe structured DB error context, verify migration/test-DB setup, fix a confirmed production defect if present; then revise step 29f to use the real assignment UI/API flow where the harness supports it and run the repository-supported focused check. Do not claim completion if Playwright or isolated PostgreSQL infrastructure remains unavailable.
+
+P1 assignment mutation remediation: in persist_assignment_inner, after beginning the transaction load the active assignment's current immutable snapshot with current_version_id JOIN compliance_bundle_assignment_versions av FOR UPDATE for update mutations. Use av.bundle_version_id for lineage locking, expected-version coherence, resolver input, uniqueness, assignment-version insertion, mutable pointer update, audit, and response; retain payload.bundle_version_id for creates. Verify with targeted assignment_semantics and cargo check, then commit and push the focused change.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
