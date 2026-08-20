@@ -236,7 +236,54 @@ impl PolicyEvidence {
         }
     }
 
+    /// Convert EvidenceSpec to editable PolicyEvidence form.
+    /// Handles all evidence kinds and reconstructs form fields for editing.
+    fn from_evidence_spec(spec: &EvidenceSpec) -> Self {
+        match &spec.kind {
+            EvidenceKind::Command { cmd, expect } => Self {
+                kind: "command".to_string(),
+                cmd: cmd.clone(),
+                expect: expect.clone(),
+                ..Self::new("command")
+            },
+            EvidenceKind::Log {
+                source,
+                unit,
+                match_text,
+            } => Self {
+                kind: "log".to_string(),
+                source: source.clone(),
+                unit: unit.clone(),
+                r#match: match_text.clone(),
+                ..Self::new("log")
+            },
+            EvidenceKind::File { path, note } => Self {
+                kind: "file".to_string(),
+                path: path.clone(),
+                note: note.clone().unwrap_or_default(),
+                ..Self::new("file")
+            },
+            EvidenceKind::UnitState { unit, state } => Self {
+                kind: "unit_state".to_string(),
+                unit: unit.clone(),
+                state: state.clone(),
+                ..Self::new("unit_state")
+            },
+            EvidenceKind::EvalAttr { attr } => Self {
+                kind: "eval_attr".to_string(),
+                attr: attr.clone(),
+                ..Self::new("eval_attr")
+            },
+            EvidenceKind::Attestation { note } => Self {
+                kind: "attestation".to_string(),
+                note: note.clone(),
+                ..Self::new("attestation")
+            },
+        }
+    }
+
     /// Convert PolicyEvidence to EvidenceSpec for the API.
+    /// Returns None if required fields are missing (validation error).
     fn to_evidence_spec(&self) -> Option<EvidenceSpec> {
         let kind = match self.kind.as_str() {
             "command" if !self.cmd.is_empty() && !self.expect.is_empty() => {
@@ -1086,12 +1133,22 @@ pub fn PolicyEditorModal(
     });
     let framework_options = custom_frameworks(&policy_library.read());
     let mut rules = use_signal(|| seed_rules);
-     let mut evidence: Signal<Vec<PolicyEvidence>> = use_signal(Vec::new);
-     let initial_evidence_count = existing_policy
+     // Initialize evidence from existing policy specs, or empty if creating new
+     let initial_evidence: Vec<PolicyEvidence> = existing_policy
          .as_ref()
          .and_then(|p| p.evidence_specs.as_ref())
-         .map(|specs| specs.len())
-         .unwrap_or(0);
+         .map(|specs| {
+             specs
+                 .iter()
+                 .map(PolicyEvidence::from_evidence_spec)
+                 .collect()
+         })
+         .unwrap_or_default();
+     let initial_evidence_count = initial_evidence.len();
+     let mut evidence: Signal<Vec<PolicyEvidence>> = use_signal({
+         let ev = initial_evidence.clone();
+         move || ev.clone()
+     });
      let mut add_rule_kind = use_signal(String::new);
      let mut add_evidence_kind = use_signal(String::new);
      let mut active_tab = use_signal(|| PolicyEditorTab::Details);
@@ -1666,29 +1723,31 @@ pub fn PolicyEditorModal(
                                 save_error.set(String::new());
                                 is_saving.set(true);
 
-                                spawn(async move {
-                                    let result = if let Some(policy_id) = editing_id {
-                                         // Determine evidence_specs dirty state:
-                                         // - None if evidence count hasn't changed (preserve)
-                                         // - Some([]) if evidence was cleared
-                                         // - Some(items) if evidence was added/modified
-                                         let evidence_specs = {
-                                             let current_evidence = evidence.read();
-                                             let current_count = current_evidence.len();
-                                             if current_count == initial_evidence_count && current_count == 0 {
-                                                 // Both zero and unchanged: preserve
-                                                 None
-                                             } else if current_count != initial_evidence_count || current_count > 0 {
-                                                 // Either count changed or there's evidence: send it
-                                                 let specs: Vec<EvidenceSpec> = current_evidence
-                                                     .iter()
-                                                     .filter_map(|ev| ev.to_evidence_spec())
-                                                     .collect();
-                                                 Some(specs)
-                                             } else {
-                                                 None
-                                             }
-                                         };
+                                 let initial_evidence_clone = initial_evidence.clone();
+                                 spawn(async move {
+                                     let result = if let Some(policy_id) = editing_id {
+                                          // Determine evidence_specs dirty state:
+                                          // Compare current evidence against initial state
+                                          // - None if unchanged (preserve existing)
+                                          // - Some([]) if cleared to empty
+                                          // - Some(items) if modified/added
+                                          let evidence_specs = {
+                                              let current_evidence = evidence.read();
+                                              let current_count = current_evidence.len();
+                                              let initial_count = initial_evidence_clone.len();
+                                              
+                                              // No change = preserve
+                                              if current_count == initial_count && current_evidence.clone() == initial_evidence_clone {
+                                                  None
+                                              } else {
+                                                  // Changed: convert and send (including empty array if cleared)
+                                                  let specs: Vec<EvidenceSpec> = current_evidence
+                                                      .iter()
+                                                      .filter_map(|ev| ev.to_evidence_spec())
+                                                      .collect();
+                                                  Some(specs)
+                                              }
+                                          };
 
                                          let request = UpdateDeploymentPolicyRequest {
                                               name: Some(name.clone()),
