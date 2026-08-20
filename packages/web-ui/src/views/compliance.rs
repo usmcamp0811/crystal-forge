@@ -1115,18 +1115,19 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
         .map(|version| version.publication_state.clone())
         .unwrap_or_else(|| "unknown".to_string());
 
-    let request = move || {
-        let scope_id = uuid::Uuid::parse_str(scope_id.read().trim()).ok()?;
-        Some(CreateAssignmentRequest {
-            bundle_version_id: props.bundle_version_id,
-            scope_type: scope_type.read().clone(),
-            scope_id,
-            enforcement_mode: Some(enforcement_mode.read().clone()),
-            exclusions: (!exclusions.read().is_empty()).then_some(exclusions.read().clone()),
-            additions: (!additions.read().is_empty()).then_some(additions.read().clone()),
-            value_overrides: None,
-        })
-    };
+     let request = move || {
+         let scope_id = uuid::Uuid::parse_str(scope_id.read().trim()).ok()?;
+         Some(CreateAssignmentRequest {
+             bundle_version_id: props.bundle_version_id,
+             scope_type: scope_type.read().clone(),
+             scope_id,
+             enforcement_mode: Some(enforcement_mode.read().clone()),
+             exclusions: (!exclusions.read().is_empty()).then_some(exclusions.read().clone()),
+             additions: (!additions.read().is_empty()).then_some(additions.read().clone()),
+             value_overrides: None,
+             reason: None,
+         })
+     };
 
     let current_request = request();
     let can_preview = current_request.is_some() && !*preview_busy.read() && !*busy.read();
@@ -1595,13 +1596,14 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                             };
                                             edit_busy.set(true);
                                             edit_error.set(None);
-                                            let request = UpdateAssignmentRequest {
-                                                expected_version_id: cm,
-                                                enforcement_mode: Some((*edit_mode.read()).clone()),
-                                                exclusions: Some(exclusions),
-                                                additions: Some(additions),
-                                                value_overrides: Some(value_overrides),
-                                            };
+                                             let request = UpdateAssignmentRequest {
+                                                 expected_version_id: cm,
+                                                 enforcement_mode: Some((*edit_mode.read()).clone()),
+                                                 exclusions: Some(exclusions),
+                                                 additions: Some(additions),
+                                                 value_overrides: Some(value_overrides),
+                                                 reason: crate::api::models::FieldUpdate::Unset,
+                                             };
                                             let st = scope_type.clone();
                                             let si = scope_id;
                                             spawn(async move {
@@ -1664,14 +1666,15 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                         return;
                                     };
                                     let request = CreateAssignmentRequest {
-                                        bundle_version_id,
-                                        scope_type: scope_type.clone(),
-                                        scope_id,
-                                        enforcement_mode: Some(mode.clone()),
-                                        exclusions: Some(exclusions),
-                                        additions: Some(additions),
-                                        value_overrides: Some(value_overrides),
-                                    };
+                                         bundle_version_id,
+                                         scope_type: scope_type.clone(),
+                                         scope_id,
+                                         enforcement_mode: Some(mode.clone()),
+                                         exclusions: Some(exclusions),
+                                         additions: Some(additions),
+                                         value_overrides: Some(value_overrides),
+                                         reason: None,
+                                     };
                                     preview_loading.set(true);
                                     spawn(async move {
                                         match preview_compliance_assignment(&request).await {

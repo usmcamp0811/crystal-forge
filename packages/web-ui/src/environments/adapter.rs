@@ -519,15 +519,16 @@ pub async fn reconcile_environment_assignments(
                 bundle_version_id,
                 enforcement_mode,
             } => {
-                let req = CreateAssignmentRequest {
-                    bundle_version_id,
-                    scope_type: "environment".to_string(),
-                    scope_id: environment_id,
-                    enforcement_mode: Some(enforcement_mode),
-                    exclusions: None,
-                    additions: None,
-                    value_overrides: None,
-                };
+                 let req = CreateAssignmentRequest {
+                     bundle_version_id,
+                     scope_type: "environment".to_string(),
+                     scope_id: environment_id,
+                     enforcement_mode: Some(enforcement_mode),
+                     exclusions: None,
+                     additions: None,
+                     value_overrides: None,
+                     reason: None,
+                 };
                 create_compliance_assignment(&req)
                     .await
                     .map_err(|e| format!("Failed to create assignment: {e}"))?;
@@ -540,13 +541,14 @@ pub async fn reconcile_environment_assignments(
                 additions,
                 value_overrides,
             } => {
-                let request = UpdateAssignmentRequest {
-                    expected_version_id: current_version_id,
-                    enforcement_mode: Some(enforcement_mode),
-                    exclusions: Some(exclusions),
-                    additions: Some(additions),
-                    value_overrides: Some(value_overrides),
-                };
+                 let request = UpdateAssignmentRequest {
+                     expected_version_id: current_version_id,
+                     enforcement_mode: Some(enforcement_mode),
+                     exclusions: Some(exclusions),
+                     additions: Some(additions),
+                     value_overrides: Some(value_overrides),
+                     reason: crate::api::models::FieldUpdate::Unset,
+                 };
                 update_compliance_assignment(&assignment_id, &request)
                     .await
                     .map_err(|e| format!("Failed to update assignment: {e}"))?;
