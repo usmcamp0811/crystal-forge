@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-20 20:43'
+updated_date: '2026-08-20 20:47'
 labels: []
 milestone: m-22
 dependencies:
@@ -257,6 +257,8 @@ Follow-up verification at pushed SHA 05e2e364bc562d2199611c18a3e3072abf656a35: c
 The broad nix build .#checks.x86_64-linux.web-ui run did not provide a clean result: it was interrupted after the mega integration reported many unrelated prerequisite failures; 29f failed only because its required bundle from 20ab was absent after 20ab failed. nix flake check -L was also interrupted by the same broad-check run and is not claimed green. Focused reconciliation check is green; no code change was made for the broad unrelated failures. Task remains In Progress and not merge-ready.
 
 At clean pushed SHA 009b5738, reproduced `deletion_lifecycle_database_matrix` against isolated PostgreSQL `crystal_forge_task422_test` with `--ignored --exact --nocapture --test-threads=1`: failed at the active draft assignment assertion because `delete_bundle` returned `Deleted`. Root cause confirmed: TASK eligibility joins bundle versions and counts assignment versions only for accepted/deprecated states, unlike origin/dev which counts every assignment-version row. Migration 0228 also permits direct deletion of mutable assignment versions/children. The existing assignment-row cleanup is still needed for versionless rows created by the legacy bundle-environment trigger, so remediation will narrow rather than remove that cleanup.
+
+Deletion invariant remediation completed, committed, and pushed as `899b491d` (`fix(policies): preserve immutable assignment history on deletion`). Migration 0231 restores strict assignment snapshot/child immutability; bundle eligibility counts all assignment-version history while retaining deletion of versionless legacy draft assignment rows. Live isolated DB verification after applying migration 0231: `deletion_lifecycle` ignored suite passed 2/2, including active/inactive blockers, direct snapshot DELETE rejection, versionless draft cleanup, and imported draft policy cleanup. Server cargo fmt, offline cargo check, and git diff check passed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
