@@ -1501,14 +1501,15 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                         .join(", ")
                 });
                  let mut edit_overrides = use_signal(|| current_overrides_text.clone());
-                 let mut edit_reason = use_signal(|| assignment.reason.clone().unwrap_or_default());
+                  let original_reason = assignment.reason.clone().unwrap_or_default();
+                  let mut edit_reason = use_signal(|| original_reason.clone());
                  let mut edit_busy = use_signal(|| false);
                  let mut edit_error = use_signal(|| None::<String>);
                  let edits_dirty = *edit_mode.read() != current_mode
                      || *edit_exclusions.read() != current_exclusions_text
                      || *edit_additions.read() != current_additions_text
                      || *edit_overrides.read() != current_overrides_text
-                     || (*edit_reason.read() != assignment.reason.clone().unwrap_or_default());
+                      || (*edit_reason.read() != original_reason);
                 rsx! {
                     div { class: "card", style: "padding:10px 14px;display:flex;flex-direction:column;gap:6px;",
                         div { style: "display:flex;justify-content:space-between;align-items:center;",
@@ -1630,18 +1631,14 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                             edit_busy.set(true);
                                             edit_error.set(None);
                                             
-                                            // Handle reason tri-state:
-                                            // - empty string = Unset (preserve)
-                                            // - "null" = Clear
-                                            // - any other value = Set
-                                            let reason_val = edit_reason.read().clone();
-                                            let reason_update = if reason_val.trim().is_empty() {
-                                                crate::api::models::FieldUpdate::Unset
-                                            } else if reason_val.trim() == "null" {
-                                                crate::api::models::FieldUpdate::Clear
-                                            } else {
-                                                crate::api::models::FieldUpdate::Set(reason_val)
-                                            };
+                                             let reason_val = edit_reason.read().clone();
+                                             let reason_update = if reason_val == original_reason {
+                                                 crate::api::models::FieldUpdate::Unset
+                                             } else if !original_reason.is_empty() && reason_val.trim().is_empty() {
+                                                 crate::api::models::FieldUpdate::Clear
+                                             } else {
+                                                 crate::api::models::FieldUpdate::Set(reason_val.trim().to_string())
+                                             };
 
                                              let request = UpdateAssignmentRequest {
                                                  expected_version_id: cm,

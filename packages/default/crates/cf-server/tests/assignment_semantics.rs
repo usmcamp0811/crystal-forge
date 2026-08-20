@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use crystal_forge::queries::compliance::{
     determine_assignment_status_for_system, list_bundle_systems_for_version,
+    load_assignment_metadata_for_systems,
 };
 
 // ---------------------------------------------------------------------------
@@ -190,6 +191,207 @@ async fn create_system_assignment(
         .execute(pool)
         .await
         .expect("set current_version_id");
+}
+
+async fn create_system_assignment_with_reason(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    bundle_version_id: Uuid,
+    system_id: Uuid,
+    reason: Option<&str>,
+) -> (Uuid, Uuid) {
+    let assignment_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO compliance_bundle_assignments
+           (id, bundle_id, bundle_version_id, system_id, scope_type, active,
+            assignment_overlay_digest, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, 'system', true, 'test-digest',
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
+    )
+    .bind(assignment_id)
+    .bind(bundle_id)
+    .bind(bundle_version_id)
+    .bind(system_id)
+    .execute(pool)
+    .await
+    .expect("create reason assignment");
+
+    let version_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO compliance_bundle_assignment_versions
+           (assignment_id, version_number, bundle_version_id, enforcement_mode,
+            assignment_overlay_digest, reason, created_at)
+           VALUES ($1, 1, $2, 'enforce', 'test-digest', $3, CURRENT_TIMESTAMP)
+           RETURNING id"#,
+    )
+    .bind(assignment_id)
+    .bind(bundle_version_id)
+    .bind(reason)
+    .fetch_one(pool)
+    .await
+    .expect("create reason assignment version");
+
+    sqlx::query("UPDATE compliance_bundle_assignments SET current_version_id = $1 WHERE id = $2")
+        .bind(version_id)
+        .bind(assignment_id)
+        .execute(pool)
+        .await
+        .expect("set reason assignment version");
+
+    (assignment_id, version_id)
+}
+
+async fn append_assignment_version(
+    pool: &PgPool,
+    assignment_id: Uuid,
+    previous_version_id: Uuid,
+    version_number: i64,
+    bundle_version_id: Uuid,
+    reason: Option<&str>,
+) -> Uuid {
+    let version_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO compliance_bundle_assignment_versions
+           (assignment_id, previous_version_id, version_number, bundle_version_id,
+            enforcement_mode, assignment_overlay_digest, reason, created_at)
+           VALUES ($1, $2, $3, $4, 'enforce', 'test-digest', $5, CURRENT_TIMESTAMP)
+           RETURNING id"#,
+    )
+    .bind(assignment_id)
+    .bind(previous_version_id)
+    .bind(version_number)
+    .bind(bundle_version_id)
+    .bind(reason)
+    .fetch_one(pool)
+    .await
+    .expect("append assignment version");
+
+    sqlx::query(
+        "UPDATE compliance_bundle_assignments SET current_version_id = $1, bundle_version_id = $2 WHERE id = $3",
+    )
+    .bind(version_id)
+    .bind(bundle_version_id)
+    .bind(assignment_id)
+    .execute(pool)
+    .await
+    .expect("advance assignment version");
+
+    version_id
+}
+
+#[sqlx::test]
+async fn test_assignment_reason_lifecycle_and_snapshot_authority(pool: PgPool) {
+    let bundle_id = create_bundle(&pool, "assignment-reason-lifecycle", "NIST CSF").await;
+    let v1_id = create_bundle_version(&pool, bundle_id, "1.0", "accepted", "Version 1").await;
+    let v2_id = create_bundle_version(&pool, bundle_id, "2.0", "accepted", "Version 2").await;
+    set_current_published(&pool, bundle_id, v2_id).await;
+    let system_id = create_system(&pool, "assignment-reason-system", None).await;
+    let (assignment_id, version_a_id) =
+        create_system_assignment_with_reason(&pool, bundle_id, v2_id, system_id, Some("Reason A"))
+            .await;
+
+    let metadata =
+        load_assignment_metadata_for_systems(&pool, bundle_id, Some(v2_id), &[system_id])
+            .await
+            .expect("read reason A");
+    assert_eq!(metadata[&system_id].reason.as_deref(), Some("Reason A"));
+
+    let version_b_id = append_assignment_version(
+        &pool,
+        assignment_id,
+        version_a_id,
+        2,
+        v2_id,
+        Some("Reason B"),
+    )
+    .await;
+    let metadata =
+        load_assignment_metadata_for_systems(&pool, bundle_id, Some(v2_id), &[system_id])
+            .await
+            .expect("read reason B");
+    assert_eq!(metadata[&system_id].reason.as_deref(), Some("Reason B"));
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT reason FROM compliance_bundle_assignment_versions WHERE id = $1",
+        )
+        .bind(version_a_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read historical reason"),
+        Some("Reason A".to_string())
+    );
+
+    let version_preserved_id = append_assignment_version(
+        &pool,
+        assignment_id,
+        version_b_id,
+        3,
+        v2_id,
+        Some("Reason B"),
+    )
+    .await;
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT reason FROM compliance_bundle_assignment_versions WHERE id = $1",
+        )
+        .bind(version_preserved_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read omitted reason result"),
+        Some("Reason B".to_string())
+    );
+
+    append_assignment_version(&pool, assignment_id, version_preserved_id, 4, v2_id, None).await;
+    let metadata =
+        load_assignment_metadata_for_systems(&pool, bundle_id, Some(v2_id), &[system_id])
+            .await
+            .expect("read cleared reason");
+    assert_eq!(metadata[&system_id].reason, None);
+
+    sqlx::query("UPDATE compliance_bundle_assignments SET bundle_version_id = $1 WHERE id = $2")
+        .bind(v1_id)
+        .bind(assignment_id)
+        .execute(&pool)
+        .await
+        .expect("corrupt mutable lineage");
+    let current_version_id: Uuid = sqlx::query_scalar(
+        "SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1",
+    )
+    .bind(assignment_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read current assignment version");
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT bundle_version_id FROM compliance_bundle_assignment_versions WHERE id = $1",
+        )
+        .bind(current_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read immutable target"),
+        v2_id
+    );
+
+    let version_after_corruption = append_assignment_version(
+        &pool,
+        assignment_id,
+        current_version_id,
+        5,
+        v2_id,
+        Some("Reason C"),
+    )
+    .await;
+    let snapshot_target: Uuid = sqlx::query_scalar(
+        "SELECT bundle_version_id FROM compliance_bundle_assignment_versions WHERE id = $1",
+    )
+    .bind(version_after_corruption)
+    .fetch_one(&pool)
+    .await
+    .expect("read updated immutable target");
+    assert_eq!(snapshot_target, v2_id);
+    let metadata =
+        load_assignment_metadata_for_systems(&pool, bundle_id, Some(v2_id), &[system_id])
+            .await
+            .expect("read reason after lineage corruption");
+    assert_eq!(metadata[&system_id].reason.as_deref(), Some("Reason C"));
 }
 
 async fn create_environment_assignment(

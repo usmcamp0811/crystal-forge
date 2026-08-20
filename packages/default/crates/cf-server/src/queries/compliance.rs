@@ -2875,28 +2875,6 @@ pub async fn load_assignment_metadata_for_systems(
     };
 
     // Build the result map
-    // Note: created_by is semantically the user who made the assignment decision.
-    // This maps to assignment_approved_by in the API.
-    //
-    // CRITICAL P2 DESIGN GAP: assignment_reason is a DESIGN REQUIREMENT that remains
-    // UNIMPLEMENTED. The TASK-422 compliance redesign explicitly displays:
-    //
-    //   "pinned to this revision... {assignment.reason}"
-    //
-    // in the per-system evidence detail callout. Users are shown each host's assignment
-    // reason. However, the current schema has NO reason/justification field, the API has
-    // NO field to accept reason on create/update, and assignment_reason is hard-coded None.
-    //
-    // TASK-428 tracks full implementation:
-    // - Add reason: text field to compliance_bundle_assignment_versions
-    // - Add reason: Option<String> to CreateAssignmentRequest / UpdateAssignmentRequest
-    // - Populate reason when inserting assignment version rows
-    // - Load and wire through to ComplianceSystemRollup.assignment_reason
-    // - Add UI input component for reason during assignment creation/edit
-    //
-    // assignment_deadline and assignment_poam are unmodeled but not design requirements
-    // (they appear conditionally in the mock). Leave them None unless domain work
-    // explicitly requires them.
     let mut result = std::collections::HashMap::new();
     for AssignmentRow {
         system_id,

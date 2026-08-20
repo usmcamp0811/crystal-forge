@@ -9158,6 +9158,152 @@ security.audit.enable = true;</fixtext>
       await page.unroute("**/api/v1/compliance/bundles*");
     },
   },
+  {
+    name: "29f-compliance-assignment-reason-semantics",
+    description: "Compliance assignment reason survives unrelated edits, changes, and explicit clearing",
+    action: async (page) => {
+      const bundleId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      const versionId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+      const environmentId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+      const assignmentId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+      const assignmentVersionId = "99999999-9999-4999-8999-999999999999";
+      let reason = null;
+      let versionNumber = 1;
+      const assignment = () => ({
+        id: assignmentId,
+        current_version_id: assignmentVersionId,
+        bundle_id: bundleId,
+        bundle_version_id: versionId,
+        scope_type: "environment",
+        scope_id: environmentId,
+        enforcement_mode: "enforce",
+        exclusions: [],
+        additions: [],
+        value_overrides: [],
+        assignment_overlay_digest: "fixture-digest",
+        active: true,
+        reason,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+      const bundle = {
+        id: bundleId,
+        name: "Assignment reason fixture",
+        framework: "NIST 800-53",
+        version: "rev5",
+        description: "Assignment reason browser fixture.",
+        layer: "fleet",
+        owner: "Platform Security",
+        last_review: new Date().toISOString(),
+        policy_ids: [],
+        required_envs: [{ id: environmentId, name: "production", color_hex: "#3b82f6" }],
+        control_count: 0,
+        policy_count: 0,
+        requirement_count: 0,
+        applicable_system_count: 0,
+        aggregate_score: 0,
+        environment_count: 1,
+        current_published_version_id: versionId,
+        current_published_version: "rev5",
+        versions: [{
+          id: versionId,
+          bundle_id: bundleId,
+          version: "rev5",
+          publication_state: "accepted",
+          trust_state: "trusted",
+          semantic_digest: "fixture-digest",
+          created_at: new Date().toISOString(),
+          published_at: new Date().toISOString(),
+          derived_from_version_id: null,
+          policy_count: 0,
+          requirement_count: 0,
+          control_count: 0,
+          is_current_published: true,
+          is_current_draft: false,
+        }],
+      };
+
+      await page.route("**/api/v1/compliance/bundles*", async (route) => {
+        if (route.request().method() === "GET" && !route.request().url().includes("/systems")) {
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([bundle]) });
+        } else {
+          await route.continue();
+        }
+      });
+      await page.route(`**/api/v1/compliance/bundles/${bundleId}/systems*`, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ bundle_id: bundleId, bundle_version_id: versionId, systems: [], totals: { system_count: 0, fully_compliant_count: 0, pass: 0, warn: 0, fail: 0, waiver: 0, total_controls: 0, overall_score: 0 } }),
+        });
+      });
+      await page.route(`**/api/v1/compliance/bundle-versions/${versionId}/requirement-coverage`, async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ bundle_version_id: versionId, frameworks: [], total_requirements: 0, full: 0, partial: 0, unmapped: 0, rows: [] }) });
+      });
+      await page.route(`**/api/v1/compliance/bundle-versions/${versionId}/policies`, async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      });
+      await page.route("**/api/v1/policies*", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      });
+      await page.route("**/api/v1/environments*", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([{ id: environmentId, name: "production", description: null, color_hex: "#3b82f6", is_active: true, system_count: 0 }]) });
+      });
+      await page.route(`**/api/v1/environments/${environmentId}/compliance-assignments`, async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ assignments: reason === null && versionNumber === 1 ? [] : [assignment()] }) });
+      });
+      await page.route("**/api/v1/compliance/assignments/preview", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ policies: [], warnings: [], effective_set_digest: "fixture-digest" }) });
+      });
+      await page.route("**/api/v1/compliance/assignments", async (route) => {
+        if (route.request().method() === "POST") {
+          reason = (await route.request().postDataJSON()).reason || null;
+          versionNumber = 1;
+          await route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify(assignment()) });
+        } else {
+          await route.continue();
+        }
+      });
+      await page.route(`**/api/v1/compliance/assignments/${assignmentId}`, async (route) => {
+        if (route.request().method() === "PUT") {
+          const payload = await route.request().postDataJSON();
+          if (Object.prototype.hasOwnProperty.call(payload, "reason")) reason = payload.reason;
+          versionNumber += 1;
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(assignment()) });
+        } else {
+          await route.continue();
+        }
+      });
+
+      await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+      await page.getByText("Assignment reason fixture", { exact: true }).first().click();
+      await page.getByRole("button", { name: /Assign bundle/i }).click();
+      const createReason = page.getByPlaceholder(/Enter reason for this assignment/i);
+      await createReason.fill("Reason A");
+      await page.locator("select").nth(2).selectOption(environmentId);
+      await page.getByRole("button", { name: /Preview effective set/i }).click();
+      await page.getByRole("button", { name: /Create assignment/i }).click();
+      await page.getByRole("button", { name: "Edit mode", exact: true }).click();
+      const editReason = page.getByPlaceholder("reason (leave empty to preserve)");
+      await assertValue(editReason, "Reason A", "Created assignment reason should be authoritative on reopen");
+
+      await page.locator("select").filter({ has: page.locator("option", { hasText: "Report only" }) }).first().selectOption("report_only");
+      await page.getByRole("button", { name: "Save", exact: true }).click();
+      await page.getByRole("button", { name: "Edit mode", exact: true }).click();
+      await assertValue(page.getByPlaceholder("reason (leave empty to preserve)"), "Reason A", "Unrelated edit must preserve reason A");
+
+      await page.getByPlaceholder("reason (leave empty to preserve)").fill("Reason B");
+      await page.getByRole("button", { name: "Save", exact: true }).click();
+      await page.getByRole("button", { name: "Edit mode", exact: true }).click();
+      await assertValue(page.getByPlaceholder("reason (leave empty to preserve)"), "Reason B", "Changed assignment reason should read back as B");
+
+      await page.getByPlaceholder("reason (leave empty to preserve)").fill("");
+      await page.getByRole("button", { name: "Save", exact: true }).click();
+      await page.getByRole("button", { name: "Edit mode", exact: true }).click();
+      await assertValue(page.getByPlaceholder("reason (leave empty to preserve)"), "", "Cleared assignment reason should be absent");
+      if (reason !== null) throw new Error(`Expected explicit clear to send null/absent reason, got ${reason}`);
+    },
+  },
   // ── End TASK-334 ─────────────────────────────────────────────────────────────
   {
     name: "13i-flakes-non-admin",

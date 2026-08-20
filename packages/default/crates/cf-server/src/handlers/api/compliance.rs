@@ -2326,13 +2326,13 @@ async fn persist_assignment_inner(
             .bind(payload.scope_id)
             .fetch_one(&mut *tx)
             .await
-            .unwrap_or(false)
+            .map_err(|_| internal_error("Failed to verify assignment environment"))?
     } else {
         sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM systems WHERE id = $1)")
             .bind(payload.scope_id)
             .fetch_one(&mut *tx)
             .await
-            .unwrap_or(false)
+            .map_err(|_| internal_error("Failed to verify assignment system"))?
     };
 
     if !target_exists {
@@ -2725,7 +2725,9 @@ pub async fn update_assignment(
         }
     };
 
-    let scope_id = env_id.or(sys_id).unwrap_or_default();
+    let Some(scope_id) = env_id.or(sys_id) else {
+        return internal_error("Assignment has no target scope");
+    };
 
     // Resolve FieldUpdate tri-state: omitted=preserve, null=clear, value=set
     let resolved_reason = match payload.reason.clone() {
@@ -7636,6 +7638,16 @@ mod tests {
     use chrono::Utc;
 
     const BOUNDARY: &str = "XCFTESTBOUNDARY";
+
+    #[test]
+    fn assignment_reason_validation_is_boundary_enforced() {
+        assert!(validate_assignment_reason(&Some(" \t\n ".to_string())).is_err());
+        assert!(validate_assignment_reason(&Some("x".repeat(2001))).is_err());
+        assert_eq!(
+            validate_assignment_reason(&Some("  Reason A  ".to_string())).expect("valid reason"),
+            Some("Reason A".to_string())
+        );
+    }
 
     fn grouping_group(
         id: &str,

@@ -1913,6 +1913,20 @@
       "baseline": "advisory"
     },
     {
+      "name": "29f-compliance-assignment-reason-semantics",
+      "description": "Compliance assignment reason survives unrelated edits, changes, and explicit clearing",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
       "name": "13i-flakes-non-admin",
       "description": "Flakes view hides admin-only mutations for non-admin users",
       "route": "/flakes",
