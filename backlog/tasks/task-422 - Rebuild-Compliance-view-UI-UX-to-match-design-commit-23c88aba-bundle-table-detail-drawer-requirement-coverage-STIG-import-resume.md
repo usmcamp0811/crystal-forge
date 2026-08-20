@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-20 14:53'
+updated_date: '2026-08-20 15:55'
 labels: []
 milestone: m-22
 dependencies:
@@ -247,6 +247,10 @@ P2 list API remediation completed in commit 3acb2a0b1da534c5bc10cd904618d600db97
 Starting focused assignment SQL error propagation follow-up from 3acb2a0b. Scope is limited to production assignment handlers; nullable SQL values remain nullable, while query failures become internal errors.
 
 Assignment SQL error propagation follow-up committed and pushed as 51b0343e. Propagates failures for deactivation recheck, audit actor lookup, system loading/status, effective-policy overlays, and preview target verification while preserving nullable values. Verification passed: nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all -- --check; nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-server --offline; nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server --test assignment_semantics (10 passed); git diff --check. Local/tracking/remote SHA verified equal. Task remains In Progress; not merge-ready.
+
+Follow-up verification at pushed SHA 05e2e364bc562d2199611c18a3e3072abf656a35: committed packages/default/default.nix cargoTestFlags fix (--lib and --bins) and pushed; local and origin branch SHAs match. nix build .#server --no-link -L --option eval-cache false passed; nix build .#web-ui --no-link -L --option eval-cache false passed; focused nix build .#checks.x86_64-linux.web-ui-reconciliation --no-link -L --option eval-cache false passed. Live DB at 127.0.0.1:3042 passed assignment_semantics 10/10, evidence_for_ato 10/10, framework_version_id_lifecycle 1/1. nix develop cargo test for packages/web-ui passed 181/181 with 1 ignored; backend cargo fmt --all -- --check and git diff --check passed.
+
+The broad nix build .#checks.x86_64-linux.web-ui run did not provide a clean result: it was interrupted after the mega integration reported many unrelated prerequisite failures; 29f failed only because its required bundle from 20ab was absent after 20ab failed. nix flake check -L was also interrupted by the same broad-check run and is not claimed green. Focused reconciliation check is green; no code change was made for the broad unrelated failures. Task remains In Progress and not merge-ready.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
