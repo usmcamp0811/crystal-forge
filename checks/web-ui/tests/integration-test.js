@@ -8848,179 +8848,61 @@ security.audit.enable = true;</fixtext>
   },
   {
     name: "29a-compliance-populated",
-    description: "Compliance view renders bundle catalog, header, score strip, and systems matrix",
+    description: "Compliance view renders server-backed imported requirement coverage and exact mapped policy details",
     action: async (page) => {
-      const bundleId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-      const systemId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-      const envId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-      const policyId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
-      const bundleVersionId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+      const fixture = await page.evaluate(async (base) => {
+        const bundlesResponse = await fetch(`${base}/api/v1/compliance/bundles`);
+        const bundles = await bundlesResponse.json();
+        if (!bundlesResponse.ok) {
+          throw new Error(`Bundle catalog lookup failed: HTTP ${bundlesResponse.status} ${JSON.stringify(bundles)}`);
+        }
+        const candidates = bundles.filter((bundle) =>
+          bundle.name === "Anduril NixOS Security Technical Implementation Guide"
+          && bundle.current_draft_version_id
+          && bundle.requirement_count === 103
+        );
+        for (const bundle of candidates) {
+          const coverageResponse = await fetch(
+            `${base}/api/v1/compliance/bundle-versions/${bundle.current_draft_version_id}/requirement-coverage`,
+          );
+          const coverage = await coverageResponse.json();
+          if (!coverageResponse.ok) continue;
+          const source = coverage.source_framework || coverage.frameworks?.[0];
+          if (source?.framework_publisher !== "DISA" || source?.framework_version !== "V1R2") continue;
+          const mappedRow = coverage.rows?.find((row) => Array.isArray(row.mappings) && row.mappings.length > 0);
+          if (mappedRow) return { bundle, coverage, mappedRow, mapping: mappedRow.mappings[0] };
+        }
+        throw new Error("The real Anduril import fixture from step 20ae was not available to compliance coverage step 29a");
+      }, baseUrl);
+      const bundleId = fixture.bundle.id;
+      const bundleVersionId = fixture.bundle.current_draft_version_id;
+      const policyId = fixture.mapping.policy_id;
+      const mappedPolicySummary = await page.evaluate(async ({ base, policyId: id }) => {
+        const limit = 100;
+        for (let offset = 0; ; offset += limit) {
+          const response = await fetch(`${base}/api/v1/deployment-policies?limit=${limit}&offset=${offset}`);
+          const body = await response.json();
+          if (!response.ok) {
+            throw new Error(`Policy catalog lookup failed: HTTP ${response.status} ${JSON.stringify(body)}`);
+          }
+          const policy = body.policies?.find((candidate) => candidate.id === id);
+          if (policy) return policy;
+          if (!Array.isArray(body.policies) || body.policies.length < limit) break;
+        }
+        throw new Error(`Mapped policy ${id} was not present in the real paginated policy catalog`);
+      }, { base: baseUrl, policyId });
+      const mappedVersion = mappedPolicySummary.versions?.find((version) => version.id === fixture.mapping.policy_version_id);
+      if (!mappedVersion) {
+        throw new Error(`Paginated policy catalog omitted exact backend version ${fixture.mapping.policy_version_id}`);
+      }
       let coverageRequests = 0;
 
-      await page.route(`**/api/v1/deployment-policies/${policyId}`, async (route) => {
-        const now = new Date().toISOString();
-        const mappedVersionId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
-        const newestVersionId = "99999999-9999-4999-8999-999999999999";
-        const version = (id, number, currentDraft) => ({
-          id,
-          policy_id: policyId,
-          version: number,
-          publication_state: "draft",
-          trust_state: "trusted",
-          semantic_digest: `fixture-${number}`,
-          created_at: now,
-          published_at: null,
-          derived_from_version_id: null,
-          is_current_published: false,
-          is_current_draft: currentDraft,
-          name: "Fixture mapped policy",
-          description: null,
-          policy_type: "custom_check",
-          config: { expression: "true" },
-          enabled: true,
-          srg_ids: [],
-          cci_ids: [],
-          category: null,
-          framework: null,
-          severity: null,
-          control_family: null,
-          cmmc_level: null,
-          cis_section: null,
-          rationale: null,
-          created_by: null,
-          created_by_display: null,
-          evidence_specs: [],
-        });
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            id: policyId,
-            name: "Fixture mapped policy",
-            description: null,
-            policy_type: "custom_check",
-            config: { expression: "true" },
-            enabled: true,
-            created_at: now,
-            updated_at: now,
-            current_version_id: newestVersionId,
-            versions: [version(newestVersionId, "8.0", true), version(mappedVersionId, "7.0", false)],
-            mapped_requirement_count: 1,
-            bundle_usage_count: 1,
-          }),
-        });
-      });
-
-      const bundle = {
-        id: bundleId,
-        name: "NIST 800-53 High",
-        framework: "NIST 800-53",
-        version: "rev5",
-        description: "NIST 800-53 rev5 High baseline for production fleet.",
-        layer: "fleet",
-        owner: "Platform Security",
-        last_review: new Date().toISOString(),
-        policy_ids: [policyId],
-        required_envs: [{ id: envId, name: "production", color_hex: "#3b82f6" }],
-        control_count: 1,
-        policy_count: 1,
-        requirement_count: 1,
-        applicable_system_count: 1,
-        aggregate_score: 100,
-        environment_count: 1,
-        current_published_version_id: bundleVersionId,
-        current_published_version: "rev5",
-        versions: [{
-          id: bundleVersionId,
-          bundle_id: bundleId,
-          version: "rev5",
-          publication_state: "accepted",
-          trust_state: "trusted",
-          semantic_digest: "fixture-digest",
-          created_at: new Date().toISOString(),
-          published_at: new Date().toISOString(),
-          derived_from_version_id: null,
-          policy_count: 1,
-          requirement_count: 1,
-          control_count: 1,
-          is_current_published: true,
-          is_current_draft: false,
-        }],
-      };
-
-      await page.route("**/api/v1/compliance/bundles*", async (route) => {
-        if (route.request().method() === "GET" && !route.request().url().includes("/systems")) {
-          await route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify([bundle]),
-          });
-        } else {
-          await route.continue();
+      const onCoverageRequest = (request) => {
+        if (request.method() === "GET" && request.url().includes(`/api/v1/compliance/bundle-versions/${bundleVersionId}/requirement-coverage`)) {
+          coverageRequests += 1;
         }
-      });
-
-      await page.route(`**/api/v1/compliance/bundles/${bundleId}/systems*`, async (route) => {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-                bundle_id: bundleId,
-                bundle_version_id: bundleVersionId,
-            systems: [
-              {
-                system_id: systemId,
-                hostname: "prod-web-01",
-                environment: "production",
-                applies: true,
-                total: 1,
-                pass: 1,
-                warn: 0,
-                fail: 0,
-                waiver: 0,
-                score: 100,
-              },
-            ],
-            totals: {
-              system_count: 1,
-              fully_compliant_count: 1,
-              pass: 1,
-              warn: 0,
-              fail: 0,
-              waiver: 0,
-              total_controls: 1,
-              overall_score: 100,
-            },
-          }),
-        });
-      });
-
-      await page.route(`**/api/v1/compliance/bundle-versions/${bundleVersionId}/requirement-coverage`, async (route) => {
-        coverageRequests += 1;
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            bundle_version_id: bundleVersionId,
-            frameworks: [{
-              framework_id: "11111111-1111-4111-8111-111111111111",
-              framework_name: "NIST SP 800-53",
-              framework_version_id: "22222222-2222-4222-8222-222222222222",
-              framework_version: "Rev 5",
-            }],
-            total_requirements: 10,
-            full: 6,
-            partial: 2,
-            unmapped: 2,
-            rows: [
-              { requirement_version_id: "00000000-0000-4000-8000-000000000001", external_id: "AC-1", title: "Full requirement 1", kind: "control", parent_requirement_version_id: null, coverage: "full", mapped_policy_version_ids: ["dddddddd-dddd-4ddd-8ddd-dddddddddddd"], mappings: [{ policy_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", policy_version_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", policy_name: "Fixture mapped policy", relationship: "implements", coverage: "full", provenance: "manual", rationale: null }] },
-              ...Array.from({ length: 5 }, (_, i) => ({ requirement_version_id: `00000000-0000-4000-8000-${String(i + 2).padStart(12, "0")}`, external_id: `AC-${i + 2}`, title: `Full requirement ${i + 2}`, kind: "control", parent_requirement_version_id: null, coverage: "full", mapped_policy_version_ids: [], mappings: [] })),
-              ...Array.from({ length: 2 }, (_, i) => ({ requirement_version_id: `00000000-0000-4000-8000-${String(i + 101).padStart(12, "0")}`, external_id: `AU-${i + 1}`, title: `Partial requirement ${i + 1}`, kind: "control", parent_requirement_version_id: null, coverage: "partial", mapped_policy_version_ids: [], mappings: [] })),
-              ...Array.from({ length: 2 }, (_, i) => ({ requirement_version_id: `00000000-0000-4000-8000-${String(i + 201).padStart(12, "0")}`, external_id: `CM-${i + 1}`, title: `Unmapped requirement ${i + 1}`, kind: "control", parent_requirement_version_id: null, coverage: "unmapped", mapped_policy_version_ids: [], mappings: [] })),
-            ],
-          }),
-        });
-      });
+      };
+      page.on("request", onCoverageRequest);
 
       await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
@@ -9033,46 +8915,22 @@ security.audit.enable = true;</fixtext>
 
       // Bundle table
       await assertVisible(
-        page.getByText("NIST 800-53 High").first(),
+        page.getByText(fixture.bundle.name, { exact: true }).first(),
         "Expected bundle name in bundle table",
       );
       await assertVisible(
-        page.getByText("NIST 800-53").first(),
+        page.getByText(fixture.bundle.framework, { exact: true }).first(),
         "Expected framework chip in bundle table",
       );
 
-      await page.getByText("NIST 800-53 High").first().click();
+      await page.getByText(fixture.bundle.name, { exact: true }).first().click();
       await page.waitForTimeout(400);
-
-      // Bundle header card
-      await assertVisible(
-        page.getByText("Platform Security").first(),
-        "Expected bundle owner in header card",
-      );
-      await assertVisible(
-        page.getByText("production").first(),
-        "Expected required-env badge in header card",
-      );
-
-      // Score strip
-      await assertVisible(
-        page.getByText(/Overall score/i).first(),
-        "Expected 'Overall score' label in score strip",
-      );
-      await assertVisible(
-        page.getByText(/100%/i).first(),
-        "Expected 100% overall score in score strip",
-      );
-      await assertVisible(
-        page.getByText(/hosts fully compliant/i).first(),
-        "Expected fully compliant host count in score strip",
-      );
 
       const coverageCard = page.getByTestId("requirement-coverage-card").first();
       const systemsCard = page.getByTestId("bundle-systems-card").first();
       await coverageCard.waitFor({ state: "visible", timeout: 5000 });
       const coverageText = await coverageCard.innerText();
-      if (!coverageText.includes("NIST SP 800-53 (Rev 5) · 10 requirements")) {
+      if (!coverageText.includes("Anduril NixOS Security Technical Implementation Guide (V1R2) · 103 requirements")) {
         throw new Error(`Expected authoritative framework release metadata in coverage summary; rendered: ${coverageText}`);
       }
       if (coverageRequests !== 1) throw new Error(`Expected exactly one initial coverage request, got ${coverageRequests}`);
@@ -9085,50 +8943,42 @@ security.audit.enable = true;</fixtext>
         throw new Error("Expected requirement coverage card before the independent Systems card");
       }
 
-      // Systems matrix
-      await assertVisible(
-        page.getByText("prod-web-01").first(),
-        "Expected system hostname in systems matrix",
-      );
-      await assertVisible(
-        page.getByRole("button", { name: /View evidence/i }).first(),
-        "Expected 'View evidence' action in systems matrix",
-      );
+      await assertVisible(systemsCard.getByText("0 hosts", { exact: true }), "Expected the imported unassigned bundle to use the real empty systems response");
 
-       await coverageCard.getByRole("button").first().click();
-       await assertVisible(page.getByText("Requirement coverage").first(), "Expected requirement coverage drawer view");
-      await assertVisible(page.getByText("Full 6").first(), "Expected full coverage count from API");
-      await assertVisible(page.getByText("Partial 2").first(), "Expected partial coverage count from API");
-      await assertVisible(page.getByText("Unmapped 2").first(), "Expected unmapped coverage count from API");
-      await assertVisible(page.getByText("10 total").first(), "Expected coverage rows to partition the API total");
-      await assertVisible(page.getByRole("button", { name: /Fixture mapped policy/ }), "Expected requirement coverage to render mapped policy links");
+      await coverageCard.getByRole("button").first().click();
+      await assertVisible(page.getByText("Requirement coverage").first(), "Expected requirement coverage drawer view");
+      await assertVisible(page.getByText(`Full ${fixture.coverage.full}`).first(), "Expected full coverage count from backend API");
+      await assertVisible(page.getByText(`Partial ${fixture.coverage.partial}`).first(), "Expected partial coverage count from backend API");
+      await assertVisible(page.getByText(`Unmapped ${fixture.coverage.unmapped}`).first(), "Expected unmapped coverage count from backend API");
+      await assertVisible(page.getByText(`${fixture.coverage.total_requirements} total`).first(), "Expected coverage rows to partition the backend API total");
+      await fillDioxusInput(coverageCard.getByPlaceholder("Filter requirements…"), fixture.mappedRow.external_id);
+      const mappedRequirementRow = page.getByTestId("requirement-coverage-row").filter({ hasText: fixture.mappedRow.external_id }).first();
+      const mappedRequirementVisible = await mappedRequirementRow.waitFor({ state: "visible", timeout: 5000 }).then(() => true).catch(() => false);
+      if (!mappedRequirementVisible) {
+        throw new Error(
+          `Expected backend-mapped requirement ${fixture.mappedRow.external_id} after filtering; rendered coverage: ${await coverageCard.innerText()}`,
+        );
+      }
+      const mappedPolicyLink = page.getByRole("button").filter({ hasText: fixture.mapping.policy_name }).first();
+      await assertVisible(mappedPolicyLink, "Expected backend coverage mapping to render its real policy link");
       const policyDetailResponsePromise = page.waitForResponse(
         (response) => response.url().includes(`/api/v1/deployment-policies/${policyId}`) && response.request().method() === "GET",
       );
-      await page.getByRole("button", { name: /Fixture mapped policy/ }).click({ force: true });
+      await mappedPolicyLink.click({ force: true });
       const policyDetailResponse = await policyDetailResponsePromise;
       if (policyDetailResponse.status() !== 200) {
         throw new Error(`Expected mapped policy detail 200, got ${policyDetailResponse.status()}`);
       }
       const policyDrawer = page.getByRole("dialog", { name: "Policy detail" });
       await policyDrawer.waitFor({ timeout: 5000 });
-      await assertVisible(policyDrawer.getByText("Fixture mapped policy", { exact: true }), "Expected mapped policy drawer");
-      await policyDrawer.getByRole("button", { name: /Revisions · 2/ }).click();
+      await assertVisible(policyDrawer.getByText(fixture.mapping.policy_name, { exact: true }), "Expected real mapped policy drawer");
+      await policyDrawer.getByRole("button", { name: new RegExp(`Revisions · ${mappedPolicySummary.versions.length}`) }).click();
       await assertVisible(
-        policyDrawer.locator(".policy-revision-row.selected").filter({ hasText: "v7.0" }),
-        "Expected exact mapped policy version v7.0, not the newest v8.0",
+        policyDrawer.locator(".policy-revision-row.selected").filter({ hasText: `v${mappedVersion.version}` }),
+        `Expected exact mapped policy version ${mappedVersion.version} from backend coverage mapping`,
       );
       await policyDrawer.getByRole("button", { name: "Close", exact: true }).click();
-      const unmappedRow = page.getByTestId("requirement-coverage-row").filter({ hasText: "CM-1" }).first();
-      await assertVisible(unmappedRow, "Expected unmapped requirement row");
-      if (await unmappedRow.locator(".cf-policy-link").count() !== 0) {
-        throw new Error("Unmapped requirement must not render a policy link");
-      }
-
-      await page.unroute("**/api/v1/compliance/bundles*");
-      await page.unroute(`**/api/v1/compliance/bundles/${bundleId}/systems*`);
-      await page.unroute(`**/api/v1/compliance/bundle-versions/${bundleVersionId}/requirement-coverage`);
-      await page.unroute(`**/api/v1/deployment-policies/${policyId}`);
+      page.off("request", onCoverageRequest);
     },
   },
   {

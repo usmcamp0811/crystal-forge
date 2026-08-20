@@ -5395,7 +5395,15 @@ fn RequirementCoverageCard(
                         break;
                     }
                     if let Some(parent_id) = r.parent_requirement_version_id {
-                        check_id = parent_id;
+                        if row_map.contains_key(&parent_id) {
+                            check_id = parent_id;
+                        } else {
+                            // Imported bundle membership can contain a rule
+                            // without its grouping parent. Keep the last known
+                            // row as the root so the rule is not dropped.
+                            check_root = Some(r.requirement_version_id);
+                            break;
+                        }
                     } else {
                         check_root = Some(r.requirement_version_id);
                         break;

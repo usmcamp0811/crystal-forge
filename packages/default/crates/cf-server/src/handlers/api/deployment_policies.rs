@@ -610,8 +610,8 @@ pub async fn get_deployment_policy(
     RequireAuth(_user): RequireAuth,
     State(state): State<CFState>,
     Path(policy_id): Path<Uuid>,
-) -> Result<Json<DeploymentPolicyRecord>, (StatusCode, String)> {
-    let policy = deployment_policies::get_deployment_policy_by_id(&state.pool, &policy_id)
+) -> Result<Json<DeploymentPolicyListItem>, (StatusCode, String)> {
+    let mut policy = deployment_policies::get_deployment_policy_by_id(&state.pool, &policy_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to fetch deployment policy {}: {}", policy_id, e);
@@ -625,7 +625,46 @@ pub async fn get_deployment_policy(
             "Deployment policy not found".to_string(),
         ))?;
 
-    Ok(Json(policy))
+    let mut version_summaries =
+        deployment_policies::fetch_policy_version_summaries(&state.pool, &[policy_id])
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load policy version history: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to retrieve policy version history".to_string(),
+                )
+            })?;
+    let versions = version_summaries.remove(&policy_id).unwrap_or_default();
+    let current_version_id = versions
+        .iter()
+        .find(|version| version.is_current_draft)
+        .or_else(|| versions.iter().find(|version| version.is_current_published))
+        .map(|version| version.id);
+    let version_ids: Vec<Uuid> = versions.iter().map(|version| version.id).collect();
+    let usage_counts =
+        deployment_policies::load_policy_version_usage_counts(&state.pool, &version_ids)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load policy counts: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to load policy counts".to_string(),
+                )
+            })?;
+    if let Some(version_id) = current_version_id {
+        if let Some((mapped_requirement_count, bundle_usage_count)) = usage_counts.get(&version_id)
+        {
+            policy.mapped_requirement_count = *mapped_requirement_count;
+            policy.bundle_usage_count = *bundle_usage_count;
+        }
+    }
+
+    Ok(Json(DeploymentPolicyListItem {
+        policy,
+        current_version_id,
+        versions,
+    }))
 }
 
 /// POST /api/v1/deployment-policies - Create a new deployment policy

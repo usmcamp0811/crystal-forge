@@ -1844,7 +1844,7 @@
     },
     {
       "name": "29a-compliance-populated",
-      "description": "Compliance view renders bundle catalog, header, score strip, and systems matrix",
+      "description": "Compliance view renders server-backed imported requirement coverage and exact mapped policy details",
       "route": "/compliance",
       "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
       "profiles": [
@@ -1853,7 +1853,7 @@
       ],
       "semanticAssertions": true,
       "interactions": false,
-      "mockedData": true,
+      "mockedData": false,
       "baseline": "advisory"
     },
     {
