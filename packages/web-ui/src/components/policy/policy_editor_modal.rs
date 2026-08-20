@@ -1825,11 +1825,11 @@ pub fn PolicyEditorModal(
                                               evidence_specs,
                                           };
                                         update_deployment_policy(&policy_id, &request).await.map(|_| None)
-                                    } else {
-                                         let evidence_specs: Vec<EvidenceSpec> = evidence.read()
-                                             .iter()
-                                             .filter_map(|ev| ev.to_evidence_spec())
-                                             .collect();
+                                     } else {
+                                          let evidence_specs: Vec<EvidenceSpec> = evidence.read()
+                                              .iter()
+                                              .map(|ev| ev.to_evidence_spec())
+                                              .collect();
 
                                          let request = CreateDeploymentPolicyRequest {
                                               name: name.clone(),
