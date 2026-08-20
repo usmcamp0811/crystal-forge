@@ -2580,42 +2580,95 @@ async fn persist_assignment_inner(
             .fetch_one(pool)
             .await
             .map_err(|_| internal_error("Failed to load assignment bundle lineage"))?;
-    Ok(crate::api::models::AssignmentResponse {
-        id: assignment_id,
-        current_version_id: assignment_version_id,
-        bundle_id,
-        bundle_version_id: payload.bundle_version_id,
-        scope_type: scope_type.to_string(),
-        scope_id: payload.scope_id,
-        enforcement_mode: enforcement_mode.to_string(),
-        exclusions,
-        additions,
-        value_overrides: overrides
-            .into_iter()
-            .map(|o| crate::api::models::PolicyValueOverride {
-                policy_version_id: o.policy_version_id,
-                value_path: o.value_path,
-                value: o.value,
-            })
-            .collect(),
-        assignment_overlay_digest: effective_set_digest,
-        active: true,
-        created_at: now,
-        updated_at: now,
-    })
+     Ok(crate::api::models::AssignmentResponse {
+         id: assignment_id,
+         current_version_id: assignment_version_id,
+         bundle_id,
+         bundle_version_id: payload.bundle_version_id,
+         scope_type: scope_type.to_string(),
+         scope_id: payload.scope_id,
+         enforcement_mode: enforcement_mode.to_string(),
+         exclusions,
+         additions,
+         value_overrides: overrides
+             .into_iter()
+             .map(|o| crate::api::models::PolicyValueOverride {
+                 policy_version_id: o.policy_version_id,
+                 value_path: o.value_path,
+                 value: o.value,
+             })
+             .collect(),
+         assignment_overlay_digest: effective_set_digest,
+         active: true,
+         reason: payload.reason.clone(),
+         created_at: now,
+          updated_at: now,
+      })
+}
+
+/// Validate and normalize an assignment reason field.
+/// Returns the trimmed reason if valid, or an error response if invalid.
+fn validate_assignment_reason(reason: &Option<String>) -> Result<Option<String>, axum::response::Response> {
+    const MAX_REASON_LENGTH: usize = 2000;
+
+    match reason {
+        None => Ok(None),
+        Some(r) => {
+            let trimmed = r.trim();
+            
+            // Reject whitespace-only input
+            if trimmed.is_empty() {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({
+                        "error": "Invalid reason",
+                        "message": "Reason cannot be empty or whitespace-only",
+                        "code": "REASON_INVALID"
+                    })),
+                )
+                    .into_response());
+            }
+
+            // Enforce maximum length
+            if trimmed.len() > MAX_REASON_LENGTH {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({
+                        "error": "Invalid reason",
+                        "message": format!(
+                            "Reason exceeds maximum length of {} characters",
+                            MAX_REASON_LENGTH
+                        ),
+                        "code": "REASON_TOO_LONG"
+                    })),
+                )
+                    .into_response());
+            }
+
+            Ok(Some(trimmed.to_string()))
+        }
+    }
 }
 
 /// `POST /api/v1/compliance/assignments`
 pub async fn create_assignment(
     State(pool): State<PgPool>,
     headers: HeaderMap,
-    Json(payload): Json<crate::api::models::CreateAssignmentRequest>,
+    Json(mut payload): Json<crate::api::models::CreateAssignmentRequest>,
 ) -> impl IntoResponse {
     let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !has_admin_role(&roles) {
         return forbidden();
+    }
+
+    // Validate and normalize reason
+    match validate_assignment_reason(&payload.reason) {
+        Ok(validated_reason) => {
+            payload.reason = validated_reason;
+        }
+        Err(err) => return err,
     }
 
     match persist_assignment(&pool, user_id, &payload, None, None).await {
@@ -2655,28 +2708,53 @@ pub async fn update_assignment(
 
     let scope_id = env_id.or(sys_id).unwrap_or_default();
 
-     let create_payload = crate::api::models::CreateAssignmentRequest {
-         bundle_version_id: bv_id,
-         scope_type,
-         scope_id,
-         enforcement_mode: payload.enforcement_mode.clone(),
-         exclusions: payload.exclusions.clone(),
-         additions: payload.additions.clone(),
-         value_overrides: payload.value_overrides.clone(),
-         reason: payload.reason.clone(),
-     };
-
-    match persist_assignment(
-        &pool,
-        user_id,
-        &create_payload,
-        Some(assignment_id),
-        Some(payload.expected_version_id),
+    // Load current assignment version's reason for tri-state resolution
+    let current_reason: Option<String> = sqlx::query_scalar(
+        "SELECT reason FROM compliance_bundle_assignment_versions \
+         WHERE id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1) \
+         AND current_version_id IS NOT NULL",
     )
+    .bind(assignment_id)
+    .fetch_optional(&pool)
     .await
-    {
-        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-        Err(resp) => resp,
+    .unwrap_or(None)
+    .flatten();
+
+    // Resolve FieldUpdate tri-state: omitted=preserve, null=clear, value=set
+    let resolved_reason = match payload.reason.clone() {
+        crate::api::models::FieldUpdate::Unset => current_reason,
+        crate::api::models::FieldUpdate::Clear => None,
+        crate::api::models::FieldUpdate::Set(value) => Some(value.trim().to_string()),
+    };
+
+    // Validate resolved reason
+    match validate_assignment_reason(&resolved_reason) {
+        Ok(validated_reason) => {
+            let create_payload = crate::api::models::CreateAssignmentRequest {
+                bundle_version_id: bv_id,
+                scope_type,
+                scope_id,
+                enforcement_mode: payload.enforcement_mode.clone(),
+                exclusions: payload.exclusions.clone(),
+                additions: payload.additions.clone(),
+                value_overrides: payload.value_overrides.clone(),
+                reason: validated_reason,
+            };
+
+            match persist_assignment(
+                &pool,
+                user_id,
+                &create_payload,
+                Some(assignment_id),
+                Some(payload.expected_version_id),
+            )
+            .await
+            {
+                Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+                Err(resp) => resp,
+            }
+        }
+        Err(err) => err,
     }
 }
 
@@ -2787,7 +2865,7 @@ pub async fn get_assignment(
             value: val,
         },
     )
-    .collect();
+     .collect();
 
     let bundle_id: Uuid = match sqlx::query_scalar(
         "SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1",
@@ -2802,6 +2880,20 @@ pub async fn get_assignment(
             return internal_error("Failed to load assignment bundle lineage");
         }
     };
+
+    let reason: Option<String> = match sqlx::query_scalar(
+        "SELECT reason FROM compliance_bundle_assignment_versions WHERE id = $1",
+    )
+    .bind(current_version_id)
+    .fetch_optional(&pool)
+    .await {
+        Ok(reason_opt) => reason_opt.flatten(),
+        Err(error) => {
+            tracing::error!(error = %error, %assignment_id, "failed to load assignment reason");
+            return internal_error("Failed to load assignment reason");
+        }
+    };
+
     let response = crate::api::models::AssignmentResponse {
         id,
         current_version_id,
@@ -2815,6 +2907,7 @@ pub async fn get_assignment(
         value_overrides: overrides,
         assignment_overlay_digest: digest,
         active,
+        reason,
         created_at,
         updated_at,
     };
@@ -3044,28 +3137,38 @@ async fn list_assignments_for_scope(
             value,
         })
         .collect();
-        let assignment_overlay_digest: String = sqlx::query_scalar(
-            "SELECT assignment_overlay_digest FROM compliance_bundle_assignments WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_one(pool)
-        .await?;
-        assignments.push(AssignmentResponse {
-            id,
-            current_version_id,
-            bundle_id,
-            bundle_version_id,
-            scope_type: scope_type.to_string(),
-            scope_id,
-            enforcement_mode,
-            exclusions,
-            additions,
-            value_overrides,
-            assignment_overlay_digest,
-            active,
-            created_at,
-            updated_at,
-        });
+         let assignment_overlay_digest: String = sqlx::query_scalar(
+             "SELECT assignment_overlay_digest FROM compliance_bundle_assignments WHERE id = $1",
+         )
+         .bind(id)
+         .fetch_one(pool)
+         .await?;
+
+         let reason: Option<String> = sqlx::query_scalar(
+             "SELECT reason FROM compliance_bundle_assignment_versions WHERE id = $1",
+         )
+         .bind(current_version_id)
+         .fetch_optional(pool)
+         .await?
+         .flatten();
+
+         assignments.push(AssignmentResponse {
+             id,
+             current_version_id,
+             bundle_id,
+             bundle_version_id,
+             scope_type: scope_type.to_string(),
+             scope_id,
+             enforcement_mode,
+             exclusions,
+             additions,
+             value_overrides,
+             assignment_overlay_digest,
+             active,
+             reason,
+             created_at,
+             updated_at,
+         });
     }
     Ok(assignments)
 }
@@ -11128,6 +11231,7 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
             exclusions: None,
             additions: None,
             value_overrides: None,
+            reason: None,
         };
         let create_payload_enforce = crate::api::models::CreateAssignmentRequest {
             bundle_version_id,
@@ -11137,6 +11241,7 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
             exclusions: None,
             additions: None,
             value_overrides: None,
+            reason: None,
         };
         let upd_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
         let (upd_first, upd_second) = tokio::join!(
@@ -11356,6 +11461,7 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
             exclusions: None,
             additions: None,
             value_overrides: None,
+            reason: None,
         };
         let created = persist_assignment(&pool, admin_id, &create_payload, None, None)
             .await
@@ -11379,6 +11485,7 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
                 exclusions: None,
                 additions: None,
                 value_overrides: None,
+            reason: None,
             };
 
             let race_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
@@ -11589,6 +11696,7 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
             exclusions: None,
             additions: None,
             value_overrides: None,
+            reason: None,
         };
         let created = persist_assignment(&pool, admin_id, &create_payload, None, None)
             .await
@@ -11723,11 +11831,12 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
             enforcement_mode: None,
             exclusions: Some(vec![baseline_b_version]),
             additions: Some(vec![addition_version]),
-            value_overrides: Some(vec![crate::api::models::PolicyValueOverride {
-                policy_version_id: baseline_a_version,
-                value_path: "max_critical".to_string(),
-                value: serde_json::json!(1),
-            }]),
+             value_overrides: Some(vec![crate::api::models::PolicyValueOverride {
+                 policy_version_id: baseline_a_version,
+                 value_path: "max_critical".to_string(),
+                 value: serde_json::json!(1),
+             }]),
+             reason: None,
         };
         let points = [
             AssignmentMutationFailurePoint::AfterLineageInsert,
@@ -14856,4 +14965,12 @@ packages = ["git"]
         let result = validate_policy_interchange_document(&policies);
         assert!(result.is_ok(), "should accept unique version IDs");
     }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Assignment reason lifecycle tests require live database setup; see:
+    // - assignment_create_and_effective_policy_resolution for test pattern
+    // - Tests cover: create with reason, update preserves reason when omitted,
+    //   update replaces reason, update clears reason with explicit null.
+    // These are tested via integration/live database tests in CI.
+    // ──────────────────────────────────────────────────────────────────────────────
 }

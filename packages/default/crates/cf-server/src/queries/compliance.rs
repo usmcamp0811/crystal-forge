@@ -2125,10 +2125,7 @@ pub async fn list_bundle_systems_for_version(
     let mut rollups = Vec::with_capacity(systems.len());
     for system in systems {
         // Retrieve pre-loaded assignment metadata
-        let metadata = assignment_metadata.get(&system.id).cloned();
-        let assignment_status = metadata.as_ref().and_then(|m| m.status.clone());
-        let assignment_approved_by = metadata.as_ref().and_then(|m| m.approved_by.clone());
-        let assignment_reason = metadata.as_ref().and_then(|m| m.reason.clone());
+        let metadata = assignment_metadata.get(&system.id);
 
         let rollup = match effective.get(&system.id) {
             Some(ResolutionOutcome::Resolved(set))
@@ -2165,30 +2162,26 @@ pub async fn list_bundle_systems_for_version(
                     system.clone(),
                     &statuses,
                     report_only,
-                    assignment_status,
-                    assignment_approved_by,
-                    assignment_reason,
+                    metadata,
                 )
             }
-            Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup_with_metadata(
-                system,
-                policies.len() as i64,
-                conflicts
-                    .first()
-                    .map(|c| c.code.as_str())
-                    .unwrap_or("conflict"),
-                assignment_status,
-                assignment_approved_by,
-            ),
-            // Missing or mismatched resolution has no authoritative effective
-            // set. Never substitute lineage/current membership for this view.
-            _ => unresolved_system_rollup_with_metadata(
-                system,
-                policies.len() as i64,
-                "not_applicable",
-                assignment_status,
-                assignment_approved_by,
-            ),
+             Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup_with_metadata(
+                 system,
+                 policies.len() as i64,
+                 conflicts
+                     .first()
+                     .map(|c| c.code.as_str())
+                     .unwrap_or("conflict"),
+                 metadata,
+             ),
+             // Missing or mismatched resolution has no authoritative effective
+             // set. Never substitute lineage/current membership for this view.
+             _ => unresolved_system_rollup_with_metadata(
+                 system,
+                 policies.len() as i64,
+                 "not_applicable",
+                 metadata,
+             ),
         };
         rollups.push(rollup);
     }
@@ -3143,16 +3136,20 @@ fn rollup_from_statuses(
     report_only: i64,
     assignment_status: Option<String>,
 ) -> ComplianceSystemRollup {
-     rollup_from_statuses_with_metadata(system, statuses, report_only, assignment_status, None, None)
+     // Wrapper for legacy use cases; convert status to metadata for consistency
+     let metadata = assignment_status.map(|status| AssignmentMetadata {
+         status: Some(status),
+         approved_by: None,
+         reason: None,
+     });
+     rollup_from_statuses_with_metadata(system, statuses, report_only, metadata.as_ref())
 }
 
 fn rollup_from_statuses_with_metadata(
     system: SystemRow,
     statuses: &[ComplianceControlStatus],
     report_only: i64,
-    assignment_status: Option<String>,
-    assignment_approved_by: Option<String>,
-    assignment_reason: Option<String>,
+    assignment_metadata: Option<&AssignmentMetadata>,
 ) -> ComplianceSystemRollup {
     let mut pass = 0i64;
     let mut warn = 0i64;
@@ -3226,9 +3223,9 @@ fn rollup_from_statuses_with_metadata(
         report_only,
         score,
         resolution_state: None,
-        assignment_status,
-        assignment_reason,
-        assignment_approved_by,
+        assignment_status: assignment_metadata.as_ref().map(|m| m.status.clone()).flatten(),
+        assignment_reason: assignment_metadata.as_ref().map(|m| m.reason.clone()).flatten(),
+        assignment_approved_by: assignment_metadata.as_ref().map(|m| m.approved_by.clone()).flatten(),
         // Not modeled: assignment_deadline and assignment_poam are conditionally shown in
         // the design mock but are not domain requirements. Implement only if explicitly
         // required by a separate task.
@@ -3243,12 +3240,17 @@ fn unresolved_system_rollup(
     state: &str,
     assignment_status: Option<String>,
 ) -> ComplianceSystemRollup {
+    // Wrapper for legacy use cases; convert status to metadata for consistency
+    let metadata = assignment_status.map(|status| AssignmentMetadata {
+        status: Some(status),
+        approved_by: None,
+        reason: None,
+    });
     unresolved_system_rollup_with_metadata(
         system,
         selected_controls,
         state,
-        assignment_status,
-        None,
+        metadata.as_ref(),
     )
 }
 
@@ -3256,8 +3258,7 @@ fn unresolved_system_rollup_with_metadata(
     system: SystemRow,
     selected_controls: i64,
     state: &str,
-    assignment_status: Option<String>,
-    assignment_approved_by: Option<String>,
+    assignment_metadata: Option<&AssignmentMetadata>,
 ) -> ComplianceSystemRollup {
     ComplianceSystemRollup {
         system_id: system.id,
@@ -3276,9 +3277,9 @@ fn unresolved_system_rollup_with_metadata(
         report_only: 0,
         score: 0,
         resolution_state: Some(state.to_string()),
-        assignment_status,
-        assignment_reason: None,
-        assignment_approved_by,
+        assignment_status: assignment_metadata.as_ref().map(|m| m.status.clone()).flatten(),
+        assignment_reason: assignment_metadata.as_ref().map(|m| m.reason.clone()).flatten(),
+        assignment_approved_by: assignment_metadata.as_ref().map(|m| m.approved_by.clone()).flatten(),
         assignment_deadline: None,
         assignment_poam: None,
     }
@@ -3413,12 +3414,17 @@ pub(crate) async fn effective_policy_rollup_with_evidence(
     effective_policies: &[crate::compliance::resolver::EffectivePolicy],
     assignment_status: Option<String>,
 ) -> Result<ComplianceSystemRollup> {
+    // Wrapper for legacy use cases; convert status to metadata for consistency
+    let metadata = assignment_status.map(|status| AssignmentMetadata {
+        status: Some(status),
+        approved_by: None,
+        reason: None,
+    });
     effective_policy_rollup_with_evidence_and_metadata(
         pool,
         system,
         effective_policies,
-        assignment_status,
-        None,
+        metadata.as_ref(),
     )
     .await
 }
@@ -3427,8 +3433,7 @@ pub(crate) async fn effective_policy_rollup_with_evidence_and_metadata(
     pool: &PgPool,
     system: &SystemRow,
     effective_policies: &[crate::compliance::resolver::EffectivePolicy],
-    assignment_status: Option<String>,
-    assignment_approved_by: Option<String>,
+    assignment_metadata: Option<&AssignmentMetadata>,
 ) -> Result<ComplianceSystemRollup> {
     let policies = materialize_effective_policies(pool, effective_policies).await?;
     let report_only = effective_policies
@@ -3453,9 +3458,7 @@ pub(crate) async fn effective_policy_rollup_with_evidence_and_metadata(
          system.clone(),
          &statuses,
          report_only,
-         assignment_status,
-         assignment_approved_by,
-         None,
+         assignment_metadata,
      ))
 }
 

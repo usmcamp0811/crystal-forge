@@ -2084,6 +2084,8 @@ pub struct CreateAssignmentRequest {
     pub exclusions: Option<Vec<Uuid>>,
     pub additions: Option<Vec<Uuid>>,
     pub value_overrides: Option<Vec<PolicyValueOverride>>,
+    /// User-provided reason/justification for the assignment.
+    pub reason: Option<String>,
 }
 
 /// Request to replace an assignment's mutable overlay and enforcement mode.
@@ -2091,6 +2093,11 @@ pub struct CreateAssignmentRequest {
 /// The server creates a new immutable assignment version and compares
 /// `expected_version_id` with the current version before doing so. Bundle
 /// version rebinding is deliberately not part of this request.
+///
+/// Reason updates use tri-state semantics:
+/// - omitted: preserve reason from current immutable version
+/// - null: explicitly clear the reason
+/// - value: replace reason
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpdateAssignmentRequest {
     pub expected_version_id: Uuid,
@@ -2098,6 +2105,9 @@ pub struct UpdateAssignmentRequest {
     pub exclusions: Option<Vec<Uuid>>,
     pub additions: Option<Vec<Uuid>>,
     pub value_overrides: Option<Vec<PolicyValueOverride>>,
+    /// Tri-state reason/justification for the assignment update.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
+    pub reason: FieldUpdate<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2118,6 +2128,8 @@ pub struct AssignmentResponse {
     pub assignment_overlay_digest: String,
     #[serde(default = "default_assignment_active")]
     pub active: bool,
+    /// Reason/justification from the current immutable assignment version.
+    pub reason: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

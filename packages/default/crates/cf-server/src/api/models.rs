@@ -3459,6 +3459,8 @@ pub struct AssignmentResponse {
     pub assignment_overlay_digest: String,
     #[serde(default = "default_assignment_active")]
     pub active: bool,
+    /// Reason/justification from the current immutable assignment version.
+    pub reason: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -3476,11 +3478,13 @@ pub struct UpdateAssignmentRequest {
     pub exclusions: Option<Vec<Uuid>>,
     pub additions: Option<Vec<Uuid>>,
     pub value_overrides: Option<Vec<PolicyValueOverride>>,
-    /// User-provided reason/justification for the updated assignment.
+    /// Tri-state reason/justification for the updated assignment.
+    /// - Omitted: preserve existing reason from current immutable version
+    /// - null: explicitly clear the reason
+    /// - value: replace reason with this value (trimmed, validated)
     /// Displayed to explain why the system/environment is pinned to this version.
-    /// When provided, creates a new immutable assignment version with this reason.
-    /// Optional; if not provided, new version's reason will be None.
-    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
+    pub reason: FieldUpdate<String>,
 }
 
 /// Request to preview an assignment before saving.
