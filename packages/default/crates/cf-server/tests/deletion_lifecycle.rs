@@ -326,6 +326,43 @@ async fn deletion_lifecycle_database_matrix() {
         BundleDeleteOutcome::NotFound
     );
 
+    // ── Versionless draft assignment: deletable with its bundle ───────────────
+    //
+    // The legacy environment-membership trigger creates an assignment lineage
+    // without an immutable version. This compatibility row is disposable and
+    // must not prevent deletion of an otherwise-unused draft bundle.
+    let environment_id: Uuid =
+        sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
+            .bind(format!("delete-env-{}", Uuid::new_v4()))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let (versionless_bundle_id, _) = draft_bundle(&pool).await;
+    sqlx::query(
+        "INSERT INTO compliance_bundle_environments (bundle_id, environment_id) VALUES ($1, $2)",
+    )
+    .bind(versionless_bundle_id)
+    .bind(environment_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM compliance_bundle_assignment_versions av JOIN compliance_bundle_assignments a ON a.id = av.assignment_id WHERE a.bundle_id = $1",
+        )
+        .bind(versionless_bundle_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        compliance::delete_bundle(&pool, versionless_bundle_id)
+            .await
+            .unwrap(),
+        BundleDeleteOutcome::Deleted
+    );
+
     // ── Accepted bundle: blocked by immutable history ─────────────────────────
     let (immutable_bundle_id, immutable_bundle_version_id) = draft_bundle(&pool).await;
     accept_bundle(&pool, immutable_bundle_id, immutable_bundle_version_id).await;
@@ -345,6 +382,18 @@ async fn deletion_lifecycle_database_matrix() {
     // than a clean Blocked outcome.  assigned_bundle() creates the version row
     // to match the production assignment state.
     let active_bundle_id = assigned_bundle(&pool).await;
+    let active_assignment_version_id: Uuid = sqlx::query_scalar(
+        "SELECT av.id FROM compliance_bundle_assignment_versions av JOIN compliance_bundle_assignments a ON a.id = av.assignment_id WHERE a.bundle_id = $1",
+    )
+    .bind(active_bundle_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM compliance_bundle_assignment_versions WHERE id = $1")
+        .bind(active_assignment_version_id)
+        .execute(&pool)
+        .await
+        .expect_err("mutable bundle assignment versions must remain immutable");
     assert_bundle_blocked_by(
         compliance::delete_bundle(&pool, active_bundle_id)
             .await
@@ -384,6 +433,7 @@ async fn draft_policy_with_requirement_mapping_is_deletable() {
         .fetch_one(&pool)
         .await
         .expect("disposable test database must contain a user");
+    let artifact_content = Uuid::new_v4().as_bytes().to_vec();
     sqlx::query(
         "INSERT INTO policy_requirement_mappings \
          (policy_version_id, requirement_version_id, relationship, coverage, created_by) \
@@ -399,11 +449,11 @@ async fn draft_policy_with_requirement_mapping_is_deletable() {
     let artifact_id: Uuid = sqlx::query_scalar(
         "INSERT INTO compliance_source_artifacts \
          (content, filename, media_type, sha256, parser_version, imported_by) \
-         VALUES (decode('00', 'hex'), $1, 'application/xml', $2, 'test', $3) \
+         VALUES ($1, $2, 'application/xml', encode(digest($1::bytea, 'sha256'), 'hex'), 'test', $3) \
          RETURNING id",
     )
+    .bind(artifact_content)
     .bind(format!("{}.xccdf.xml", Uuid::new_v4()))
-    .bind("6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d")
     .bind(actor_id)
     .fetch_one(&pool)
     .await

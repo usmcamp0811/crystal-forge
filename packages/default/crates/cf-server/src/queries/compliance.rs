@@ -1800,12 +1800,7 @@ async fn bundle_deletion_eligibility_in_transaction(
     .await
     .context("Failed to check compliance bundle immutable history")?;
     let immutable_assignment_history: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)
-         FROM compliance_bundle_assignment_versions av
-         JOIN compliance_bundle_assignments a ON a.id = av.assignment_id
-         JOIN compliance_bundle_versions bv ON bv.id = av.bundle_version_id
-         WHERE a.bundle_id = $1
-           AND bv.publication_state IN ('accepted', 'deprecated')",
+        "SELECT COUNT(*) FROM compliance_bundle_assignment_versions av JOIN compliance_bundle_assignments a ON a.id = av.assignment_id WHERE a.bundle_id = $1",
     )
     .bind(bundle_id)
     .fetch_one(&mut **tx)
@@ -1907,11 +1902,10 @@ pub async fn delete_bundle(pool: &PgPool, bundle_id: Uuid) -> Result<BundleDelet
         return Ok(BundleDeleteOutcome::Blocked(eligibility));
     }
 
-    // Draft-only assignment lineages are disposable with their draft bundle.
-    // Remove them before deleting bundle versions because assignment rows hold
-    // RESTRICT references to those versions. Immutable assignment history was
-    // already checked above and blocks this path when it references published
-    // or deprecated bundle versions.
+    // Versionless draft assignment lineages can be created by the legacy
+    // bundle-environment synchronization trigger. Remove those rows before
+    // deleting the bundle because they hold RESTRICT references to its draft
+    // version. Any lineage with immutable version history was blocked above.
     sqlx::query("DELETE FROM compliance_bundle_assignments WHERE bundle_id = $1")
         .bind(bundle_id)
         .execute(&mut *tx)
