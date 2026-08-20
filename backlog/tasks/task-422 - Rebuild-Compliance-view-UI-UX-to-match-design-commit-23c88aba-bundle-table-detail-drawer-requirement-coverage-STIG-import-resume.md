@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-20 14:45'
+updated_date: '2026-08-20 14:49'
 labels: []
 milestone: m-22
 dependencies:
@@ -239,6 +239,8 @@ Blocker slice findings from 9898ac66: repository isolated assignment_semantics t
 P1 remediation committed as f21b50953458c45a63284641b5e638f709424147 and pushed to origin/TASK-422-compliance-view-redesign. persist_assignment_inner now locks and uses current_version_id JOIN compliance_bundle_assignment_versions av FOR UPDATE for update mutations; create behavior remains payload-based. Verification passed: isolated assignment_semantics 10/10, nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-server --offline, cargo fmt --all -- --check, and git diff --check. Existing f20 web DTO/UI and assignment reason changes were preserved; no unrelated UI edits.
 
 Starting the P2 list API remediation from f21b5095. Scope is limited to list_assignments_for_scope and focused assignment-list regression coverage.
+
+P2 list API remediation completed in commit 3acb2a0b1da534c5bc10cd904618d600db976ea5 and pushed to origin/TASK-422-compliance-view-redesign. list_assignments_for_scope now joins current_version_id to av for authoritative bundle_version_id, enforcement_mode, assignment_overlay_digest, and reason; exclusions, additions, and value_overrides are loaded in three set-wise ANY($1) queries and grouped by version. Verification passed: nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all -- --check; nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-server --offline; nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server --test assignment_semantics (10 passed); git diff --check. Local/tracking/remote SHA verified equal. Task remains In Progress; no merge-ready claim made.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
