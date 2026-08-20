@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-20 14:40'
+updated_date: '2026-08-20 14:43'
 labels: []
 milestone: m-22
 dependencies:
@@ -233,6 +233,8 @@ Drawer parity review assessment (post eda648ba):
 **Verification**: web-ui-reconciliation 20ac-stig-import-reconciliation-fixture 1/1 passed with dark+light screenshots post-commit. nix build .#web-ui exit 0. All hygiene checks exit 0.
 
 Blocker slice findings from 9898ac66: repository isolated assignment_semantics test passed 1/1. The local dev DB at isolated 127.0.0.1:3042 had migrations through 229 and no compliance_bundle_assignment_versions.reason; `sqlx migrate run --source packages/default/crates/cf-server/migrations` applied 230/migrate assignment reason successfully, after which the schema check reported migration 230 and reason=true. This explains the valid-create 500 as an unapplied deployment migration, not a failing current migration. Added safe structured logging at the assignment-version INSERT boundary (SQLSTATE/message/constraint/table only; no payloads) and added a server-backed 29f path that uses the real assignment UI and POST/PUT responses after the existing 20ab bundle setup; standalone retains deterministic mocks because it has no authenticated seeded backend. `nix build .#checks.x86_64-linux.web-ui -L` was blocked before Playwright: the Nix server package build ran assignment_semantics with DATABASE_URL unset, causing 10/10 DB tests to fail at SQLx setup. Node syntax, cargo fmt check, cargo check -p cf-server --offline, and git diff --check passed. Playwright was also unavailable in the host shell (`Cannot find module 'playwright'`).
+
+P1 remediation committed as f21b50953458c45a63284641b5e638f709424147 and pushed to origin/TASK-422-compliance-view-redesign. persist_assignment_inner now locks and uses current_version_id JOIN compliance_bundle_assignment_versions av FOR UPDATE for update mutations; create behavior remains payload-based. Verification passed: isolated assignment_semantics 10/10, nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-server --offline, cargo fmt --all -- --check, and git diff --check. Existing f20 web DTO/UI and assignment reason changes were preserved; no unrelated UI edits.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
