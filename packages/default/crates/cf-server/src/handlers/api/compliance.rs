@@ -2596,7 +2596,7 @@ async fn persist_assignment_inner(
             .bind(user_id)
             .fetch_optional(&mut *tx)
             .await
-            .unwrap_or(None);
+            .map_err(|_| internal_error("Failed to load assignment audit actor"))?;
     if let Err(error) = sqlx::query(
         "INSERT INTO admin_audit_events (actor_user_id, actor_identifier, action, target, metadata)
          VALUES ($1, $2, $3, $4, $5)",
@@ -3036,14 +3036,19 @@ async fn deactivate_assignment_inner(
         }
     }
 
-    let current_after_lock = sqlx::query_scalar::<_, Option<Uuid>>(
+    let current_after_lock = match sqlx::query_scalar::<_, Option<Uuid>>(
         "SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1 AND active FOR UPDATE",
     )
     .bind(assignment_id)
     .fetch_optional(&mut *tx)
     .await
-    .ok()
-    .and_then(|value| value);
+    {
+        Ok(value) => value,
+        Err(_) => {
+            let _ = tx.rollback().await;
+            return internal_error("Failed to recheck assignment");
+        }
+    };
     let Some(Some(current_version_id)) = current_after_lock else {
         let _ = tx.rollback().await;
         return not_found();
@@ -3325,11 +3330,17 @@ pub async fn get_system_effective_policies(
 
     // Verify the system exists and load its health/environment data.
     let system_row: Option<crate::queries::compliance::SystemRow> =
-        sqlx::query_as("SELECT id, hostname, environment, health_status, critical_cve_count, high_cve_count FROM view_system_list WHERE id = $1")
+        match sqlx::query_as("SELECT id, hostname, environment, health_status, critical_cve_count, high_cve_count FROM view_system_list WHERE id = $1")
             .bind(system_id)
             .fetch_optional(&pool)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::error!("Failed to load system {system_id}: {error:#}");
+                return internal_error("Failed to load system");
+            }
+        };
 
     let Some(system) = system_row else {
         return not_found();
@@ -3338,13 +3349,20 @@ pub async fn get_system_effective_policies(
     match crate::compliance::resolver::resolve_system_effective_policies(&pool, system_id).await {
         Ok(ResolutionOutcome::Resolved(set)) => {
             let assignment_status =
-                crate::queries::compliance::determine_assignment_status_for_bundle_version(
+                match crate::queries::compliance::determine_assignment_status_for_bundle_version(
                     &pool,
                     set.bundle_version_id,
                 )
                 .await
-                .ok()
-                .flatten();
+                {
+                    Ok(status) => status,
+                    Err(error) => {
+                        tracing::error!(
+                            "Failed to load assignment status for {system_id}: {error:#}"
+                        );
+                        return internal_error("Failed to load assignment status");
+                    }
+                };
             let rollup = match crate::queries::compliance::effective_policy_rollup_with_evidence(
                 &pool,
                 &system,
@@ -3415,16 +3433,19 @@ pub async fn get_assignment_effective_policies(
     }
 
     // Load overlay rows scoped to the current immutable assignment version.
-    let exclusions: Vec<Uuid> = sqlx::query_scalar(
+    let exclusions: Vec<Uuid> = match sqlx::query_scalar(
         "SELECT policy_version_id FROM compliance_assignment_exclusions
          WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)",
     )
     .bind(assignment_id)
     .fetch_all(&pool)
     .await
-    .unwrap_or_default();
+    {
+        Ok(values) => values,
+        Err(_) => return internal_error("Failed to load assignment exclusions"),
+    };
 
-    let additions: Vec<Uuid> = sqlx::query_scalar(
+    let additions: Vec<Uuid> = match sqlx::query_scalar(
         "SELECT policy_version_id FROM compliance_assignment_additions
          WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)
          ORDER BY addition_order",
@@ -3432,16 +3453,22 @@ pub async fn get_assignment_effective_policies(
     .bind(assignment_id)
     .fetch_all(&pool)
     .await
-    .unwrap_or_default();
+    {
+        Ok(values) => values,
+        Err(_) => return internal_error("Failed to load assignment additions"),
+    };
 
-    let overrides: Vec<crate::compliance::resolver::PolicyOverride> = sqlx::query_as::<_, (Uuid, String, serde_json::Value)>(
+    let overrides: Vec<crate::compliance::resolver::PolicyOverride> = match sqlx::query_as::<_, (Uuid, String, serde_json::Value)>(
         "SELECT policy_version_id, value_path, value FROM compliance_assignment_value_overrides
          WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)",
     )
     .bind(assignment_id)
     .fetch_all(&pool)
     .await
-    .unwrap_or_default()
+    {
+        Ok(values) => values,
+        Err(_) => return internal_error("Failed to load assignment overrides"),
+    }
     .into_iter()
     .map(|(pvid, path, val)| crate::compliance::resolver::PolicyOverride {
         policy_version_id: pvid,
@@ -3522,17 +3549,25 @@ pub async fn preview_assignment(
     }
 
     let target_exists: bool = if scope_type == "environment" {
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM environments WHERE id = $1)")
-            .bind(payload.scope_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap_or(false)
+        match sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM environments WHERE id = $1)",
+        )
+        .bind(payload.scope_id)
+        .fetch_one(&pool)
+        .await
+        {
+            Ok(exists) => exists,
+            Err(_) => return internal_error("Failed to verify assignment environment"),
+        }
     } else {
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM systems WHERE id = $1)")
+        match sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM systems WHERE id = $1)")
             .bind(payload.scope_id)
             .fetch_one(&pool)
             .await
-            .unwrap_or(false)
+        {
+            Ok(exists) => exists,
+            Err(_) => return internal_error("Failed to verify assignment system"),
+        }
     };
 
     if !target_exists {
