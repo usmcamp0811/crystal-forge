@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-20 13:40'
+updated_date: '2026-08-20 13:55'
 labels: []
 milestone: m-22
 dependencies:
@@ -229,6 +229,8 @@ Drawer parity review assessment (post eda648ba):
 - ScoreStrip gating on systems response: left as-is because ScoreStrip requires ComplianceRollupTotals (per-control counts), not just an aggregate score; the bundle-table row already shows aggregate_score.
 
 **Verification**: web-ui-reconciliation 20ac-stig-import-reconciliation-fixture 1/1 passed with dark+light screenshots post-commit. nix build .#web-ui exit 0. All hygiene checks exit 0.
+
+Blocker slice findings from 9898ac66: repository isolated assignment_semantics test passed 1/1. The local dev DB at isolated 127.0.0.1:3042 had migrations through 229 and no compliance_bundle_assignment_versions.reason; `sqlx migrate run --source packages/default/crates/cf-server/migrations` applied 230/migrate assignment reason successfully, after which the schema check reported migration 230 and reason=true. This explains the valid-create 500 as an unapplied deployment migration, not a failing current migration. Added safe structured logging at the assignment-version INSERT boundary (SQLSTATE/message/constraint/table only; no payloads) and added a server-backed 29f path that uses the real assignment UI and POST/PUT responses after the existing 20ab bundle setup; standalone retains deterministic mocks because it has no authenticated seeded backend. `nix build .#checks.x86_64-linux.web-ui -L` was blocked before Playwright: the Nix server package build ran assignment_semantics with DATABASE_URL unset, causing 10/10 DB tests to fail at SQLx setup. Node syntax, cargo fmt check, cargo check -p cf-server --offline, and git diff --check passed. Playwright was also unavailable in the host shell (`Cannot find module 'playwright'`).
 <!-- SECTION:NOTES:END -->
 
 ## Comments
