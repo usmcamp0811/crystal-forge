@@ -2880,6 +2880,8 @@ pub async fn load_assignment_metadata_for_systems(
     };
 
     // Build the result map
+    // Note: created_by is semantically the user who made/approved the assignment decision.
+    // Future: assignment_reason, assignment_deadline, assignment_poam require schema extensions.
     let mut result = std::collections::HashMap::new();
     for AssignmentRow {
         system_id,
@@ -2892,6 +2894,7 @@ pub async fn load_assignment_metadata_for_systems(
             Some(_) => Some("pinned".to_string()),
             None => Some("pinned".to_string()),
         };
+        // Map created_by to assignment_approved_by: the user who made the assignment decision
         let approved_by = created_by.and_then(|uid| users.get(&uid).cloned());
         result.insert(
             system_id,
