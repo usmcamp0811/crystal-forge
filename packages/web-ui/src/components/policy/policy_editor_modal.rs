@@ -6,8 +6,8 @@
 //! evidence-for-ATO builder, and an edit-mode danger zone with typed-confirmation
 //! delete.
 //!
-//! The deployment-policy API persists classification with the exact policy
-//! version, while Evidence remains unavailable in the current API.
+//! The deployment-policy API persists classification and evidence specifications
+//! with each policy version.
 
 use dioxus::prelude::*;
 use uuid::Uuid;
