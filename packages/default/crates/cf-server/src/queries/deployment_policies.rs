@@ -8,9 +8,9 @@ use uuid::Uuid;
 use crate::api::models::{DeletionEligibility, DeploymentPolicyVersionSummary};
 use crate::compliance::digest::{PolicyVersionCanonical, write_policy_version_digest};
 use crate::compliance::mappings::{
-    decode_evidence_specs_strict, extract_cci_ids, extract_classification, extract_evidence_specs,
-    extract_srg_ids, infer_legacy_category, initial_policy_metadata,
-    merge_classification_into_metadata, merge_evidence_into_metadata, merge_policy_mappings,
+    decode_evidence_specs_strict, extract_cci_ids, extract_classification, extract_srg_ids,
+    infer_legacy_category, initial_policy_metadata, merge_classification_into_metadata,
+    merge_evidence_into_metadata, merge_policy_mappings,
 };
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
@@ -1060,6 +1060,17 @@ pub async fn delete_deployment_policy(
         .execute(&mut *tx)
         .await
         .context("Failed to remove mutable system policy assignments")?;
+    sqlx::query(
+        "DELETE FROM policy_requirement_mappings m \
+         USING deployment_policy_versions pv \
+         WHERE m.policy_version_id = pv.id \
+           AND pv.policy_id = $1 \
+           AND pv.publication_state IN ('incomplete', 'draft', 'interim')",
+    )
+    .bind(policy_id)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to remove mutable policy requirement mappings")?;
 
     let deleted = sqlx::query("DELETE FROM deployment_policies WHERE id = $1")
         .bind(policy_id)

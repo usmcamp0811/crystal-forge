@@ -6416,6 +6416,106 @@ const steps = [
     name: "18-policies",
     description: "Policies view",
     action: async (page) => {
+      const laterPagePolicies = new Map();
+      await page.route("**/api/v1/deployment-policies*", async (route) => {
+        if (route.request().method() !== "GET") {
+          await route.continue();
+          return;
+        }
+        const url = new URL(route.request().url());
+        if (!url.pathname.endsWith("/deployment-policies")) {
+          const id = url.pathname.split("/").pop();
+          const policy = laterPagePolicies.get(id);
+          if (policy) {
+            await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(policy) });
+          } else {
+            await route.continue();
+          }
+          return;
+        }
+
+        const upstream = await route.fetch();
+        const original = await upstream.json();
+        const now = new Date().toISOString();
+        const template = original.policies?.[0] || {
+          id: "00000000-0000-4000-8000-000000000001",
+          name: "Pagination template",
+          description: "Pagination regression fixture",
+          policy_type: "custom_check",
+          config: { expression: "true" },
+          enabled: true,
+          created_at: now,
+          updated_at: now,
+          current_version_id: "10000000-0000-4000-8000-000000000001",
+          versions: [{
+            id: "10000000-0000-4000-8000-000000000001",
+            policy_id: "00000000-0000-4000-8000-000000000001",
+            version: "1.0.0",
+            publication_state: "draft",
+            trust_state: "trusted",
+            semantic_digest: "pagination-template",
+            created_at: now,
+            published_at: null,
+            derived_from_version_id: null,
+            is_current_published: false,
+            is_current_draft: true,
+            name: "Pagination template",
+            description: "Pagination regression fixture",
+            policy_type: "custom_check",
+            config: { expression: "true" },
+            enabled: true,
+            srg_ids: [],
+            cci_ids: [],
+            category: null,
+            framework: null,
+            severity: null,
+            control_family: null,
+            cmmc_level: null,
+            cis_section: null,
+            rationale: null,
+            created_by: null,
+            created_by_display: null,
+            evidence_specs: [],
+          }],
+          mapped_requirement_count: 0,
+          bundle_usage_count: 0,
+        };
+        const makePolicy = (index, category, name) => {
+          const policy = structuredClone(template);
+          const id = `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`;
+          const versionId = `10000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`;
+          policy.id = id;
+          policy.name = name;
+          policy.current_version_id = versionId;
+          policy.versions = (policy.versions || []).slice(0, 1).map((version) => ({
+            ...version,
+            id: versionId,
+            policy_id: id,
+            name,
+            category,
+            version: "1.0.0",
+          }));
+          laterPagePolicies.set(id, policy);
+          return policy;
+        };
+        const policies = [
+          ...Array.from({ length: 105 }, (_, index) => makePolicy(index, "security", `Security regression ${String(index).padStart(3, "0")}`)),
+          ...Array.from({ length: 5 }, (_, index) => makePolicy(105 + index, null, `Platform regression ${String(index).padStart(3, "0")}`)),
+        ];
+        const offset = Number(url.searchParams.get("offset") || "0");
+        const limit = Number(url.searchParams.get("limit") || "100");
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            policies: policies.slice(offset, offset + limit),
+            total: policies.length,
+            limit,
+            offset,
+            system_counts: {},
+          }),
+        });
+      });
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
       await page.locator("main h1:has-text('Policies')").first().waitFor({ timeout: 5000 });
       await assertVisible(page.getByText("Criteria a system must satisfy to deploy").first(), "Expected design subtitle on Policies page");
@@ -6423,6 +6523,35 @@ const steps = [
       await assertVisible(page.getByPlaceholder("Search policies…").first(), "Expected policy search filter");
       await assertVisible(page.getByRole("button", { name: /deploy/i }).first(), "Expected deployment category segment filter");
       await assertVisible(page.getByText(/policies?$/).first(), "Expected policy count in filter bar");
+
+      const catalog = await page.evaluate(async (url) => {
+        const response = await fetch(url, { credentials: "include" });
+        return { status: response.status, body: await response.json() };
+      }, `${apiBaseUrl}/api/v1/deployment-policies?limit=100&offset=0`);
+      if (catalog.status !== 200) throw new Error(`Expected policy catalog response 200, got ${catalog.status}`);
+      const expectedCount = Number(catalog.body.total);
+      if (!Number.isInteger(expectedCount) || expectedCount < 1) throw new Error(`Invalid policy catalog total: ${catalog.body.total}`);
+      await assertVisible(
+        page.getByText(new RegExp(`^${expectedCount} policies?$`)).first(),
+        `Expected Policies view to render all ${expectedCount} catalog policies`,
+      );
+      if (expectedCount <= 100) throw new Error(`Pagination regression fixture requires >100 policies, got ${expectedCount}`);
+      const laterPage = await page.evaluate(async (url) => {
+        const response = await fetch(url, { credentials: "include" });
+        return { status: response.status, body: await response.json() };
+      }, `${apiBaseUrl}/api/v1/deployment-policies?limit=100&offset=100`);
+      if (laterPage.status !== 200 || laterPage.body.policies.length === 0) {
+        throw new Error(`Expected a populated second policy page, got HTTP ${laterPage.status}`);
+      }
+      const laterPolicy = laterPage.body.policies[laterPage.body.policies.length - 1];
+      await page.getByRole("button", { name: /^Platform\b/i }).click();
+      const search = page.getByPlaceholder("Search policies…").first();
+      await search.fill(laterPolicy.name);
+      await assertVisible(page.getByText(laterPolicy.name, { exact: true }), "Expected a policy from page 2 in the Platform catalog");
+      await page.getByText(laterPolicy.name, { exact: true }).click();
+      await assertVisible(page.getByRole("dialog", { name: "Policy detail" }), "Expected later-page Platform policy details to open");
+      await page.getByTitle("Close").click();
+      await page.unroute("**/api/v1/deployment-policies*");
     },
   },
   {
@@ -6675,6 +6804,7 @@ const steps = [
     description: "Policies new modal persists two real requirement mappings and reloads them",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+      await collapseOnboardingCoach(page);
       // custom_check policies belong to the security domain; select that tab
       // before creating one so the new card is visible after the modal closes.
       await page.getByRole("tab", { name: /Security controls/ }).click();
@@ -6689,7 +6819,7 @@ const steps = [
         const frameworksResponse = await fetch(`${base}/api/v1/compliance/frameworks`, requestOptions);
         if (!frameworksResponse.ok) throw new Error(`framework list failed: ${frameworksResponse.status}`);
         const frameworks = await frameworksResponse.json();
-         const framework = frameworks.find((item) => item.canonical_source_key === "disa-web-ui-mapping-roundtrip");
+         const framework = frameworks.find((item) => item.canonical_source_key === "web-ui-mapping-roundtrip");
         if (!framework) throw new Error("Mapping round-trip framework fixture missing");
         const versionsResponse = await fetch(`${base}/api/v1/compliance/frameworks/${framework.id}/versions`, requestOptions);
         if (!versionsResponse.ok) throw new Error(`framework versions failed: ${versionsResponse.status}`);
@@ -6899,10 +7029,29 @@ const steps = [
        await assertVisible(page.getByText("Mappings · 2", { exact: true }), "Expected two mappings after edit");
 
        // Removing the second mapping must leave the first mapping intact.
-       const secondMappingRow = page.getByTestId("policy-mapping-row").filter({ hasText: requirementB.external_id });
-       await secondMappingRow.getByTitle("Remove mapping").click();
-       await assertVisible(page.getByText("Mappings · 1", { exact: true }), "Expected one mapping after removal");
-    },
+        const secondMappingRow = page.getByTestId("policy-mapping-row").filter({ hasText: requirementB.external_id });
+        await secondMappingRow.getByTitle("Remove mapping").click();
+        await assertVisible(page.getByText("Mappings · 1", { exact: true }), "Expected one mapping after removal");
+
+        await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
+        const deleteCard = page.locator(`[data-policy-card="true"][data-policy-id="${createdPolicy.id}"]`);
+        const deletionEligibility = page.waitForResponse(
+          (response) => response.url().includes(`/api/v1/deployment-policies/${createdPolicy.id}/deletion-eligibility`) && response.request().method() === "GET",
+        );
+        await deleteCard.getByRole("button", { name: "Delete", exact: true }).click();
+        const eligibilityResponse = await deletionEligibility;
+        if (eligibilityResponse.status() !== 200) throw new Error(`Expected deletion eligibility 200, got ${eligibilityResponse.status()}`);
+        await assertVisible(page.getByText("Delete permanently", { exact: true }), "Expected permanent deletion action");
+        const deleteResponse = page.waitForResponse(
+          (response) => response.url().includes(`/api/v1/deployment-policies/${createdPolicy.id}`) && response.request().method() === "DELETE",
+        );
+        await page.getByText("Delete permanently", { exact: true }).click();
+        const deleted = await deleteResponse;
+        if (deleted.status() !== 204) throw new Error(`Expected policy deletion 204, got ${deleted.status()}`);
+        await assertHidden(page.locator(`[data-policy-card="true"][data-policy-id="${createdPolicy.id}"]`), "Deleted policy remained in the catalog");
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await assertHidden(page.locator(`[data-policy-card="true"][data-policy-id="${createdPolicy.id}"]`), "Deleted policy returned after reload");
+     },
   },
   {
      name: "20ad-stig-nixos-assertion-roundtrip",
@@ -7336,7 +7485,7 @@ security.audit.enable = true;</fixtext>
         const frameworksResponse = await fetch(`${base}/api/v1/compliance/frameworks`, options);
         if (!frameworksResponse.ok) throw new Error(`framework list failed: ${frameworksResponse.status}`);
         const frameworks = await frameworksResponse.json();
-        const framework = frameworks.find((item) => item.canonical_source_key === "disa-web-ui-mapping-roundtrip");
+       const framework = frameworks.find((item) => item.canonical_source_key === "web-ui-mapping-roundtrip");
         if (!framework) throw new Error("Bundle baseline framework fixture missing");
         const versionsResponse = await fetch(`${base}/api/v1/compliance/frameworks/${framework.id}/versions`, options);
         if (!versionsResponse.ok) throw new Error(`framework versions failed: ${versionsResponse.status}`);
@@ -8708,6 +8857,60 @@ security.audit.enable = true;</fixtext>
       const bundleVersionId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
       let coverageRequests = 0;
 
+      await page.route(`**/api/v1/deployment-policies/${policyId}`, async (route) => {
+        const now = new Date().toISOString();
+        const mappedVersionId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+        const newestVersionId = "99999999-9999-4999-8999-999999999999";
+        const version = (id, number, currentDraft) => ({
+          id,
+          policy_id: policyId,
+          version: number,
+          publication_state: "draft",
+          trust_state: "trusted",
+          semantic_digest: `fixture-${number}`,
+          created_at: now,
+          published_at: null,
+          derived_from_version_id: null,
+          is_current_published: false,
+          is_current_draft: currentDraft,
+          name: "Fixture mapped policy",
+          description: null,
+          policy_type: "custom_check",
+          config: { expression: "true" },
+          enabled: true,
+          srg_ids: [],
+          cci_ids: [],
+          category: null,
+          framework: null,
+          severity: null,
+          control_family: null,
+          cmmc_level: null,
+          cis_section: null,
+          rationale: null,
+          created_by: null,
+          created_by_display: null,
+          evidence_specs: [],
+        });
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            id: policyId,
+            name: "Fixture mapped policy",
+            description: null,
+            policy_type: "custom_check",
+            config: { expression: "true" },
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+            current_version_id: newestVersionId,
+            versions: [version(newestVersionId, "8.0", true), version(mappedVersionId, "7.0", false)],
+            mapped_requirement_count: 1,
+            bundle_usage_count: 1,
+          }),
+        });
+      });
+
       const bundle = {
         id: bundleId,
         name: "NIST 800-53 High",
@@ -8810,7 +9013,8 @@ security.audit.enable = true;</fixtext>
             partial: 2,
             unmapped: 2,
             rows: [
-              ...Array.from({ length: 6 }, (_, i) => ({ requirement_version_id: `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`, external_id: `AC-${i + 1}`, title: `Full requirement ${i + 1}`, kind: "control", parent_requirement_version_id: null, coverage: "full", mapped_policy_version_ids: [], mappings: [] })),
+              { requirement_version_id: "00000000-0000-4000-8000-000000000001", external_id: "AC-1", title: "Full requirement 1", kind: "control", parent_requirement_version_id: null, coverage: "full", mapped_policy_version_ids: ["dddddddd-dddd-4ddd-8ddd-dddddddddddd"], mappings: [{ policy_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", policy_version_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", policy_name: "Fixture mapped policy", relationship: "implements", coverage: "full", provenance: "manual", rationale: null }] },
+              ...Array.from({ length: 5 }, (_, i) => ({ requirement_version_id: `00000000-0000-4000-8000-${String(i + 2).padStart(12, "0")}`, external_id: `AC-${i + 2}`, title: `Full requirement ${i + 2}`, kind: "control", parent_requirement_version_id: null, coverage: "full", mapped_policy_version_ids: [], mappings: [] })),
               ...Array.from({ length: 2 }, (_, i) => ({ requirement_version_id: `00000000-0000-4000-8000-${String(i + 101).padStart(12, "0")}`, external_id: `AU-${i + 1}`, title: `Partial requirement ${i + 1}`, kind: "control", parent_requirement_version_id: null, coverage: "partial", mapped_policy_version_ids: [], mappings: [] })),
               ...Array.from({ length: 2 }, (_, i) => ({ requirement_version_id: `00000000-0000-4000-8000-${String(i + 201).padStart(12, "0")}`, external_id: `CM-${i + 1}`, title: `Unmapped requirement ${i + 1}`, kind: "control", parent_requirement_version_id: null, coverage: "unmapped", mapped_policy_version_ids: [], mappings: [] })),
             ],
@@ -8897,10 +9101,34 @@ security.audit.enable = true;</fixtext>
       await assertVisible(page.getByText("Partial 2").first(), "Expected partial coverage count from API");
       await assertVisible(page.getByText("Unmapped 2").first(), "Expected unmapped coverage count from API");
       await assertVisible(page.getByText("10 total").first(), "Expected coverage rows to partition the API total");
+      await assertVisible(page.getByRole("button", { name: /Fixture mapped policy/ }), "Expected requirement coverage to render mapped policy links");
+      const policyDetailResponsePromise = page.waitForResponse(
+        (response) => response.url().includes(`/api/v1/deployment-policies/${policyId}`) && response.request().method() === "GET",
+      );
+      await page.getByRole("button", { name: /Fixture mapped policy/ }).click({ force: true });
+      const policyDetailResponse = await policyDetailResponsePromise;
+      if (policyDetailResponse.status() !== 200) {
+        throw new Error(`Expected mapped policy detail 200, got ${policyDetailResponse.status()}`);
+      }
+      const policyDrawer = page.getByRole("dialog", { name: "Policy detail" });
+      await policyDrawer.waitFor({ timeout: 5000 });
+      await assertVisible(policyDrawer.getByText("Fixture mapped policy", { exact: true }), "Expected mapped policy drawer");
+      await policyDrawer.getByRole("button", { name: /Revisions · 2/ }).click();
+      await assertVisible(
+        policyDrawer.locator(".policy-revision-row.selected").filter({ hasText: "v7.0" }),
+        "Expected exact mapped policy version v7.0, not the newest v8.0",
+      );
+      await policyDrawer.getByRole("button", { name: "Close", exact: true }).click();
+      const unmappedRow = page.getByTestId("requirement-coverage-row").filter({ hasText: "CM-1" }).first();
+      await assertVisible(unmappedRow, "Expected unmapped requirement row");
+      if (await unmappedRow.locator(".cf-policy-link").count() !== 0) {
+        throw new Error("Unmapped requirement must not render a policy link");
+      }
 
       await page.unroute("**/api/v1/compliance/bundles*");
       await page.unroute(`**/api/v1/compliance/bundles/${bundleId}/systems*`);
       await page.unroute(`**/api/v1/compliance/bundle-versions/${bundleVersionId}/requirement-coverage`);
+      await page.unroute(`**/api/v1/deployment-policies/${policyId}`);
     },
   },
   {

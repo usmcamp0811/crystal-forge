@@ -5,10 +5,12 @@
 //! can render an explicit error state. Mock policy data is never returned to
 //! the caller (AC #34).
 
+use std::{collections::HashMap, future::Future};
+
 use uuid::Uuid;
 
 use crate::api::client::{ApiClientError, fetch_deployment_policies, fetch_deployment_policy};
-use crate::api::models::DeploymentPolicyRecord;
+use crate::api::models::{DeploymentPoliciesListResponse, DeploymentPolicyRecord};
 use crate::components::policy::PolicyDefinition;
 use crate::components::policy::PolicyRevisionSummary;
 
@@ -20,33 +22,114 @@ pub enum PolicyLoadResult {
     Err(String),
 }
 
+const POLICY_PAGE_SIZE: i64 = 100;
+
+async fn load_all_policy_pages<F, Fut>(
+    mut fetch_page: F,
+) -> Result<(Vec<DeploymentPolicyRecord>, HashMap<Uuid, i64>), ApiClientError>
+where
+    F: FnMut(i64) -> Fut,
+    Fut: Future<Output = Result<DeploymentPoliciesListResponse, ApiClientError>>,
+{
+    let mut offset = 0_i64;
+    let mut records = Vec::new();
+    let mut system_counts = HashMap::new();
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut expected_total = None;
+    let mut previous_name = None::<String>;
+
+    loop {
+        let response = fetch_page(offset).await?;
+        if response.offset != offset {
+            return Err(ApiClientError::Deserialize(format!(
+                "policy page offset mismatch: requested {offset}, received {}",
+                response.offset
+            )));
+        }
+        if let Some(total) = expected_total {
+            if total != response.total {
+                return Err(ApiClientError::Deserialize(
+                    "policy page total changed during load".to_string(),
+                ));
+            }
+        } else {
+            expected_total = Some(response.total);
+        }
+
+        for policy in &response.policies {
+            if let Some(previous) = previous_name.as_ref() {
+                if policy.name < *previous {
+                    return Err(ApiClientError::Deserialize(
+                        "policy pages are not deterministically ordered".to_string(),
+                    ));
+                }
+            }
+            if !seen_ids.insert(policy.id) {
+                return Err(ApiClientError::Deserialize(format!(
+                    "duplicate policy id returned: {}",
+                    policy.id
+                )));
+            }
+            previous_name = Some(policy.name.clone());
+        }
+
+        let page_len = response.policies.len() as i64;
+        system_counts.extend(response.system_counts);
+        records.extend(response.policies);
+        offset += page_len;
+        let total = expected_total.unwrap_or_default();
+
+        if records.len() == total {
+            break;
+        }
+        if page_len == 0 || records.len() > total {
+            return Err(ApiClientError::Deserialize(format!(
+                "policy page load ended with {} records, expected {total}",
+                records.len()
+            )));
+        }
+    }
+
+    Ok((records, system_counts))
+}
+
+async fn load_policies_with<F, Fut>(fetch_page: F) -> PolicyLoadResult
+where
+    F: FnMut(i64) -> Fut,
+    Fut: Future<Output = Result<DeploymentPoliciesListResponse, ApiClientError>>,
+{
+    let result = load_all_policy_pages(fetch_page).await;
+    let (records, system_counts) = match result {
+        Ok(result) => result,
+        Err(ApiClientError::Status { code, body }) => {
+            return PolicyLoadResult::Err(format!("Server returned {}: {}", code, body));
+        }
+        Err(ApiClientError::Network(msg)) => {
+            return PolicyLoadResult::Err(format!("Network error: {}", msg));
+        }
+        Err(ApiClientError::Deserialize(msg)) => {
+            return PolicyLoadResult::Err(format!("Deserialize error: {}", msg));
+        }
+    };
+
+    let definitions = records
+        .into_iter()
+        .map(|p| {
+            let count = system_counts.get(&p.id).copied().unwrap_or(0);
+            policy_record_to_definition_with_count(p, count)
+        })
+        .collect();
+    PolicyLoadResult::Ok(definitions)
+}
+
 /// Fetch policies from the API.
 ///
 /// Returns an explicit error on any failure; never falls back to mock data.
 pub async fn load_policies() -> PolicyLoadResult {
-    match fetch_deployment_policies(Some(100), Some(0)).await {
-        Ok(response) => {
-            let sys_counts = response.system_counts;
-            let definitions = response
-                .policies
-                .into_iter()
-                .map(|p| {
-                    let count = sys_counts.get(&p.id).copied().unwrap_or(0);
-                    policy_record_to_definition_with_count(p, count)
-                })
-                .collect();
-            PolicyLoadResult::Ok(definitions)
-        }
-        Err(ApiClientError::Status { code, body }) => {
-            PolicyLoadResult::Err(format!("Server returned {}: {}", code, body))
-        }
-        Err(ApiClientError::Network(msg)) => {
-            PolicyLoadResult::Err(format!("Network error: {}", msg))
-        }
-        Err(ApiClientError::Deserialize(msg)) => {
-            PolicyLoadResult::Err(format!("Deserialize error: {}", msg))
-        }
-    }
+    load_policies_with(|offset| async move {
+        fetch_deployment_policies(Some(POLICY_PAGE_SIZE), Some(offset)).await
+    })
+    .await
 }
 
 /// Fetch a complete policy lineage directly and select the exact version used
@@ -82,6 +165,164 @@ pub async fn load_policy_version(
 /// re-fetch the paginated first-100 list.
 pub(crate) fn policy_record_to_definition(record: DeploymentPolicyRecord) -> PolicyDefinition {
     policy_record_to_definition_with_count(record, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use chrono::Utc;
+
+    use super::*;
+    use crate::api::models::DeploymentPolicyVersionSummary;
+
+    fn fixture_policy(id: Uuid, name: String, category: Option<&str>) -> DeploymentPolicyRecord {
+        let version_id = Uuid::new_v4();
+        DeploymentPolicyRecord {
+            id,
+            name: name.clone(),
+            description: None,
+            policy_type: "custom_check".to_string(),
+            config: serde_json::json!({"expression": "true"}),
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            current_version_id: Some(version_id),
+            versions: vec![DeploymentPolicyVersionSummary {
+                id: version_id,
+                policy_id: id,
+                version: "1.0.0".to_string(),
+                publication_state: "draft".to_string(),
+                trust_state: "trusted".to_string(),
+                semantic_digest: format!("digest-{id}"),
+                created_at: Utc::now(),
+                published_at: None,
+                derived_from_version_id: None,
+                is_current_published: false,
+                is_current_draft: true,
+                name,
+                description: None,
+                policy_type: "custom_check".to_string(),
+                config: serde_json::json!({"expression": "true"}),
+                enabled: true,
+                srg_ids: Vec::new(),
+                cci_ids: Vec::new(),
+                category: category.map(str::to_string),
+                framework: None,
+                severity: None,
+                control_family: None,
+                cmmc_level: None,
+                cis_section: None,
+                rationale: None,
+                created_by: None,
+                created_by_display: None,
+                evidence_specs: Vec::new(),
+            }],
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
+        }
+    }
+
+    fn page(
+        offset: i64,
+        total: usize,
+        policies: Vec<DeploymentPolicyRecord>,
+    ) -> DeploymentPoliciesListResponse {
+        DeploymentPoliciesListResponse {
+            policies,
+            total,
+            limit: POLICY_PAGE_SIZE,
+            offset,
+            system_counts: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn production_loader_fetches_and_classifies_later_policy_page() {
+        let mut policies = Vec::new();
+        for index in 0..105 {
+            policies.push(fixture_policy(
+                Uuid::new_v4(),
+                format!("security-{index:03}"),
+                Some("security"),
+            ));
+        }
+        let platform_ids: Vec<Uuid> = (0..5)
+            .map(|index| {
+                let id = Uuid::new_v4();
+                policies.push(fixture_policy(id, format!("zzz-platform-{index:03}"), None));
+                id
+            })
+            .collect();
+
+        let first_page = policies[..100].to_vec();
+        let second_page = policies[100..].to_vec();
+        let result = load_policies_with(move |offset| {
+            let first_page = first_page.clone();
+            let second_page = second_page.clone();
+            async move {
+                Ok(if offset == 0 {
+                    page(0, 110, first_page)
+                } else {
+                    page(100, 110, second_page)
+                })
+            }
+        })
+        .await;
+
+        let PolicyLoadResult::Ok(loaded) = result else {
+            panic!("expected complete policy catalog");
+        };
+        assert_eq!(loaded.len(), 110);
+        let unique_ids: std::collections::HashSet<Uuid> =
+            loaded.iter().map(|policy| policy.id).collect();
+        assert_eq!(unique_ids.len(), 110);
+        assert_eq!(
+            loaded
+                .iter()
+                .filter(|p| p.category.as_deref() == Some("security"))
+                .count(),
+            105
+        );
+        assert_eq!(loaded.iter().filter(|p| p.category.is_none()).count(), 5);
+        for id in platform_ids {
+            assert!(loaded.iter().any(|policy| policy.id == id));
+        }
+        assert!(
+            loaded
+                .iter()
+                .any(|policy| policy.name == "zzz-platform-004")
+        );
+    }
+
+    #[tokio::test]
+    async fn production_loader_rejects_later_page_failure_without_partial_success() {
+        let first_page: Vec<DeploymentPolicyRecord> = (0..100)
+            .map(|index| {
+                fixture_policy(
+                    Uuid::new_v4(),
+                    format!("security-{index:03}"),
+                    Some("security"),
+                )
+            })
+            .collect();
+        let result = load_policies_with(move |offset| {
+            let first_page = first_page.clone();
+            async move {
+                if offset == 0 {
+                    Ok(page(0, 110, first_page))
+                } else {
+                    Err(ApiClientError::Status {
+                        code: 503,
+                        body: "later page unavailable".to_string(),
+                    })
+                }
+            }
+        })
+        .await;
+
+        assert!(matches!(result, PolicyLoadResult::Err(message) if message.contains("503")));
+    }
 }
 
 /// Convert a backend DeploymentPolicyRecord to a frontend PolicyDefinition.

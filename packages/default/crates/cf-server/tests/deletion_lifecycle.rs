@@ -369,3 +369,115 @@ async fn deletion_lifecycle_database_matrix() {
         "immutable_assignment_history",
     );
 }
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL database"]
+async fn draft_policy_with_requirement_mapping_is_deletable() {
+    let pool = pool().await;
+    let (policy_id, policy_version_id) = draft_policy(&pool).await;
+    let requirement_version_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM compliance_requirement_versions LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("disposable test database must contain a requirement version");
+    let actor_id: Uuid = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .expect("disposable test database must contain a user");
+    sqlx::query(
+        "INSERT INTO policy_requirement_mappings \
+         (policy_version_id, requirement_version_id, relationship, coverage, created_by) \
+         VALUES ($1, $2, 'implements', 'full', $3)",
+    )
+    .bind(policy_version_id)
+    .bind(requirement_version_id)
+    .bind(actor_id)
+    .execute(&pool)
+    .await
+    .expect("insert draft policy requirement mapping");
+
+    let artifact_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO compliance_source_artifacts \
+         (content, filename, media_type, sha256, parser_version, imported_by) \
+         VALUES (decode('00', 'hex'), $1, 'application/xml', $2, 'test', $3) \
+         RETURNING id",
+    )
+    .bind(format!("{}.xccdf.xml", Uuid::new_v4()))
+    .bind("6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d")
+    .bind(actor_id)
+    .fetch_one(&pool)
+    .await
+    .expect("insert imported source artifact");
+    sqlx::query("UPDATE deployment_policy_versions SET source_artifact_id = $1 WHERE id = $2")
+        .bind(artifact_id)
+        .bind(policy_version_id)
+        .execute(&pool)
+        .await
+        .expect("attach source artifact to policy version");
+    sqlx::query(
+        "INSERT INTO compliance_source_object_mappings \
+         (source_artifact_id, object_kind, source_identity, policy_version_id, fidelity) \
+         VALUES ($1, 'rule', '[SV-268140r1117267_rule]', $2, 'normalized_complete')",
+    )
+    .bind(artifact_id)
+    .bind(policy_version_id)
+    .execute(&pool)
+    .await
+    .expect("insert imported source mapping");
+
+    let eligibility = deployment_policies::policy_deletion_eligibility(&pool, &policy_id)
+        .await
+        .expect("load draft deletion eligibility")
+        .expect("draft policy should exist");
+    assert!(
+        eligibility.eligible,
+        "draft deletion was unexpectedly blocked: {eligibility:?}"
+    );
+
+    assert_eq!(
+        deployment_policies::delete_deployment_policy(&pool, &policy_id)
+            .await
+            .expect("delete draft policy with mapping"),
+        PolicyDeleteOutcome::Deleted
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(policy_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count deleted policy version"),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM policy_requirement_mappings WHERE policy_version_id = $1",
+        )
+        .bind(policy_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count deleted requirement mappings"),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM compliance_source_object_mappings WHERE policy_version_id = $1",
+        )
+        .bind(policy_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count deleted source mappings"),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM compliance_source_artifacts WHERE id = $1",
+        )
+        .bind(artifact_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count retained source artifact"),
+        1
+    );
+}

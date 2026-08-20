@@ -3138,12 +3138,12 @@ pub mod tests {
             .unwrap();
         tx.commit().await.unwrap();
 
-        // Create a policy + draft version, add it to the bundle.
+        // Create two policies + draft versions, add both to the bundle.
         let pol_id: Uuid = sqlx::query_scalar(
             "INSERT INTO deployment_policies (name, policy_type, config, enabled) \
-             VALUES ($1, 'custom_check', '{\"expression\":\"true\"}', false) RETURNING id",
+              VALUES ($1, 'custom_check', '{\"expression\":\"true\"}', false) RETURNING id",
         )
-        .bind(format!("coverage-policy-{}", Uuid::new_v4()))
+        .bind(format!("coverage-policy-full-{}", Uuid::new_v4()))
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -3152,6 +3152,21 @@ pub mod tests {
             "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
         )
         .bind(pol_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let pol_id2: Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config, enabled) \
+             VALUES ($1, 'custom_check', '{\"expression\":\"true\"}', false) RETURNING id",
+        )
+        .bind(format!("coverage-policy-partial-{}", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let pv_id2: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(pol_id2)
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -3167,9 +3182,19 @@ pub mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        sqlx::query(
+            "INSERT INTO compliance_bundle_version_policies \
+             (bundle_version_id, policy_version_id, policy_order, selected) \
+             VALUES ($1, $2, 1, true)",
+        )
+        .bind(bv_id)
+        .bind(pv_id2)
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        // Map the policy to V-001 (full/implements) → full coverage.
-        // Map the policy to V-002 (partial/supports) → partial coverage.
+        // Map P1 to V-001 (full/implements) → full coverage.
+        // Map P2 to V-002 (partial/supports) → partial coverage.
         // V-003 has no mapping → unmapped.
         //
         // Use a real user ID to satisfy the FK on policy_requirement_mappings.
@@ -3190,7 +3215,7 @@ pub mod tests {
         .await
         .unwrap();
         create_policy_mapping(
-            &pool, pv_id, rv_id2, "supports", "partial", None, "manual", actor,
+            &pool, pv_id2, rv_id2, "supports", "partial", None, "manual", actor,
         )
         .await
         .unwrap();
@@ -3210,6 +3235,53 @@ pub mod tests {
         assert_eq!(report.frameworks[0].framework_version_id, fv_id);
         assert_eq!(report.frameworks[0].framework_version, "V1R1");
         assert_eq!(report.frameworks[0].framework_publisher, None);
+
+        let row = |external_id: &str| {
+            report
+                .rows
+                .iter()
+                .find(|row| row.external_id == external_id)
+                .unwrap_or_else(|| panic!("missing coverage row {external_id}"))
+        };
+        let full = row("V-001");
+        assert_eq!(full.coverage, RequirementCoverage::Full);
+        assert_eq!(full.mapped_policy_version_ids, vec![pv_id]);
+        assert_eq!(full.mappings.len(), 1);
+        assert_eq!(full.mappings[0].policy_id, pol_id);
+        assert_eq!(full.mappings[0].policy_version_id, pv_id);
+        assert!(
+            full.mappings[0]
+                .policy_name
+                .starts_with("coverage-policy-full-")
+        );
+        assert_eq!(full.mappings[0].coverage, "full");
+
+        let partial = row("V-002");
+        assert_eq!(partial.coverage, RequirementCoverage::Partial);
+        assert_eq!(partial.mapped_policy_version_ids, vec![pv_id2]);
+        assert_eq!(partial.mappings.len(), 1);
+        assert_eq!(partial.mappings[0].policy_id, pol_id2);
+        assert_eq!(partial.mappings[0].policy_version_id, pv_id2);
+        assert_eq!(partial.mappings[0].coverage, "partial");
+
+        let unmapped = row("V-003");
+        assert_eq!(unmapped.coverage, RequirementCoverage::Unmapped);
+        assert!(unmapped.mapped_policy_version_ids.is_empty());
+        assert!(unmapped.mappings.is_empty());
+
+        for row in &report.rows {
+            match row.coverage {
+                RequirementCoverage::Full | RequirementCoverage::Partial => {
+                    assert!(!row.mapped_policy_version_ids.is_empty());
+                    assert!(!row.mappings.is_empty());
+                }
+                RequirementCoverage::Unmapped => {
+                    assert!(row.mapped_policy_version_ids.is_empty());
+                    assert!(row.mappings.is_empty());
+                }
+                RequirementCoverage::RecoveryRequired => {}
+            }
+        }
     }
 
     #[tokio::test]

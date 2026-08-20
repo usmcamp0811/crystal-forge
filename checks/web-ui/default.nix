@@ -21,7 +21,7 @@
 , pkgs
 , inputs
 , testProfile ? "ci_fast"
-, testSteps ? null
+, testSteps ? builtins.getEnv "CF_UI_TEST_STEPS"
 , runExportValidation ? true
 , playwrightResultTimeout ? 1800
 , ...
