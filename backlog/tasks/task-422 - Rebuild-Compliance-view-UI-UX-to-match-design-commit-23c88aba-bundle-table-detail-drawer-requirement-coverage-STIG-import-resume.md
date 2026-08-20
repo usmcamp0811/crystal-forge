@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-20 20:47'
+updated_date: '2026-08-20 21:59'
 labels: []
 milestone: m-22
 dependencies:
@@ -195,6 +195,8 @@ Follow-up assignment mutation error audit: propagate SQL failures in deactivate_
 Current-head maintainer audit remediation: fix get_assignment_effective_policies to load bundle_version_id and enforcement_mode from current immutable assignment version; extend pair assignment metadata loading so conflict/unresolved bundle rollups preserve reason and status; add discriminating production-path tests for lineage V1 versus current immutable V2 and conflict reason preservation. Then run direct browser steps 20ab, 29f, and 30d on TASK-422 and origin/dev, followed by exact-head flake/CI verification.
 
 Focused deletion-invariant remediation from pushed SHA 009b5738: (1) restore bundle deletion eligibility to classify every compliance_bundle_assignment_versions row as immutable regardless of referenced bundle publication state; (2) retain cleanup only for versionless draft assignment lineages so imported unpublished drafts with trigger-created legacy rows remain deletable; (3) add migration 0231 restoring strict assignment-version and assignment-child DELETE immutability because migration 0228 has already been applied and must not be edited; (4) strengthen live-DB coverage to prove active and inactive draft assignments block deletion, direct deletion of mutable assignment history is rejected, and a versionless draft assignment can still be removed atomically; (5) run the focused deletion lifecycle suite before proceeding to backend-backed coverage and imported-draft browser regressions.
+
+Real-backend coverage browser conversion exposed a production grouping defect: imported STIG rule rows may reference a parent requirement not present in the selected bundle report. RequirementCoverageCard currently emits the missing parent as a heading but drops the child because its second root walk returns no root. Within acceptance criterion #9, treat the last known row as the group root when its parent is absent so backend rows and Enforced-by links remain visible; cover this through the focused 20ae + 29a browser flow.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -259,6 +261,8 @@ The broad nix build .#checks.x86_64-linux.web-ui run did not provide a clean res
 At clean pushed SHA 009b5738, reproduced `deletion_lifecycle_database_matrix` against isolated PostgreSQL `crystal_forge_task422_test` with `--ignored --exact --nocapture --test-threads=1`: failed at the active draft assignment assertion because `delete_bundle` returned `Deleted`. Root cause confirmed: TASK eligibility joins bundle versions and counts assignment versions only for accepted/deprecated states, unlike origin/dev which counts every assignment-version row. Migration 0228 also permits direct deletion of mutable assignment versions/children. The existing assignment-row cleanup is still needed for versionless rows created by the legacy bundle-environment trigger, so remediation will narrow rather than remove that cleanup.
 
 Deletion invariant remediation completed, committed, and pushed as `899b491d` (`fix(policies): preserve immutable assignment history on deletion`). Migration 0231 restores strict assignment snapshot/child immutability; bundle eligibility counts all assignment-version history while retaining deletion of versionless legacy draft assignment rows. Live isolated DB verification after applying migration 0231: `deletion_lifecycle` ignored suite passed 2/2, including active/inactive blockers, direct snapshot DELETE rejection, versionless draft cleanup, and imported draft policy cleanup. Server cargo fmt, offline cargo check, and git diff check passed.
+
+Focused `CF_UI_TEST_STEPS=20ae-anduril-nixos-stig-import-roundtrip,29a-compliance-populated` runs confirmed the real backend report has 103/103 coverage and a mapping for `SV-268078r1130947_rule`, but the coverage detail rendered only that row's heading and no row/link. Root cause is RequirementCoverageCard's second parent walk: an imported rule whose parent is not included in the report leaves `check_root=None`, producing an empty group. This was hidden by the synthetic flat coverage fixture.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
