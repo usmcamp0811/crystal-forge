@@ -2881,7 +2881,18 @@ pub async fn load_assignment_metadata_for_systems(
 
     // Build the result map
     // Note: created_by is semantically the user who made/approved the assignment decision.
-    // Future: assignment_reason, assignment_deadline, assignment_poam require schema extensions.
+    // 
+    // DESIGN GAP: assignment_reason is defined in the ComplianceSystemRollup API model
+    // but has no authoritative source in the current schema. The database tracks created_by
+    // and updated_by for auditing, but no reason/purpose/justification field for the assignment
+    // itself. The TASK-422 compliance redesign spec does not include assignment_reason in
+    // its UI mockups or acceptance criteria. Future work should:
+    // 1. Clarify whether assignment_reason is a design requirement
+    // 2. If yes, add a reason field to compliance_bundle_assignments schema
+    // 3. Wire it through the API response
+    // 
+    // assignment_deadline and assignment_poam have similar gaps - not in schema, not in
+    // design spec, likely placeholders for future ATO metadata extensions.
     let mut result = std::collections::HashMap::new();
     for AssignmentRow {
         system_id,
@@ -3197,11 +3208,12 @@ fn rollup_from_statuses_with_metadata(
         score,
         resolution_state: None,
         assignment_status,
+        // DESIGN GAP: assignment_reason has no source in current schema.
+        // See load_assignment_metadata_for_systems() comment for details.
         assignment_reason: None,
         assignment_approved_by,
-        // NOTE: assignment_deadline and assignment_poam are design gaps.
-        // These fields are not modeled in the schema and have no domain requirement.
-        // They are placeholders for future ATO/compliance metadata extensions.
+        // DESIGN GAP: assignment_deadline and assignment_poam are not modeled in schema
+        // and have no domain requirement. They are placeholders for future ATO extensions.
         assignment_deadline: None,
         assignment_poam: None,
     }
