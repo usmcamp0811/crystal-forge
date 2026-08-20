@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-20 14:50'
+updated_date: '2026-08-20 14:53'
 labels: []
 milestone: m-22
 dependencies:
@@ -245,6 +245,8 @@ Starting the P2 list API remediation from f21b5095. Scope is limited to list_ass
 P2 list API remediation completed in commit 3acb2a0b1da534c5bc10cd904618d600db976ea5 and pushed to origin/TASK-422-compliance-view-redesign. list_assignments_for_scope now joins current_version_id to av for authoritative bundle_version_id, enforcement_mode, assignment_overlay_digest, and reason; exclusions, additions, and value_overrides are loaded in three set-wise ANY($1) queries and grouped by version. Verification passed: nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all -- --check; nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-server --offline; nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server --test assignment_semantics (10 passed); git diff --check. Local/tracking/remote SHA verified equal. Task remains In Progress; no merge-ready claim made.
 
 Starting focused assignment SQL error propagation follow-up from 3acb2a0b. Scope is limited to production assignment handlers; nullable SQL values remain nullable, while query failures become internal errors.
+
+Assignment SQL error propagation follow-up committed and pushed as 51b0343e. Propagates failures for deactivation recheck, audit actor lookup, system loading/status, effective-policy overlays, and preview target verification while preserving nullable values. Verification passed: nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all -- --check; nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-server --offline; nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server --test assignment_semantics (10 passed); git diff --check. Local/tracking/remote SHA verified equal. Task remains In Progress; not merge-ready.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
