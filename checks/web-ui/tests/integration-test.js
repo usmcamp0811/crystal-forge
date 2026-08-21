@@ -9459,6 +9459,28 @@ security.audit.enable = true;</fixtext>
         if (updated.status() !== 200) throw new Error(`Live unrelated assignment update returned HTTP ${updated.status()}`);
         await page.getByRole("button", { name: "Edit mode", exact: true }).click();
         await assertValue(page.getByPlaceholder("reason (leave empty to preserve)"), "Reason A", "Live unrelated edit changed reason A");
+
+        // ── Exercise Reason A → Reason B → clear against the real server ──
+        await page.getByPlaceholder("reason (leave empty to preserve)").fill("Reason B");
+        const reasonBUpdate = page.waitForResponse(
+          (response) => response.url().includes("/api/v1/compliance/assignments/") && response.request().method() === "PUT",
+        );
+        await page.getByRole("button", { name: "Save", exact: true }).click();
+        const reasonBResp = await reasonBUpdate;
+        if (reasonBResp.status() !== 200) throw new Error(`Live reason-B update returned HTTP ${reasonBResp.status()}`);
+        await page.getByRole("button", { name: "Edit mode", exact: true }).click();
+        await assertValue(page.getByPlaceholder("reason (leave empty to preserve)"), "Reason B", "Live reason B not persisted after reopen");
+
+        // ── Clear the reason ──
+        await page.getByPlaceholder("reason (leave empty to preserve)").fill("");
+        const clearUpdate = page.waitForResponse(
+          (response) => response.url().includes("/api/v1/compliance/assignments/") && response.request().method() === "PUT",
+        );
+        await page.getByRole("button", { name: "Save", exact: true }).click();
+        const clearResp = await clearUpdate;
+        if (clearResp.status() !== 200) throw new Error(`Live reason clear returned HTTP ${clearResp.status()}`);
+        await page.getByRole("button", { name: "Edit mode", exact: true }).click();
+        await assertValue(page.getByPlaceholder("reason (leave empty to preserve)"), "", "Live cleared reason should be absent after reopen");
         return;
       }
 
@@ -9758,14 +9780,13 @@ security.audit.enable = true;</fixtext>
     action: async (page) => {
       // STEP 1: Create a policy with initial evidence
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
-      await page.getByRole("button", { name: /New policy/i }).click();
+      await collapseOnboardingCoach(page);
+      await page.getByRole("button", { name: /New custom policy/i }).first().click();
       
       // Wait for create modal to open and fill basic details
-      await page.getByLabel("Policy name", { exact: true }).waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
-      await page.getByLabel("Policy name", { exact: true }).fill("Evidence Test Policy");
-      
-      const typeSelect = page.locator("select").first();
-      await typeSelect.selectOption("require_packages");
+      await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: LOAD_TIMEOUT });
+      await page.getByLabel("Name", { exact: true }).waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await page.getByLabel("Name", { exact: true }).fill("Evidence Test Policy");
       
       // Navigate to Evidence tab
       const evidenceTab = page.getByTestId("policy-editor-tab-evidence");
