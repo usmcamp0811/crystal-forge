@@ -37,7 +37,15 @@ where
     let mut system_counts = HashMap::new();
     let mut seen_ids = std::collections::HashSet::new();
     let mut expected_total = None;
-    let mut previous_name = None::<String>;
+    // Full advertised ordering key: `(name, id)`. The server sorts with
+    // `ORDER BY name COLLATE "C" ASC, id ASC`; `C` collation is bytewise over
+    // UTF-8, which is exactly Rust `String::Ord`, so comparing with Rust
+    // ordering here is equivalent to the server's ordering.
+    //
+    // Both halves must be validated. Comparing only `name` would silently
+    // accept a page boundary that reorders equal-named records, which is the
+    // half of the contract the server's `id` tie-breaker exists to guarantee.
+    let mut previous_key = None::<(String, Uuid)>;
 
     loop {
         let response = fetch_page(offset).await?;
@@ -58,8 +66,9 @@ where
         }
 
         for policy in &response.policies {
-            if let Some(previous) = previous_name.as_ref() {
-                if policy.name < *previous {
+            let key = (policy.name.clone(), policy.id);
+            if let Some(previous) = previous_key.as_ref() {
+                if key < *previous {
                     return Err(ApiClientError::Deserialize(
                         "policy pages are not deterministically ordered".to_string(),
                     ));
@@ -71,7 +80,7 @@ where
                     policy.id
                 )));
             }
-            previous_name = Some(policy.name.clone());
+            previous_key = Some(key);
         }
 
         let page_len = response.policies.len() as i64;
@@ -325,80 +334,130 @@ mod tests {
         assert!(matches!(result, PolicyLoadResult::Err(message) if message.contains("503")));
     }
 
-    /// Regression: two policies sharing the same name must not cause
-    /// `"policy pages are not deterministically ordered"`.  With
-    /// `ORDER BY name ASC, id ASC` the server always returns the same
-    /// id-sequence for tied names.  This test feeds the client two pages
-    /// that are already correctly ordered by (name, id) and verifies the
-    /// loader accepts them.  A previous bug (`ORDER BY name ASC` alone)
-    /// made the page boundary unstable, which triggered the client-side
-    /// deterministic-page validation.
+    /// The production failure mode, reproduced at the client boundary.
+    ///
+    /// A database-collated `ORDER BY name` (e.g. `en_US.utf8`) emits
+    /// `apple` before `Apple`, because that collation is case-insensitive.
+    /// Rust `String::Ord` is bytewise, so it considers `"Apple" < "apple"`
+    /// (`0x41 < 0x61`) and rejects the page. The server fix is
+    /// `ORDER BY name COLLATE "C"`, which matches Rust byte ordering.
     #[tokio::test]
-    async fn production_loader_accepts_pages_with_tied_names() {
-        let shared_name = "shared-policy-name".to_string();
+    async fn production_loader_rejects_locale_collated_name_order() {
+        // Exactly what an en_US.utf8 database returns for these two names.
+        let locale_ordered = vec![
+            fixture_policy(Uuid::new_v4(), "apple policy".to_string(), None),
+            fixture_policy(Uuid::new_v4(), "Apple policy".to_string(), None),
+        ];
 
-        // Simulate 4 policies with the same name but distinct UUIDs,
-        // pre-sorted by (name, id) — exactly what the fixed query returns.
-        let mut tied: Vec<DeploymentPolicyRecord> = (0..4)
-            .map(|i| {
-                let id = Uuid::new_v4();
-                let mut p = fixture_policy(id, shared_name.clone(), None);
-                // Ensure the ID sorts after the others so the tie-break is exercised.
-                p.name = shared_name.clone();
-                p
-            })
-            .collect();
-        tied.sort_by(|a, b| (a.name.clone(), a.id).cmp(&(b.name.clone(), b.id)));
+        let result = load_policies_with(move |_offset| {
+            let locale_ordered = locale_ordered.clone();
+            async move { Ok(page(0, 2, locale_ordered)) }
+        })
+        .await;
 
-        let first_page = tied[..2].to_vec();
-        let second_page = tied[2..].to_vec();
+        assert!(
+            matches!(
+                result,
+                PolicyLoadResult::Err(ref msg) if msg.contains("deterministically ordered")
+            ),
+            "locale-collated name order must be rejected by the client contract, got: {result:?}"
+        );
+    }
 
-        let result = load_policies_with(move |offset| {
-            let first_page = first_page.clone();
-            let second_page = second_page.clone();
-            async move {
-                Ok(if offset == 0 {
-                    page(0, 4, first_page)
-                } else {
-                    page(2, 4, second_page)
-                })
-            }
+    /// The same two names in `C`/Rust byte order must be accepted. This is
+    /// the post-fix server behaviour.
+    #[tokio::test]
+    async fn production_loader_accepts_c_collated_name_order() {
+        let c_ordered = vec![
+            fixture_policy(Uuid::new_v4(), "Apple policy".to_string(), None),
+            fixture_policy(Uuid::new_v4(), "apple policy".to_string(), None),
+        ];
+
+        let result = load_policies_with(move |_offset| {
+            let c_ordered = c_ordered.clone();
+            async move { Ok(page(0, 2, c_ordered)) }
         })
         .await;
 
         let PolicyLoadResult::Ok(loaded) = result else {
-            panic!(
-                "pages with tied names must not fail deterministic-page validation: {:?}",
-                result
-            );
+            panic!("C-collated (Rust byte) name order must be accepted, got: {result:?}");
         };
-        assert_eq!(loaded.len(), 4);
-        let unique_ids: std::collections::HashSet<Uuid> =
-            loaded.iter().map(|policy| policy.id).collect();
-        assert_eq!(unique_ids.len(), 4, "no duplicate policy IDs");
+        assert_eq!(loaded.len(), 2);
     }
 
-    /// Verify that the deterministic-page validation rejects out-of-order
-    /// pages — the exact scenario that caused the production regression.
+    /// Validates the half of the ordering contract the client previously
+    /// ignored: for equal names the server promises ascending `id`, so a
+    /// page that emits descending `id` within a name tie must be rejected.
+    ///
+    /// Before widening the validator to the full `(name, id)` key this case
+    /// passed silently, because `name < previous` is false for equal names.
     #[tokio::test]
-    async fn production_loader_rejects_out_of_order_pages() {
-        let mut policies: Vec<DeploymentPolicyRecord> = (0..5)
-            .map(|i| fixture_policy(Uuid::new_v4(), format!("policy-{i:03}"), None))
-            .collect();
-        // Reverse the first page to simulate non-deterministic ordering.
-        policies[..3].reverse();
+    async fn production_loader_rejects_tied_names_with_descending_ids() {
+        let shared = "shared policy name".to_string();
+        let mut ids = [Uuid::new_v4(), Uuid::new_v4()];
+        ids.sort();
+        // Emit the higher id first — violates the advertised `id ASC`.
+        let descending = vec![
+            fixture_policy(ids[1], shared.clone(), None),
+            fixture_policy(ids[0], shared.clone(), None),
+        ];
 
-        let first_page = policies[..3].to_vec();
-        let second_page = policies[3..].to_vec();
+        let result = load_policies_with(move |_offset| {
+            let descending = descending.clone();
+            async move { Ok(page(0, 2, descending)) }
+        })
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                PolicyLoadResult::Err(ref msg) if msg.contains("deterministically ordered")
+            ),
+            "tied names with descending ids must be rejected, got: {result:?}"
+        );
+    }
+
+    /// Tied names in ascending `id` order satisfy the contract.
+    #[tokio::test]
+    async fn production_loader_accepts_tied_names_with_ascending_ids() {
+        let shared = "shared policy name".to_string();
+        let mut ids = [Uuid::new_v4(), Uuid::new_v4()];
+        ids.sort();
+        let ascending = vec![
+            fixture_policy(ids[0], shared.clone(), None),
+            fixture_policy(ids[1], shared.clone(), None),
+        ];
+
+        let result = load_policies_with(move |_offset| {
+            let ascending = ascending.clone();
+            async move { Ok(page(0, 2, ascending)) }
+        })
+        .await;
+
+        let PolicyLoadResult::Ok(loaded) = result else {
+            panic!("tied names with ascending ids must be accepted, got: {result:?}");
+        };
+        assert_eq!(loaded.len(), 2);
+    }
+
+    /// Ordering must also hold *across* a page boundary, not just within a page.
+    #[tokio::test]
+    async fn production_loader_rejects_out_of_order_across_page_boundary() {
+        let first_page = vec![
+            fixture_policy(Uuid::new_v4(), "b policy".to_string(), None),
+            fixture_policy(Uuid::new_v4(), "c policy".to_string(), None),
+        ];
+        // Regresses below the last name of page 1.
+        let second_page = vec![fixture_policy(Uuid::new_v4(), "a policy".to_string(), None)];
 
         let result = load_policies_with(move |offset| {
             let first_page = first_page.clone();
             let second_page = second_page.clone();
             async move {
                 Ok(if offset == 0 {
-                    page(0, 5, first_page)
+                    page(0, 3, first_page)
                 } else {
-                    page(3, 5, second_page)
+                    page(2, 3, second_page)
                 })
             }
         })
@@ -409,7 +468,7 @@ mod tests {
                 result,
                 PolicyLoadResult::Err(ref msg) if msg.contains("deterministically ordered")
             ),
-            "out-of-order pages must be rejected, got: {result:?}"
+            "ordering violation across a page boundary must be rejected, got: {result:?}"
         );
     }
 }

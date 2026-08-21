@@ -18,7 +18,27 @@ use crate::models::deployment_policies::{
 use crate::queries::compliance::ensure_policy_draft;
 use crate::queries::deletion::{blocker, eligibility};
 
-/// List deployment policies with pagination
+/// List deployment policies with pagination.
+///
+/// # Ordering contract
+///
+/// The advertised pagination key is `(name COLLATE "C", id)`.
+///
+/// `COLLATE "C"` is mandatory, not cosmetic. Without it PostgreSQL sorts using
+/// the database's configured collation (e.g. `en_US.utf8`), which orders text
+/// case-insensitively and ignores punctuation. The WASM client validates page
+/// ordering with Rust `String::Ord`, which is bytewise over UTF-8. Those two
+/// orderings disagree (for example `en_US` yields `apple, Apple` while Rust
+/// considers `"Apple" < "apple"`), causing the client to reject a correctly
+/// paginated response with "policy pages are not deterministically ordered".
+///
+/// `C` collation is bytewise over the encoding, which for a UTF-8 database is
+/// exactly Rust's `String::Ord`. Keep this in sync with
+/// `web-ui/src/views/policies_api.rs::load_all_policy_pages`.
+///
+/// `id` is a defensive total-order tie-breaker. `deployment_policies.name`
+/// currently carries a UNIQUE constraint so ties cannot occur today; the
+/// tie-breaker keeps the contract total if that constraint is ever relaxed.
 pub async fn list_deployment_policies(
     pool: &PgPool,
     limit: i64,
@@ -28,7 +48,7 @@ pub async fn list_deployment_policies(
         r#"
         SELECT id, name, description, policy_type, config, enabled, created_at, updated_at
         FROM deployment_policies
-        ORDER BY name ASC, id ASC
+        ORDER BY name COLLATE "C" ASC, id ASC
         LIMIT $1 OFFSET $2
         "#,
     )
@@ -53,7 +73,7 @@ pub async fn list_enabled_deployment_policies(
         SELECT id, name, description, policy_type, config, enabled, created_at, updated_at
         FROM deployment_policies
         WHERE enabled = true
-        ORDER BY name ASC, id ASC
+        ORDER BY name COLLATE "C" ASC, id ASC
         "#,
     )
     .fetch_all(pool)
@@ -69,14 +89,24 @@ pub async fn list_enabled_deployment_policies(
 /// This is the correct scope for Nix-eval policy checks: a policy that is
 /// only assigned to environments unrelated to this flake should not block
 /// builds for systems in other environments.
+///
+/// Ordered by `(name COLLATE "C", id)` for the same reason as
+/// [`list_deployment_policies`] — see that function's ordering contract.
+///
+/// The previous `SELECT DISTINCT` was removed because it was redundant and
+/// is illegal alongside a collated `ORDER BY` ("for SELECT DISTINCT, ORDER BY
+/// expressions must appear in select list"). Redundancy holds because this
+/// query selects from a single table with no joins; the assignment checks are
+/// `EXISTS` subqueries in `WHERE`, which filter rows but cannot multiply them,
+/// and `dp.id` is the primary key so no two output rows could ever collapse.
 pub async fn list_enabled_policies_for_flake(
     pool: &PgPool,
     flake_id: i32,
 ) -> Result<Vec<DeploymentPolicyRecord>> {
     let policies = sqlx::query_as::<_, DeploymentPolicyRecord>(
         r#"
-        SELECT DISTINCT dp.id, dp.name, dp.description, dp.policy_type,
-                        dp.config, dp.enabled, dp.created_at, dp.updated_at
+        SELECT dp.id, dp.name, dp.description, dp.policy_type,
+               dp.config, dp.enabled, dp.created_at, dp.updated_at
         FROM deployment_policies dp
         WHERE dp.enabled = true
           AND (
@@ -101,7 +131,7 @@ pub async fn list_enabled_policies_for_flake(
                     AND s.is_active  = TRUE
               )
           )
-        ORDER BY dp.name ASC, dp.id ASC
+        ORDER BY dp.name COLLATE "C" ASC, dp.id ASC
         "#,
     )
     .bind(flake_id)
@@ -2759,131 +2789,287 @@ mod tests {
             .expect("clean up source artifact");
     }
 
-    // ── Deterministic pagination regression ───────────────────────────────
+    // ── Deterministic pagination / collation contract regression ──────────
     //
-    // This test catches the production regression where ORDER BY name ASC
-    // without a unique tie-breaker caused non-deterministic page boundaries.
+    // The paginated policy list advertises the ordering key
+    // `(name COLLATE "C", id)`. The WASM client re-validates that ordering
+    // using Rust `String::Ord`, which is bytewise over UTF-8.
+    //
+    // If the server sorts with the *database* collation instead (e.g.
+    // `en_US.utf8`), PostgreSQL orders case-insensitively and ignores
+    // punctuation, producing a sequence Rust considers unsorted. The client
+    // then rejects a perfectly-paginated response with
+    // "policy pages are not deterministically ordered" — the production bug.
+    //
+    // These tests deliberately create a temp database with `en_US.utf8`
+    // collation. Running them against a `C`-collated database (which is what
+    // the local dev database uses) would NOT be discriminating: there the
+    // buggy and fixed queries return identical output.
     //
     // Run with:
     //   CRYSTAL_FORGE_TEST_DATABASE_URL=... cargo test -p cf-server --lib \
-    //     deployment_policies::tests::pagination_is_deterministic -- --ignored --test-threads=1
+    //     deployment_policies::tests::pagination -- --ignored --test-threads=1
 
+    /// Names chosen so that `en_US.utf8` and `C` collation disagree:
+    /// case differences, punctuation, and a non-ASCII character.
+    const COLLATION_SENSITIVE_NAMES: &[&str] = &[
+        "Zebra policy",
+        "apple policy",
+        "Apple policy",
+        "banana-1 policy",
+        "banana 1 policy",
+        "Banana2 policy",
+        "_underscore policy",
+        "Ápple policy",
+    ];
+
+    /// Rust `String::Ord` over `(name, id)` — the exact comparison the WASM
+    /// client performs in `load_all_policy_pages`.
+    fn client_ordering_key(policy: &DeploymentPolicyRecord) -> (&str, Uuid) {
+        (policy.name.as_str(), policy.id)
+    }
+
+    /// Create a temp database with an explicitly non-`C` collation so the
+    /// mismatch between database ordering and Rust ordering is observable.
+    async fn create_locale_collated_temp_db() -> Option<(sqlx::PgPool, sqlx::PgPool, String)> {
+        let admin_url = admin_database_url();
+        let admin_pool = sqlx::PgPool::connect(&admin_url)
+            .await
+            .expect("connect to admin database");
+
+        let collation_available: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_collation WHERE collname = 'en_US.utf8')",
+        )
+        .fetch_one(&admin_pool)
+        .await
+        .unwrap_or(false);
+        if !collation_available {
+            return None;
+        }
+
+        let db_name = format!("cf_collate_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!(
+            "CREATE DATABASE \"{db_name}\" TEMPLATE template0 \
+             ENCODING 'UTF8' LC_COLLATE 'en_US.utf8' LC_CTYPE 'en_US.utf8'"
+        ))
+        .execute(&admin_pool)
+        .await
+        .expect("create en_US.utf8 collated temp database");
+
+        let slash = admin_url
+            .rfind('/')
+            .expect("admin URL must contain final /db segment");
+        let db_url = format!("{}{}", &admin_url[..slash + 1], db_name);
+        let db_pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect to collated temp database");
+        Some((admin_pool, db_pool, db_name))
+    }
+
+    async fn insert_named_policy(pool: &sqlx::PgPool, name: &str) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, description, policy_type, config, enabled) \
+             VALUES ($1, 'collation regression', 'custom_check', \
+                     '{\"expression\":\"true\"}'::jsonb, true) \
+             RETURNING id",
+        )
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .expect("insert policy")
+    }
+
+    /// The discriminating test: on a locale-collated database the paginated
+    /// query must still return rows in an order Rust agrees is sorted.
+    ///
+    /// Fails against `ORDER BY name ASC, id ASC`.
+    /// Passes against `ORDER BY name COLLATE "C" ASC, id ASC`.
     #[tokio::test]
-    #[ignore = "requires live postgres"]
-    async fn pagination_is_deterministic() {
-        let pool = get_test_pool().await;
-        let suffix = uuid::Uuid::new_v4().simple();
+    #[ignore = "requires a test database role with CREATE DATABASE privileges"]
+    async fn pagination_order_matches_rust_ordering_on_locale_collated_database() {
+        let Some((admin_pool, pool, db_name)) = create_locale_collated_temp_db().await else {
+            eprintln!("skipping: en_US.utf8 collation unavailable on this server");
+            return;
+        };
+
+        MIGRATOR
+            .run(&pool)
+            .await
+            .expect("migrations apply on collated temp database");
+
+        // Prove the fixture actually distinguishes the two collations,
+        // otherwise this test would silently stop being discriminating.
+        let db_collation_order: Vec<String> = sqlx::query_scalar(
+            "SELECT v FROM UNNEST($1::text[]) AS t(v) ORDER BY v COLLATE \"en_US.utf8\"",
+        )
+        .bind(COLLATION_SENSITIVE_NAMES)
+        .fetch_all(&pool)
+        .await
+        .expect("compute en_US ordering");
+        let c_collation_order: Vec<String> =
+            sqlx::query_scalar("SELECT v FROM UNNEST($1::text[]) AS t(v) ORDER BY v COLLATE \"C\"")
+                .bind(COLLATION_SENSITIVE_NAMES)
+                .fetch_all(&pool)
+                .await
+                .expect("compute C ordering");
+        assert_ne!(
+            db_collation_order, c_collation_order,
+            "fixture must distinguish en_US.utf8 from C collation, otherwise \
+             this regression cannot detect the production bug"
+        );
+
+        // Clear seeded policies so page boundaries are fully controlled.
+        sqlx::query("DELETE FROM deployment_policies")
+            .execute(&pool)
+            .await
+            .expect("clear seeded policies");
+
+        for name in COLLATION_SENSITIVE_NAMES {
+            insert_named_policy(&pool, name).await;
+        }
+
+        let total = COLLATION_SENSITIVE_NAMES.len();
         let page_size: i64 = 3;
 
-        // Create 6 policies — 3 with one name, 3 with another — to exercise
-        // the id tie-breaker when names collide.
-        let mut created_ids = Vec::new();
-        let names = [
-            "det-pagination-alpha",
-            "det-pagination-alpha",
-            "det-pagination-alpha",
-            "det-pagination-beta",
-            "det-pagination-beta",
-            "det-pagination-beta",
-        ];
-        for (i, base_name) in names.iter().enumerate() {
-            let request = CreateDeploymentPolicyRequest {
-                name: format!("{base_name}-{suffix}-{i:02}"),
-                description: Some(format!("deterministic-pagination-{suffix}")),
-                policy_type: "custom_check".to_string(),
-                config: serde_json::json!({"expression": "true"}),
-                enabled: Some(true),
-                ..Default::default()
-            };
-            let policy = create_deployment_policy(&pool, &request)
+        // ── Assert: every page, and the concatenation of all pages, is
+        // sorted according to the *client's* comparison. This is what the
+        // WASM validator enforces and what production violated.
+        let mut all_pages: Vec<DeploymentPolicyRecord> = Vec::new();
+        let mut offset = 0_i64;
+        while (offset as usize) < total {
+            let page = list_deployment_policies(&pool, page_size, offset)
                 .await
-                .expect("create policy");
-            created_ids.push(policy.id);
+                .expect("fetch page");
+            assert!(
+                page.windows(2)
+                    .all(|w| client_ordering_key(&w[0]) <= client_ordering_key(&w[1])),
+                "page at offset {offset} is not sorted by Rust (name, id) ordering; \
+                 server used database collation instead of COLLATE \"C\""
+            );
+            all_pages.extend(page);
+            offset += page_size;
         }
 
-        // Fetch page 1 and page 2 repeatedly (5 iterations) — every
-        // invocation must return the same ID sequence.
-        let mut page1_ids_prev: Option<Vec<Uuid>> = None;
-        let mut page2_ids_prev: Option<Vec<Uuid>> = None;
+        assert_eq!(all_pages.len(), total, "pages must cover every policy once");
+        assert!(
+            all_pages
+                .windows(2)
+                .all(|w| client_ordering_key(&w[0]) <= client_ordering_key(&w[1])),
+            "concatenated pages are not sorted by Rust (name, id) ordering: {:?}",
+            all_pages
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+        );
 
-        for _iteration in 0..5 {
-            let page1 = list_deployment_policies(&pool, page_size, 0)
-                .await
-                .expect("page 1");
-            let page2 = list_deployment_policies(&pool, page_size, page_size)
-                .await
-                .expect("page 2");
-
-            // ── Assert 1: concatenated IDs are identical across iterations ──
-            let page1_ids: Vec<Uuid> = page1.iter().map(|p| p.id).collect();
-            let page2_ids: Vec<Uuid> = page2.iter().map(|p| p.id).collect();
-
-            if let Some(prev) = &page1_ids_prev {
-                assert_eq!(
-                    &page1_ids, prev,
-                    "page 1 IDs must be identical across iterations"
-                );
-            }
-            if let Some(prev) = &page2_ids_prev {
-                assert_eq!(
-                    &page2_ids, prev,
-                    "page 2 IDs must be identical across iterations"
-                );
-            }
-            page1_ids_prev = Some(page1_ids.clone());
-            page2_ids_prev = Some(page2_ids.clone());
-
-            // ── Assert 2: each page is ordered by (name ASC, id ASC) ──────
-            fn is_ordered_by_name_id(policies: &[DeploymentPolicyRecord]) -> bool {
-                policies.windows(2).all(|w| {
-                    let a = &w[0];
-                    let b = &w[1];
-                    (a.name.as_str(), a.id) <= (b.name.as_str(), b.id)
-                })
-            }
-            assert!(
-                is_ordered_by_name_id(&page1),
-                "page 1 must be ordered by (name, id)"
-            );
-            assert!(
-                is_ordered_by_name_id(&page2),
-                "page 2 must be ordered by (name, id)"
-            );
-        }
-
-        // ── Assert 3: no duplicates or omissions across adjacent pages ────
-        let all_policies = list_deployment_policies(&pool, 1000, 0)
+        // ── Assert: page boundaries are stable and lossless ───────────────
+        let full = list_deployment_policies(&pool, 1000, 0)
             .await
             .expect("full list");
-        let all_ids: Vec<Uuid> = all_policies.iter().map(|p| p.id).collect();
-        let unique_ids: std::collections::HashSet<Uuid> = all_ids.iter().copied().collect();
+        let full_ids: Vec<Uuid> = full.iter().map(|p| p.id).collect();
+        let paged_ids: Vec<Uuid> = all_pages.iter().map(|p| p.id).collect();
         assert_eq!(
-            all_ids.len(),
-            unique_ids.len(),
-            "full list must have no duplicate IDs"
+            paged_ids, full_ids,
+            "paged traversal must equal the full ordered list (no duplicates, no omissions)"
         );
-        assert!(
-            all_ids.len() >= 6,
-            "must have at least 6 policies in full list"
+        let unique: std::collections::HashSet<Uuid> = paged_ids.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            paged_ids.len(),
+            "no duplicate IDs across pages"
         );
 
-        // Verify page 1 + page 2 covers exactly the first 6 IDs of the full list
-        let page1 = list_deployment_policies(&pool, page_size, 0)
-            .await
-            .expect("page 1 final");
-        let page2 = list_deployment_policies(&pool, page_size, page_size)
-            .await
-            .expect("page 2 final");
-        let combined: Vec<Uuid> = page1.iter().chain(page2.iter()).map(|p| p.id).collect();
-        assert_eq!(
-            combined,
-            all_ids[..6.min(all_ids.len())],
-            "page 1 + page 2 must exactly equal the first N entries of the full ordered list"
-        );
-
-        // Cleanup: remove only policies we created (filter by suffix in description)
-        for id in &created_ids {
-            let _ = delete_deployment_policy(&pool, id).await;
+        // ── Assert: repeated fetches are byte-identical ───────────────────
+        for _ in 0..5 {
+            let repeat: Vec<Uuid> = list_deployment_policies(&pool, page_size, 0)
+                .await
+                .expect("repeat page 1")
+                .iter()
+                .map(|p| p.id)
+                .collect();
+            assert_eq!(
+                repeat,
+                full_ids[..(page_size as usize).min(full_ids.len())],
+                "page 1 must be identical across repeated fetches"
+            );
         }
+
+        drop(pool);
+        drop_temp_db(&admin_pool, &db_name).await;
+    }
+
+    /// Guards the enabled-policy list used by evaluation against the same
+    /// collation mismatch.
+    #[tokio::test]
+    #[ignore = "requires a test database role with CREATE DATABASE privileges"]
+    async fn enabled_policy_list_order_matches_rust_ordering_on_locale_collated_database() {
+        let Some((admin_pool, pool, db_name)) = create_locale_collated_temp_db().await else {
+            eprintln!("skipping: en_US.utf8 collation unavailable on this server");
+            return;
+        };
+
+        MIGRATOR
+            .run(&pool)
+            .await
+            .expect("migrations apply on collated temp database");
+
+        sqlx::query("DELETE FROM deployment_policies")
+            .execute(&pool)
+            .await
+            .expect("clear seeded policies");
+
+        for name in COLLATION_SENSITIVE_NAMES {
+            insert_named_policy(&pool, name).await;
+        }
+
+        let enabled = list_enabled_deployment_policies(&pool)
+            .await
+            .expect("list enabled policies");
+        assert_eq!(enabled.len(), COLLATION_SENSITIVE_NAMES.len());
+        assert!(
+            enabled
+                .windows(2)
+                .all(|w| client_ordering_key(&w[0]) <= client_ordering_key(&w[1])),
+            "enabled policy list is not sorted by Rust (name, id) ordering: {:?}",
+            enabled.iter().map(|p| p.name.as_str()).collect::<Vec<_>>()
+        );
+
+        drop(pool);
+        drop_temp_db(&admin_pool, &db_name).await;
+    }
+
+    /// `deployment_policies.name` is UNIQUE, so the `id` tie-breaker can never
+    /// fire on this table today. This test pins that invariant: if the UNIQUE
+    /// constraint is ever removed, this test fails and whoever removes it must
+    /// consciously confirm the tie-breaker still holds the ordering total.
+    #[tokio::test]
+    #[ignore = "requires live postgres"]
+    async fn policy_name_uniqueness_invariant_backs_the_tie_breaker() {
+        let pool = get_test_pool().await;
+        let has_unique_name: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_index i
+                JOIN pg_class c   ON c.oid = i.indrelid
+                JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY (i.indkey)
+                WHERE c.relname = 'deployment_policies'
+                  AND a.attname = 'name'
+                  AND i.indisunique
+                  AND i.indnatts = 1
+            )
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect deployment_policies indexes");
+
+        assert!(
+            has_unique_name,
+            "deployment_policies.name is expected to be UNIQUE. If this constraint was \
+             intentionally removed, tied names are now reachable: re-verify that the \
+             `id ASC` tie-breaker in list_deployment_policies keeps page boundaries stable, \
+             and add a genuine tied-name pagination regression."
+        );
     }
 }
