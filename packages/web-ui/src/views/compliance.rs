@@ -531,7 +531,12 @@ pub fn ComplianceView() -> Element {
                             if *coverage_view.read() {
                                 header { class: "fl-tray-head",
                                     div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;",
-                                        button { class: "btn-icon focus-ring", onclick: move |_| coverage_view.set(false), Icon { name: IconName::ArrowLeft, size: 16 } }
+                                        button {
+                                            class: "btn-icon focus-ring",
+                                            "data-testid": "requirement-coverage-back",
+                                            onclick: move |_| coverage_view.set(false),
+                                            Icon { name: IconName::ArrowLeft, size: 16 }
+                                        }
                                         div {
                                             div { style: "font-size:15px;font-weight:700;", "Requirement coverage" }
                                             div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{bundle.name}" }
@@ -543,8 +548,13 @@ pub fn ComplianceView() -> Element {
                                 header { class: "fl-tray-head",
                                     div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;", Icon { name: IconName::Shield, size: 18 }, span { style: "font-size:11px;color:var(--cf-text-muted);", "Compliance bundle" } }
                                     div { style: "display:flex;gap:6px;",
-                                        if is_admin { button { class: "btn btn-ghost focus-ring xs", onclick: move |_| show_edit_bundle.set(true), Icon { name: IconName::Edit, size: 12 }, " Edit bundle" } }
-                                        button { class: "btn-icon focus-ring", onclick: move |_| drawer_open.set(false), Icon { name: IconName::X, size: 16 } }
+                                        if is_admin { button { class: "btn btn-ghost focus-ring xs", "data-testid": "compliance-edit-bundle", onclick: move |_| show_edit_bundle.set(true), Icon { name: IconName::Edit, size: 12 }, " Edit bundle" } }
+                                        button {
+                                            class: "btn-icon focus-ring",
+                                            "data-testid": "compliance-drawer-close",
+                                            onclick: move |_| drawer_open.set(false),
+                                            Icon { name: IconName::X, size: 16 }
+                                        }
                                     }
                                 }
                             }
@@ -4180,6 +4190,7 @@ fn BundleFrameworkField(props: BundleFrameworkFieldProps) -> Element {
             } else {
                 select {
                     class: "input focus-ring",
+                    "data-testid": "bundle-framework-select",
                     value: "{current_framework}",
                     onchange: move |event| {
                         let value = event.value();
@@ -4482,6 +4493,7 @@ fn BundleRequirementPicker(mut props: BundleRequirementPickerProps) -> Element {
                     label { "Framework release" }
                     select {
                         class: "input focus-ring mono",
+                        "data-testid": "bundle-framework-release-select",
                         value: version_id.map(|id| id.to_string()).unwrap_or_default(),
                         onchange: move |event| {
                             let selected = event.value().parse::<uuid::Uuid>().ok();
@@ -5435,6 +5447,7 @@ fn RequirementCoverageCard(
         div { class: "card", "data-testid": "requirement-coverage-card", style: "display:flex;flex-direction:column;gap:10px;",
             button {
                 class: "focus-ring",
+                "data-testid": "requirement-coverage-open",
                 style: "display:flex;align-items:center;justify-content:space-between;width:100%;padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer;",
                 onclick: move |_| {
                     if detail {

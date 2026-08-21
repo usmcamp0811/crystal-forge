@@ -349,7 +349,10 @@ pub async fn list_policies_handler(
 
     match list_deployment_policies(&pool).await {
         Ok(policies) => (StatusCode::OK, Json(policies)).into_response(),
-        Err(_) => internal_error("Failed to load policies"),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to load deployment policy catalog");
+            internal_error("Failed to load policies")
+        }
     }
 }
 

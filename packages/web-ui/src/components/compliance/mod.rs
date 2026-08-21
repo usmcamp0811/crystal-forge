@@ -115,7 +115,11 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                         let score_label = score.map_or_else(|| "—".to_string(), |score| format!("{score}%"));
                         let system_count_label = format!("{} system{}", bundle.applicable_system_count, if bundle.applicable_system_count == 1 { "" } else { "s" });
                         rsx! {
-                            tr { class: if selected { "selected" } else { "" }, onclick: move |_| props.on_select.call(id),
+                            tr {
+                                class: if selected { "selected" } else { "" },
+                                "data-testid": "compliance-bundle-row",
+                                "data-bundle-id": "{id}",
+                                onclick: move |_| props.on_select.call(id),
                                 td {
                                     div { style: "display:flex;align-items:center;gap:8px;min-width:0;",
                                         span { style: "width:7px;height:7px;border-radius:50%;flex-shrink:0;background:{score_color};" }

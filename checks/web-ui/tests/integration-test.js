@@ -7464,6 +7464,31 @@ security.audit.enable = true;</fixtext>
     name: "20ab-compliance-bundle-requirement-baseline-roundtrip",
     description: "Compliance bundle requirement and policy memberships remain independent across create, edit, reload, and release changes",
     action: async (page) => {
+      // The bundle-baseline workflow depends on the policy catalog. Assert it
+      // authenticated and before any UI interaction so a catalog failure is
+      // reported as a backend failure instead of a modal timeout. This guards
+      // the `trusted` vs `trust_state` class of schema/query mismatch, which
+      // fails deterministically, so one request is sufficient coverage.
+      const catalogProbe = await page.evaluate(async (base) => {
+        const response = await fetch(`${base}/api/v1/policies`, {
+          method: "GET",
+          credentials: "include",
+          headers: { Accept: "application/json" },
+        });
+        const body = await response.text();
+        return {
+          status: response.status,
+          body: response.ok ? "" : body,
+          count: response.ok ? JSON.parse(body).length : null,
+        };
+      }, apiBaseUrl);
+      console.log(`  [20ab] policy catalog preflight: HTTP ${catalogProbe.status} policies=${catalogProbe.count}`);
+      if (catalogProbe.status !== 200) {
+        throw new Error(
+          `Authenticated policy catalog preflight failed: HTTP ${catalogProbe.status} ${catalogProbe.body}`,
+        );
+      }
+
       await page.evaluate(() => localStorage.setItem("cf_backend_origin", "http://127.0.0.1:3445"));
       // Local Dioxus development is cross-origin. Playwright forwards bundle
       // mutations so this focused proof exercises the real API without making
@@ -7476,9 +7501,48 @@ security.audit.enable = true;</fixtext>
           await route.continue();
         }
       });
+
+      // Record page-level failures so a modal that never opens reports why.
+      const consoleErrors = [];
+      const pageErrors = [];
+      const failedRequests = [];
+      const onConsole = (message) => {
+        if (message.type() === "error") consoleErrors.push(message.text());
+      };
+      const onPageError = (error) => pageErrors.push(error.message);
+      const onRequestFailed = (request) => {
+        failedRequests.push(`${request.method()} ${request.url()} ${request.failure()?.errorText || ""}`);
+      };
+      page.on("console", onConsole);
+      page.on("pageerror", onPageError);
+      page.on("requestfailed", onRequestFailed);
+
       await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT, waitUntil: "domcontentloaded" });
-      await page.getByRole("button", { name: /New bundle/i }).first().click({ force: true });
-      await page.getByRole("heading", { name: /New compliance bundle/i }).waitFor({ timeout: 10000 });
+      const newBundleButton = page.getByRole("button", { name: /New bundle/i }).first();
+      await assertVisible(newBundleButton, "Expected the New bundle action on the compliance view", 15000);
+      await newBundleButton.click();
+      const modalHeading = page.getByRole("heading", { name: /New compliance bundle/i });
+      const modalOpened = await modalHeading
+        .waitFor({ state: "visible", timeout: 10000 })
+        .then(() => true)
+        .catch(() => false);
+      if (!modalOpened) {
+        const diagnostics = await page.evaluate(() => ({
+          url: window.location.href,
+          title: document.title,
+          headings: Array.from(document.querySelectorAll("h1,h2,h3")).map((node) => node.innerText).slice(0, 20),
+          dialogs: Array.from(document.querySelectorAll("[role='dialog']")).map((node) => node.innerText.slice(0, 200)),
+          bodyText: (document.body.innerText || "").slice(0, 1000),
+        }));
+        throw new Error(
+          "New compliance bundle modal did not open: " +
+          `${JSON.stringify(diagnostics)} consoleErrors=${JSON.stringify(consoleErrors.slice(0, 10))} ` +
+          `pageErrors=${JSON.stringify(pageErrors.slice(0, 10))} failedRequests=${JSON.stringify(failedRequests.slice(0, 10))}`,
+        );
+      }
+      page.off("console", onConsole);
+      page.off("pageerror", onPageError);
+      page.off("requestfailed", onRequestFailed);
 
       const fixture = await page.evaluate(async (base) => {
         const options = { credentials: "include" };
@@ -7505,8 +7569,9 @@ security.audit.enable = true;</fixtext>
         return { framework, versions, requirements, policy };
       }, apiBaseUrl);
 
-      const frameworkSelect = page.getByRole("combobox").filter({ hasText: "DISA STIG" }).last();
-      await frameworkSelect.selectOption("DISA STIG");
+      const frameworkSelect = page.getByTestId("bundle-framework-select");
+      await frameworkSelect.locator('option[value="Test Mapping Framework"]').waitFor({ state: "attached", timeout: 10000 });
+      await frameworkSelect.selectOption("Test Mapping Framework");
       const v1 = fixture.versions.find((version) => version.canonical_release_key === "web-ui-mapping-roundtrip-v1");
       const v2 = fixture.versions.find((version) => version.canonical_release_key === "web-ui-mapping-roundtrip-v2");
       if (!v1 || !v2) throw new Error("Expected two framework release fixtures for release-switch coverage");
@@ -7516,7 +7581,7 @@ security.audit.enable = true;</fixtext>
       const requirementB = requirementsV1.find((item) => item.external_id === "MAP-2");
       if (!requirementA || !requirementB) throw new Error("Expected v1 requirement fixtures");
 
-      const releaseSelect = page.getByRole("combobox").filter({ hasText: /v1|v2/ }).last();
+      const releaseSelect = page.getByTestId("bundle-framework-release-select");
       await releaseSelect.locator(`option[value="${v1.id}"]`).waitFor({ state: "attached", timeout: 10000 });
       await releaseSelect.selectOption(v1.id);
       const requirementSearch = page.getByPlaceholder("Search requirement ID or title…");
@@ -7551,7 +7616,7 @@ security.audit.enable = true;</fixtext>
         base: apiBaseUrl,
         payload: {
           name: requirementOnlyName,
-          framework: "DISA STIG",
+          framework: "Test Mapping Framework",
           version: "v1",
           description: null,
           layer: "fleet",
@@ -7586,12 +7651,13 @@ security.audit.enable = true;</fixtext>
        // Reload and edit: both requirements must be preselected. Add one policy
        // without changing the requirement set, proving independent membership.
        await page.reload({ waitUntil: "domcontentloaded" });
-       await page.getByRole("button", { name: requirementOnlyName }).click();
+       await page.locator(`[data-testid="compliance-bundle-row"][data-bundle-id="${createdBundle.id}"]`).click();
        const coverageCard = page.getByTestId("requirement-coverage-card");
        await coverageCard.waitFor({ timeout: 15000 });
-       await coverageCard.getByRole("button", { name: "Expand", exact: true }).click();
+       await coverageCard.getByTestId("requirement-coverage-open").click();
        await page.getByTestId("requirement-coverage-row").first().waitFor({ timeout: 10000 });
-       await page.getByRole("button", { name: "Edit bundle", exact: true }).click();
+       await page.getByTestId("requirement-coverage-back").click();
+       await page.getByTestId("compliance-edit-bundle").click();
       await page.getByRole("heading", { name: /Edit compliance bundle/i }).waitFor({ timeout: 10000 });
       await assertVisible(page.getByText("2 selected", { exact: true }), "Existing draft requirements were not preselected");
       const policyButton = page.getByRole("button").filter({ hasText: fixture.policy.name });
@@ -7609,9 +7675,9 @@ security.audit.enable = true;</fixtext>
 
       // Switching releases must clear release-specific IDs. Search must also
       // remain scoped to the selected framework version.
-      await page.getByRole("button", { name: "Edit bundle", exact: true }).click();
+      await page.getByTestId("compliance-edit-bundle").click();
       await page.getByRole("heading", { name: /Edit compliance bundle/i }).waitFor({ timeout: 10000 });
-      const editReleaseSelect = page.getByRole("combobox").filter({ hasText: /v1|v2/ }).last();
+      const editReleaseSelect = page.getByTestId("bundle-framework-release-select");
       await editReleaseSelect.selectOption(v2.id);
       await assertVisible(page.getByText("0 selected", { exact: true }), "Switching framework releases retained incompatible requirement IDs");
       await page.getByPlaceholder("Search requirement ID or title…").fill("MAP-1");
@@ -7646,7 +7712,9 @@ security.audit.enable = true;</fixtext>
 
       // Empty baseline validation remains distinct from a valid requirement-only
       // or policy-only baseline.
-      await page.getByRole("button", { name: /New bundle/i }).first().click({ force: true });
+      await page.getByTestId("compliance-drawer-close").click();
+      await collapseOnboardingCoach(page);
+      await page.getByRole("button", { name: /New bundle/i }).first().click();
       await page.getByRole("heading", { name: /New compliance bundle/i }).waitFor({ timeout: 10000 });
       await page.getByPlaceholder("e.g. DISA RHEL9 STIG (v1r5)").fill(`UI empty baseline ${Date.now()}`);
       await assertDisabled(page.getByRole("button", { name: /Create bundle/i }), "Empty baseline should remain blocked");

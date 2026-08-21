@@ -365,6 +365,13 @@ in pkgs.testers.runNixOSTest {
       SELECT id, '1', 'web-ui-mapping-roundtrip-v1', 'web-ui-mapping-roundtrip-digest'
       FROM compliance_frameworks WHERE canonical_source_key = 'web-ui-mapping-roundtrip'
       ON CONFLICT (framework_id, canonical_release_key) DO NOTHING;
+      -- Second release: the bundle baseline step proves that switching
+      -- framework releases clears release-specific requirement IDs, so the
+      -- framework needs two releases with distinct requirement identifiers.
+      INSERT INTO compliance_framework_versions (framework_id, version, canonical_release_key, semantic_digest)
+      SELECT id, '2', 'web-ui-mapping-roundtrip-v2', 'web-ui-mapping-roundtrip-digest-v2'
+      FROM compliance_frameworks WHERE canonical_source_key = 'web-ui-mapping-roundtrip'
+      ON CONFLICT (framework_id, canonical_release_key) DO NOTHING;
       INSERT INTO compliance_requirements (framework_id, canonical_requirement_key)
       SELECT id, 'MAP-1' FROM compliance_frameworks WHERE canonical_source_key = 'web-ui-mapping-roundtrip'
       ON CONFLICT (framework_id, canonical_requirement_key) DO NOTHING;
@@ -376,12 +383,21 @@ in pkgs.testers.runNixOSTest {
       FROM compliance_requirements r JOIN compliance_frameworks f ON f.id = r.framework_id
       JOIN compliance_framework_versions v ON v.framework_id = f.id
       WHERE f.canonical_source_key = 'web-ui-mapping-roundtrip' AND r.canonical_requirement_key = 'MAP-1'
+        AND v.canonical_release_key = 'web-ui-mapping-roundtrip-v1'
+      ON CONFLICT (requirement_id, framework_version_id) DO NOTHING;
+      INSERT INTO compliance_requirement_versions (requirement_id, framework_version_id, external_id, title, kind, semantic_digest)
+      SELECT r.id, v.id, 'MAP-1-V2', 'Mapping round-trip requirement one (release 2)', 'control', 'web-ui-map-1-v2'
+      FROM compliance_requirements r JOIN compliance_frameworks f ON f.id = r.framework_id
+      JOIN compliance_framework_versions v ON v.framework_id = f.id
+      WHERE f.canonical_source_key = 'web-ui-mapping-roundtrip' AND r.canonical_requirement_key = 'MAP-1'
+        AND v.canonical_release_key = 'web-ui-mapping-roundtrip-v2'
       ON CONFLICT (requirement_id, framework_version_id) DO NOTHING;
       INSERT INTO compliance_requirement_versions (requirement_id, framework_version_id, external_id, title, kind, semantic_digest)
       SELECT r.id, v.id, 'MAP-2', 'Mapping round-trip requirement two', 'control', 'web-ui-map-2'
       FROM compliance_requirements r JOIN compliance_frameworks f ON f.id = r.framework_id
       JOIN compliance_framework_versions v ON v.framework_id = f.id
       WHERE f.canonical_source_key = 'web-ui-mapping-roundtrip' AND r.canonical_requirement_key = 'MAP-2'
+        AND v.canonical_release_key = 'web-ui-mapping-roundtrip-v1'
       ON CONFLICT (requirement_id, framework_version_id) DO NOTHING;
     """
     encoded_mapping_fixture_sql = base64.b64encode(
@@ -514,13 +530,17 @@ in pkgs.testers.runNixOSTest {
     test_steps_env = f" CF_UI_TEST_STEPS={test_steps}" if test_steps else ""
     result_timeout = ${toString playwrightResultTimeout}
 
-    # The bundle-baseline workflow needs the policy catalog. Capture the raw
-    # response before Playwright starts so a catalog failure includes backend
-    # context rather than only a browser-side status code.
-    print("=== Policy catalog prerequisite ===")
+    # Deployment-policy fixture state. Browser steps that read the policy
+    # catalog depend on it, so record the shape of the seeded data to tell
+    # fixture drift apart from a server-side catalog failure.
+    print("=== Deployment policy fixture state ===")
     print(
         machine.succeed(
-            "curl -i -sS http://127.0.0.1:${toString CF_TEST_SERVER_PORT}/api/v1/policies || true"
+            "sudo -u postgres psql -d crystal_forge -A -t -c "
+            "\"SELECT (SELECT COUNT(*) FROM deployment_policies) AS policies, "
+            "(SELECT COUNT(*) FROM deployment_policy_versions) AS versions, "
+            "(SELECT COUNT(*) FROM deployment_policy_versions "
+            "WHERE compliance_metadata ? 'evidence_specs') AS with_evidence\" || true"
         )
     )
 
