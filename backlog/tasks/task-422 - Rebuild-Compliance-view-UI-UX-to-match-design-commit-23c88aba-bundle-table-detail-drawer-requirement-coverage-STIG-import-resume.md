@@ -3,11 +3,11 @@ id: TASK-422
 title: >-
   Rebuild Compliance view UI/UX to match design commit 23c88aba (bundle table,
   detail drawer, requirement coverage, STIG import resume)
-status: Review
+status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-21 01:38'
+updated_date: '2026-08-21 01:54'
 labels: []
 milestone: m-22
 dependencies:
@@ -200,6 +200,12 @@ Focused deletion-invariant remediation from pushed SHA 009b5738: (1) restore bun
 Real-backend coverage browser conversion exposed a production grouping defect: imported STIG rule rows may reference a parent requirement not present in the selected bundle report. RequirementCoverageCard currently emits the missing parent as a heading but drops the child because its second root walk returns no root. Within acceptance criterion #9, treat the last known row as the group root when its parent is absent so backend rows and Enforced-by links remain visible; cover this through the focused 20ae + 29a browser flow.
 
 The same real mapping flow exposed the lazy exact-version API mismatch in acceptance criterion #10: `GET /deployment-policies/:id` returns only the lineage record, while the web DTO and `load_policy_version` require `current_version_id` and `versions`. Make the detail endpoint return the additive `DeploymentPolicyListItem` shape already used by the paginated list, using the existing batched version-summary and usage-count helpers for the single lineage. This preserves existing fields while making lazy exact-version drill-in work without waiting for the catalog load.
+
+## Final MR !316 remediation pass (remote HEAD 28449dad)
+1. Inspect and correct assignment GET/current-version authority plus related current-version queries; add discriminating live-DB HTTP regression.
+2. Replace fragile evidence selectors, execute evidence lifecycle/browser and live DB integrity regressions.
+3. Add/execute real assignment-reason browser lifecycle and SystemsMatrix pinned/reason parity coverage; correct coverage header hierarchy.
+4. Run focused DB, browser, Rust, Nix, flake, source-sanity, final diff/CI checks; update MR verification only with exact final SHA.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
