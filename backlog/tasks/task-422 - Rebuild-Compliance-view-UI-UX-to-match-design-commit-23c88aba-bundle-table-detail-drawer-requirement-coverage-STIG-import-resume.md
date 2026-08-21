@@ -3,11 +3,11 @@ id: TASK-422
 title: >-
   Rebuild Compliance view UI/UX to match design commit 23c88aba (bundle table,
   detail drawer, requirement coverage, STIG import resume)
-status: In Progress
+status: Review
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-20 22:33'
+updated_date: '2026-08-21 01:38'
 labels: []
 milestone: m-22
 dependencies:
@@ -22,6 +22,7 @@ references:
   - docs/design/CrystalForge/screens/compliance-redesign/cb-5.png
   - docs/design/CrystalForge/screens/compliance-redesign/cb-6.png
   - docs/design/CrystalForge/screens/compliance-redesign/cb-7.png
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/316'
 documentation:
   - backlog/docs/doc-22 - Compliance-UI-Redesign-Spec-design-commit-23c88aba.md
   - docs/design/CrystalForge/components/ComplianceView.jsx
@@ -267,6 +268,12 @@ Deletion invariant remediation completed, committed, and pushed as `899b491d` (`
 Focused `CF_UI_TEST_STEPS=20ae-anduril-nixos-stig-import-roundtrip,29a-compliance-populated` runs confirmed the real backend report has 103/103 coverage and a mapping for `SV-268078r1130947_rule`, but the coverage detail rendered only that row's heading and no row/link. Root cause is RequirementCoverageCard's second parent walk: an imported rule whose parent is not included in the report leaves `check_root=None`, producing an empty group. This was hidden by the synthetic flat coverage fixture.
 
 After fixing orphan-parent grouping, the real Enforced-by link rendered and clicked, but PolicyDrawer did not open. The mapped version is present in the paginated policy API. The lazy fallback calls `GET /deployment-policies/:id`; that server handler serializes bare `DeploymentPolicyRecord`, so web-ui deserializes default empty `versions` and correctly rejects the mapped version. The prior browser mock supplied non-production `versions`, hiding this contract mismatch.
+
+Final focused backend-backed browser verification passed at `28449dada392a1a1b8acd576e5a3259493d0d8c7`: `CF_UI_TEST_STEPS='20ae-anduril-nixos-stig-import-roundtrip,29a-compliance-populated,29aa-imported-draft-policy-deletion' nix build --impure .#checks.x86_64-linux.web-ui --no-link -L` reported 3/3 `[OK]`. The real Anduril V1R2 import produces 103/103 coverage, exact mapped policy-version drill-in succeeds, and an imported draft policy reports removable `mutable_draft_membership` plus `disposable_source_mapping` blockers, deletes with 204, returns 404 afterward, and updates coverage from full to unmapped.
+
+Final package verification passed: `nix build .#server --no-link -L` (1174 passed, 373 ignored), `nix build .#web-ui --no-link -L`, backend `cargo fmt --all -- --check`, Node syntax, manifest JSON parse, and `git diff --check`. Branch and origin both resolve to `28449dada392a1a1b8acd576e5a3259493d0d8c7`; worktree is clean. Commits added in this slice: `899b491d`, `a06723c0`, `3c84caa1`, and `28449dad`.
+
+An out-of-scope bulk-import catalog issue discovered while attempting to drive imported deletion through the Deployment Policies cards was recorded as TASK-429. The imported deletion regression remains in the browser suite but exercises the real authenticated API from the browser context, while the existing custom-draft step retains the modal/UI deletion coverage.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
