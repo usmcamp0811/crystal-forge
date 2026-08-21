@@ -3,11 +3,11 @@ id: TASK-422
 title: >-
   Rebuild Compliance view UI/UX to match design commit 23c88aba (bundle table,
   detail drawer, requirement coverage, STIG import resume)
-status: In Progress
+status: Review
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-21 16:07'
+updated_date: '2026-08-21 19:05'
 labels: []
 milestone: m-22
 dependencies:
@@ -286,6 +286,32 @@ Final remediation progress: assignment GET and effective-policy GET now source b
 Committed and pushed final-remediation work as `15053ac9` (`fix(compliance): preserve assignment snapshot authority`). Local HEAD and origin/TASK-422-compliance-view-redesign both resolve to `15053ac9`. Focused browser verification remains incomplete due to the recorded 20ab HTTP 500 prerequisite failure; no merge-ready claim.
 
 20ab diagnosis progress at `5ed0582c`: added authenticated browser response-body diagnostics and server journal tails for failed browser results, then pushed. TASK-422 runs remain non-deterministic: two reruns stopped earlier at the New compliance bundle modal; one rerun reproduced GET /api/v1/policies HTTP 500. The unauthenticated VM curl returns expected 403, so it cannot diagnose the authenticated request. An origin/dev VM run was attempted from a temporary detached worktree at `fa302602`, but that revision ignored CF_UI_TEST_STEPS and executed its entire mega suite; its 20ab entry failed before policy fetch with localStorage SecurityError, so it does not prove or disprove the policy-list 500. The exact authenticated error-chain and offending row remain unconfirmed; no root-cause claim made.
+
+## Verification Results (commit 7836ff75)
+
+### Passed
+
+- 20ab-compliance-bundle-requirement-baseline-roundtrip: PASS (both isolated and full ci_fast suite)
+
+- Policy catalog preflight: HTTP 200, 113 policies
+
+- nix build .#server: PASS
+
+- nix build .#web-ui: PASS
+
+- cargo fmt --check: PASS
+
+- node --check integration-test.js: PASS
+
+- git diff --check: PASS
+
+### Pre-existing failures (not caused by TASK-422)
+
+- 20c, 20d, 20e, 16c, 21-25, 26, 26b, 28, 29, 29a, 29aa, 29c, 29d
+
+### Out-of-scope
+
+- TASK-431: Fix 30d-evidence-lifecycle test (pre-existing bug)
 <!-- SECTION:NOTES:END -->
 
 ## Comments
