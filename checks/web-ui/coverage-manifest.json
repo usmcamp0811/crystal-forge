@@ -2016,7 +2016,6 @@
       "route": "/deployment-policies",
       "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
       "profiles": [
-        "ci_fast",
         "full"
       ],
       "semanticAssertions": true,
