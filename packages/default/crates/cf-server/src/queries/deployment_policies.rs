@@ -28,7 +28,7 @@ pub async fn list_deployment_policies(
         r#"
         SELECT id, name, description, policy_type, config, enabled, created_at, updated_at
         FROM deployment_policies
-        ORDER BY name ASC
+        ORDER BY name ASC, id ASC
         LIMIT $1 OFFSET $2
         "#,
     )
@@ -53,7 +53,7 @@ pub async fn list_enabled_deployment_policies(
         SELECT id, name, description, policy_type, config, enabled, created_at, updated_at
         FROM deployment_policies
         WHERE enabled = true
-        ORDER BY name ASC
+        ORDER BY name ASC, id ASC
         "#,
     )
     .fetch_all(pool)
@@ -101,7 +101,7 @@ pub async fn list_enabled_policies_for_flake(
                     AND s.is_active  = TRUE
               )
           )
-        ORDER BY dp.name ASC
+        ORDER BY dp.name ASC, dp.id ASC
         "#,
     )
     .bind(flake_id)
@@ -2757,5 +2757,133 @@ mod tests {
             .execute(&pool)
             .await
             .expect("clean up source artifact");
+    }
+
+    // ── Deterministic pagination regression ───────────────────────────────
+    //
+    // This test catches the production regression where ORDER BY name ASC
+    // without a unique tie-breaker caused non-deterministic page boundaries.
+    //
+    // Run with:
+    //   CRYSTAL_FORGE_TEST_DATABASE_URL=... cargo test -p cf-server --lib \
+    //     deployment_policies::tests::pagination_is_deterministic -- --ignored --test-threads=1
+
+    #[tokio::test]
+    #[ignore = "requires live postgres"]
+    async fn pagination_is_deterministic() {
+        let pool = get_test_pool().await;
+        let suffix = uuid::Uuid::new_v4().simple();
+        let page_size: i64 = 3;
+
+        // Create 6 policies — 3 with one name, 3 with another — to exercise
+        // the id tie-breaker when names collide.
+        let mut created_ids = Vec::new();
+        let names = [
+            "det-pagination-alpha",
+            "det-pagination-alpha",
+            "det-pagination-alpha",
+            "det-pagination-beta",
+            "det-pagination-beta",
+            "det-pagination-beta",
+        ];
+        for (i, base_name) in names.iter().enumerate() {
+            let request = CreateDeploymentPolicyRequest {
+                name: format!("{base_name}-{suffix}-{i:02}"),
+                description: Some(format!("deterministic-pagination-{suffix}")),
+                policy_type: "custom_check".to_string(),
+                config: serde_json::json!({"expression": "true"}),
+                enabled: Some(true),
+                ..Default::default()
+            };
+            let policy = create_deployment_policy(&pool, &request)
+                .await
+                .expect("create policy");
+            created_ids.push(policy.id);
+        }
+
+        // Fetch page 1 and page 2 repeatedly (5 iterations) — every
+        // invocation must return the same ID sequence.
+        let mut page1_ids_prev: Option<Vec<Uuid>> = None;
+        let mut page2_ids_prev: Option<Vec<Uuid>> = None;
+
+        for _iteration in 0..5 {
+            let page1 = list_deployment_policies(&pool, page_size, 0)
+                .await
+                .expect("page 1");
+            let page2 = list_deployment_policies(&pool, page_size, page_size)
+                .await
+                .expect("page 2");
+
+            // ── Assert 1: concatenated IDs are identical across iterations ──
+            let page1_ids: Vec<Uuid> = page1.iter().map(|p| p.id).collect();
+            let page2_ids: Vec<Uuid> = page2.iter().map(|p| p.id).collect();
+
+            if let Some(prev) = &page1_ids_prev {
+                assert_eq!(
+                    &page1_ids, prev,
+                    "page 1 IDs must be identical across iterations"
+                );
+            }
+            if let Some(prev) = &page2_ids_prev {
+                assert_eq!(
+                    &page2_ids, prev,
+                    "page 2 IDs must be identical across iterations"
+                );
+            }
+            page1_ids_prev = Some(page1_ids.clone());
+            page2_ids_prev = Some(page2_ids.clone());
+
+            // ── Assert 2: each page is ordered by (name ASC, id ASC) ──────
+            fn is_ordered_by_name_id(policies: &[DeploymentPolicyRecord]) -> bool {
+                policies.windows(2).all(|w| {
+                    let a = &w[0];
+                    let b = &w[1];
+                    (a.name.as_str(), a.id) <= (b.name.as_str(), b.id)
+                })
+            }
+            assert!(
+                is_ordered_by_name_id(&page1),
+                "page 1 must be ordered by (name, id)"
+            );
+            assert!(
+                is_ordered_by_name_id(&page2),
+                "page 2 must be ordered by (name, id)"
+            );
+        }
+
+        // ── Assert 3: no duplicates or omissions across adjacent pages ────
+        let all_policies = list_deployment_policies(&pool, 1000, 0)
+            .await
+            .expect("full list");
+        let all_ids: Vec<Uuid> = all_policies.iter().map(|p| p.id).collect();
+        let unique_ids: std::collections::HashSet<Uuid> = all_ids.iter().copied().collect();
+        assert_eq!(
+            all_ids.len(),
+            unique_ids.len(),
+            "full list must have no duplicate IDs"
+        );
+        assert!(
+            all_ids.len() >= 6,
+            "must have at least 6 policies in full list"
+        );
+
+        // Verify page 1 + page 2 covers exactly the first 6 IDs of the full list
+        let page1 = list_deployment_policies(&pool, page_size, 0)
+            .await
+            .expect("page 1 final");
+        let page2 = list_deployment_policies(&pool, page_size, page_size)
+            .await
+            .expect("page 2 final");
+        let combined: Vec<Uuid> = page1.iter().chain(page2.iter()).map(|p| p.id).collect();
+        assert_eq!(
+            combined,
+            all_ids[..6.min(all_ids.len())],
+            "page 1 + page 2 must exactly equal the first N entries of the full ordered list"
+        );
+
+        // Cleanup: remove only policies we created (filter by suffix in description)
+        for id in &created_ids {
+            let _ = delete_deployment_policy(&pool, id).await;
+        }
     }
 }

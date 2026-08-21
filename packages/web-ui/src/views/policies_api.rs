@@ -15,6 +15,7 @@ use crate::components::policy::PolicyDefinition;
 use crate::components::policy::PolicyRevisionSummary;
 
 /// Result type for policy loading.
+#[derive(Debug)]
 pub enum PolicyLoadResult {
     Ok(Vec<PolicyDefinition>),
     /// Server or network error — the caller must display an error state.
@@ -322,6 +323,94 @@ mod tests {
         .await;
 
         assert!(matches!(result, PolicyLoadResult::Err(message) if message.contains("503")));
+    }
+
+    /// Regression: two policies sharing the same name must not cause
+    /// `"policy pages are not deterministically ordered"`.  With
+    /// `ORDER BY name ASC, id ASC` the server always returns the same
+    /// id-sequence for tied names.  This test feeds the client two pages
+    /// that are already correctly ordered by (name, id) and verifies the
+    /// loader accepts them.  A previous bug (`ORDER BY name ASC` alone)
+    /// made the page boundary unstable, which triggered the client-side
+    /// deterministic-page validation.
+    #[tokio::test]
+    async fn production_loader_accepts_pages_with_tied_names() {
+        let shared_name = "shared-policy-name".to_string();
+
+        // Simulate 4 policies with the same name but distinct UUIDs,
+        // pre-sorted by (name, id) — exactly what the fixed query returns.
+        let mut tied: Vec<DeploymentPolicyRecord> = (0..4)
+            .map(|i| {
+                let id = Uuid::new_v4();
+                let mut p = fixture_policy(id, shared_name.clone(), None);
+                // Ensure the ID sorts after the others so the tie-break is exercised.
+                p.name = shared_name.clone();
+                p
+            })
+            .collect();
+        tied.sort_by(|a, b| (a.name.clone(), a.id).cmp(&(b.name.clone(), b.id)));
+
+        let first_page = tied[..2].to_vec();
+        let second_page = tied[2..].to_vec();
+
+        let result = load_policies_with(move |offset| {
+            let first_page = first_page.clone();
+            let second_page = second_page.clone();
+            async move {
+                Ok(if offset == 0 {
+                    page(0, 4, first_page)
+                } else {
+                    page(2, 4, second_page)
+                })
+            }
+        })
+        .await;
+
+        let PolicyLoadResult::Ok(loaded) = result else {
+            panic!(
+                "pages with tied names must not fail deterministic-page validation: {:?}",
+                result
+            );
+        };
+        assert_eq!(loaded.len(), 4);
+        let unique_ids: std::collections::HashSet<Uuid> =
+            loaded.iter().map(|policy| policy.id).collect();
+        assert_eq!(unique_ids.len(), 4, "no duplicate policy IDs");
+    }
+
+    /// Verify that the deterministic-page validation rejects out-of-order
+    /// pages — the exact scenario that caused the production regression.
+    #[tokio::test]
+    async fn production_loader_rejects_out_of_order_pages() {
+        let mut policies: Vec<DeploymentPolicyRecord> = (0..5)
+            .map(|i| fixture_policy(Uuid::new_v4(), format!("policy-{i:03}"), None))
+            .collect();
+        // Reverse the first page to simulate non-deterministic ordering.
+        policies[..3].reverse();
+
+        let first_page = policies[..3].to_vec();
+        let second_page = policies[3..].to_vec();
+
+        let result = load_policies_with(move |offset| {
+            let first_page = first_page.clone();
+            let second_page = second_page.clone();
+            async move {
+                Ok(if offset == 0 {
+                    page(0, 5, first_page)
+                } else {
+                    page(3, 5, second_page)
+                })
+            }
+        })
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                PolicyLoadResult::Err(ref msg) if msg.contains("deterministically ordered")
+            ),
+            "out-of-order pages must be rejected, got: {result:?}"
+        );
     }
 }
 
