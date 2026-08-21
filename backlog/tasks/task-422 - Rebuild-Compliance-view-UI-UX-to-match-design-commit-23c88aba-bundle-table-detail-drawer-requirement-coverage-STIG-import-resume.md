@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-21 02:27'
+updated_date: '2026-08-21 02:28'
 labels: []
 milestone: m-22
 dependencies:
@@ -282,6 +282,8 @@ Final package verification passed: `nix build .#server --no-link -L` (1174 passe
 An out-of-scope bulk-import catalog issue discovered while attempting to drive imported deletion through the Deployment Policies cards was recorded as TASK-429. The imported deletion regression remains in the browser suite but exercises the real authenticated API from the browser context, while the existing custom-draft step retains the modal/UI deletion coverage.
 
 Final remediation progress: assignment GET and effective-policy GET now source bundle lineage/mode/overlays from the current immutable assignment snapshot. The existing ignored HTTP regression now corrupts the mutable lineage pointer and asserts both GET endpoints still return the snapshot bundle version. Added stable Evidence editor selectors and a SystemsMatrix assignment-status test id plus mocked pinned/reason assertion in step 29f. Verified server fmt/check, web-ui cargo check, Node syntax, diff check, and the ignored HTTP regression (1 passed). Focused web-ui attempt with 29f/30d correctly exposed its 20ab prerequisite; retrying with 20ab used the actual step name but stopped before browser steps because 20ab's prerequisite deployment-policy list returned HTTP 500 in the Nix VM. This is not claimed as a passing browser check.
+
+Committed and pushed final-remediation work as `15053ac9` (`fix(compliance): preserve assignment snapshot authority`). Local HEAD and origin/TASK-422-compliance-view-redesign both resolve to `15053ac9`. Focused browser verification remains incomplete due to the recorded 20ab HTTP 500 prerequisite failure; no merge-ready claim.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
