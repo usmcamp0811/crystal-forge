@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-21 02:28'
+updated_date: '2026-08-21 03:27'
 labels: []
 milestone: m-22
 dependencies:
@@ -284,6 +284,8 @@ An out-of-scope bulk-import catalog issue discovered while attempting to drive i
 Final remediation progress: assignment GET and effective-policy GET now source bundle lineage/mode/overlays from the current immutable assignment snapshot. The existing ignored HTTP regression now corrupts the mutable lineage pointer and asserts both GET endpoints still return the snapshot bundle version. Added stable Evidence editor selectors and a SystemsMatrix assignment-status test id plus mocked pinned/reason assertion in step 29f. Verified server fmt/check, web-ui cargo check, Node syntax, diff check, and the ignored HTTP regression (1 passed). Focused web-ui attempt with 29f/30d correctly exposed its 20ab prerequisite; retrying with 20ab used the actual step name but stopped before browser steps because 20ab's prerequisite deployment-policy list returned HTTP 500 in the Nix VM. This is not claimed as a passing browser check.
 
 Committed and pushed final-remediation work as `15053ac9` (`fix(compliance): preserve assignment snapshot authority`). Local HEAD and origin/TASK-422-compliance-view-redesign both resolve to `15053ac9`. Focused browser verification remains incomplete due to the recorded 20ab HTTP 500 prerequisite failure; no merge-ready claim.
+
+20ab diagnosis progress at `5ed0582c`: added authenticated browser response-body diagnostics and server journal tails for failed browser results, then pushed. TASK-422 runs remain non-deterministic: two reruns stopped earlier at the New compliance bundle modal; one rerun reproduced GET /api/v1/policies HTTP 500. The unauthenticated VM curl returns expected 403, so it cannot diagnose the authenticated request. An origin/dev VM run was attempted from a temporary detached worktree at `fa302602`, but that revision ignored CF_UI_TEST_STEPS and executed its entire mega suite; its 20ab entry failed before policy fetch with localStorage SecurityError, so it does not prove or disprove the policy-list 500. The exact authenticated error-chain and offending row remain unconfirmed; no root-cause claim made.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
