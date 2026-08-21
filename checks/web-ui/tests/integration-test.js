@@ -9338,6 +9338,7 @@ security.audit.enable = true;</fixtext>
       const environmentId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
       const assignmentId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
       const assignmentVersionId = "99999999-9999-4999-8999-999999999999";
+      const systemId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
       let reason = null;
       let versionNumber = 1;
 
@@ -9457,7 +9458,7 @@ security.audit.enable = true;</fixtext>
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify({ bundle_id: bundleId, bundle_version_id: versionId, systems: [], totals: { system_count: 0, fully_compliant_count: 0, pass: 0, warn: 0, fail: 0, waiver: 0, total_controls: 0, overall_score: 0 } }),
+          body: JSON.stringify({ bundle_id: bundleId, bundle_version_id: versionId, systems: [{ system_id: systemId, hostname: "reason-fixture-host", environment: "production", applies: true, total: 1, evaluated_total: 1, pass: 1, warn: 0, fail: 0, waiver: 0, not_checked: 0, not_applicable: 0, error: 0, report_only: 0, score: 100, resolution_state: "resolved", assignment_status: "pinned", assignment_reason: "Change freeze exception", assignment_approved_by: null, assignment_deadline: null, assignment_poam: null }], totals: { system_count: 1, fully_compliant_count: 1, pass: 1, warn: 0, fail: 0, waiver: 0, total_controls: 1, overall_score: 100 } }),
         });
       });
       await page.route(`**/api/v1/compliance/bundle-versions/${versionId}/requirement-coverage`, async (route) => {
@@ -9499,6 +9500,11 @@ security.audit.enable = true;</fixtext>
       });
       await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
       await page.getByText("Assignment reason fixture", { exact: true }).first().click();
+      const assignmentChip = page.getByTestId(`system-assignment-status-${systemId}`);
+      await assertVisible(assignmentChip, "Pinned SystemsMatrix assignment status should render");
+      if (await assignmentChip.getAttribute("title") !== "Change freeze exception") {
+        throw new Error("Pinned SystemsMatrix assignment reason should be available as the assignment chip title");
+      }
       await page.getByRole("button", { name: /Assign bundle/i }).click();
       const createReason = page.getByPlaceholder(/Enter reason for this assignment/i);
       await createReason.fill("Reason A");
@@ -9708,11 +9714,11 @@ security.audit.enable = true;</fixtext>
       await evidenceTypeSelect.selectOption("command");
       
       // Fill command evidence fields
-      const cmdInput = page.locator("input[class*='mono']").first();
+      const cmdInput = page.getByTestId("policy-evidence-command-cmd-0");
       await cmdInput.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
       await cmdInput.fill("systemctl status ssh");
       
-      const expectOutput = page.locator("input[class*='mono']").nth(1);
+      const expectOutput = page.getByTestId("policy-evidence-command-expect-0");
       await expectOutput.fill("active");
       
       // Save policy with first evidence
@@ -9754,7 +9760,7 @@ security.audit.enable = true;</fixtext>
       const evidenceTypeSelectEdit = page.locator("select").last();
       await evidenceTypeSelectEdit.selectOption("file");
       
-      const filePathInput = page.locator("input[class*='mono']").filter({ has: page.locator("") }).last();
+      const filePathInput = page.getByTestId("policy-evidence-file-path-1");
       await filePathInput.fill("/etc/ssh/sshd_config");
       
       // Save updated policy with two evidence specs

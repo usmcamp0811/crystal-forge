@@ -533,8 +533,8 @@ pub fn ComplianceView() -> Element {
                                     div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;",
                                         button { class: "btn-icon focus-ring", onclick: move |_| coverage_view.set(false), Icon { name: IconName::ArrowLeft, size: 16 } }
                                         div {
-                                            div { style: "font-size:11px;color:var(--cf-text-muted);", "Requirement coverage" }
-                                            div { style: "font-size:13px;font-weight:600;", "{bundle.name}" }
+                                            div { style: "font-size:15px;font-weight:700;", "Requirement coverage" }
+                                            div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{bundle.name}" }
                                         }
                                     }
                                     button { class: "btn-icon focus-ring", onclick: move |_| drawer_open.set(false), Icon { name: IconName::X, size: 16 } }
@@ -620,7 +620,14 @@ pub fn ComplianceView() -> Element {
                                     }
                                 } else if let Some(resp) = systems.read().as_ref() {
                                     div { class: "card", "data-testid": "bundle-systems-card", style: "padding:0;overflow:hidden;",
-                                        SystemsMatrix { systems: resp.systems.clone(), on_evidence, filter: sys_filter.read().clone(), on_filter: move |filter| sys_filter.set(filter) }
+                                        SystemsMatrix {
+                                            systems: resp.systems.clone(),
+                                            selected_bundle_version_id: *selected_bundle_version_id.read(),
+                                            current_bundle_version_id: bundle.current_published_version_id.or(bundle.current_draft_version_id),
+                                            on_evidence,
+                                            filter: sys_filter.read().clone(),
+                                            on_filter: move |filter| sys_filter.set(filter)
+                                        }
                                     }
                                 }
                                 XccdfVersionSelector { bundle: bundle.clone(), selected_version_id: *selected_bundle_version_id.read(), on_select: move |version_id| { selected_bundle_version_id.set(version_id); if let Some(bundle_id) = *selected_bundle_id.read() { start_systems_fetch(bundle_id, version_id); } } }

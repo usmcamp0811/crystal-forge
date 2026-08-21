@@ -297,6 +297,8 @@ fn ScoreStat(props: ScoreStatProps) -> Element {
 #[derive(Props, Clone, PartialEq)]
 pub struct SystemsMatrixProps {
     pub systems: Vec<ComplianceSystemRollup>,
+    pub selected_bundle_version_id: Option<uuid::Uuid>,
+    pub current_bundle_version_id: Option<uuid::Uuid>,
     pub on_evidence: EventHandler<uuid::Uuid>,
     pub filter: String,
     pub on_filter: EventHandler<String>,
@@ -314,6 +316,12 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
             _ => true,
         })
         .collect();
+    let pinned_system_count = visible
+        .iter()
+        .filter(|row| row.assignment_status.as_deref() == Some("pinned"))
+        .count();
+    let viewing_non_current_revision = props.selected_bundle_version_id.is_some()
+        && props.selected_bundle_version_id != props.current_bundle_version_id;
 
     rsx! {
         div { style: "overflow:hidden;border-top:1px solid var(--cf-divider);",
@@ -348,6 +356,16 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
                     "Select a host to step through its "
                     strong { "per-control evidence" }
                     " — the proof Crystal Forge collected that each control is satisfied."
+                }
+            }
+            if viewing_non_current_revision && pinned_system_count > 0 {
+                div { class: "sd-callout sd-callout-warn", style: "margin:10px 16px 0;",
+                    Icon { name: IconName::Warn, size: 13 }
+                    div { style: "font-size:12px;",
+                        "These {pinned_system_count} host"
+                        if pinned_system_count == 1 { " is" } else { "s are" }
+                        " explicitly pinned to this revision rather than tracking current — see each host's assignment reason below."
+                    }
                 }
             }
             // Systems table
@@ -413,11 +431,16 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
                                               "{env}"
                                           }
                                       }
-                                      td { span { class: "chip chip-info", "{assignment_status}" } }
+                                        td { span {
+                                            "data-testid": "system-assignment-status-{system_id}",
+                                            class: if is_pinned { "chip chip-warning" } else { "chip chip-info" },
+                                           title: row.assignment_reason.as_deref().unwrap_or("Tracking current baseline"),
+                                           "{assignment_status}"
+                                       } }
                                     td {
                                         div { style: "display:flex;align-items:center;gap:8px;",
                                             div {
-                                                style: "width:48px;height:5px;background:var(--cf-subtle-bg);border-radius:99px;overflow:hidden;",
+                                                style: "width:40px;height:5px;background:var(--cf-subtle-bg);border-radius:99px;overflow:hidden;",
                                                 div {
                                                     style: "width:{score}%;height:100%;background:{score_color};",
                                                 }

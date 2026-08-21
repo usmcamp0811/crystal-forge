@@ -2313,7 +2313,8 @@ async fn persist_assignment_inner(
     let duplicate_assignment: Option<Uuid> = sqlx::query_scalar(
         r#"SELECT a.id
            FROM compliance_bundle_assignments a
-           JOIN compliance_bundle_versions bv ON bv.id = a.bundle_version_id
+           JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
+           JOIN compliance_bundle_versions bv ON bv.id = av.bundle_version_id
            WHERE a.active
              AND bv.bundle_id = (
                SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1
@@ -2831,9 +2832,12 @@ pub async fn get_assignment(
         return forbidden();
     }
 
-    let row = sqlx::query_as::<_, (Uuid, Option<Uuid>, Uuid, String, Option<Uuid>, Option<Uuid>, String, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, bool)>(
-            "SELECT id, current_version_id, bundle_version_id, scope_type, environment_id, system_id, enforcement_mode, assignment_overlay_digest, created_at, updated_at, active \
-         FROM compliance_bundle_assignments WHERE id = $1",
+    let row = sqlx::query_as::<_, (Uuid, Option<Uuid>, Option<Uuid>, Option<Uuid>, String, Option<Uuid>, Option<Uuid>, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, bool)>(
+            "SELECT a.id, av.id, bv.bundle_id, av.bundle_version_id, a.scope_type, a.environment_id, a.system_id, av.enforcement_mode, av.assignment_overlay_digest, a.created_at, a.updated_at, a.active \
+         FROM compliance_bundle_assignments a \
+         LEFT JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id \
+         LEFT JOIN compliance_bundle_versions bv ON bv.id = av.bundle_version_id \
+         WHERE a.id = $1",
     )
     .bind(assignment_id)
     .fetch_optional(&pool)
@@ -2841,7 +2845,8 @@ pub async fn get_assignment(
 
     let (
         id,
-        current_version_id_opt,
+        current_version_id,
+        bundle_id,
         bv_id,
         scope_type,
         env_id,
@@ -2860,9 +2865,19 @@ pub async fn get_assignment(
         }
     };
 
-    // Deactivated assignments have current_version_id = NULL.
+    // Deactivated assignments have no current immutable snapshot.
     // Return a 410 Gone so the UI knows the assignment has been removed.
-    let Some(current_version_id) = current_version_id_opt else {
+    let Some((current_version_id, bundle_id, bv_id, mode, digest)) = current_version_id
+        .zip(bundle_id)
+        .zip(bv_id)
+        .zip(mode)
+        .zip(digest)
+        .map(
+            |((((current_version_id, bundle_id), bv_id), mode), digest)| {
+                (current_version_id, bundle_id, bv_id, mode, digest)
+            },
+        )
+    else {
         return (
             StatusCode::GONE,
             Json(crate::api::models::ApiError {
@@ -2879,9 +2894,9 @@ pub async fn get_assignment(
     };
 
     let exclusions: Vec<Uuid> = match sqlx::query_scalar(
-        "SELECT policy_version_id FROM compliance_assignment_exclusions WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)",
+        "SELECT policy_version_id FROM compliance_assignment_exclusions WHERE assignment_version_id = $1",
     )
-    .bind(assignment_id)
+    .bind(current_version_id)
     .fetch_all(&pool)
     .await {
         Ok(values) => values,
@@ -2892,9 +2907,9 @@ pub async fn get_assignment(
     };
 
     let additions: Vec<Uuid> = match sqlx::query_scalar(
-        "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1) ORDER BY addition_order",
+        "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_version_id = $1 ORDER BY addition_order",
     )
-    .bind(assignment_id)
+    .bind(current_version_id)
     .fetch_all(&pool)
     .await {
         Ok(values) => values,
@@ -2905,9 +2920,9 @@ pub async fn get_assignment(
     };
 
     let overrides = sqlx::query_as::<_, (Uuid, String, serde_json::Value)>(
-        "SELECT policy_version_id, value_path, value FROM compliance_assignment_value_overrides WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)",
+        "SELECT policy_version_id, value_path, value FROM compliance_assignment_value_overrides WHERE assignment_version_id = $1",
     )
-    .bind(assignment_id)
+    .bind(current_version_id)
     .fetch_all(&pool)
     .await;
     let overrides = match overrides {
@@ -2926,20 +2941,6 @@ pub async fn get_assignment(
         },
     )
     .collect();
-
-    let bundle_id: Uuid = match sqlx::query_scalar(
-        "SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1",
-    )
-    .bind(bv_id)
-    .fetch_one(&pool)
-    .await
-    {
-        Ok(bundle_id) => bundle_id,
-        Err(error) => {
-            tracing::error!(error = %error, %assignment_id, "failed to load assignment bundle lineage");
-            return internal_error("Failed to load assignment bundle lineage");
-        }
-    };
 
     let reason: Option<String> = match sqlx::query_scalar(
         "SELECT reason FROM compliance_bundle_assignment_versions WHERE id = $1",
@@ -3405,22 +3406,40 @@ pub async fn get_assignment_effective_policies(
         return forbidden();
     }
 
-    // Load assignment
-    let row = sqlx::query_as::<_, (Uuid, String, Option<Uuid>, Option<Uuid>, String, bool, Option<Uuid>)>(
-        "SELECT bundle_version_id, scope_type, environment_id, system_id, enforcement_mode, active, current_version_id \
-         FROM compliance_bundle_assignments WHERE id = $1",
+    // Bundle version and enforcement mode are immutable snapshot fields. The
+    // mutable lineage row only provides the target scope and active state.
+    let row = sqlx::query_as::<_, (Option<Uuid>, Option<Uuid>, Option<String>, String, Option<Uuid>, Option<Uuid>, bool)>(
+        "SELECT av.id, av.bundle_version_id, av.enforcement_mode, a.scope_type, a.environment_id, a.system_id, a.active \
+         FROM compliance_bundle_assignments a \
+         LEFT JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id \
+         WHERE a.id = $1",
     )
     .bind(assignment_id)
     .fetch_optional(&pool)
     .await;
 
-    let (bv_id, scope_type, env_id, sys_id, mode, active, current_version_id) = match row {
+    let (current_version_id, bv_id, mode, scope_type, env_id, sys_id, active) = match row {
         Ok(Some(r)) => r,
         Ok(None) => return not_found(),
         Err(_) => return internal_error("Failed to load assignment"),
     };
 
-    if !active || current_version_id.is_none() {
+    let Some((current_version_id, bv_id, mode)) = current_version_id
+        .zip(bv_id)
+        .zip(mode)
+        .map(|((current_version_id, bv_id), mode)| (current_version_id, bv_id, mode))
+    else {
+        return (
+            StatusCode::GONE,
+            Json(crate::api::models::ApiError {
+                error: "ASSIGNMENT_INACTIVE".into(),
+                message: "This assignment has been deactivated".into(),
+                details: None,
+            }),
+        )
+            .into_response();
+    };
+    if !active {
         return (
             StatusCode::GONE,
             Json(crate::api::models::ApiError {
@@ -3435,9 +3454,9 @@ pub async fn get_assignment_effective_policies(
     // Load overlay rows scoped to the current immutable assignment version.
     let exclusions: Vec<Uuid> = match sqlx::query_scalar(
         "SELECT policy_version_id FROM compliance_assignment_exclusions
-         WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)",
+         WHERE assignment_version_id = $1",
     )
-    .bind(assignment_id)
+    .bind(current_version_id)
     .fetch_all(&pool)
     .await
     {
@@ -3447,10 +3466,10 @@ pub async fn get_assignment_effective_policies(
 
     let additions: Vec<Uuid> = match sqlx::query_scalar(
         "SELECT policy_version_id FROM compliance_assignment_additions
-         WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)
+         WHERE assignment_version_id = $1
          ORDER BY addition_order",
     )
-    .bind(assignment_id)
+    .bind(current_version_id)
     .fetch_all(&pool)
     .await
     {
@@ -3458,24 +3477,27 @@ pub async fn get_assignment_effective_policies(
         Err(_) => return internal_error("Failed to load assignment additions"),
     };
 
-    let overrides: Vec<crate::compliance::resolver::PolicyOverride> = match sqlx::query_as::<_, (Uuid, String, serde_json::Value)>(
-        "SELECT policy_version_id, value_path, value FROM compliance_assignment_value_overrides
-         WHERE assignment_version_id = (SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1)",
-    )
-    .bind(assignment_id)
-    .fetch_all(&pool)
-    .await
-    {
-        Ok(values) => values,
-        Err(_) => return internal_error("Failed to load assignment overrides"),
-    }
-    .into_iter()
-    .map(|(pvid, path, val)| crate::compliance::resolver::PolicyOverride {
-        policy_version_id: pvid,
-        value_path: path,
-        value: val,
-    })
-    .collect();
+    let overrides: Vec<crate::compliance::resolver::PolicyOverride> =
+        match sqlx::query_as::<_, (Uuid, String, serde_json::Value)>(
+            "SELECT policy_version_id, value_path, value FROM compliance_assignment_value_overrides
+          WHERE assignment_version_id = $1",
+        )
+        .bind(current_version_id)
+        .fetch_all(&pool)
+        .await
+        {
+            Ok(values) => values,
+            Err(_) => return internal_error("Failed to load assignment overrides"),
+        }
+        .into_iter()
+        .map(
+            |(pvid, path, val)| crate::compliance::resolver::PolicyOverride {
+                policy_version_id: pvid,
+                value_path: path,
+                value: val,
+            },
+        )
+        .collect();
 
     let target = if scope_type == "environment" {
         crate::compliance::resolver::AssignmentTarget::Environment {
@@ -11282,6 +11304,37 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
         .execute(&pool)
         .await
         .expect("corrupt mutable lineage pointer");
+
+        // GET endpoints must ignore the mutable lineage compatibility column.
+        // Both values continue to come from the immutable current snapshot.
+        let corrupted_get: serde_json::Value = client
+            .get(&assignment_url)
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("get assignment with corrupted lineage")
+            .json()
+            .await
+            .expect("corrupted assignment json");
+        assert_eq!(
+            corrupted_get["bundle_version_id"],
+            bundle_version_id.to_string()
+        );
+        let corrupted_effective: serde_json::Value = client
+            .get(format!(
+                "{base}/api/v1/compliance/assignments/{assignment_id}/effective-policies"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("get effective policies with corrupted lineage")
+            .json()
+            .await
+            .expect("corrupted effective policy json");
+        assert_eq!(
+            corrupted_effective["bundle_version_id"],
+            bundle_version_id.to_string()
+        );
 
         let preserve = client
             .put(format!(

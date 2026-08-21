@@ -1983,6 +1983,7 @@ fn RuleEditorRow(index: usize, rule: PolicyRule, rules: Signal<Vec<PolicyRule>>)
                     div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
                         span { "Block deploy when" }
                         select {
+                            "data-testid": "policy-evidence-log-source-{index}",
                             class: "input focus-ring",
                             style: "width:auto;font-size:12px;padding:4px 8px;",
                             value: "{rule.severity}",
@@ -2020,6 +2021,7 @@ fn RuleEditorRow(index: usize, rule: PolicyRule, rules: Signal<Vec<PolicyRule>>)
                             oninput: move |event| set_rule_field!(path, event.value()),
                         }
                         select {
+                            "data-testid": "policy-evidence-unit-state-{index}",
                             class: "input focus-ring mono",
                             style: "width:auto;font-size:12px;padding:5px 6px;",
                             value: "{rule.op}",
@@ -2133,15 +2135,16 @@ fn EvidenceEditorRow(
             span { style: "display:flex;align-items:center;gap:6px;font-weight:600;", "{label}" }
             match kind.as_str() {
                 "command" => rsx! {
-                    input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "sshd -T | grep permitrootlogin", value: "{evidence.cmd}", oninput: move |event| set_ev_field!(cmd, event.value()) }
+                    input { "data-testid": "policy-evidence-command-cmd-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "sshd -T | grep permitrootlogin", value: "{evidence.cmd}", oninput: move |event| set_ev_field!(cmd, event.value()) }
                     div { style: "display:flex;align-items:center;gap:6px;",
                         span { style: "font-size:11px;color:var(--cf-text-muted);", "expect output contains" }
-                        input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;", placeholder: "permitrootlogin no", value: "{evidence.expect}", oninput: move |event| set_ev_field!(expect, event.value()) }
+                        input { "data-testid": "policy-evidence-command-expect-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;", placeholder: "permitrootlogin no", value: "{evidence.expect}", oninput: move |event| set_ev_field!(expect, event.value()) }
                     }
                 },
                 "log" => rsx! {
                     div { style: "display:flex;gap:6px;flex-wrap:wrap;",
                         select {
+                            "data-testid": "policy-evidence-log-source-{index}",
                             class: "input focus-ring",
                             style: "font-size:11px;padding:5px 8px;width:auto;",
                             value: "{evidence.source}",
@@ -2150,19 +2153,20 @@ fn EvidenceEditorRow(
                             option { value: "auditd", "auditd" }
                             option { value: "file", "file" }
                         }
-                        input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;min-width:140px;", placeholder: "auditd.service", value: "{evidence.unit}", oninput: move |event| set_ev_field!(unit, event.value()) }
+                        input { "data-testid": "policy-evidence-log-unit-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;min-width:140px;", placeholder: "auditd.service", value: "{evidence.unit}", oninput: move |event| set_ev_field!(unit, event.value()) }
                     }
-                    input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "regex / substring to match", value: "{match_value}", oninput: move |event| set_ev_field!(r#match, event.value()) }
+                    input { "data-testid": "policy-evidence-log-match-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "regex / substring to match", value: "{match_value}", oninput: move |event| set_ev_field!(r#match, event.value()) }
                 },
                 "file" => rsx! {
-                    input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "/etc/issue", value: "{evidence.path}", oninput: move |event| set_ev_field!(path, event.value()) }
+                    input { "data-testid": "policy-evidence-file-path-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "/etc/issue", value: "{evidence.path}", oninput: move |event| set_ev_field!(path, event.value()) }
                     input { class: "input focus-ring", style: "font-size:11px;padding:5px 8px;", placeholder: "What to look for / why it proves compliance", value: "{evidence.note}", oninput: move |event| set_ev_field!(note, event.value()) }
                 },
                 "unit_state" => rsx! {
                     div { style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;",
-                        input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;min-width:140px;", placeholder: "auditd.service", value: "{evidence.unit}", oninput: move |event| set_ev_field!(unit, event.value()) }
+                        input { "data-testid": "policy-evidence-unit-name-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;min-width:140px;", placeholder: "auditd.service", value: "{evidence.unit}", oninput: move |event| set_ev_field!(unit, event.value()) }
                         span { style: "font-size:11px;color:var(--cf-text-muted);", "is" }
                         select {
+                            "data-testid": "policy-evidence-unit-state-{index}",
                             class: "input focus-ring",
                             style: "font-size:11px;padding:5px 8px;width:auto;",
                             value: "{evidence.state}",
@@ -2174,11 +2178,11 @@ fn EvidenceEditorRow(
                     }
                 },
                 "eval_attr" => rsx! {
-                    input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "config.services.openssh.settings.PermitRootLogin", value: "{evidence.attr}", oninput: move |event| set_ev_field!(attr, event.value()) }
+                    input { "data-testid": "policy-evidence-eval-attr-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "config.services.openssh.settings.PermitRootLogin", value: "{evidence.attr}", oninput: move |event| set_ev_field!(attr, event.value()) }
                     span { class: "mono", style: "font-size:10px;color:var(--cf-text-muted);", "Captured from the evaluated config — no host access needed." }
                 },
                 "attestation" => rsx! {
-                    input { class: "input focus-ring", style: "font-size:11px;padding:5px 8px;", placeholder: "What the agent attests to (signed snapshot)", value: "{evidence.note}", oninput: move |event| set_ev_field!(note, event.value()) }
+                    input { "data-testid": "policy-evidence-attestation-note-{index}", class: "input focus-ring", style: "font-size:11px;padding:5px 8px;", placeholder: "What the agent attests to (signed snapshot)", value: "{evidence.note}", oninput: move |event| set_ev_field!(note, event.value()) }
                     span { class: "mono", style: "font-size:10px;color:var(--cf-text-muted);", "Ed25519-signed by the agent at collection time." }
                 },
                 _ => rsx! { span { style: "font-style:italic;", "{kind}" } },
