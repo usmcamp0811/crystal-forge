@@ -1857,6 +1857,20 @@
       "baseline": "advisory"
     },
     {
+      "name": "29aa-imported-draft-policy-deletion",
+      "description": "Imported draft policy deletion preserves source provenance while updating backend coverage",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
       "name": "29b-compliance-evidence-drawer",
       "description": "Compliance evidence drawer opens and renders control evidence",
       "route": "/compliance",

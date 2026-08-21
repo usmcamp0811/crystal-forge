@@ -8982,6 +8982,100 @@ security.audit.enable = true;</fixtext>
     },
   },
   {
+    name: "29aa-imported-draft-policy-deletion",
+    description: "Imported draft policies expose removable provenance blockers and delete cleanly",
+    action: async (page) => {
+      const importedState = await page.evaluate(async (base) => {
+        const bundlesResponse = await fetch(`${base}/api/v1/compliance/bundles`);
+        if (!bundlesResponse.ok) return { error: `bundle list returned ${bundlesResponse.status}` };
+        const bundles = await bundlesResponse.json();
+        const bundle = bundles.find((candidate) =>
+          candidate.name === "Anduril NixOS Security Technical Implementation Guide"
+          && candidate.current_draft_version_id
+          && candidate.requirement_count === 103
+        );
+        if (!bundle) return { error: "Anduril NixOS STIG V1R2 draft bundle was not found" };
+
+        const coverageResponse = await fetch(`${base}/api/v1/compliance/bundle-versions/${bundle.current_draft_version_id}/requirement-coverage`);
+        if (!coverageResponse.ok) return { error: `coverage report returned ${coverageResponse.status}` };
+        const coverage = await coverageResponse.json();
+
+        return {
+          bundleVersionId: bundle.current_draft_version_id,
+          coverage,
+        };
+      }, apiBaseUrl);
+      if (importedState.error) throw new Error(importedState.error);
+
+      const targetRow = importedState.coverage.rows.find((requirement) => requirement.mappings.length === 1);
+      if (!targetRow) throw new Error("Imported coverage did not contain a singly mapped policy");
+      const policyId = targetRow.mappings[0].policy_id;
+      const affectedRequirements = importedState.coverage.rows.filter(
+        (requirement) => requirement.mappings.length === 1 && requirement.mappings[0].policy_id === policyId,
+      ).length;
+      if (affectedRequirements < 1) {
+        throw new Error(`Imported policy ${policyId} did not exclusively map any requirements`);
+      }
+
+      const deletionResult = await page.evaluate(async ({ base, id }) => {
+        const eligibilityResponse = await fetch(`${base}/api/v1/deployment-policies/${id}/deletion-eligibility`);
+        const eligibility = await eligibilityResponse.json();
+        if (!eligibilityResponse.ok) {
+          return { eligibilityStatus: eligibilityResponse.status, eligibility };
+        }
+        const deleteResponse = await fetch(`${base}/api/v1/deployment-policies/${id}`, { method: "DELETE" });
+        return { eligibilityStatus: eligibilityResponse.status, eligibility, deleteStatus: deleteResponse.status };
+      }, { base: apiBaseUrl, id: policyId });
+      if (deletionResult.eligibilityStatus !== 200) {
+        throw new Error(`Expected imported policy deletion eligibility 200, got ${deletionResult.eligibilityStatus}`);
+      }
+      const eligibility = deletionResult.eligibility;
+      if (!eligibility.eligible) {
+        throw new Error(`Expected imported draft policy to be deletable: ${JSON.stringify(eligibility)}`);
+      }
+      const blockerKinds = new Set(eligibility.blockers.map((blocker) => blocker.kind));
+      for (const expectedKind of ["mutable_draft_membership", "disposable_source_mapping"]) {
+        if (!blockerKinds.has(expectedKind)) {
+          throw new Error(`Expected imported policy blocker ${expectedKind}: ${JSON.stringify(eligibility.blockers)}`);
+        }
+      }
+      if (eligibility.blockers.some((blocker) => !blocker.removable)) {
+        throw new Error(`Imported draft policy reported a retained blocker: ${JSON.stringify(eligibility.blockers)}`);
+      }
+      if (deletionResult.deleteStatus !== 204) {
+        throw new Error(`Expected imported policy deletion 204, got ${deletionResult.deleteStatus}`);
+      }
+
+      const deletionState = await page.evaluate(async ({ base, bundleVersionId, deletedPolicyId }) => {
+        const [policyResponse, coverageResponse] = await Promise.all([
+          fetch(`${base}/api/v1/deployment-policies/${deletedPolicyId}`),
+          fetch(`${base}/api/v1/compliance/bundle-versions/${bundleVersionId}/requirement-coverage`),
+        ]);
+        return {
+          policyStatus: policyResponse.status,
+          coverageStatus: coverageResponse.status,
+          coverage: coverageResponse.ok ? await coverageResponse.json() : null,
+        };
+      }, { base: apiBaseUrl, bundleVersionId: importedState.bundleVersionId, deletedPolicyId: policyId });
+      if (deletionState.policyStatus !== 404) {
+        throw new Error(`Expected deleted imported policy to return 404, got ${deletionState.policyStatus}`);
+      }
+      if (deletionState.coverageStatus !== 200) {
+        throw new Error(`Expected post-deletion coverage report 200, got ${deletionState.coverageStatus}`);
+      }
+
+      if (
+        deletionState.coverage.total_requirements !== importedState.coverage.total_requirements ||
+        deletionState.coverage.full !== importedState.coverage.full - affectedRequirements ||
+        deletionState.coverage.unmapped !== importedState.coverage.unmapped + affectedRequirements
+      ) {
+        throw new Error(
+          `Unexpected coverage after imported policy deletion: before=${JSON.stringify(importedState.coverage)} after=${JSON.stringify(deletionState.coverage)} affected=${affectedRequirements}`,
+        );
+      }
+    },
+  },
+  {
     name: "29b-compliance-evidence-drawer",
     description: "Compliance evidence drawer opens and renders control evidence",
     action: async (page) => {
