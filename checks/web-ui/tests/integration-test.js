@@ -7497,8 +7497,9 @@ security.audit.enable = true;</fixtext>
           requirements[version.canonical_release_key] = await response.json();
         }
         const policiesResponse = await fetch(`${base}/api/v1/policies`, options);
-        if (!policiesResponse.ok) throw new Error(`policy list failed: ${policiesResponse.status}`);
-        const policies = await policiesResponse.json();
+        const policiesBody = await policiesResponse.text();
+        if (!policiesResponse.ok) throw new Error(`policy list failed: ${policiesResponse.status} ${policiesBody}`);
+        const policies = JSON.parse(policiesBody);
         const policy = policies.find((item) => item.version_id);
         if (!policy) throw new Error("No versioned policy fixture available for mixed bundle coverage");
         return { framework, versions, requirements, policy };

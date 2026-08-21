@@ -514,6 +514,16 @@ in pkgs.testers.runNixOSTest {
     test_steps_env = f" CF_UI_TEST_STEPS={test_steps}" if test_steps else ""
     result_timeout = ${toString playwrightResultTimeout}
 
+    # The bundle-baseline workflow needs the policy catalog. Capture the raw
+    # response before Playwright starts so a catalog failure includes backend
+    # context rather than only a browser-side status code.
+    print("=== Policy catalog prerequisite ===")
+    print(
+        machine.succeed(
+            "curl -i -sS http://127.0.0.1:${toString CF_TEST_SERVER_PORT}/api/v1/policies || true"
+        )
+    )
+
     # Run the integration test script
     machine.succeed("rm -f /tmp/web-ui-tests/integration.exit /tmp/screenshots/results.json /tmp/screenshots/fatal.json")
     machine.succeed(
@@ -535,6 +545,12 @@ in pkgs.testers.runNixOSTest {
 
     if machine.execute("test -f /tmp/screenshots/results.json")[0] != 0:
         exit_code = machine.succeed("cat /tmp/web-ui-tests/integration.exit").strip()
+        print("=== Crystal Forge server journal after integration failure ===")
+        print(
+            machine.succeed(
+                "journalctl -u crystal-forge-server.service --no-pager -n 300 || true"
+            )
+        )
         raise Exception(
             "integration process exited before producing results.json "
             f"(exit code {exit_code})"
@@ -543,6 +559,14 @@ in pkgs.testers.runNixOSTest {
     # Read results
     results_json = machine.succeed("cat /tmp/screenshots/results.json")
     results = json.loads(results_json)
+
+    if any(not result.get("ok") for result in results):
+        print("=== Crystal Forge server journal after failed browser step ===")
+        print(
+            machine.succeed(
+                "journalctl -u crystal-forge-server.service --no-pager -n 300 || true"
+            )
+        )
 
     # Copy screenshots + visual reports out
     for r in results:
