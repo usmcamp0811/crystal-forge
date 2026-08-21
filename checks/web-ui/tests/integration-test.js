@@ -272,13 +272,13 @@ async function collapseOnboardingCoach(page) {
   if (await coachPanel.isVisible().catch(() => false)) {
     const tagName = await coachPanel.evaluate((element) => element.tagName).catch(() => "");
     if (tagName === "BUTTON") {
-      await coachPanel.click({ force: true });
+      await coachPanel.evaluate((el) => el.click());
       await page.waitForTimeout(250);
     }
   }
   const coachCollapse = page.locator("[data-testid='onboarding-coach-collapse']").first();
   if (await coachCollapse.isVisible().catch(() => false)) {
-    await coachCollapse.click({ force: true });
+    await coachCollapse.evaluate((el) => el.click());
     await page.waitForTimeout(250);
   }
 }
