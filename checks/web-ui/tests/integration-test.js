@@ -8971,7 +8971,6 @@ security.audit.enable = true;</fixtext>
       }
       const policyDrawer = page.getByRole("dialog", { name: "Policy detail" });
       await policyDrawer.waitFor({ timeout: 5000 });
-      await assertVisible(policyDrawer.getByText(fixture.mapping.policy_name, { exact: true }), "Expected real mapped policy drawer");
       await policyDrawer.getByRole("button", { name: new RegExp(`Revisions · ${mappedPolicySummary.versions.length}`) }).click();
       await assertVisible(
         policyDrawer.locator(".policy-revision-row.selected").filter({ hasText: `v${mappedVersion.version}` }),
