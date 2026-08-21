@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-21 01:54'
+updated_date: '2026-08-21 02:27'
 labels: []
 milestone: m-22
 dependencies:
@@ -280,6 +280,8 @@ Final focused backend-backed browser verification passed at `28449dada392a1a1b8a
 Final package verification passed: `nix build .#server --no-link -L` (1174 passed, 373 ignored), `nix build .#web-ui --no-link -L`, backend `cargo fmt --all -- --check`, Node syntax, manifest JSON parse, and `git diff --check`. Branch and origin both resolve to `28449dada392a1a1b8acd576e5a3259493d0d8c7`; worktree is clean. Commits added in this slice: `899b491d`, `a06723c0`, `3c84caa1`, and `28449dad`.
 
 An out-of-scope bulk-import catalog issue discovered while attempting to drive imported deletion through the Deployment Policies cards was recorded as TASK-429. The imported deletion regression remains in the browser suite but exercises the real authenticated API from the browser context, while the existing custom-draft step retains the modal/UI deletion coverage.
+
+Final remediation progress: assignment GET and effective-policy GET now source bundle lineage/mode/overlays from the current immutable assignment snapshot. The existing ignored HTTP regression now corrupts the mutable lineage pointer and asserts both GET endpoints still return the snapshot bundle version. Added stable Evidence editor selectors and a SystemsMatrix assignment-status test id plus mocked pinned/reason assertion in step 29f. Verified server fmt/check, web-ui cargo check, Node syntax, diff check, and the ignored HTTP regression (1 passed). Focused web-ui attempt with 29f/30d correctly exposed its 20ab prerequisite; retrying with 20ab used the actual step name but stopped before browser steps because 20ab's prerequisite deployment-policy list returned HTTP 500 in the Nix VM. This is not claimed as a passing browser check.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
