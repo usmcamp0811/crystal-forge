@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-21 03:27'
+updated_date: '2026-08-21 16:07'
 labels: []
 milestone: m-22
 dependencies:
@@ -390,5 +390,29 @@ Pushed remediation commit 4150c626 to MR !316 addressing all four reviewer items
 3) disa_version_major now accepts 'Version N Release N', 'V' prefix, and bare digits (regression disa_version_major_supports_documented_formats).
 4) Step 20ae now opens the deployed bundle drawer after import and machine-checks the coverage card DOM (framework name + (V1R2), 103 Fully covered, 0 Partially covered, 0 Unmapped, 103 total) instead of visual inspection alone.
 Focused web-ui check rerun (exit 0): derivation /nix/store/pf5vcc7pnasdfz9wlk404ka8yqjgsf4b-vm-test-run-crystal-forge-web-ui-mega-integration; results.json ok=true; import status 201 with 103/103/103 counts; step [OK]. Screenshots with the drawer coverage card open uploaded to MR !316 note 3701974720. Verification: disa_stig_adapter 25/25; cf-server --lib 1161 passed (3 pre-existing DB-only cve_scans_tests failures); cargo fmt --all -- --check clean; web-ui cargo check clean; new DB regression bundle_coverage_source_framework_survives_zero_requirements.
+---
+
+author: agent
+created: 2026-08-21 16:07
+---
+Correction to the earlier working hypothesis: the authenticated `GET /api/v1/policies` HTTP 500 is **not** a pre-existing `origin/dev` defect. It was introduced on this branch by `5c391b85` ("feat(policies): Add mapped_requirement_count and bundle_usage_count to DeploymentPolicy"), which added per-policy count queries filtering on `policy_requirement_mappings.trusted = true`. That column does not exist; the schema column is `trust_state` (migration `0213_policy_requirement_mappings.sql`). Verified with `git grep -n 'trusted = true' origin/dev -- packages/default/crates/cf-server/src/queries/environments.rs` -> not present, and `git log -S` -> `5c391b85`. `origin/dev`'s `list_deployment_policies` has no count queries at all, so it cannot produce this failure. Fix: the routed catalog query now uses the batched `deployment_policies::load_policy_version_usage_counts()` helper, so `/api/v1/policies` and the deployment-policy catalog report identical counts without N+1 queries.
+---
+
+author: agent
+created: 2026-08-21 16:07
+---
+Second, independent defect found while unblocking `20ab`: the `web-ui` harness fixture seeds only `web-ui-mapping-roundtrip-v1`, while `20ab` requires a second release (`web-ui-mapping-roundtrip-v2`, requirement `MAP-1-V2`) for its release-switch assertions. This gap **is** pre-existing on `origin/dev` (`origin/dev:checks/web-ui/tests/integration-test.js:6922` requires v2; `origin/dev:checks/web-ui/default.nix` never seeds it), so `20ab` has been unrunnable since TASK-418 merged. Fixed by seeding the v2 release plus `MAP-1-V2`, and by scoping the existing v1 requirement-version inserts to the v1 release so they do not leak into v2.
+---
+
+author: agent
+created: 2026-08-21 16:07
+---
+`20ab` also depended on brittle text/role selectors that broke once the modal was reachable. Added stable hooks and switched the step to them: `bundle-framework-select`, `bundle-framework-release-select`, `compliance-bundle-row`/`data-bundle-id`, `requirement-coverage-open`, `requirement-coverage-back`, `compliance-edit-bundle`, `compliance-drawer-close`. The step now also selects the fixture framework (`Test Mapping Framework`) instead of `DISA STIG`, leaves the coverage view and closes the drawer explicitly instead of force-clicking, and collapses the onboarding coach before the final `New bundle` click (the coach panel was intercepting pointer events).
+---
+
+author: agent
+created: 2026-08-21 16:07
+---
+Verification at the current working state: `CF_UI_TEST_STEPS='20ab-compliance-bundle-requirement-baseline-roundtrip' nix build --impure .#checks.x86_64-linux.web-ui --no-link -L` passed (exit 0), with `[OK] 20ab-compliance-bundle-requirement-baseline-roundtrip`, `Screenshots: 1/1 captured`, and all five authenticated `/api/v1/policies` preflight requests returning `HTTP 200 policies=8` (they returned `HTTP 500 Failed to load policies` before the query fix). Also passed: `nix develop -c env SQLX_OFFLINE=true cargo check --manifest-path packages/default/Cargo.toml -p cf-server --offline`, `cargo fmt --all -- --check`, `node --check checks/web-ui/tests/integration-test.js`, `git diff --check`. Still outstanding before Review: an independent `30d-evidence-lifecycle` run at this head, the ignored live-DB regression `list_deployment_policies_reports_counts_against_real_schema` against an isolated local database, and the remaining MR !316 verification. These changes are uncommitted.
 ---
 <!-- COMMENTS:END -->
