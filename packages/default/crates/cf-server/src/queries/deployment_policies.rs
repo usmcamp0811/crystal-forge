@@ -5,10 +5,12 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::api::models::DeletionEligibility;
+use crate::api::models::{DeletionEligibility, DeploymentPolicyVersionSummary};
 use crate::compliance::digest::{PolicyVersionCanonical, write_policy_version_digest};
 use crate::compliance::mappings::{
-    initial_policy_metadata, merge_classification_into_metadata, merge_policy_mappings,
+    decode_evidence_specs_strict, extract_cci_ids, extract_classification, extract_srg_ids,
+    infer_legacy_category, initial_policy_metadata, merge_classification_into_metadata,
+    merge_evidence_into_metadata, merge_policy_mappings,
 };
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
@@ -16,7 +18,27 @@ use crate::models::deployment_policies::{
 use crate::queries::compliance::ensure_policy_draft;
 use crate::queries::deletion::{blocker, eligibility};
 
-/// List deployment policies with pagination
+/// List deployment policies with pagination.
+///
+/// # Ordering contract
+///
+/// The advertised pagination key is `(name COLLATE "C", id)`.
+///
+/// `COLLATE "C"` is mandatory, not cosmetic. Without it PostgreSQL sorts using
+/// the database's configured collation (e.g. `en_US.utf8`), which orders text
+/// case-insensitively and ignores punctuation. The WASM client validates page
+/// ordering with Rust `String::Ord`, which is bytewise over UTF-8. Those two
+/// orderings disagree (for example `en_US` yields `apple, Apple` while Rust
+/// considers `"Apple" < "apple"`), causing the client to reject a correctly
+/// paginated response with "policy pages are not deterministically ordered".
+///
+/// `C` collation is bytewise over the encoding, which for a UTF-8 database is
+/// exactly Rust's `String::Ord`. Keep this in sync with
+/// `web-ui/src/views/policies_api.rs::load_all_policy_pages`.
+///
+/// `id` is a defensive total-order tie-breaker. `deployment_policies.name`
+/// currently carries a UNIQUE constraint so ties cannot occur today; the
+/// tie-breaker keeps the contract total if that constraint is ever relaxed.
 pub async fn list_deployment_policies(
     pool: &PgPool,
     limit: i64,
@@ -26,7 +48,7 @@ pub async fn list_deployment_policies(
         r#"
         SELECT id, name, description, policy_type, config, enabled, created_at, updated_at
         FROM deployment_policies
-        ORDER BY name ASC
+        ORDER BY name COLLATE "C" ASC, id ASC
         LIMIT $1 OFFSET $2
         "#,
     )
@@ -51,7 +73,7 @@ pub async fn list_enabled_deployment_policies(
         SELECT id, name, description, policy_type, config, enabled, created_at, updated_at
         FROM deployment_policies
         WHERE enabled = true
-        ORDER BY name ASC
+        ORDER BY name COLLATE "C" ASC, id ASC
         "#,
     )
     .fetch_all(pool)
@@ -67,14 +89,24 @@ pub async fn list_enabled_deployment_policies(
 /// This is the correct scope for Nix-eval policy checks: a policy that is
 /// only assigned to environments unrelated to this flake should not block
 /// builds for systems in other environments.
+///
+/// Ordered by `(name COLLATE "C", id)` for the same reason as
+/// [`list_deployment_policies`] — see that function's ordering contract.
+///
+/// The previous `SELECT DISTINCT` was removed because it was redundant and
+/// is illegal alongside a collated `ORDER BY` ("for SELECT DISTINCT, ORDER BY
+/// expressions must appear in select list"). Redundancy holds because this
+/// query selects from a single table with no joins; the assignment checks are
+/// `EXISTS` subqueries in `WHERE`, which filter rows but cannot multiply them,
+/// and `dp.id` is the primary key so no two output rows could ever collapse.
 pub async fn list_enabled_policies_for_flake(
     pool: &PgPool,
     flake_id: i32,
 ) -> Result<Vec<DeploymentPolicyRecord>> {
     let policies = sqlx::query_as::<_, DeploymentPolicyRecord>(
         r#"
-        SELECT DISTINCT dp.id, dp.name, dp.description, dp.policy_type,
-                        dp.config, dp.enabled, dp.created_at, dp.updated_at
+        SELECT dp.id, dp.name, dp.description, dp.policy_type,
+               dp.config, dp.enabled, dp.created_at, dp.updated_at
         FROM deployment_policies dp
         WHERE dp.enabled = true
           AND (
@@ -99,7 +131,7 @@ pub async fn list_enabled_policies_for_flake(
                     AND s.is_active  = TRUE
               )
           )
-        ORDER BY dp.name ASC
+        ORDER BY dp.name COLLATE "C" ASC, dp.id ASC
         "#,
     )
     .bind(flake_id)
@@ -148,6 +180,8 @@ impl ConfigPolicyRow {
             enabled: self.enabled,
             created_at: self.created_at,
             updated_at: self.updated_at,
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
         }
     }
 }
@@ -303,6 +337,9 @@ pub async fn get_deployment_policy_by_version(
 /// Evaluation and deployment resolve policies per system, but many systems
 /// share the same policy versions. Loading those versions as a batch avoids a
 /// policy-version query for every system/policy pair.
+///
+/// Counts (mapped_requirement_count and bundle_usage_count) are loaded via a
+/// separate batched query to avoid N+1 and ensure they reflect real data.
 pub async fn get_deployment_policies_by_versions(
     pool: &PgPool,
     policy_version_ids: &[Uuid],
@@ -339,6 +376,9 @@ pub async fn get_deployment_policies_by_versions(
     .await
     .context("Failed to fetch deployment policies by version IDs")?;
 
+    // Load counts in a separate batch query to avoid N+1
+    let usage_counts = load_policy_version_usage_counts(pool, policy_version_ids).await?;
+
     Ok(rows
         .into_iter()
         .map(
@@ -353,6 +393,8 @@ pub async fn get_deployment_policies_by_versions(
                 created_at,
                 updated_at,
             )| {
+                let (mapped_requirement_count, bundle_usage_count) =
+                    usage_counts.get(&version_id).copied().unwrap_or((0, 0));
                 (
                     version_id,
                     DeploymentPolicyRecord {
@@ -364,11 +406,197 @@ pub async fn get_deployment_policies_by_versions(
                         enabled,
                         created_at,
                         updated_at,
+                        mapped_requirement_count,
+                        bundle_usage_count,
                     },
                 )
             },
         )
         .collect())
+}
+
+/// Load mapped requirement and bundle usage counts for a batch of policy versions.
+///
+/// Returns a map of policy_version_id -> (mapped_requirement_count, bundle_usage_count).
+/// This function enables batch loading of counts without N+1 queries.
+///
+/// - mapped_requirement_count: COUNT(DISTINCT requirement_version_id) from
+///   policy_requirement_mappings for this exact policy_version_id
+/// - bundle_usage_count: COUNT(DISTINCT bundle_id) lineage from
+///   compliance_bundle_version_policies for this exact policy_version_id,
+///   counting only selected=true memberships.
+pub async fn load_policy_version_usage_counts(
+    pool: &PgPool,
+    policy_version_ids: &[Uuid],
+) -> Result<HashMap<Uuid, (i64, i64)>> {
+    if policy_version_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct CountRow {
+        policy_version_id: Uuid,
+        mapped_requirement_count: i64,
+        bundle_usage_count: i64,
+    }
+
+    let rows = sqlx::query_as::<_, CountRow>(
+        r#"
+        SELECT
+            pv.id AS policy_version_id,
+            COALESCE(COUNT(DISTINCT prm.requirement_version_id), 0) AS mapped_requirement_count,
+            COALESCE(COUNT(DISTINCT bv.bundle_id), 0) AS bundle_usage_count
+        FROM (SELECT UNNEST($1::uuid[]) AS id) pv(id)
+        LEFT JOIN policy_requirement_mappings prm
+            ON prm.policy_version_id = pv.id
+            AND prm.trust_state = 'trusted'
+        LEFT JOIN compliance_bundle_version_policies cbvp
+            ON cbvp.policy_version_id = pv.id
+            AND cbvp.selected = true
+        LEFT JOIN compliance_bundle_versions bv
+            ON bv.id = cbvp.bundle_version_id
+        GROUP BY pv.id
+        "#,
+    )
+    .bind(policy_version_ids)
+    .fetch_all(pool)
+    .await
+    .context("Failed to load policy version usage counts")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.policy_version_id,
+                (row.mapped_requirement_count, row.bundle_usage_count),
+            )
+        })
+        .collect())
+}
+
+/// Fetch full version summaries for a batch of policy lineage IDs.
+///
+/// This is the production path used by the deployment-policies list handler:
+/// - one query loads all version rows for the batch (no N+1);
+/// - the `users` table is joined to resolve `created_by` into a human-readable
+///   display name (username, falling back to email);
+/// - each version's `compliance_metadata` is decoded for SRG/CCI ids,
+///   classification, and evidence specs;
+/// - current published/draft pointers are resolved for `is_current_*` flags.
+///
+/// Returns a map of `policy_id -> Vec<DeploymentPolicyVersionSummary>`,
+/// ordered newest-first per policy.
+pub async fn fetch_policy_version_summaries(
+    pool: &PgPool,
+    policy_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<DeploymentPolicyVersionSummary>>> {
+    if policy_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct VersionRow {
+        id: Uuid,
+        policy_id: Uuid,
+        version: String,
+        publication_state: String,
+        trust_state: String,
+        semantic_digest: String,
+        created_at: chrono::DateTime<chrono::Utc>,
+        published_at: Option<chrono::DateTime<chrono::Utc>>,
+        derived_from_version_id: Option<Uuid>,
+        name: String,
+        description: Option<String>,
+        policy_type: String,
+        config: serde_json::Value,
+        enabled_by_default: Option<bool>,
+        compliance_metadata: serde_json::Value,
+        created_by: Option<Uuid>,
+        created_by_display: Option<String>,
+    }
+
+    let rows = sqlx::query_as::<_, VersionRow>(
+        r#"
+        SELECT dpv.id, dpv.policy_id, dpv.version, dpv.publication_state, dpv.trust_state,
+               dpv.semantic_digest, dpv.created_at, dpv.published_at,
+               dpv.derived_from_version_id, dpv.name, dpv.description, dpv.policy_type,
+               dpv.config, dpv.enabled_by_default, dpv.compliance_metadata, dpv.created_by,
+               COALESCE(u.username, u.email) AS created_by_display
+          FROM deployment_policy_versions dpv
+          LEFT JOIN users u ON dpv.created_by = u.id
+         WHERE dpv.policy_id = ANY($1)
+         ORDER BY dpv.policy_id, dpv.created_at DESC, dpv.id DESC
+        "#,
+    )
+    .bind(policy_ids)
+    .fetch_all(pool)
+    .await
+    .context("Failed to load policy version history")?;
+
+    let pointer_rows: HashMap<Uuid, (Option<Uuid>, Option<Uuid>)> = sqlx::query_as::<_, (Uuid, Option<Uuid>, Option<Uuid>)>(
+        "SELECT id, current_published_version_id, current_draft_version_id FROM deployment_policies WHERE id = ANY($1)",
+    )
+    .bind(policy_ids)
+    .fetch_all(pool)
+    .await
+    .context("Failed to load policy version pointers")?
+    .into_iter()
+    .map(|(id, published, draft)| (id, (published, draft)))
+    .collect();
+
+    let mut by_policy: HashMap<Uuid, Vec<DeploymentPolicyVersionSummary>> = HashMap::new();
+    for row in rows {
+        let pointers = pointer_rows
+            .get(&row.policy_id)
+            .copied()
+            .unwrap_or((None, None));
+        let compliance_meta = &row.compliance_metadata;
+        let (cat, fw, sev, cf, cmmc, cis, rat) = extract_classification(compliance_meta);
+        let inferred_category = cat.clone().unwrap_or_else(|| {
+            infer_legacy_category(&row.policy_type, compliance_meta).to_string()
+        });
+        let summary = DeploymentPolicyVersionSummary {
+            id: row.id,
+            policy_id: row.policy_id,
+            version: row.version,
+            publication_state: row.publication_state,
+            trust_state: row.trust_state,
+            semantic_digest: row.semantic_digest,
+            created_at: row.created_at,
+            published_at: row.published_at,
+            derived_from_version_id: row.derived_from_version_id,
+            is_current_published: pointers.0 == Some(row.id),
+            is_current_draft: pointers.1 == Some(row.id),
+            name: row.name,
+            description: row.description,
+            policy_type: row.policy_type,
+            config: row.config,
+            enabled: row.enabled_by_default.unwrap_or(true),
+            srg_ids: extract_srg_ids(compliance_meta),
+            cci_ids: extract_cci_ids(compliance_meta),
+            category: Some(inferred_category),
+            framework: fw,
+            severity: sev,
+            control_family: cf,
+            cmmc_level: cmmc,
+            cis_section: cis,
+            rationale: rat,
+            created_by: row.created_by,
+            created_by_display: row.created_by_display,
+            evidence_specs: decode_evidence_specs_strict(compliance_meta).with_context(|| {
+                format!(
+                    "failed to decode evidence_specs for policy version {}",
+                    row.id
+                )
+            })?,
+        };
+        by_policy
+            .entry(summary.policy_id)
+            .or_default()
+            .push(summary);
+    }
+
+    Ok(by_policy)
 }
 
 /// Create a new deployment policy.
@@ -384,11 +612,27 @@ pub async fn create_deployment_policy(
     create_deployment_policy_with_mappings(pool, request, None).await
 }
 
+fn duplicate_requirement_mapping_id(request: &CreateDeploymentPolicyRequest) -> Option<Uuid> {
+    let mut requirement_ids = std::collections::HashSet::new();
+    request
+        .requirement_mappings
+        .iter()
+        .map(|mapping| mapping.requirement_version_id)
+        .find(|requirement_version_id| !requirement_ids.insert(*requirement_version_id))
+}
+
 pub async fn create_deployment_policy_with_mappings(
     pool: &PgPool,
     request: &CreateDeploymentPolicyRequest,
     actor_id: Option<Uuid>,
 ) -> Result<DeploymentPolicyRecord> {
+    if let Some(requirement_version_id) = duplicate_requirement_mapping_id(request) {
+        anyhow::bail!(
+            "Duplicate requirement mapping {} in policy request",
+            requirement_version_id
+        );
+    }
+
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
     let policy = sqlx::query_as::<_, DeploymentPolicyRecord>(
@@ -423,7 +667,7 @@ pub async fn create_deployment_policy_with_mappings(
     let base_metadata = initial_policy_metadata(srg_ids_opt, cci_ids_opt)
         .context("Failed to build compliance metadata for new policy")?;
     // Merge classification fields into the initial metadata.
-    let compliance_metadata = merge_classification_into_metadata(
+    let with_classification = merge_classification_into_metadata(
         &base_metadata,
         request.category.as_deref(),
         request.framework.as_deref(),
@@ -433,6 +677,14 @@ pub async fn create_deployment_policy_with_mappings(
         request.cis_section.as_deref(),
         request.rationale.as_deref(),
     );
+    // Merge evidence specs into the metadata.
+    let evidence_specs = if request.evidence_specs.is_empty() {
+        None
+    } else {
+        Some(request.evidence_specs.as_slice())
+    };
+    let compliance_metadata = merge_evidence_into_metadata(&with_classification, evidence_specs)
+        .context("Failed to validate and merge evidence specs")?;
 
     let canonical = PolicyVersionCanonical {
         name: policy.name.clone(),
@@ -589,7 +841,7 @@ pub async fn update_deployment_policy(
         let srg_cci_merged = merge_policy_mappings(&existing_meta, srg_opt, cci_opt)
             .context("Failed to merge SRG/CCI mappings")?;
         // Merge classification fields into the already-merged metadata.
-        let merged_meta = merge_classification_into_metadata(
+        let classified_meta = merge_classification_into_metadata(
             &srg_cci_merged,
             request.category.as_deref(),
             request.framework.as_deref(),
@@ -599,6 +851,10 @@ pub async fn update_deployment_policy(
             request.cis_section.as_deref(),
             request.rationale.as_deref(),
         );
+        // Merge evidence specs into the metadata.
+        let evidence_specs = request.evidence_specs.as_deref();
+        let merged_meta = merge_evidence_into_metadata(&classified_meta, evidence_specs)
+            .context("Failed to validate and merge evidence specs")?;
 
         let canonical = PolicyVersionCanonical {
             name: p.name.clone(),
@@ -850,6 +1106,17 @@ pub async fn delete_deployment_policy(
         .execute(&mut *tx)
         .await
         .context("Failed to remove mutable system policy assignments")?;
+    sqlx::query(
+        "DELETE FROM policy_requirement_mappings m \
+         USING deployment_policy_versions pv \
+         WHERE m.policy_version_id = pv.id \
+           AND pv.policy_id = $1 \
+           AND pv.publication_state IN ('incomplete', 'draft', 'interim')",
+    )
+    .bind(policy_id)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to remove mutable policy requirement mappings")?;
 
     let deleted = sqlx::query("DELETE FROM deployment_policies WHERE id = $1")
         .bind(policy_id)
@@ -1024,6 +1291,34 @@ mod tests {
     fn test_query_compilation() {
         // This test ensures the SQL queries compile correctly
         // Actual database tests would require sqlx test fixtures
+    }
+
+    #[test]
+    fn duplicate_requirement_mapping_requests_are_rejected() {
+        let requirement_version_id = Uuid::new_v4();
+        let mapping = CreatePolicyRequirementMapping {
+            requirement_version_id,
+            relationship: "supports".to_string(),
+            coverage: "partial".to_string(),
+            rationale: Some("first semantics".to_string()),
+            provenance: "manual".to_string(),
+        };
+        let mut request = CreateDeploymentPolicyRequest::default();
+        request.requirement_mappings = vec![
+            mapping,
+            CreatePolicyRequirementMapping {
+                requirement_version_id,
+                relationship: "implements".to_string(),
+                coverage: "full".to_string(),
+                rationale: Some("conflicting semantics".to_string()),
+                provenance: "imported".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            duplicate_requirement_mapping_id(&request),
+            Some(requirement_version_id)
+        );
     }
 
     // ── DB-level tests for list_policy_rows_by_configuration_for_flake ────
@@ -2536,5 +2831,289 @@ mod tests {
             .execute(&pool)
             .await
             .expect("clean up source artifact");
+    }
+
+    // ── Deterministic pagination / collation contract regression ──────────
+    //
+    // The paginated policy list advertises the ordering key
+    // `(name COLLATE "C", id)`. The WASM client re-validates that ordering
+    // using Rust `String::Ord`, which is bytewise over UTF-8.
+    //
+    // If the server sorts with the *database* collation instead (e.g.
+    // `en_US.utf8`), PostgreSQL orders case-insensitively and ignores
+    // punctuation, producing a sequence Rust considers unsorted. The client
+    // then rejects a perfectly-paginated response with
+    // "policy pages are not deterministically ordered" — the production bug.
+    //
+    // These tests deliberately create a temp database with `en_US.utf8`
+    // collation. Running them against a `C`-collated database (which is what
+    // the local dev database uses) would NOT be discriminating: there the
+    // buggy and fixed queries return identical output.
+    //
+    // Run with:
+    //   CRYSTAL_FORGE_TEST_DATABASE_URL=... cargo test -p cf-server --lib \
+    //     deployment_policies::tests::pagination -- --ignored --test-threads=1
+
+    /// Names chosen so that `en_US.utf8` and `C` collation disagree:
+    /// case differences, punctuation, and a non-ASCII character.
+    const COLLATION_SENSITIVE_NAMES: &[&str] = &[
+        "Zebra policy",
+        "apple policy",
+        "Apple policy",
+        "banana-1 policy",
+        "banana 1 policy",
+        "Banana2 policy",
+        "_underscore policy",
+        "Ápple policy",
+    ];
+
+    /// Rust `String::Ord` over `(name, id)` — the exact comparison the WASM
+    /// client performs in `load_all_policy_pages`.
+    fn client_ordering_key(policy: &DeploymentPolicyRecord) -> (&str, Uuid) {
+        (policy.name.as_str(), policy.id)
+    }
+
+    /// Create a temp database with an explicitly non-`C` collation so the
+    /// mismatch between database ordering and Rust ordering is observable.
+    async fn create_locale_collated_temp_db() -> Option<(sqlx::PgPool, sqlx::PgPool, String)> {
+        let admin_url = admin_database_url();
+        let admin_pool = sqlx::PgPool::connect(&admin_url)
+            .await
+            .expect("connect to admin database");
+
+        let collation_available: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_collation WHERE collname = 'en_US.utf8')",
+        )
+        .fetch_one(&admin_pool)
+        .await
+        .unwrap_or(false);
+        if !collation_available {
+            return None;
+        }
+
+        let db_name = format!("cf_collate_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!(
+            "CREATE DATABASE \"{db_name}\" TEMPLATE template0 \
+             ENCODING 'UTF8' LC_COLLATE 'en_US.utf8' LC_CTYPE 'en_US.utf8'"
+        ))
+        .execute(&admin_pool)
+        .await
+        .expect("create en_US.utf8 collated temp database");
+
+        let slash = admin_url
+            .rfind('/')
+            .expect("admin URL must contain final /db segment");
+        let db_url = format!("{}{}", &admin_url[..slash + 1], db_name);
+        let db_pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect to collated temp database");
+        Some((admin_pool, db_pool, db_name))
+    }
+
+    async fn insert_named_policy(pool: &sqlx::PgPool, name: &str) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, description, policy_type, config, enabled) \
+             VALUES ($1, 'collation regression', 'custom_check', \
+                     '{\"expression\":\"true\"}'::jsonb, true) \
+             RETURNING id",
+        )
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .expect("insert policy")
+    }
+
+    /// The discriminating test: on a locale-collated database the paginated
+    /// query must still return rows in an order Rust agrees is sorted.
+    ///
+    /// Fails against `ORDER BY name ASC, id ASC`.
+    /// Passes against `ORDER BY name COLLATE "C" ASC, id ASC`.
+    #[tokio::test]
+    #[ignore = "requires a test database role with CREATE DATABASE privileges"]
+    async fn pagination_order_matches_rust_ordering_on_locale_collated_database() {
+        let Some((admin_pool, pool, db_name)) = create_locale_collated_temp_db().await else {
+            eprintln!("skipping: en_US.utf8 collation unavailable on this server");
+            return;
+        };
+
+        MIGRATOR
+            .run(&pool)
+            .await
+            .expect("migrations apply on collated temp database");
+
+        // Prove the fixture actually distinguishes the two collations,
+        // otherwise this test would silently stop being discriminating.
+        let db_collation_order: Vec<String> = sqlx::query_scalar(
+            "SELECT v FROM UNNEST($1::text[]) AS t(v) ORDER BY v COLLATE \"en_US.utf8\"",
+        )
+        .bind(COLLATION_SENSITIVE_NAMES)
+        .fetch_all(&pool)
+        .await
+        .expect("compute en_US ordering");
+        let c_collation_order: Vec<String> =
+            sqlx::query_scalar("SELECT v FROM UNNEST($1::text[]) AS t(v) ORDER BY v COLLATE \"C\"")
+                .bind(COLLATION_SENSITIVE_NAMES)
+                .fetch_all(&pool)
+                .await
+                .expect("compute C ordering");
+        assert_ne!(
+            db_collation_order, c_collation_order,
+            "fixture must distinguish en_US.utf8 from C collation, otherwise \
+             this regression cannot detect the production bug"
+        );
+
+        // Clear seeded policies so page boundaries are fully controlled.
+        sqlx::query("DELETE FROM deployment_policies")
+            .execute(&pool)
+            .await
+            .expect("clear seeded policies");
+
+        for name in COLLATION_SENSITIVE_NAMES {
+            insert_named_policy(&pool, name).await;
+        }
+
+        let total = COLLATION_SENSITIVE_NAMES.len();
+        let page_size: i64 = 3;
+
+        // ── Assert: every page, and the concatenation of all pages, is
+        // sorted according to the *client's* comparison. This is what the
+        // WASM validator enforces and what production violated.
+        let mut all_pages: Vec<DeploymentPolicyRecord> = Vec::new();
+        let mut offset = 0_i64;
+        while (offset as usize) < total {
+            let page = list_deployment_policies(&pool, page_size, offset)
+                .await
+                .expect("fetch page");
+            assert!(
+                page.windows(2)
+                    .all(|w| client_ordering_key(&w[0]) <= client_ordering_key(&w[1])),
+                "page at offset {offset} is not sorted by Rust (name, id) ordering; \
+                 server used database collation instead of COLLATE \"C\""
+            );
+            all_pages.extend(page);
+            offset += page_size;
+        }
+
+        assert_eq!(all_pages.len(), total, "pages must cover every policy once");
+        assert!(
+            all_pages
+                .windows(2)
+                .all(|w| client_ordering_key(&w[0]) <= client_ordering_key(&w[1])),
+            "concatenated pages are not sorted by Rust (name, id) ordering: {:?}",
+            all_pages
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        // ── Assert: page boundaries are stable and lossless ───────────────
+        let full = list_deployment_policies(&pool, 1000, 0)
+            .await
+            .expect("full list");
+        let full_ids: Vec<Uuid> = full.iter().map(|p| p.id).collect();
+        let paged_ids: Vec<Uuid> = all_pages.iter().map(|p| p.id).collect();
+        assert_eq!(
+            paged_ids, full_ids,
+            "paged traversal must equal the full ordered list (no duplicates, no omissions)"
+        );
+        let unique: std::collections::HashSet<Uuid> = paged_ids.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            paged_ids.len(),
+            "no duplicate IDs across pages"
+        );
+
+        // ── Assert: repeated fetches are byte-identical ───────────────────
+        for _ in 0..5 {
+            let repeat: Vec<Uuid> = list_deployment_policies(&pool, page_size, 0)
+                .await
+                .expect("repeat page 1")
+                .iter()
+                .map(|p| p.id)
+                .collect();
+            assert_eq!(
+                repeat,
+                full_ids[..(page_size as usize).min(full_ids.len())],
+                "page 1 must be identical across repeated fetches"
+            );
+        }
+
+        drop(pool);
+        drop_temp_db(&admin_pool, &db_name).await;
+    }
+
+    /// Guards the enabled-policy list used by evaluation against the same
+    /// collation mismatch.
+    #[tokio::test]
+    #[ignore = "requires a test database role with CREATE DATABASE privileges"]
+    async fn enabled_policy_list_order_matches_rust_ordering_on_locale_collated_database() {
+        let Some((admin_pool, pool, db_name)) = create_locale_collated_temp_db().await else {
+            eprintln!("skipping: en_US.utf8 collation unavailable on this server");
+            return;
+        };
+
+        MIGRATOR
+            .run(&pool)
+            .await
+            .expect("migrations apply on collated temp database");
+
+        sqlx::query("DELETE FROM deployment_policies")
+            .execute(&pool)
+            .await
+            .expect("clear seeded policies");
+
+        for name in COLLATION_SENSITIVE_NAMES {
+            insert_named_policy(&pool, name).await;
+        }
+
+        let enabled = list_enabled_deployment_policies(&pool)
+            .await
+            .expect("list enabled policies");
+        assert_eq!(enabled.len(), COLLATION_SENSITIVE_NAMES.len());
+        assert!(
+            enabled
+                .windows(2)
+                .all(|w| client_ordering_key(&w[0]) <= client_ordering_key(&w[1])),
+            "enabled policy list is not sorted by Rust (name, id) ordering: {:?}",
+            enabled.iter().map(|p| p.name.as_str()).collect::<Vec<_>>()
+        );
+
+        drop(pool);
+        drop_temp_db(&admin_pool, &db_name).await;
+    }
+
+    /// `deployment_policies.name` is UNIQUE, so the `id` tie-breaker can never
+    /// fire on this table today. This test pins that invariant: if the UNIQUE
+    /// constraint is ever removed, this test fails and whoever removes it must
+    /// consciously confirm the tie-breaker still holds the ordering total.
+    #[tokio::test]
+    #[ignore = "requires live postgres"]
+    async fn policy_name_uniqueness_invariant_backs_the_tie_breaker() {
+        let pool = get_test_pool().await;
+        let has_unique_name: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_index i
+                JOIN pg_class c   ON c.oid = i.indrelid
+                JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY (i.indkey)
+                WHERE c.relname = 'deployment_policies'
+                  AND a.attname = 'name'
+                  AND i.indisunique
+                  AND i.indnatts = 1
+            )
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect deployment_policies indexes");
+
+        assert!(
+            has_unique_name,
+            "deployment_policies.name is expected to be UNIQUE. If this constraint was \
+             intentionally removed, tied names are now reachable: re-verify that the \
+             `id ASC` tie-breaker in list_deployment_policies keeps page boundaries stable, \
+             and add a genuine tied-name pagination regression."
+        );
     }
 }

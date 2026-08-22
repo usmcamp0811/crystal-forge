@@ -66,6 +66,12 @@ pub struct BenchmarkMeta {
     pub title: Option<String>,
     pub description: Option<String>,
     pub version: Option<String>,
+    /// DISA release counter from `<plain-text id="release-info">`, e.g.
+    /// `"Release: 2 Benchmark Date: 01 Oct 2025"`. The DISA release number
+    /// (the `R` in `V1R2`) is not present in the benchmark `<version>`
+    /// element, which only carries the major version.
+    #[serde(default)]
+    pub release_info: Option<String>,
     pub status: Option<String>,
     pub status_date: Option<String>,
     pub platforms: Vec<String>,

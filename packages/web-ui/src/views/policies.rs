@@ -4,11 +4,12 @@ use dioxus::prelude::*;
 use std::collections::HashSet;
 use uuid::Uuid;
 
+use crate::Route;
 use crate::api::client::{
     delete_deployment_policy, export_policy_versions, fetch_compliance_grouping_schemes,
-    fetch_policy_requirement_mappings,
+    fetch_policy_requirement_mappings, fetch_policy_version_usage,
 };
-use crate::api::models::{ComplianceGroupingScheme, PolicyMappingRow};
+use crate::api::models::{ComplianceGroupingScheme, PolicyMappingRow, PolicyVersionUsageResponse};
 use crate::components::io_menu::{IOMenu, IOMenuItem};
 use crate::components::layout::Card;
 use crate::components::policy::{
@@ -760,7 +761,7 @@ pub fn PoliciesView() -> Element {
 }
 
 #[component]
-fn PolicyDrawer(
+pub fn PolicyDrawer(
     policy: PolicyDefinition,
     is_admin: bool,
     initial_revisions: bool,
@@ -785,35 +786,40 @@ fn PolicyDrawer(
                 "config": revision.config,
             }))
             .unwrap_or_else(|_| "{}".to_string());
-            PolicyDefinition {
-                id: policy.id,
-                lineage_id: policy.lineage_id,
-                version_id: Some(revision.id),
-                revision: Some(revision.version.clone()),
-                publication_state: Some(revision.publication_state.clone()),
-                semantic_digest: Some(revision.semantic_digest.clone()),
-                revisions: policy.revisions.clone(),
-                name: revision.name.clone(),
-                description: revision
-                    .description
-                    .clone()
-                    .unwrap_or_else(|| "No description".to_string()),
-                format: policy.format,
-                body,
-                policy_type: Some(revision.policy_type.clone()),
-                updated_at: policy.updated_at.clone(),
-                system_count: policy.system_count,
-                // Use the selected revision's exact mappings (not the lineage current).
-                srg_ids: revision.srg_ids.clone(),
-                cci_ids: revision.cci_ids.clone(),
-                category: revision.category.clone(),
-                framework: revision.framework.clone(),
-                severity: revision.severity.clone(),
-                control_family: revision.control_family.clone(),
-                cmmc_level: revision.cmmc_level,
-                cis_section: revision.cis_section.clone(),
-                rationale: revision.rationale.clone(),
-            }
+             PolicyDefinition {
+                 id: policy.id,
+                 lineage_id: policy.lineage_id,
+                 version_id: Some(revision.id),
+                 revision: Some(revision.version.clone()),
+                 publication_state: Some(revision.publication_state.clone()),
+                 semantic_digest: Some(revision.semantic_digest.clone()),
+                 revisions: policy.revisions.clone(),
+                 name: revision.name.clone(),
+                 description: revision
+                     .description
+                     .clone()
+                     .unwrap_or_else(|| "No description".to_string()),
+                 format: policy.format,
+                 body,
+                 policy_type: Some(revision.policy_type.clone()),
+                 updated_at: policy.updated_at.clone(),
+                 system_count: policy.system_count,
+                 // Use the selected revision's exact mappings (not the lineage current).
+                 srg_ids: revision.srg_ids.clone(),
+                 cci_ids: revision.cci_ids.clone(),
+                 category: revision.category.clone(),
+                 framework: revision.framework.clone(),
+                 severity: revision.severity.clone(),
+                 control_family: revision.control_family.clone(),
+                 cmmc_level: revision.cmmc_level,
+                 cis_section: revision.cis_section.clone(),
+                 rationale: revision.rationale.clone(),
+                 // Draft policies inherit counts from their parent version at fetch time.
+                 // When creating a new draft, use 0 as placeholder; real counts come from server.
+                 mapped_requirement_count: 0,
+                 bundle_usage_count: 0,
+                 evidence_specs: Some(revision.evidence_specs.clone()),
+             }
         },
     );
     let category = policy_category(&displayed_policy);
@@ -828,6 +834,11 @@ fn PolicyDrawer(
     let mut mappings_error: Signal<Option<String>> = use_signal(|| None);
     let mut loaded_mapping_version: Signal<Option<Uuid>> = use_signal(|| None);
     let mut mapping_request_generation = use_signal(|| 0_u64);
+    let mut usage: Signal<Option<PolicyVersionUsageResponse>> = use_signal(|| None);
+    let mut usage_loading = use_signal(|| false);
+    let mut usage_error: Signal<Option<String>> = use_signal(|| None);
+    let mut loaded_usage_version: Signal<Option<Uuid>> = use_signal(|| None);
+    let mut usage_request_generation = use_signal(|| 0_u64);
 
     use_effect(move || {
         let requested_version = selected_version_id();
@@ -864,7 +875,54 @@ fn PolicyDrawer(
         });
     });
 
+    use_effect(move || {
+        let requested_version = selected_version_id();
+        let generation = *usage_request_generation.peek() + 1;
+        usage_request_generation.set(generation);
+        loaded_usage_version.set(None);
+        usage_error.set(None);
+
+        let Some(requested_version) = requested_version else {
+            usage.set(None);
+            usage_loading.set(false);
+            return;
+        };
+
+        usage.set(None);
+        usage_loading.set(true);
+        spawn(async move {
+            let result = fetch_policy_version_usage(&requested_version).await;
+            if usage_request_generation() != generation
+                || selected_version_id() != Some(requested_version)
+            {
+                return;
+            }
+            usage_loading.set(false);
+            match result {
+                Ok(value) => {
+                    usage.set(Some(value));
+                    loaded_usage_version.set(Some(requested_version));
+                }
+                Err(error) => {
+                    usage_error.set(Some(format!("Failed to load policy usage: {error}")))
+                }
+            }
+        });
+    });
+
     let mapping_groups = grouped_policy_mappings(&mappings.read());
+    let usage_snapshot = usage.read().clone();
+    let resolved_system_count = usage_snapshot
+        .as_ref()
+        .map(|usage| {
+            usage
+                .systems
+                .iter()
+                .map(|system| system.system_id)
+                .collect::<HashSet<_>>()
+                .len()
+        })
+        .unwrap_or(0);
 
     let version_id = displayed_policy.version_id;
     let revision_count = policy.revisions.len();
@@ -1006,13 +1064,18 @@ fn PolicyDrawer(
                     }
                 }
             }
-            div { class: "ed-stats",
-                div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{displayed_policy.system_count}" } }
-                div { class: "ed-stat", div { class: "ed-stat-label", "Rules" } div { class: "ed-stat-val", "{rules.len()}" } }
-                div { class: "ed-stat", div { class: "ed-stat-label", "Type" } div { class: "ed-stat-val", style: "font-size:12px;", "{type_display}" } }
-                div { class: "ed-stat", div { class: "ed-stat-label", "Modified" } div { class: "ed-stat-val", style: "font-size:12px;", "{modified_at}" } }
-                div { class: "ed-stat", div { class: "ed-stat-label", "Owner" } div { class: "ed-stat-val", "—" } }
-            }
+             div { class: "ed-stats",
+                 div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", if usage_loading() { "—" } else { "{resolved_system_count}" } } }
+                 div { class: "ed-stat", div { class: "ed-stat-label", "Rules" } div { class: "ed-stat-val", "{rules.len()}" } }
+                 div { class: "ed-stat", div { class: "ed-stat-label", "Type" } div { class: "ed-stat-val", style: "font-size:12px;", "{type_display}" } }
+                  div { class: "ed-stat", div { class: "ed-stat-label", "Modified" } div { class: "ed-stat-val", style: "font-size:12px;", "{modified_at}" } }
+                   // Owner is the user who created this policy version
+                   if let Some(selected_rev) = selected_revision {
+                       if let Some(display_name) = selected_rev.created_by_display.as_deref() {
+                           div { class: "ed-stat", div { class: "ed-stat-label", "Owner" } div { class: "ed-stat-val", style: "font-size:11px;", "{display_name}" } }
+                       }
+                   }
+             }
             if revision_count > 1 {
                 div { class: "policy-drawer-tabs",
                     button { class: if !show_revisions() { "btn btn-ghost xs focus-ring active" } else { "btn btn-ghost xs focus-ring" }, onclick: move |_| show_revisions.set(false), "Details" }
@@ -1126,9 +1189,79 @@ fn PolicyDrawer(
                             }
                         }
                     }
-                    div {
-                        h3 { class: "policy-drawer-section-title", "Systems using this policy · {displayed_policy.system_count}" }
-                        p { style: "margin:0;font-size:12px;color:var(--cf-text-muted);line-height:1.5;", "{displayed_policy.system_count} systems currently use this policy. Detailed system membership is not available from this endpoint." }
+                    // Defect 4 - Evidence for ATO section rendering
+                    if let Some(selected_rev) = selected_revision {
+                        if !selected_rev.evidence_specs.is_empty() {
+                            section {
+                                h3 { class: "policy-drawer-section-title", "Evidence for ATO · {selected_rev.evidence_specs.len()}" }
+                                div { style: "display:flex;flex-direction:column;gap:6px;",
+                                    for spec in selected_rev.evidence_specs.iter() {
+                                        div { style: "padding:8px 10px;border:1px solid var(--cf-divider);border-radius:8px;background:var(--cf-subtle-bg);font-size:12px;",
+                                            "{spec_display_label(spec)}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    section {
+                        h3 { class: "policy-drawer-section-title", "Used by bundles" }
+                        if usage_loading() || loaded_usage_version() != displayed_policy.version_id {
+                            div { style: "font-size:12px;color:var(--cf-text-muted);", "Loading exact-version usage…" }
+                        } else if let Some(error) = usage_error.read().as_ref() {
+                            div { class: "sd-callout sd-callout-danger", style: "font-size:12px;", "{error}" }
+                        } else if let Some(usage) = usage_snapshot.as_ref() {
+                            if usage.bundle_versions.is_empty() {
+                                div { class: "sd-callout sd-callout-info", "This exact policy version is not selected by any bundle revision." }
+                            } else {
+                                div { style: "display:flex;flex-direction:column;gap:6px;",
+                                    for bundle in usage.bundle_versions.iter() {
+                                        div { key: "{bundle.bundle_version_id}", style: "display:flex;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid var(--cf-divider);border-radius:8px;background:var(--cf-subtle-bg);",
+                                            div {
+                                                div { style: "font-size:12px;font-weight:600;", "{bundle.bundle_name}" }
+                                                div { class: "mono", style: "font-size:10px;color:var(--cf-text-muted);margin-top:2px;", "Revision {bundle.bundle_version} · policy order {bundle.policy_order}" }
+                                            }
+                                            div { style: "display:flex;gap:4px;align-items:center;",
+                                                span { class: "chip chip-unknown", "{bundle.publication_state}" }
+                                                if bundle.is_current_published { span { class: "chip chip-healthy", "current" } }
+                                                if bundle.is_current_draft { span { class: "chip chip-info", "draft" } }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    section {
+                        h3 { class: "policy-drawer-section-title", "Systems using this version · {resolved_system_count}" }
+                        if usage_loading() || loaded_usage_version() != displayed_policy.version_id {
+                            div { style: "font-size:12px;color:var(--cf-text-muted);", "Loading resolved system membership…" }
+                        } else if usage_error.read().is_none() {
+                            if let Some(usage) = usage_snapshot.as_ref() {
+                                if usage.systems.is_empty() {
+                                    div { class: "sd-callout sd-callout-info", "No active bundle assignment currently resolves this exact policy version onto a system." }
+                                } else {
+                                    div { style: "display:flex;flex-direction:column;gap:6px;",
+                                        for system in usage.systems.iter() {
+                                            {
+                                                let environment = system.environment.as_deref().unwrap_or("No environment");
+                                                rsx! { Link { key: "{system.bundle_version_id}-{system.system_id}", class: "policy-revision-row focus-ring", to: Route::SystemDetailView { id: system.system_id.to_string() },
+                                                    div {
+                                                        div { class: "mono", style: "font-weight:700;", "{system.hostname}" }
+                                                        div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:3px;", "{environment} · {system.bundle_name} rev {system.bundle_version}" }
+                                                    }
+                                                    div { style: "display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;",
+                                                        span { class: "chip chip-info", "{system.source}" }
+                                                        span { class: "chip chip-neutral", "{system.enforcement_mode}" }
+                                                    }
+                                                }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     details { class: "policy-definition",
                         summary { "Definition" }
@@ -1138,6 +1271,21 @@ fn PolicyDrawer(
             }
         }
     }
+}
+
+/// Display label for an evidence spec based on its kind.
+fn spec_display_label(spec: &crate::api::models::EvidenceSpec) -> String {
+    use crate::api::models::EvidenceKind;
+
+    let kind_label = match &spec.kind {
+        EvidenceKind::Command { cmd, .. } => format!("Command: {cmd}"),
+        EvidenceKind::Log { source, unit, .. } => format!("Log: {source} ({unit})"),
+        EvidenceKind::File { path, .. } => format!("File: {path}"),
+        EvidenceKind::UnitState { unit, .. } => format!("Unit: {unit}"),
+        EvidenceKind::EvalAttr { attr } => format!("Eval: {attr}"),
+        EvidenceKind::Attestation { note } => format!("Attestation: {note}"),
+    };
+    kind_label
 }
 
 fn mapping_relationship_label(relationship: &str) -> &str {
@@ -1361,7 +1509,10 @@ fn grouped_policies(
             .collect();
     }
 
-    if let Some(scheme_id) = grouping.strip_prefix("custom:").and_then(|id| Uuid::parse_str(id).ok()) {
+    if let Some(scheme_id) = grouping
+        .strip_prefix("custom:")
+        .and_then(|id| Uuid::parse_str(id).ok())
+    {
         if let Some(scheme) = custom_schemes.iter().find(|scheme| scheme.id == scheme_id) {
             return grouped_by_custom_scheme(policies, scheme);
         }
@@ -1402,7 +1553,10 @@ fn grouped_by_custom_scheme(
         if !items.is_empty() {
             groups.push(PolicyGroup {
                 label: group.name.clone(),
-                blurb: group.description.clone().unwrap_or_else(|| "Custom grouping scheme.".to_string()),
+                blurb: group
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| "Custom grouping scheme.".to_string()),
                 color: PolicyCategory::Security.color(),
                 items,
             });
@@ -1616,31 +1770,34 @@ mod interchange_tests {
     use uuid::Uuid;
 
     fn security_policy() -> PolicyDefinition {
-        PolicyDefinition {
-            id: Uuid::new_v4(),
-            lineage_id: Uuid::new_v4(),
-            version_id: None,
-            revision: None,
-            publication_state: None,
-            semantic_digest: None,
-            revisions: Vec::new(),
-            name: "SSH hardening".to_string(),
-            description: "Require a secure SSH configuration".to_string(),
-            format: PolicyFormat::Json,
-            body: "{}".to_string(),
-            policy_type: Some("custom_check".to_string()),
-            updated_at: String::new(),
-            system_count: 0,
-            srg_ids: vec!["SRG-OS-000001".to_string()],
-            cci_ids: vec!["CCI-000001".to_string()],
-            category: Some("security".to_string()),
-            framework: Some("NIST 800-53".to_string()),
-            severity: Some("high".to_string()),
-            control_family: Some("AC".to_string()),
-            cmmc_level: None,
-            cis_section: Some("5.2".to_string()),
-            rationale: None,
-        }
+         PolicyDefinition {
+             id: Uuid::new_v4(),
+             lineage_id: Uuid::new_v4(),
+             version_id: None,
+             revision: None,
+             publication_state: None,
+             semantic_digest: None,
+             revisions: Vec::new(),
+             name: "SSH hardening".to_string(),
+             description: "Require a secure SSH configuration".to_string(),
+             format: PolicyFormat::Json,
+             body: "{}".to_string(),
+             policy_type: Some("custom_check".to_string()),
+             updated_at: String::new(),
+             system_count: 0,
+             srg_ids: vec!["SRG-OS-000001".to_string()],
+             cci_ids: vec!["CCI-000001".to_string()],
+             category: Some("security".to_string()),
+             framework: Some("NIST 800-53".to_string()),
+             severity: Some("high".to_string()),
+             control_family: Some("AC".to_string()),
+             cmmc_level: None,
+             cis_section: Some("5.2".to_string()),
+             rationale: None,
+             mapped_requirement_count: 0,
+             bundle_usage_count: 0,
+             evidence_specs: None,
+         }
     }
 
     #[test]
@@ -1719,10 +1876,7 @@ fn DeleteConfirmModal(
     on_cancel: EventHandler<()>,
 ) -> Element {
     let _ = policy_id;
-    let can_delete = eligibility
-        .as_ref()
-        .map(|e| e.eligible)
-        .unwrap_or(false);
+    let can_delete = eligibility.as_ref().map(|e| e.eligible).unwrap_or(false);
     let permanently_blocked = eligibility
         .as_ref()
         .map(|e| e.permanently_blocked())

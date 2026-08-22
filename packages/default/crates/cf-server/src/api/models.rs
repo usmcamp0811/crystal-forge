@@ -1320,6 +1320,15 @@ pub struct DeploymentPolicySummary {
     /// Human-readable rationale
     #[serde(default)]
     pub rationale: Option<String>,
+    /// Number of trusted/eligible policy_requirement_mappings for this policy version
+    #[serde(default)]
+    pub mapped_requirement_count: i64,
+    /// Number of distinct bundle lineages using this policy version
+    #[serde(default)]
+    pub bundle_usage_count: i64,
+    /// Evidence collection specifications for this policy (for ATO audit trails)
+    #[serde(default)]
+    pub evidence_specs: Vec<EvidenceSpec>,
 }
 
 /// A retained record that prevents permanent deletion. These are returned by
@@ -1399,6 +1408,49 @@ pub struct DeploymentPolicyVersionSummary {
     /// Human-readable rationale for this control
     #[serde(default)]
     pub rationale: Option<String>,
+    /// User UUID who created this version (if available)
+    #[serde(default)]
+    pub created_by: Option<Uuid>,
+    /// Human-readable display name of the user who created this version (username or email)
+    #[serde(default)]
+    pub created_by_display: Option<String>,
+    /// Evidence collection specifications for ATO audits
+    #[serde(default)]
+    pub evidence_specs: Vec<EvidenceSpec>,
+}
+
+/// Evidence collection specification for a control or policy.
+/// Describes the authoritative evidence needed to satisfy an ATO requirement.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "details")]
+pub enum EvidenceKind {
+    /// Command execution proof: cmd output must match expect pattern
+    Command { cmd: String, expect: String },
+    /// System journal or event log: unit/source with match_text filter
+    Log {
+        source: String,
+        unit: String,
+        match_text: String,
+    },
+    /// File presence/state: path with optional annotation
+    File { path: String, note: Option<String> },
+    /// systemd/systemctl unit state: requires exact state value
+    UnitState { unit: String, state: String },
+    /// NixOS eval attribute: attr path to be evaluated
+    EvalAttr { attr: String },
+    /// Human attestation: reviewer assertion with optional note
+    Attestation { note: String },
+}
+
+/// Single versioned evidence spec within a policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceSpec {
+    /// Spec type and parameters
+    #[serde(flatten)]
+    pub kind: EvidenceKind,
+    /// Optional required-fields map (validation dictionary)
+    #[serde(default)]
+    pub required_fields: std::collections::HashMap<String, String>,
 }
 
 /// An exact policy-version member of a selected bundle version.
@@ -1411,6 +1463,39 @@ pub struct BundleVersionPolicyMembership {
     pub description: Option<String>,
     pub policy_type: String,
     pub enabled: bool,
+}
+
+/// Bundle membership and resolved active-system usage for one exact policy version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyVersionUsageResponse {
+    pub policy_version_id: Uuid,
+    pub bundle_versions: Vec<PolicyVersionBundleUsage>,
+    pub systems: Vec<PolicyVersionSystemUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PolicyVersionBundleUsage {
+    pub bundle_id: Uuid,
+    pub bundle_name: String,
+    pub bundle_version_id: Uuid,
+    pub bundle_version: String,
+    pub publication_state: String,
+    pub policy_order: i32,
+    pub is_current_published: bool,
+    pub is_current_draft: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyVersionSystemUsage {
+    pub system_id: Uuid,
+    pub hostname: String,
+    pub environment: Option<String>,
+    pub bundle_id: Uuid,
+    pub bundle_name: String,
+    pub bundle_version_id: Uuid,
+    pub bundle_version: String,
+    pub source: String,
+    pub enforcement_mode: String,
 }
 
 /// An exact requirement-version member of a selected bundle version.
@@ -1522,6 +1607,10 @@ pub struct ComplianceBundleSummary {
     /// Immutable revisions belonging to this bundle lineage, ordered newest first.
     #[serde(default)]
     pub versions: Vec<ComplianceBundleVersionSummary>,
+    #[serde(default)]
+    pub applicable_system_count: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate_score: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1633,6 +1722,16 @@ pub struct ComplianceSystemRollup {
     /// exact revision must not be presented as a baseline compliance score.
     #[serde(default)]
     pub resolution_state: Option<String>,
+    /// Assignment status: "current" = assigned to latest bundle version, "pinned" = assigned to specific older version,
+    /// or null if no assignment exists or system doesn't apply.
+    #[serde(default)]
+    pub assignment_status: Option<String>,
+    /// Reason for the assignment (e.g. "migration in progress", "vendor testing").
+    #[serde(default)]
+    pub assignment_reason: Option<String>,
+    /// User who approved the assignment.
+    #[serde(default)]
+    pub assignment_approved_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2811,6 +2910,58 @@ pub struct ApiError {
 mod tests {
     use super::*;
 
+    /// TASK-422's design fixture included deadline/POA&M strings on mock
+    /// assignments, but the production immutable assignment snapshot has no
+    /// such fields. The API must expose only metadata backed by that domain
+    /// model rather than advertising keys that always serialize as `null`.
+    ///
+    /// This fails against the previous MR shape, which emitted
+    /// `assignment_deadline: null` and `assignment_poam: null` on every row.
+    #[test]
+    fn compliance_rollup_serializes_only_backed_assignment_metadata() {
+        let rollup = ComplianceSystemRollup {
+            system_id: uuid::Uuid::new_v4(),
+            hostname: "pinned-host".to_string(),
+            environment: Some("production".to_string()),
+            applies: true,
+            total: 1,
+            evaluated_total: 1,
+            pass: 1,
+            warn: 0,
+            fail: 0,
+            waiver: 0,
+            not_checked: 0,
+            not_applicable: 0,
+            error: 0,
+            report_only: 0,
+            score: 100,
+            resolution_state: Some("resolved".to_string()),
+            assignment_status: Some("pinned".to_string()),
+            assignment_reason: Some("Change freeze exception".to_string()),
+            assignment_approved_by: Some("admin".to_string()),
+        };
+
+        let json = serde_json::to_value(rollup).expect("serialize compliance rollup");
+        assert_eq!(
+            json.get("assignment_reason")
+                .and_then(|value| value.as_str()),
+            Some("Change freeze exception")
+        );
+        assert_eq!(
+            json.get("assignment_approved_by")
+                .and_then(|value| value.as_str()),
+            Some("admin")
+        );
+        assert!(
+            json.get("assignment_deadline").is_none(),
+            "do not advertise deadline until it has an immutable assignment field and mutation contract"
+        );
+        assert!(
+            json.get("assignment_poam").is_none(),
+            "do not advertise POA&M until it has an immutable assignment field and mutation contract"
+        );
+    }
+
     #[test]
     fn update_system_request_omitted_fqdn_is_unset() {
         // Older/partial clients that don't send `fqdn` must not clear it.
@@ -3332,6 +3483,10 @@ pub struct CreateAssignmentRequest {
     pub additions: Option<Vec<Uuid>>,
     /// Value overrides targeting policies in the effective set.
     pub value_overrides: Option<Vec<PolicyValueOverride>>,
+    /// User-provided reason/justification for the assignment.
+    /// Displayed to explain why the system/environment is pinned to this version.
+    /// Optional; if not provided, assignment.reason will be None in the response.
+    pub reason: Option<String>,
 }
 
 /// Response when an assignment is created.
@@ -3350,6 +3505,8 @@ pub struct AssignmentResponse {
     pub assignment_overlay_digest: String,
     #[serde(default = "default_assignment_active")]
     pub active: bool,
+    /// Reason/justification from the current immutable assignment version.
+    pub reason: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -3367,6 +3524,13 @@ pub struct UpdateAssignmentRequest {
     pub exclusions: Option<Vec<Uuid>>,
     pub additions: Option<Vec<Uuid>>,
     pub value_overrides: Option<Vec<PolicyValueOverride>>,
+    /// Tri-state reason/justification for the updated assignment.
+    /// - Omitted: preserve existing reason from current immutable version
+    /// - null: explicitly clear the reason
+    /// - value: replace reason with this value (trimmed, validated)
+    /// Displayed to explain why the system/environment is pinned to this version.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
+    pub reason: FieldUpdate<String>,
 }
 
 /// Request to preview an assignment before saving.
@@ -3379,6 +3543,7 @@ pub struct PreviewAssignmentRequest {
     pub exclusions: Option<Vec<Uuid>>,
     pub additions: Option<Vec<Uuid>>,
     pub value_overrides: Option<Vec<PolicyValueOverride>>,
+    pub reason: Option<String>,
 }
 
 /// A single resolved policy in the effective set.

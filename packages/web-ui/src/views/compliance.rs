@@ -4,34 +4,37 @@ use crate::api::client::{
     create_bundle_draft, create_compliance_assignment, create_compliance_bundle,
     delete_compliance_bundle, fetch_bundle_requirement_coverage,
     fetch_bundle_version_policy_membership, fetch_bundle_version_requirement_membership,
-    fetch_compliance_bundle_systems, fetch_compliance_bundles, fetch_compliance_system_evidence,
-    fetch_compliance_framework_versions, fetch_compliance_frameworks, fetch_environments,
-    fetch_framework_mapped_policy_versions, search_requirements,
-    fetch_policies, fetch_systems, import_xccdf, preview_compliance_assignment, preview_xccdf,
-    publish_bundle_version, trust_bundle_version, update_compliance_bundle,
+    fetch_compliance_bundle_systems, fetch_compliance_bundles, fetch_compliance_framework_versions,
+    fetch_compliance_frameworks, fetch_compliance_system_evidence, fetch_environments,
+    fetch_framework_mapped_policy_versions, fetch_policies, fetch_systems, import_xccdf,
+    preview_compliance_assignment, preview_xccdf, publish_bundle_version, search_requirements,
+    trust_bundle_version, update_compliance_bundle,
 };
 use crate::api::models::{
-    BundleCoverageReport, BundleCoverageRow, ComplianceBundleSummary, ComplianceBundleSystemsResponse,
-    ComplianceEvidenceResponse, CreateAssignmentRequest, CreateBundleDraftRequest,
-    CreateComplianceBundleRequest, ComplianceFrameworkSummary, ComplianceFrameworkVersionSummary,
-    DeploymentPolicySummary, EnvironmentSummary, RequirementVersionSummary,
-    ImportedBundlePlan, ImportedCustomCheck, ImportedCustomCheckRule, ImportedEvidenceRequirement,
+    BundleCoverageReport, BundleCoverageRow, ComplianceBundleSummary,
+    ComplianceBundleSystemsResponse, ComplianceEvidenceResponse, ComplianceFrameworkSummary,
+    ComplianceFrameworkVersionSummary, CreateAssignmentRequest, CreateBundleDraftRequest,
+    CreateComplianceBundleRequest, DeploymentPolicySummary, EnvironmentSummary, ImportedBundlePlan,
+    ImportedCustomCheck, ImportedCustomCheckRule, ImportedEvidenceRequirement,
     ImportedPolicyCustomization, PolicyValueOverride, PublishBundleVersionRequest,
-    RequirementCoverage, SortOrder, SystemSummary, SystemsListParams,
+    RequirementCoverage, RequirementVersionSummary, SortOrder, SystemSummary, SystemsListParams,
     TrustBundleVersionRequest, UpdateAssignmentRequest, UpdateComplianceBundleRequest,
-    XccdfImportPlan, XccdfImportResponse, XccdfPreviewResponse, XccdfRuleImportAction,
+    XccdfDiagnostic, XccdfImportPlan, XccdfImportResponse, XccdfPreviewResponse,
+    XccdfRuleImportAction,
 };
 use crate::components::compliance::{
-    BundleCatalog, BundleHeader, EvidenceDrawer, ImportReview, RefinePolicyStep,
-    RefinedPolicyDraft, RefinedRuleAction, RefinedStigRule, ScoreStrip, SourceCheck,
-    SourceCheckBodyPart, SourceStigRule, SystemsMatrix, action_to_import, mapping_semantics_for,
+    action_to_import, mapping_semantics_for, BundleCatalog, BundleHeader, ComparisonOperator,
+    EvidenceDrawer, ImportReview, PolicyAssertionDraft, RefinePolicyStep, RefinedPolicyDraft,
+    RefinedRuleAction, RefinedStigRule, ScoreStrip, SourceCheck, SourceCheckBodyPart,
+    SourceStigRule, SystemsMatrix, TypedPolicyValue,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::components::io_menu::{IOMenu, IOMenuItem};
 use crate::components::loading::DashboardLoadingSpinner;
+use crate::components::policy::{PolicyDefinition, PolicyFormat};
 use crate::export::{
-    ExportPayload, build_cf_json, build_csv, build_oscal, build_sarif, download_print_html,
-    trigger_download,
+    build_cf_json, build_csv, build_oscal, build_sarif, download_print_html, trigger_download,
+    ExportPayload,
 };
 use crate::state::{app_state::AppState, auth};
 
@@ -53,6 +56,7 @@ pub fn ComplianceView() -> Element {
     let mut bundles = use_signal(Vec::<ComplianceBundleSummary>::new);
     let mut load_error = use_signal(|| None::<String>);
     let mut selected_bundle_id = use_signal(|| None::<uuid::Uuid>);
+    let mut drawer_open = use_signal(|| false);
     // Separate Ok/Err state for systems so failures are surfaced, not swallowed.
     let mut systems = use_signal(|| None::<ComplianceBundleSystemsResponse>);
     let mut systems_error = use_signal(|| None::<String>);
@@ -64,18 +68,33 @@ pub fn ComplianceView() -> Element {
     let mut show_new_bundle = use_signal(|| false);
     let mut show_edit_bundle = use_signal(|| false);
     let mut show_import_stig = use_signal(|| false);
+    let mut stig_import_draft = use_signal(load_stig_import_draft);
     let mut import_mode_stig = use_signal(|| true); // true = STIG/XCCDF, false = CF-native bundle
     let mut version_action_busy = use_signal(|| false);
     let mut version_action_error = use_signal(|| None::<String>);
     let mut policies = use_signal(Vec::<DeploymentPolicySummary>::new);
     // Requirement coverage for the selected bundle version.
     let mut coverage_report: Signal<Option<BundleCoverageReport>> = use_signal(|| None);
+    let mut coverage_error = use_signal(|| None::<String>);
+    let mut coverage_loading = use_signal(|| false);
     let mut coverage_expanded = use_signal(|| false);
+    let mut coverage_view = use_signal(|| false);
+    let mut revisions_open = use_signal(|| false);
+    let mut coverage_gen = use_signal(|| 0u32);
+    let mut coverage_requested_version = use_signal(|| None::<uuid::Uuid>);
     let mut environments = use_signal(Vec::<EnvironmentSummary>::new);
     let mut sys_filter = use_signal(|| "all".to_string());
-    let mut selected_export_version_id = use_signal(|| None::<uuid::Uuid>);
+    let mut selected_bundle_version_id = use_signal(|| None::<uuid::Uuid>);
     let mut export_version_pointers = use_signal(|| (None::<uuid::Uuid>, None::<uuid::Uuid>));
     let mut show_assignment = use_signal(|| false);
+    let mut policy_library = use_signal(Vec::<PolicyDefinition>::new);
+    let mut policy_drawer = use_signal(|| None::<PolicyDefinition>);
+    let mut policy_loading = use_signal(|| false);
+    let mut policy_error = use_signal(|| None::<String>);
+
+    use_effect(move || {
+        stig_import_draft.set(load_stig_import_draft());
+    });
 
     // Generation counters guard against stale async responses overwriting the
     // state of a subsequently-selected bundle or system.  Each spawn captures
@@ -133,6 +152,7 @@ pub fn ComplianceView() -> Element {
                     });
                     bundles.set(items);
                     selected_bundle_id.set(first_id);
+                    selected_bundle_version_id.set(first_version_id);
                     // loaded = true before the systems fetch so the bundle list
                     // renders immediately; systems has its own loading indicator.
                     loaded.set(true);
@@ -159,9 +179,22 @@ pub fn ComplianceView() -> Element {
     let selected_bundle = selected_bundle_id
         .read()
         .and_then(|id| bundles.read().iter().find(|b| b.id == id).cloned());
+    let paused_import_name = stig_import_draft
+        .read()
+        .as_ref()
+        .map(|draft| {
+            if draft.bundle_name.is_empty() {
+                "unnamed benchmark".to_string()
+            } else {
+                draft.bundle_name.clone()
+            }
+        })
+        .unwrap_or_else(|| "unnamed benchmark".to_string());
 
-    let on_select_bundle = move |bundle_id: uuid::Uuid| {
+    let mut on_select_bundle = move |bundle_id: uuid::Uuid| {
         selected_bundle_id.set(Some(bundle_id));
+        coverage_expanded.set(false);
+        coverage_view.set(false);
         evidence.set(None);
         evidence_error.set(None);
         // Bump evidence_gen so any in-flight evidence fetch for the old bundle
@@ -178,6 +211,7 @@ pub fn ComplianceView() -> Element {
                     .current_published_version_id
                     .or(bundle.current_draft_version_id)
             });
+        selected_bundle_version_id.set(version_id);
         start_systems_fetch(bundle_id, version_id);
     };
 
@@ -201,7 +235,7 @@ pub fn ComplianceView() -> Element {
         // Preserve an explicit choice while it remains available. If the
         // selected bundle is refreshed or published and the old version is no
         // longer one of the current pointers, prefer published, then draft.
-        let current = *selected_export_version_id.read();
+        let current = *selected_bundle_version_id.read();
         let version_exists = bundle_id
             .and_then(|bid| bundles_snapshot.iter().find(|bundle| bundle.id == bid))
             .is_some_and(|bundle| {
@@ -219,7 +253,57 @@ pub fn ComplianceView() -> Element {
                 })
             })
         };
-        selected_export_version_id.set(next);
+        if current != next {
+            selected_bundle_version_id.set(next);
+            if let Some(bundle_id) = bundle_id {
+                start_systems_fetch(bundle_id, next);
+            }
+        }
+    });
+
+    use_effect(move || {
+        let Some(version_id) = *selected_bundle_version_id.read() else {
+            let generation = *coverage_gen.peek() + 1;
+            coverage_gen.set(generation);
+            coverage_requested_version.set(None);
+            coverage_report.set(None);
+            coverage_error.set(None);
+            coverage_loading.set(false);
+            return;
+        };
+        if coverage_report
+            .peek()
+            .as_ref()
+            .is_some_and(|report| report.bundle_version_id == version_id)
+        {
+            return;
+        }
+        if *coverage_requested_version.peek() == Some(version_id) {
+            return;
+        }
+        let generation = *coverage_gen.peek() + 1;
+        coverage_gen.set(generation);
+        coverage_requested_version.set(Some(version_id));
+        coverage_expanded.set(false);
+        coverage_report.set(None);
+        coverage_error.set(None);
+        coverage_loading.set(true);
+        spawn(async move {
+            match fetch_bundle_requirement_coverage(&version_id).await {
+                Ok(report) => {
+                    if *coverage_gen.peek() == generation {
+                        coverage_report.set(Some(report));
+                        coverage_loading.set(false);
+                    }
+                }
+                Err(error) => {
+                    if *coverage_gen.peek() == generation {
+                        coverage_error.set(Some(error.to_string()));
+                        coverage_loading.set(false);
+                    }
+                }
+            }
+        });
     });
 
     let on_evidence = move |system_id: uuid::Uuid| {
@@ -228,7 +312,7 @@ pub fn ComplianceView() -> Element {
             evidence_error.set(None);
             let gen_id = *evidence_gen.read() + 1;
             evidence_gen.set(gen_id);
-            let version_id = *selected_export_version_id.read();
+            let version_id = *selected_bundle_version_id.read();
             spawn(async move {
                 match fetch_compliance_system_evidence(&bundle_id, &system_id, version_id.as_ref())
                     .await
@@ -248,8 +332,54 @@ pub fn ComplianceView() -> Element {
         }
     };
 
+    let mut on_open_policy = move |(policy_id, policy_version_id): (uuid::Uuid, uuid::Uuid)| {
+        if let Some(policy) = policy_library
+            .read()
+            .iter()
+            .find(|policy| policy.id == policy_id)
+            .cloned()
+        {
+            if policy
+                .revisions
+                .iter()
+                .any(|revision| revision.id == policy_version_id)
+            {
+                let mut exact_policy = policy;
+                exact_policy.version_id = Some(policy_version_id);
+                policy_drawer.set(Some(exact_policy));
+                return;
+            }
+        }
+        if *policy_loading.read() {
+            return;
+        }
+        policy_loading.set(true);
+        policy_error.set(None);
+        spawn(async move {
+            match crate::views::policies_api::load_policy_version(policy_id, policy_version_id)
+                .await
+            {
+                Ok(policy) => {
+                    let mut cached = policy_library.read().clone();
+                    if let Some(position) = cached.iter().position(|item| item.id == policy.id) {
+                        cached[position] = policy.clone();
+                    } else {
+                        cached.push(policy.clone());
+                    }
+                    policy_library.set(cached);
+                    policy_drawer.set(Some(policy));
+                    policy_loading.set(false);
+                }
+                Err(error) => {
+                    policy_loading.set(false);
+                    policy_error.set(Some(error));
+                }
+            }
+        });
+    };
+
     rsx! {
-        div { style: "display:flex;flex-direction:column;gap:16px;",
+        div { class: "cf-compliance-view", style: "display:flex;flex-direction:column;gap:16px;",
             // ── Page head ──────────────────────────────────────────────────
             div { class: "page-head",
                 div {
@@ -276,7 +406,7 @@ pub fn ComplianceView() -> Element {
                             let mut items = vec![];
                             if is_admin {
                                 items.push(IOMenuItem::action_with_icon(
-                                    "Import STIG or XCCDF (.xml/.zip)",
+                                    if stig_import_draft.read().is_some() { "Resume STIG import…" } else { "Import STIG or XCCDF (.xml/.zip)" },
                                     IconName::Download,
                                 ));
                                 // Import CF bundle: uses the same import flow as foreign XCCDF.
@@ -288,9 +418,9 @@ pub fn ComplianceView() -> Element {
                             }
                             // Export XCCDF: enabled when a bundle version is selected.
                             let bundle_selected = selected_bundle_id.read().is_some();
-                            let has_version = selected_export_version_id.read().is_some();
+                            let has_version = selected_bundle_version_id.read().is_some();
                             let export_label = selected_bundle.as_ref().and_then(|bundle| {
-                                let selected = *selected_export_version_id.read();
+                                let selected = *selected_bundle_version_id.read();
                                 if selected == bundle.current_published_version_id {
                                     bundle.current_published_version.as_ref().map(|version| {
                                         format!("Export XCCDF: {version} published")
@@ -338,7 +468,7 @@ pub fn ComplianceView() -> Element {
                                     }
                                     2 => {
                                         // Export XCCDF: trigger a download of the selected bundle version.
-                                        if let Some(vid) = *selected_export_version_id.read() {
+                                        if let Some(vid) = *selected_bundle_version_id.read() {
                                             let url = format!(
                                                 "{}/api/v1/compliance/bundle-versions/{}/xccdf",
                                                 crate::api::client::base_url(),
@@ -355,7 +485,7 @@ pub fn ComplianceView() -> Element {
                             } else {
                                 match idx {
                                     0 => {
-                                        if let Some(vid) = *selected_export_version_id.read() {
+                                        if let Some(vid) = *selected_bundle_version_id.read() {
                                             let url = format!(
                                                 "{}/api/v1/compliance/bundle-versions/{}/xccdf",
                                                 crate::api::client::base_url(),
@@ -375,196 +505,229 @@ pub fn ComplianceView() -> Element {
                 }
             }
 
+            if stig_import_draft.read().is_some() && !*show_import_stig.read() {
+                div { class: "sd-callout sd-callout-warn", style: "display:flex;align-items:center;justify-content:space-between;gap:12px;",
+                    div { style: "display:flex;align-items:center;gap:10px;font-size:12.5px;",
+                        Icon { name: IconName::Shield, size: 14 }
+                        "Paused STIG import — "
+                        strong { "{paused_import_name}" }
+                        ". in progress."
+                    }
+                    div { style: "display:flex;gap:6px;flex-shrink:0;",
+                        button { class: "btn btn-ghost focus-ring xs", onclick: move |_| { clear_stig_import_draft(); stig_import_draft.set(None); }, "Discard" }
+                        button { class: "btn btn-primary focus-ring xs", onclick: move |_| { import_mode_stig.set(true); show_import_stig.set(true); }, "Resume" }
+                    }
+                }
+            }
+
             // ── Body ───────────────────────────────────────────────────────
             if let Some(error) = load_error.read().as_ref() {
-                div { class: "sd-callout sd-callout-danger",
-                    Icon { name: IconName::X, size: 13 }
-                    div { "Failed to load compliance bundles: {error}" }
-                }
+                div { class: "sd-callout sd-callout-danger", Icon { name: IconName::X, size: 13 }, div { "Failed to load compliance bundles: {error}" } }
             } else if !*loaded.read() {
                 DashboardLoadingSpinner { label: "Loading compliance…".to_string() }
             } else if bundles.read().is_empty() {
-                EmptyComplianceState {
-                    is_admin,
-                    on_new: move |_| show_new_bundle.set(true),
-                }
+                EmptyComplianceState { is_admin, on_new: move |_| show_new_bundle.set(true) }
             } else {
-                div {
-                    style: "display:grid;grid-template-columns:320px 1fr;gap:16px;align-items:start;",
-                    // Left rail: catalog
-                     BundleCatalog {
-                         bundles: bundles.read().clone(),
-                         selected_id: *selected_bundle_id.read(),
-                         on_select: on_select_bundle,
-                         selected_version_id: *selected_export_version_id.read(),
-                         on_select_version: move |version_id| {
-                             selected_export_version_id.set(Some(version_id));
-                             if let Some(bundle_id) = *selected_bundle_id.read() {
-                                 start_systems_fetch(bundle_id, Some(version_id));
-                             }
-                         },
-                     }
-                    // Right: bundle content
+                BundleCatalog {
+                    bundles: bundles.read().clone(),
+                    selected_id: *selected_bundle_id.read(),
+                    on_select: move |bundle_id| { on_select_bundle(bundle_id); coverage_view.set(false); drawer_open.set(true); },
+                    selected_version_id: *selected_bundle_version_id.read(),
+                    on_select_version: move |version_id| {
+                        selected_bundle_version_id.set(Some(version_id));
+                        drawer_open.set(true);
+                        if let Some(bundle_id) = *selected_bundle_id.read() { start_systems_fetch(bundle_id, Some(version_id)); }
+                    },
+                }
+                if *drawer_open.read() && policy_drawer.read().is_none() {
                     if let Some(bundle) = selected_bundle {
-                        div { style: "display:flex;flex-direction:column;gap:14px;min-width:0;",
-                             BundleHeader {
-                                 bundle: bundle.clone(),
-                                 on_edit: move |_| show_edit_bundle.set(true),
-                                 is_admin,
-                             }
-                             XccdfVersionSelector {
-                                 bundle: bundle.clone(),
-                                 selected_version_id: *selected_export_version_id.read(),
-                                   on_select: move |version_id| {
-                                       selected_export_version_id.set(version_id);
-                                       if let Some(bundle_id) = *selected_bundle_id.read() {
-                                           start_systems_fetch(bundle_id, version_id);
-                                       }
-                                   },
-                             }
-                             // ── Version lifecycle actions (admin-only) ─
-                             if is_admin {
-                                 BundleVersionActions {
-                                     bundle: bundle.clone(),
-                                     selected_version_id: *selected_export_version_id.read(),
-                                     busy: *version_action_busy.read(),
-                                     error: version_action_error.read().clone(),
-                                     on_trust: move |version_id: uuid::Uuid| {
-                                         version_action_busy.set(true);
-                                         version_action_error.set(None);
-                                         spawn(async move {
-                                             match trust_bundle_version(
-                                                 &version_id,
-                                                 &TrustBundleVersionRequest { trusted: true, review_note: None },
-                                             ).await {
-                                                 Ok(_) => {
-                                                     version_action_busy.set(false);
-                                                     if let Ok(items) = fetch_compliance_bundles().await {
-                                                         bundles.set(items);
-                                                     }
-                                                 }
-                                                 Err(err) => {
-                                                     version_action_busy.set(false);
-                                                     version_action_error.set(Some(format!("Trust failed: {err}")));
-                                                 }
-                                             }
-                                         });
-                                     },
-                                     on_publish: move |version_id: uuid::Uuid| {
-                                         version_action_busy.set(true);
-                                         version_action_error.set(None);
-                                         spawn(async move {
-                                             match publish_bundle_version(
-                                                 &version_id,
-                                                 &PublishBundleVersionRequest {
-                                                     auto_publish_draft_policies: Some(true),
-                                                     expected_semantic_digest: None,
-                                                 },
-                                             ).await {
-                                                 Ok(_) => {
-                                                     version_action_busy.set(false);
-                                                     if let Ok(items) = fetch_compliance_bundles().await {
-                                                         bundles.set(items);
-                                                     }
-                                                 }
-                                                 Err(err) => {
-                                                     version_action_busy.set(false);
-                                                     version_action_error.set(Some(format!("Publish failed: {err}")));
-                                                 }
-                                             }
-                                         });
-                                     },
-                                     on_create_draft: move |bundle_id: uuid::Uuid| {
-                                         version_action_busy.set(true);
-                                         version_action_error.set(None);
-                                         spawn(async move {
-                                             match create_bundle_draft(
-                                                 &bundle_id,
-                                                 &CreateBundleDraftRequest { new_version: None },
-                                             ).await {
-                                                 Ok(draft) => {
-                                                     version_action_busy.set(false);
-                                                     selected_export_version_id.set(Some(draft.version_id));
-                                                     if let Ok(items) = fetch_compliance_bundles().await {
-                                                         bundles.set(items);
-                                                     }
-                                                 }
-                                                 Err(err) => {
-                                                     version_action_busy.set(false);
-                                                     version_action_error.set(Some(format!("Draft creation failed: {err}")));
-                                                 }
-                                             }
-                                         });
-                                     },
-                                 }
-                             }
-                             if let Some(err) = systems_error.read().as_ref() {
-                                div { class: "sd-callout sd-callout-danger",
-                                    Icon { name: IconName::X, size: 13 }
-                                    div { style: "font-size:12px;display:flex;flex-direction:column;gap:6px;",
-                                        div { "Failed to load systems: {err}" }
+                        div { class: "fl-tray-backdrop", onclick: move |_| drawer_open.set(false) }
+                        aside { class: "fl-tray", style: "width:min(900px,96vw);",
+                            if *coverage_view.read() {
+                                header { class: "fl-tray-head",
+                                    div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;",
                                         button {
-                                            class: "btn btn-ghost focus-ring xs",
-                                            style: "width:fit-content;",
-                            onclick: move |_| {
-                             if let Some(bid) = *selected_bundle_id.read() {
-                                     start_systems_fetch(bid, *selected_export_version_id.read());
+                                            class: "btn-icon focus-ring",
+                                            "data-testid": "requirement-coverage-back",
+                                            onclick: move |_| coverage_view.set(false),
+                                            Icon { name: IconName::ArrowLeft, size: 16 }
+                                        }
+                                        div {
+                                            div { style: "font-size:15px;font-weight:700;", "Requirement coverage" }
+                                            div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{bundle.name}" }
+                                        }
+                                    }
+                                    button { class: "btn-icon focus-ring", onclick: move |_| drawer_open.set(false), Icon { name: IconName::X, size: 16 } }
                                 }
-                            },
-                                            Icon { name: IconName::Sync, size: 11 }
-                                            " Retry"
+                            } else {
+                                header { class: "fl-tray-head",
+                                    div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;", Icon { name: IconName::Shield, size: 18 }, span { style: "font-size:11px;color:var(--cf-text-muted);", "Compliance bundle" } }
+                                    div { style: "display:flex;gap:6px;",
+                                        if is_admin { button { class: "btn btn-ghost focus-ring xs", "data-testid": "compliance-edit-bundle", onclick: move |_| show_edit_bundle.set(true), Icon { name: IconName::Edit, size: 12 }, " Edit bundle" } }
+                                        button {
+                                            class: "btn-icon focus-ring",
+                                            "data-testid": "compliance-drawer-close",
+                                            onclick: move |_| drawer_open.set(false),
+                                            Icon { name: IconName::X, size: 16 }
                                         }
                                     }
                                 }
-                            } else if *systems_loading.read() {
-                                div { class: "sd-callout sd-callout-info",
-                                    Icon { name: IconName::Shield, size: 13 }
-                                    div { style: "font-size:12px;", "Loading systems rollup…" }
+                            }
+                            if *coverage_view.read() {
+                                div { style: "padding:14px 18px;overflow:auto;flex:1;",
+                                    if *coverage_loading.read() {
+                                        DashboardLoadingSpinner { label: "Loading requirement coverage…".to_string() }
+                                    } else if let Some(error) = coverage_error.read().as_ref() {
+                                        div { class: "sd-callout sd-callout-danger", Icon { name: IconName::X, size: 13 }, div { "Failed to load requirement coverage: {error}" } }
+                                    } else if let Some(report) = coverage_report.read().clone() {
+                                        RequirementCoverageCard { report, expanded: coverage_expanded, detail: true, on_open_policy }
+                                    } else {
+                                        div { class: "q-empty", "No requirement coverage is available for this revision." }
+                                    }
                                 }
-                             } else if let Some(resp) = systems.read().as_ref() {
-                                  ScoreStrip { totals: resp.totals.clone() }
-                                  SystemsMatrix {
-                                     systems: resp.systems.clone(),
-                                     on_evidence,
-                                     filter: sys_filter.read().clone(),
-                                      on_filter: move |f| sys_filter.set(f),
-                                  }
-                                  // ── Requirement coverage card ───────────────
-                                  if let Some(vid) = *selected_export_version_id.read() {
-                                      {
-                                          // Lazy-load coverage when the version changes.
-                                          if coverage_report.read().as_ref().map(|r| r.bundle_version_id) != Some(vid) {
-                                              spawn(async move {
-                                                  if let Ok(report) = fetch_bundle_requirement_coverage(&vid).await {
-                                                      coverage_report.set(Some(report));
-                                                  }
-                                              });
-                                          }
-                                          rsx! { div {} }
-                                      }
-                                      if let Some(report) = coverage_report.read().clone() {
-                                          RequirementCoverageCard { report, expanded: coverage_expanded }
-                                      }
-                                  }
-                                  // Administrative assignment controls stay below operational posture.
-                                  if is_admin {
-                                     if let Some(vid) = *selected_export_version_id.read() {
-                                          button {
-                                              class: "btn btn-primary focus-ring",
-                                              onclick: move |_| show_assignment.set(true),
-                                              "Assign bundle"
-                                          }
-                                          if *show_assignment.read() {
-                                              AssignmentCreatePanel {
-                                                   bundle: bundle.clone(),
-                                                   bundle_version_id: vid,
-                                                   environments: environments.read().clone(),
-                                                   policies: policies.read().clone(),
-                                               }
-                                          }
-                                     }
-                                 }
-                             }
+                            } else {
+                            div { style: "overflow:auto;flex:1;",
+                                div { style: "padding:14px 18px;", BundleHeader { bundle: bundle.clone(), on_edit: move |_| show_edit_bundle.set(true), is_admin, cardless: true } }
+                                if let Some(resp) = systems.read().as_ref() {
+                                    ScoreStrip { totals: resp.totals.clone() }
+                                }
+                                if bundle.versions.len() > 1 {
+                                    {
+                                    let revisions_expanded = *revisions_open.read();
+                                    rsx! { div { style: "border-top:1px solid var(--cf-divider);padding:12px 18px;",
+                                        button { class: "btn btn-ghost focus-ring xs", onclick: move |_| revisions_open.set(!revisions_expanded), Icon { name: if revisions_expanded { IconName::ChevronDown } else { IconName::ChevronRight }, size: 13 }, " Revisions · {bundle.versions.len()} total" }
+                                        if revisions_expanded {
+                                            div { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;",
+                                                for revision in bundle.versions.iter() {
+                                                    {
+                                                        let revision_id = revision.id;
+                                                        let selected = *selected_bundle_version_id.read() == Some(revision_id);
+                                                        rsx! { button { class: if selected { "btn btn-ghost focus-ring" } else { "btn btn-ghost focus-ring xs" }, onclick: move |_| { selected_bundle_version_id.set(Some(revision_id)); if let Some(bundle_id) = *selected_bundle_id.read() { start_systems_fetch(bundle_id, Some(revision_id)); } }, "Rev {revision.version} · {revision.publication_state}" } }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } }
+                                    }
+                                }
+                                if let Some(error) = coverage_error.read().as_ref() {
+                                    div { class: "card", "data-testid": "requirement-coverage-card",
+                                        div { style: "font-size:13px;font-weight:600;margin-bottom:8px;", "Requirement coverage" }
+                                        div { class: "sd-callout sd-callout-danger", Icon { name: IconName::X, size: 13 }, div { "Failed to load requirement coverage: {error}" } }
+                                    }
+                                } else if *coverage_loading.read() {
+                                    div { class: "card", "data-testid": "requirement-coverage-card",
+                                        div { style: "font-size:13px;font-weight:600;margin-bottom:8px;", "Requirement coverage" }
+                                        DashboardLoadingSpinner { label: "Loading requirement coverage…".to_string() }
+                                    }
+                                } else if let Some(report) = coverage_report.read().clone() {
+                                    RequirementCoverageCard {
+                                        report,
+                                        expanded: coverage_expanded,
+                                        on_open: move |_| { coverage_view.set(true); },
+                                        on_open_policy,
+                                    }
+                                } else {
+                                    div { class: "card", "data-testid": "requirement-coverage-card",
+                                        div { style: "font-size:13px;font-weight:600;", "Requirement coverage" }
+                                        div { class: "q-empty", "No requirement coverage is available for this revision." }
+                                    }
+                                }
+                                if let Some(err) = systems_error.read().as_ref() {
+                                    div { class: "card", "data-testid": "bundle-systems-card",
+                                        h3 { style: "margin:0 0 8px;font-size:13px;font-weight:600;", "Systems" }
+                                        div { class: "sd-callout sd-callout-danger", Icon { name: IconName::X, size: 13 }, div { "Failed to load systems: {err}" } }
+                                    }
+                                } else if *systems_loading.read() {
+                                    div { class: "card", "data-testid": "bundle-systems-card",
+                                        h3 { style: "margin:0 0 8px;font-size:13px;font-weight:600;", "Systems" }
+                                        div { class: "sd-callout sd-callout-info", Icon { name: IconName::Shield, size: 13 }, div { "Loading systems rollup…" } }
+                                    }
+                                } else if let Some(resp) = systems.read().as_ref() {
+                                    div { class: "card", "data-testid": "bundle-systems-card", style: "padding:0;overflow:hidden;",
+                                        SystemsMatrix {
+                                            systems: resp.systems.clone(),
+                                            selected_bundle_version_id: *selected_bundle_version_id.read(),
+                                            current_bundle_version_id: bundle.current_published_version_id.or(bundle.current_draft_version_id),
+                                            on_evidence,
+                                            filter: sys_filter.read().clone(),
+                                            on_filter: move |filter| sys_filter.set(filter)
+                                        }
+                                    }
+                                }
+                                XccdfVersionSelector { bundle: bundle.clone(), selected_version_id: *selected_bundle_version_id.read(), on_select: move |version_id| { selected_bundle_version_id.set(version_id); if let Some(bundle_id) = *selected_bundle_id.read() { start_systems_fetch(bundle_id, version_id); } } }
+                                if is_admin {
+                                    BundleVersionActions {
+                                        bundle: bundle.clone(),
+                                        selected_version_id: *selected_bundle_version_id.read(),
+                                        busy: *version_action_busy.read(),
+                                        error: version_action_error.read().clone(),
+                                        on_trust: move |version_id| {
+                                            version_action_busy.set(true);
+                                            version_action_error.set(None);
+                                            spawn(async move {
+                                                match trust_bundle_version(&version_id, &TrustBundleVersionRequest { trusted: true, review_note: None }).await {
+                                                    Ok(_) => {
+                                                        version_action_busy.set(false);
+                                                        if let Ok(items) = fetch_compliance_bundles().await { bundles.set(items); }
+                                                    }
+                                                    Err(error) => {
+                                                        version_action_busy.set(false);
+                                                        version_action_error.set(Some(format!("Trust failed: {error}")));
+                                                    }
+                                                }
+                                            });
+                                        },
+                                        on_publish: move |version_id| {
+                                            version_action_busy.set(true);
+                                            version_action_error.set(None);
+                                            spawn(async move {
+                                                match publish_bundle_version(&version_id, &PublishBundleVersionRequest { auto_publish_draft_policies: Some(true), expected_semantic_digest: None }).await {
+                                                    Ok(_) => {
+                                                        version_action_busy.set(false);
+                                                        if let Ok(items) = fetch_compliance_bundles().await { bundles.set(items); }
+                                                    }
+                                                    Err(error) => {
+                                                        version_action_busy.set(false);
+                                                        version_action_error.set(Some(format!("Publish failed: {error}")));
+                                                    }
+                                                }
+                                            });
+                                        },
+                                        on_create_draft: move |bundle_id| {
+                                            version_action_busy.set(true);
+                                            version_action_error.set(None);
+                                            spawn(async move {
+                                                match create_bundle_draft(&bundle_id, &CreateBundleDraftRequest { new_version: None }).await {
+                                                     Ok(draft) => {
+                                                         selected_bundle_version_id.set(Some(draft.version_id));
+                                                         // Selecting the newly derived draft must
+                                                         // re-scope Systems/stat totals immediately.
+                                                         // Otherwise coverage/evidence follow the
+                                                         // new shared version signal while the drawer
+                                                         // continues displaying the prior revision's
+                                                         // systems and score.
+                                                         start_systems_fetch(bundle_id, Some(draft.version_id));
+                                                         version_action_busy.set(false);
+                                                        if let Ok(items) = fetch_compliance_bundles().await { bundles.set(items); }
+                                                    }
+                                                    Err(error) => {
+                                                        version_action_busy.set(false);
+                                                        version_action_error.set(Some(format!("Draft creation failed: {error}")));
+                                                    }
+                                                }
+                                            });
+                                        },
+                                    }
+                                }
+                                if is_admin {
+                                    if let Some(version_id) = *selected_bundle_version_id.read() {
+                                        button { class: "btn btn-primary focus-ring", onclick: move |_| show_assignment.set(true), "Assign bundle" }
+                                        if *show_assignment.read() { AssignmentCreatePanel { bundle: bundle.clone(), bundle_version_id: version_id, environments: environments.read().clone(), policies: policies.read().clone() } }
+                                    }
+                                }
+                            }
+                            }
                         }
                     }
                 }
@@ -578,6 +741,9 @@ pub fn ComplianceView() -> Element {
                 bundle_name: selected_bundle_id.read()
                     .and_then(|id| bundles.read().iter().find(|b| b.id == id).map(|b| b.name.clone()))
                     .unwrap_or_default(),
+                system: systems.read().as_ref().and_then(|response| {
+                    response.systems.iter().find(|system| system.system_id == ev.system_id).cloned()
+                }),
                 on_close: move |_| { evidence.set(None); evidence_error.set(None); },
             }
         } else if let Some(err) = evidence_error.read().as_ref() {
@@ -612,6 +778,26 @@ pub fn ComplianceView() -> Element {
             }
         }
 
+        if *policy_loading.read() {
+            div { class: "fl-tray-backdrop", div { class: "fl-tray", style: "width:min(420px,96vw);padding:24px;", DashboardLoadingSpinner { label: "Loading policy…".to_string() } } }
+        }
+        if let Some(error) = policy_error.read().clone() {
+            aside { class: "fl-tray", style: "width:min(480px,96vw);",
+                header { class: "fl-tray-head", span { "Policy unavailable" }, button { class: "btn-icon focus-ring", onclick: move |_| policy_error.set(None), Icon { name: IconName::X, size: 16 } } }
+                div { class: "sd-callout sd-callout-danger", style: "margin:18px;", "{error}" }
+            }
+        }
+        if let Some(policy) = policy_drawer.read().clone() {
+            crate::views::policies::PolicyDrawer {
+                policy,
+                is_admin,
+                initial_revisions: false,
+                on_close: move |_| policy_drawer.set(None),
+                on_export: move |_| {},
+                on_edit: move |_| {},
+            }
+        }
+
         // ── Export modal ────────────────────────────────────────────────────
         if *show_export.read() {
             ExportModal {
@@ -638,6 +824,7 @@ pub fn ComplianceView() -> Element {
                     next.push(bundle);
                     bundles.set(next);
                     selected_bundle_id.set(Some(id));
+                    selected_bundle_version_id.set(version_id);
                     evidence.set(None);
                     evidence_error.set(None);
                     let eg = *evidence_gen.read() + 1;
@@ -661,12 +848,17 @@ pub fn ComplianceView() -> Element {
                     on_close: move |_| show_edit_bundle.set(false),
                     on_saved: move |updated: ComplianceBundleSummary| {
                         let id = updated.id;
-                        let version_id = updated.current_published_version_id.or(updated.current_draft_version_id);
+                        let current_version_id = *selected_bundle_version_id.read();
+                        let version_id = current_version_id
+                            .filter(|selected| updated.versions.iter().any(|version| version.id == *selected))
+                            .or(updated.current_published_version_id)
+                            .or(updated.current_draft_version_id);
                         let mut next = bundles.read().clone();
                         if let Some(pos) = next.iter().position(|b| b.id == id) {
                             next[pos] = updated;
                         }
                         bundles.set(next);
+                        selected_bundle_version_id.set(version_id);
                         show_edit_bundle.set(false);
                         start_systems_fetch(id, version_id);
                     },
@@ -698,15 +890,22 @@ pub fn ComplianceView() -> Element {
             ImportStigModal {
                 environments: environments.read().clone(),
                 is_stig_import: *import_mode_stig.read(),
-                on_close: move |_| show_import_stig.set(false),
+                on_close: move |_| { show_import_stig.set(false); stig_import_draft.set(load_stig_import_draft()); },
                 on_success: move |_| {
+                    clear_stig_import_draft();
+                    stig_import_draft.set(None);
                     // Refresh the bundle catalog after a successful import.
                     spawn(async move {
                         if let Ok(items) = fetch_compliance_bundles().await {
                             let first_id = items.first().map(|b| b.id);
+                            let first_version_id = items.first().and_then(|bundle| {
+                                bundle.current_published_version_id.or(bundle.current_draft_version_id)
+                            });
                             bundles.set(items);
                             if let Some(id) = first_id {
                                 selected_bundle_id.set(Some(id));
+                                selected_bundle_version_id.set(first_version_id);
+                                start_systems_fetch(id, first_version_id);
                             }
                         }
                     });
@@ -914,6 +1113,7 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
     let mut enforcement_mode = use_signal(|| "enforce".to_string());
     let mut exclusions = use_signal(Vec::<uuid::Uuid>::new);
     let mut additions = use_signal(Vec::<uuid::Uuid>::new);
+    let mut reason = use_signal(String::new);
     let mut busy = use_signal(|| false);
     let mut success = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
@@ -968,6 +1168,8 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
 
     let request = move || {
         let scope_id = uuid::Uuid::parse_str(scope_id.read().trim()).ok()?;
+        let reason_text = reason.read().clone();
+        let reason_value = reason_text.trim();
         Some(CreateAssignmentRequest {
             bundle_version_id: props.bundle_version_id,
             scope_type: scope_type.read().clone(),
@@ -976,6 +1178,7 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
             exclusions: (!exclusions.read().is_empty()).then_some(exclusions.read().clone()),
             additions: (!additions.read().is_empty()).then_some(additions.read().clone()),
             value_overrides: None,
+            reason: (!reason_value.is_empty()).then_some(reason_value.to_string()),
         })
     };
 
@@ -1060,6 +1263,26 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
                         }
                     }
                 }
+
+                // Reason / Justification field
+                div { class: "field",
+                    label { "Reason / Justification (optional)" }
+                    textarea {
+                        class: "input focus-ring",
+                        style: "resize:vertical;min-height:60px;font-family:monospace;font-size:12px;",
+                        placeholder: "Enter reason for this assignment (e.g., 'migration in progress', 'vendor validation')",
+                        value: "{reason.read()}",
+                        onchange: move |e| {
+                            reason.set(e.value());
+                            preview.set(None);
+                            previewed_request.set(None);
+                        },
+                    }
+                    div { style: "font-size:10px;color:var(--cf-text-muted);margin-top:4px;",
+                        "{reason.read().len()} / 2000 characters"
+                    }
+                }
+
                 div { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px;",
                     div { class: "field",
                         label { "Exclude baseline policies" }
@@ -1327,13 +1550,16 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                         .collect::<Vec<_>>()
                         .join(", ")
                 });
-                let mut edit_overrides = use_signal(|| current_overrides_text.clone());
-                let mut edit_busy = use_signal(|| false);
-                let mut edit_error = use_signal(|| None::<String>);
-                let edits_dirty = *edit_mode.read() != current_mode
-                    || *edit_exclusions.read() != current_exclusions_text
-                    || *edit_additions.read() != current_additions_text
-                    || *edit_overrides.read() != current_overrides_text;
+                 let mut edit_overrides = use_signal(|| current_overrides_text.clone());
+                  let original_reason = assignment.reason.clone().unwrap_or_default();
+                  let mut edit_reason = use_signal(|| original_reason.clone());
+                 let mut edit_busy = use_signal(|| false);
+                 let mut edit_error = use_signal(|| None::<String>);
+                 let edits_dirty = *edit_mode.read() != current_mode
+                     || *edit_exclusions.read() != current_exclusions_text
+                     || *edit_additions.read() != current_additions_text
+                     || *edit_overrides.read() != current_overrides_text
+                      || (*edit_reason.read() != original_reason);
                 rsx! {
                     div { class: "card", style: "padding:10px 14px;display:flex;flex-direction:column;gap:6px;",
                         div { style: "display:flex;justify-content:space-between;align-items:center;",
@@ -1419,6 +1645,14 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                     value: "{edit_overrides.read()}",
                                     oninput: move |e| edit_overrides.set(e.value()),
                                 }
+                                textarea {
+                                    class: "input xs",
+                                    style: "flex:1;",
+                                    rows: "2",
+                                    placeholder: "reason (leave empty to preserve)",
+                                    value: "{edit_reason.read()}",
+                                    oninput: move |e| edit_reason.set(e.value()),
+                                }
                                 button {
                                     class: "btn btn-primary xs focus-ring",
                                     style: "font-size:10px;",
@@ -1446,13 +1680,24 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                             };
                                             edit_busy.set(true);
                                             edit_error.set(None);
-                                            let request = UpdateAssignmentRequest {
-                                                expected_version_id: cm,
-                                                enforcement_mode: Some((*edit_mode.read()).clone()),
-                                                exclusions: Some(exclusions),
-                                                additions: Some(additions),
-                                                value_overrides: Some(value_overrides),
-                                            };
+
+                                             let reason_val = edit_reason.read().clone();
+                                             let reason_update = if reason_val == original_reason {
+                                                 crate::api::models::FieldUpdate::Unset
+                                             } else if !original_reason.is_empty() && reason_val.trim().is_empty() {
+                                                 crate::api::models::FieldUpdate::Clear
+                                             } else {
+                                                 crate::api::models::FieldUpdate::Set(reason_val.trim().to_string())
+                                             };
+
+                                             let request = UpdateAssignmentRequest {
+                                                 expected_version_id: cm,
+                                                 enforcement_mode: Some((*edit_mode.read()).clone()),
+                                                 exclusions: Some(exclusions),
+                                                 additions: Some(additions),
+                                                 value_overrides: Some(value_overrides),
+                                                 reason: reason_update,
+                                             };
                                             let st = scope_type.clone();
                                             let si = scope_id;
                                             spawn(async move {
@@ -1515,14 +1760,15 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                         return;
                                     };
                                     let request = CreateAssignmentRequest {
-                                        bundle_version_id,
-                                        scope_type: scope_type.clone(),
-                                        scope_id,
-                                        enforcement_mode: Some(mode.clone()),
-                                        exclusions: Some(exclusions),
-                                        additions: Some(additions),
-                                        value_overrides: Some(value_overrides),
-                                    };
+                                         bundle_version_id,
+                                         scope_type: scope_type.clone(),
+                                         scope_id,
+                                         enforcement_mode: Some(mode.clone()),
+                                         exclusions: Some(exclusions),
+                                         additions: Some(additions),
+                                         value_overrides: Some(value_overrides),
+                                         reason: None,
+                                     };
                                     preview_loading.set(true);
                                     spawn(async move {
                                         match preview_compliance_assignment(&request).await {
@@ -1580,9 +1826,145 @@ struct StigRule {
     local_description: String,
     implementation_note: String,
     assertion_mode: String,
-    assertions: Vec<ImportedCustomCheckRule>,
+    assertions: Vec<PolicyAssertionDraft>,
     evidence_requirements: Vec<ImportedEvidenceRequirement>,
     mapped_policy_version_id: Option<uuid::Uuid>,
+}
+
+const STIG_IMPORT_DRAFT_KEY: &str = "cf-stig-import-draft";
+const MAX_STIG_IMPORT_DRAFT_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct StigImportDraftMetadata {
+    version: u8,
+    step: String,
+    original_filename: String,
+    expected_sha256: Option<String>,
+    bundle_name: String,
+    #[serde(default)]
+    environment_ids: Vec<uuid::Uuid>,
+    refine_cursor: usize,
+    selected_rule_ids: Vec<String>,
+    refined_rule_ids: Vec<String>,
+    #[serde(default)]
+    refined_rules: Vec<crate::components::compliance::RefinedStigRule>,
+    /// Optional cached preview. It is only a convenience for recovery; source
+    /// verification and reparsing remain mandatory before restoring refinement.
+    #[serde(default)]
+    preview_payload: Option<crate::api::models::XccdfPreviewResponse>,
+}
+
+fn load_stig_import_draft() -> Option<StigImportDraftMetadata> {
+    let storage = web_sys::window()?.local_storage().ok()??;
+    let raw = storage.get_item(STIG_IMPORT_DRAFT_KEY).ok()??;
+    let draft = serde_json::from_str::<StigImportDraftMetadata>(&raw).ok()?;
+    (draft.version == 1).then_some(draft)
+}
+
+fn clear_stig_import_draft() {
+    if let Some(storage) =
+        web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+    {
+        let _ = storage.remove_item(STIG_IMPORT_DRAFT_KEY);
+    }
+}
+
+fn save_stig_import_draft(draft: &StigImportDraftMetadata) -> Result<(), String> {
+    let raw = serialize_stig_import_draft(draft, MAX_STIG_IMPORT_DRAFT_BYTES)?;
+    let storage = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .ok_or_else(|| "Browser local storage is unavailable.".to_string())?;
+    storage
+        .set_item(STIG_IMPORT_DRAFT_KEY, &raw)
+        .map_err(|_| "Browser storage rejected the paused STIG import.".to_string())
+}
+
+/// Serialize a resumable draft with a deterministic metadata-only fallback.
+///
+/// The 2 MiB guard applies to the complete serialized object, not merely the
+/// cached preview. A preview can fit independently while the complete draft
+/// (including refined rule payloads) exceeds the guard. In that case preserve
+/// workflow identity/cursor/selection metadata and omit all restorable payload
+/// that can be reconstructed after the source file is reattached.
+fn serialize_stig_import_draft(
+    draft: &StigImportDraftMetadata,
+    max_bytes: usize,
+) -> Result<String, String> {
+    let raw = serde_json::to_string(draft)
+        .map_err(|error| format!("Could not serialize paused STIG import: {error}"))?;
+    if raw.len() <= max_bytes {
+        return Ok(raw);
+    }
+
+    let mut metadata_only = draft.clone();
+    metadata_only.preview_payload = None;
+    metadata_only.refined_rules.clear();
+    // Later workflow steps depend on the discarded preview/refinement payload.
+    // Resume at upload so the user must reattach and re-validate the source
+    // before any reconstructed defaults can be reviewed or committed.
+    metadata_only.step = "upload".to_string();
+    let raw = serde_json::to_string(&metadata_only)
+        .map_err(|error| format!("Could not serialize paused STIG import metadata: {error}"))?;
+    if raw.len() > max_bytes {
+        return Err(format!(
+            "Paused STIG import is too large to save ({:.1} MiB; limit is 2 MiB).",
+            raw.len() as f64 / (1024.0 * 1024.0)
+        ));
+    }
+    Ok(raw)
+}
+
+fn environment_ids_for_names(
+    environments: &[EnvironmentSummary],
+    selected_names: &[String],
+) -> Vec<uuid::Uuid> {
+    environments
+        .iter()
+        .filter(|environment| selected_names.iter().any(|name| name == &environment.name))
+        .map(|environment| environment.id)
+        .collect()
+}
+
+fn environment_names_for_ids(
+    environments: &[EnvironmentSummary],
+    selected_ids: &[uuid::Uuid],
+) -> Vec<String> {
+    environments
+        .iter()
+        .filter(|environment| selected_ids.contains(&environment.id))
+        .map(|environment| environment.name.clone())
+        .collect()
+}
+
+fn restore_refined_rules(
+    parsed_rules: &[StigRule],
+    saved_rules: &[crate::components::compliance::RefinedStigRule],
+    selected_rule_ids: &[String],
+) -> Vec<crate::components::compliance::RefinedStigRule> {
+    let selected_rule_ids = selected_rule_ids
+        .iter()
+        .collect::<std::collections::HashSet<_>>();
+    let fresh = refined_rules_from_rules(parsed_rules);
+    fresh
+        .into_iter()
+        .map(|mut rule| {
+            if let Some(saved) = saved_rules
+                .iter()
+                .find(|saved| saved.source.rule_id == rule.source.rule_id)
+            {
+                rule.draft = saved.draft.clone();
+                rule.selected = saved.selected;
+                rule.mapping_relationship = saved.mapping_relationship.clone();
+                rule.mapping_coverage = saved.mapping_coverage.clone();
+                rule.mapping_rationale = saved.mapping_rationale.clone();
+                rule.candidate_options = saved.candidate_options.clone();
+                rule.selected_candidate = saved.selected_candidate.clone();
+            } else if !selected_rule_ids.is_empty() {
+                rule.selected = selected_rule_ids.contains(&rule.source.rule_id);
+            }
+            rule
+        })
+        .collect()
 }
 
 /// Convert the server's ordered source check parts without changing the XCCDF
@@ -1622,6 +2004,32 @@ fn source_check_body_parts(check: &serde_json::Value) -> Vec<SourceCheckBodyPart
             },
         )
         .collect()
+}
+
+fn inferred_assertion_from_json(value: &serde_json::Value) -> Option<PolicyAssertionDraft> {
+    let path = value.get("option_path")?.as_str()?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let expected = value.get("expected_value")?;
+    let value_type = expected.get("type")?.as_str()?;
+    let typed_value = match value_type {
+        "boolean" => TypedPolicyValue::Boolean(expected.get("value")?.as_bool()?),
+        "integer" => TypedPolicyValue::Integer(expected.get("value")?.as_i64()?.to_string()),
+        "string_literal" => TypedPolicyValue::String(expected.get("value")?.as_str()?.to_string()),
+        _ => return None,
+    };
+    Some(PolicyAssertionDraft::NixosOption {
+        path: path.to_string(),
+        operator: ComparisonOperator::Equal,
+        expected_value: typed_value,
+        failure_message: value
+            .get("description")
+            .and_then(|description| description.as_str())
+            .unwrap_or("Inferred from official fix; review before importing.")
+            .to_string(),
+        strict: true,
+    })
 }
 
 fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
@@ -1707,21 +2115,10 @@ fn rules_from_preview(preview: &XccdfPreviewResponse) -> Vec<StigRule> {
 
             // Foreign source remains non-executable. The server may provide
             // conservative structured suggestions from recognized fix literals.
-            let assertions: Vec<ImportedCustomCheckRule> = r
+            let assertions: Vec<PolicyAssertionDraft> = r
                 .inferred_assertions
                 .iter()
-                .filter_map(|a| {
-                    Some(ImportedCustomCheckRule {
-                        field_name: a.get("option_path")?.as_str()?.replace('.', "_"),
-                        expression: a.get("nix_expression")?.as_str()?.to_string(),
-                        description: a
-                            .get("description")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Inferred from official fix; review before importing.")
-                            .to_string(),
-                        strict: true,
-                    })
-                })
+                .filter_map(inferred_assertion_from_json)
                 .collect();
             let default_action = if r.is_native || !assertions.is_empty() {
                 "native"
@@ -1823,7 +2220,9 @@ fn reconciliation_match_label(match_type: &str) -> &'static str {
 
 fn reconciliation_match_class(match_type: &str) -> &'static str {
     match match_type {
-        "authoritative_mapping" | "inherited_mapping" | "exact_technical_match" => "chip chip-success",
+        "authoritative_mapping" | "inherited_mapping" | "exact_technical_match" => {
+            "chip chip-success"
+        }
         "related_mapping" | "fuzzy_similarity" => "chip chip-warning",
         _ => "chip chip-unknown",
     }
@@ -1856,7 +2255,12 @@ fn import_action_from_rule(rule: &StigRule) -> XccdfRuleImportAction {
             customization,
             custom_check: ImportedCustomCheck {
                 mode: rule.assertion_mode.clone(),
-                rules: rule.assertions.clone(),
+                rules: rule
+                    .assertions
+                    .iter()
+                    .enumerate()
+                    .map(|(index, assertion)| assertion.to_rule(index + 1))
+                    .collect(),
             },
             evidence_requirements: rule.evidence_requirements.clone(),
         },
@@ -1911,7 +2315,7 @@ fn refined_rules_from_rules(rules: &[StigRule]) -> Vec<RefinedStigRule> {
             implementation_note: rule.implementation_note.clone(),
             action: match rule.action.as_str() { "native" => RefinedRuleAction::Native, "manual" => RefinedRuleAction::Manual, "opaque" => RefinedRuleAction::Opaque, _ => RefinedRuleAction::Unbound },
             assertion_mode: rule.assertion_mode.clone(),
-            assertions: rule.assertions.iter().map(|assertion| crate::components::compliance::refine_policy::PolicyAssertionDraft::CustomExpression { field_name: assertion.field_name.clone(), expression: assertion.expression.clone(), failure_message: assertion.description.clone(), strict: assertion.strict }).collect(),
+            assertions: rule.assertions.clone(),
             evidence_requirements: rule.evidence_requirements.iter().filter_map(|evidence| match evidence { ImportedEvidenceRequirement::Command { command, expected_output } => Some(crate::components::compliance::refine_policy::EvidenceRequirementDraft::Command { command: command.clone(), expected_output: expected_output.clone() }), ImportedEvidenceRequirement::Attestation { description } => Some(crate::components::compliance::refine_policy::EvidenceRequirementDraft::Attestation { description: description.clone() }), _ => None }).collect(),
         },
         selected: rule.selected,
@@ -1960,8 +2364,30 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
     let mut previewing = use_signal(|| false);
     let mut committing = use_signal(|| false);
     let mut import_error = use_signal(|| None::<String>);
+    let mut draft_loaded = use_signal(|| false);
+    let mut draft_save_error = use_signal(|| Option::<String>::None);
 
-    let all_env_names: Vec<String> = props.environments.iter().map(|e| e.name.clone()).collect();
+    let draft_environments = props.environments.clone();
+    use_effect(move || {
+        if *draft_loaded.read() {
+            return;
+        }
+        draft_loaded.set(true);
+        let Some(draft) = load_stig_import_draft() else {
+            return;
+        };
+        bundle_name.set(draft.bundle_name);
+        file_name.set(draft.original_filename);
+        selected_envs.set(environment_names_for_ids(
+            &draft_environments,
+            &draft.environment_ids,
+        ));
+        cursor.set(draft.refine_cursor);
+        parse_error.set(Some(
+            "Paused import found. Re-select the original source file to restore and continue."
+                .to_string(),
+        ));
+    });
 
     // Derived counts
     let selected_rules: Vec<StigRule> = rules
@@ -1986,12 +2412,10 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
         })
         .collect();
 
-    // can_advance: need at least one rule selected and a bundle name.
-    // Env selection is only required when environments actually exist — if the
-    // server has no environments yet the user can still proceed.
-    let can_advance = sel_count > 0
-        && !bundle_name.read().trim().is_empty()
-        && (props.environments.is_empty() || !selected_envs.read().is_empty());
+    // can_advance: need at least one rule selected and a bundle name. An empty
+    // environment selection is intentional: it creates an unassigned bundle
+    // that must apply to zero systems until an assignment is created.
+    let can_advance = sel_count > 0 && !bundle_name.read().trim().is_empty();
     let foreign_reconciliation = preview_response
         .read()
         .as_ref()
@@ -2026,15 +2450,13 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
     let framework_reconciliation = foreign_reconciliation
         .as_ref()
         .map(|reconciliation| reconciliation.framework.clone());
-    let framework_state_label = framework_reconciliation
-        .as_ref()
-        .map(|framework| {
-            if framework.state == "exact_release" {
-                "Exact release"
-            } else {
-                "Release requires review"
-            }
-        });
+    let framework_state_label = framework_reconciliation.as_ref().map(|framework| {
+        if framework.state == "exact_release" {
+            "Exact release"
+        } else {
+            "Release requires review"
+        }
+    });
     let attention_rule_ids: Vec<String> = reconciliation_rows
         .iter()
         .filter(|row| !row.auto_resolvable || row.state == "identity_conflict")
@@ -2046,15 +2468,27 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
         .count();
     let authoritative_count = reconciliation_rows
         .iter()
-        .filter(|row| row.candidates.iter().any(|candidate| candidate.match_type == "authoritative_mapping"))
+        .filter(|row| {
+            row.candidates
+                .iter()
+                .any(|candidate| candidate.match_type == "authoritative_mapping")
+        })
         .count();
     let inherited_count = reconciliation_rows
         .iter()
-        .filter(|row| row.candidates.iter().any(|candidate| candidate.match_type == "inherited_mapping"))
+        .filter(|row| {
+            row.candidates
+                .iter()
+                .any(|candidate| candidate.match_type == "inherited_mapping")
+        })
         .count();
     let exact_count = reconciliation_rows
         .iter()
-        .filter(|row| row.candidates.iter().any(|candidate| candidate.match_type == "exact_technical_match"))
+        .filter(|row| {
+            row.candidates
+                .iter()
+                .any(|candidate| candidate.match_type == "exact_technical_match")
+        })
         .count();
     let ready_count = reconciliation_rows
         .iter()
@@ -2070,15 +2504,64 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
         .map(|rule| rule.rule_id.clone())
         .collect();
     let fallback_review_rule_ids = refine_all_rule_ids.clone();
+    let save_environments = props.environments.clone();
+    let save_draft = move || -> Result<(), String> {
+        if step.read().as_str() == "upload" || step.read().as_str() == "done" {
+            return Ok(());
+        }
+        save_stig_import_draft(&StigImportDraftMetadata {
+            version: 1,
+            step: step.read().clone(),
+            original_filename: file_name.read().clone(),
+            expected_sha256: preview_response
+                .read()
+                .as_ref()
+                .map(|preview| preview.sha256.clone()),
+            bundle_name: bundle_name.read().clone(),
+            environment_ids: environment_ids_for_names(&save_environments, &selected_envs.read()),
+            refine_cursor: *cursor.read(),
+            selected_rule_ids: rules
+                .read()
+                .iter()
+                .filter(|rule| rule.selected)
+                .map(|rule| rule.rule_id.clone())
+                .collect(),
+            refined_rule_ids: refined_rules
+                .read()
+                .iter()
+                .map(|rule| rule.source.rule_id.clone())
+                .collect(),
+            refined_rules: refined_rules.read().clone(),
+            preview_payload: preview_response.read().clone(),
+        })
+    };
+    let native_plan_environments = props.environments.clone();
+    let reconcile_plan_environments = props.environments.clone();
+    let final_plan_environments = props.environments.clone();
 
     rsx! {
         div {
             class: "modal-backdrop",
-            onclick: move |_| props.on_close.call(()),
+            onclick: move |event| event.stop_propagation(),
             div {
                  class: "modal import-workflow-modal",
                 style: "width:min(720px,97vw);max-height:92vh;display:flex;flex-direction:column;",
-                onclick: move |e| e.stop_propagation(),
+                 onclick: move |e| e.stop_propagation(),
+
+                  if *step.read() != "upload" && *step.read() != "done" {
+                      if let Some(error) = draft_save_error.read().as_ref() {
+                          div { class: "sd-callout sd-callout-danger", style: "margin:8px 12px 0;", Icon { name: IconName::Warn, size: 13 } "{error}" }
+                      }
+                      div { style: "display:flex;justify-content:flex-end;padding:8px 12px 0;gap:10px;",
+                          button { class: "btn btn-ghost xs focus-ring", onclick: move |_| { clear_stig_import_draft(); step.set("upload".to_string()); rules.set(Vec::new()); preview_response.set(None); }, "Discard draft" }
+                          button { class: "btn-icon focus-ring", title: "Pause — your progress is saved", onclick: move |_| {
+                              match save_draft() {
+                                  Ok(()) => props.on_close.call(()),
+                                  Err(error) => draft_save_error.set(Some(error)),
+                              }
+                          }, Icon { name: IconName::X, size: 16 } }
+                     }
+                 }
 
                 // ══════════════════════════════════════════════════════
                 // STEP: upload
@@ -2131,9 +2614,9 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         let mut bench_title = bench_title;
                                         let mut bench_ver = bench_ver;
                                         let mut selected_envs = selected_envs;
-                                        let mut previewing = previewing;
-                                        let mut step = step;
-                                        let all_env_names = all_env_names.clone();
+                                         let mut previewing = previewing;
+                                         let mut step = step;
+                                         let paused_draft = load_stig_import_draft();
 
                                         parse_error.set(None);
                                         let files = event.files();
@@ -2146,6 +2629,13 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                         let bytes_vec = bytes.to_vec();
                                                         match preview_xccdf(&bytes_vec, &fname).await {
                                                             Ok(resp) => {
+                                                                if let Some(expected_sha256) = load_stig_import_draft().and_then(|draft| draft.expected_sha256) {
+                                                                    if expected_sha256 != resp.sha256 {
+                                                                        previewing.set(false);
+                                                                        parse_error.set(Some("The selected source file does not match the paused import artifact. Select the original file or discard the draft.".to_string()));
+                                                                        return;
+                                                                    }
+                                                                }
                                                                 let bm_title = resp.benchmark.as_ref()
                                                                     .and_then(|b| b.title.clone())
                                                                     .unwrap_or_else(|| fname.clone());
@@ -2154,8 +2644,10 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                     .unwrap_or_default();
                                                                  // Branch on document class
                                                                  let is_cf_native = resp.document_class.as_deref().unwrap_or("") == "cfnativeexact";
-                                                                 
-                                                                 bundle_name.set(bm_title.clone());
+
+                                                                  if paused_draft.is_none() || bundle_name.read().trim().is_empty() {
+                                                                      bundle_name.set(bm_title.clone());
+                                                                  }
                                                                  bench_title.set(bm_title);
                                                                  bench_ver.set(bm_ver);
                                                                  file_name.set(fname.clone());
@@ -2163,15 +2655,28 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                    let foreign_reconciliation = resp.foreign_stig_reconciliation.clone();
                                                                   preview_response.set(Some(resp));
                                                                  previewing.set(false);
-                                                                 
+
                                                                  if is_cf_native {
                                                                      // Native workflow: skip rule refinement
                                                                      step.set("native-review".to_string());
                                                                  } else {
                                                                      // Foreign XCCDF workflow: do rule processing
-                                                                      let parsed_rules = rules_from_preview(&preview_response.read().as_ref().unwrap());
-                                                                      rules.set(parsed_rules.clone());
-                                                                      let mut refined = refined_rules_from_rules(&parsed_rules);
+                                                                       let parsed_rules = rules_from_preview(&preview_response.read().as_ref().unwrap());
+                                                                       let mut refined = restore_refined_rules(
+                                                                           &parsed_rules,
+                                                                           paused_draft.as_ref().map(|draft| draft.refined_rules.as_slice()).unwrap_or(&[]),
+                                                                           paused_draft.as_ref().map(|draft| draft.selected_rule_ids.as_slice()).unwrap_or(&[]),
+                                                                       );
+                                                                       let restored_selected = refined
+                                                                           .iter()
+                                                                           .filter(|rule| rule.selected)
+                                                                           .map(|rule| rule.source.rule_id.clone())
+                                                                           .collect::<std::collections::HashSet<_>>();
+                                                                       let mut parsed_rules = parsed_rules;
+                                                                       for rule in parsed_rules.iter_mut() {
+                                                                           rule.selected = restored_selected.contains(&rule.rule_id);
+                                                                       }
+                                                                       rules.set(parsed_rules.clone());
                                                                       if let Some(reconciliation) = foreign_reconciliation.as_ref() {
                                                                           for rule in refined.iter_mut() {
                                                                               if let Some(requirement) = reconciliation.requirements.iter().find(|requirement| requirement.rule_id == rule.source.rule_id) {
@@ -2179,7 +2684,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                               }
                                                                           }
                                                                       }
-                                                                      refined_rules.set(refined);
+                                                                       refined_rules.set(refined);
                                                                       mapping_semantics.set(
                                                                       foreign_reconciliation
                                                                           .as_ref()
@@ -2200,8 +2705,15 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                                           })
                                                                           .collect(),
                                                                   );
-                                                                     selected_envs.set(all_env_names.clone());
-                                                                     step.set("review".to_string());
+                                                                       if let Some(draft) = paused_draft.as_ref() {
+                                                                          refine_rule_ids.set(draft.refined_rule_ids.clone());
+                                                                          step.set(match draft.step.as_str() {
+                                                                              "review" | "reconcile" | "refine" | "final-review" => draft.step.clone(),
+                                                                              _ => "review".to_string(),
+                                                                          });
+                                                                      } else {
+                                                                          step.set("review".to_string());
+                                                                      }
                                                                  }
                                                             }
                                                             Err(err) => {
@@ -2267,7 +2779,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                     "Source: {prev.xccdf_version.as_deref().unwrap_or(\"XCCDF\")} · Fidelity: {human_fidelity(prev.fidelity.as_deref())}"
                                 }
                                 div { style: "margin-top:12px;font-weight:600;", "Bundle: " span { "{recon.bundle.name} v{recon.bundle.version}" } }
-                                div { style: "margin-top:8px;font-size:12px;", 
+                                div { style: "margin-top:8px;font-size:12px;",
                                     "Exact: {recon.policies.iter().filter(|p| p.reconciliation_state == \"exact_match\").count()} · "
                                     "New version: {recon.policies.iter().filter(|p| p.reconciliation_state == \"new_version\").count()} · "
                                     "New policy: {recon.policies.iter().filter(|p| p.reconciliation_state == \"new_lineage\").count()}"
@@ -2287,9 +2799,10 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 }
                                 button {
                                     class: "btn btn-primary focus-ring",
-                                    disabled: recon.has_blocking_conflicts,
-                                    onclick: move |_| {
-                                        let mut step = step;
+                                     disabled: recon.has_blocking_conflicts,
+                                     onclick: move |_| {
+                                         let plan_environments = native_plan_environments.clone();
+                                         let mut step = step;
                                         let mut committing = committing;
                                         let mut file_bytes = file_bytes;
                                         let mut preview_response = preview_response;
@@ -2312,6 +2825,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                         layer: None,
                                                         owner: None,
                                                         description: None,
+                                                        environment_ids: environment_ids_for_names(&plan_environments, &selected_envs.read()),
                                                     },
                                                 };
                                                 match import_xccdf(&file_bytes.read(), "import.xccdf", &plan).await {
@@ -2561,8 +3075,9 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 class: "btn btn-ghost focus-ring",
                                 disabled: !can_advance || *committing.read(),
                                 style: if !can_advance || *committing.read() { "opacity:0.5;cursor:not-allowed;" } else { "" },
-                                onclick: move |_| {
-                                    if !can_advance || *committing.read() { return; }
+                                 onclick: move |_| {
+                                     if !can_advance || *committing.read() { return; }
+                                     let plan_environments = reconcile_plan_environments.clone();
                                     let selected_rule_ids: Vec<String> = rules
                                         .read()
                                         .iter()
@@ -2605,10 +3120,11 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                         bundle: ImportedBundlePlan {
                                             name: bundle_name.read().trim().to_string(),
                                             framework: "xccdf".to_string(),
-                                            version: bench_ver.read().clone(),
-                                            layer: None,
-                                            owner: None,
-                                            description: None,
+                                             version: bench_ver.read().clone(),
+                                             layer: None,
+                                             owner: None,
+                                             description: None,
+                                             environment_ids: environment_ids_for_names(&plan_environments, &selected_envs.read()),
                                         },
                                     };
                                     let bytes = file_bytes.read().clone();
@@ -2787,26 +3303,24 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                 // STEP: refine (structured per-control walkthrough)
                 // ══════════════════════════════════════════════════════
                 if *step.read() == "refine" {
-                    {
-                        let refined_rules_signal = refined_rules;
-                        let cursor_signal = cursor;
-                        rsx! {
-                        RefinePolicyStep {
-                            rules: refined_rules_signal,
-                            cursor: cursor_signal,
-                            review_rule_ids: Some(refine_rule_ids.read().clone()),
-                            on_back: move |_| step.set("reconcile".to_string()),
-                            on_review: move |_| step.set("final-review".to_string()),
-                        }
+                    RefinePolicyStep {
+                        rules: refined_rules,
+                        cursor,
+                        review_rule_ids: Some(refine_rule_ids.read().clone()),
+                        on_back: move |_| step.set("reconcile".to_string()),
+                        on_review: move |_| step.set("final-review".to_string()),
                     }
                 }
 
                 if *step.read() == "final-review" {
                     ImportReview {
                         rules: refined_rules,
+                        committing: *committing.read(),
+                        import_error: import_error.read().clone(),
                         on_back: move |_| step.set("refine".to_string()),
-                        on_confirm: move |_| {
-                                if *committing.read() { return; }
+                         on_confirm: move |_| {
+                                 let plan_environments = final_plan_environments.clone();
+                                 if *committing.read() { return; }
                                 let selected_rule_ids = refined_rules.read().iter().filter(|rule| rule.selected).map(|rule| rule.source.rule_id.clone()).collect::<Vec<_>>();
                                 let rule_actions = refined_rules.read().iter().filter(|rule| rule.selected).map(action_to_import).collect::<Vec<_>>();
                                  let plan = XccdfImportPlan {
@@ -2831,7 +3345,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                              })
                                          })
                                          .collect(),
-                                    bundle: ImportedBundlePlan { name: bundle_name.read().trim().to_string(), framework: "xccdf".into(), version: bench_ver.read().clone(), layer: None, owner: None, description: None },
+                                     bundle: ImportedBundlePlan { name: bundle_name.read().trim().to_string(), framework: "xccdf".into(), version: bench_ver.read().clone(), layer: None, owner: None, description: None, environment_ids: environment_ids_for_names(&plan_environments, &selected_envs.read()) },
                                 };
                                 let bytes = file_bytes.read().clone();
                                 let filename = file_name.read().clone();
@@ -2909,7 +3423,6 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         }
                     }
                 }
-            }
         }
     }
 }
@@ -3733,6 +4246,7 @@ fn BundleFrameworkField(props: BundleFrameworkFieldProps) -> Element {
             } else {
                 select {
                     class: "input focus-ring",
+                    "data-testid": "bundle-framework-select",
                     value: "{current_framework}",
                     onchange: move |event| {
                         let value = event.value();
@@ -3789,17 +4303,16 @@ fn BundlePolicyPicker(props: BundlePolicyPickerProps) -> Element {
         let framework_name_for_request = framework_name.clone();
         spawn(async move {
             let mapped = match fetch_compliance_frameworks().await {
-                Ok(frameworks) => match frameworks
-                    .iter()
-                    .find(|framework| {
-                        framework.name.eq_ignore_ascii_case(&framework_name_for_request)
-                            || (framework_name_for_request.eq_ignore_ascii_case("DISA STIG")
-                                && framework
-                                    .canonical_source_key
-                                    .to_ascii_lowercase()
-                                    .starts_with("disa-"))
-                    })
-                {
+                Ok(frameworks) => match frameworks.iter().find(|framework| {
+                    framework
+                        .name
+                        .eq_ignore_ascii_case(&framework_name_for_request)
+                        || (framework_name_for_request.eq_ignore_ascii_case("DISA STIG")
+                            && framework
+                                .canonical_source_key
+                                .to_ascii_lowercase()
+                                .starts_with("disa-"))
+                }) {
                     Some(framework) => fetch_framework_mapped_policy_versions(&framework.id)
                         .await
                         .map(|response| response.policy_version_ids)
@@ -3949,9 +4462,14 @@ fn BundleRequirementPicker(mut props: BundleRequirementPickerProps) -> Element {
         if let Some(version_id) = props.baseline_version_id {
             let mut selected_requirement_ids = props.selected_requirement_ids;
             spawn(async move {
-                if let Ok(members) = fetch_bundle_version_requirement_membership(&version_id).await {
+                if let Ok(members) = fetch_bundle_version_requirement_membership(&version_id).await
+                {
                     selected_requirement_ids.set(
-                        members.into_iter().filter(|member| member.selected).map(|member| member.requirement_version_id).collect(),
+                        members
+                            .into_iter()
+                            .filter(|member| member.selected)
+                            .map(|member| member.requirement_version_id)
+                            .collect(),
                     );
                 }
             });
@@ -3980,9 +4498,14 @@ fn BundleRequirementPicker(mut props: BundleRequirementPickerProps) -> Element {
                 frameworks.read().clone()
             };
             if let Some(framework) = loaded.iter().find(|candidate| {
-                candidate.name.eq_ignore_ascii_case(&framework_name_for_request)
+                candidate
+                    .name
+                    .eq_ignore_ascii_case(&framework_name_for_request)
                     || (framework_name_for_request.eq_ignore_ascii_case("DISA STIG")
-                        && candidate.canonical_source_key.to_ascii_lowercase().starts_with("disa-"))
+                        && candidate
+                            .canonical_source_key
+                            .to_ascii_lowercase()
+                            .starts_with("disa-"))
             }) {
                 match fetch_compliance_framework_versions(&framework.id).await {
                     Ok(value) => {
@@ -4026,6 +4549,7 @@ fn BundleRequirementPicker(mut props: BundleRequirementPickerProps) -> Element {
                     label { "Framework release" }
                     select {
                         class: "input focus-ring mono",
+                        "data-testid": "bundle-framework-release-select",
                         value: version_id.map(|id| id.to_string()).unwrap_or_default(),
                         onchange: move |event| {
                             let selected = event.value().parse::<uuid::Uuid>().ok();
@@ -4329,15 +4853,6 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
     let mut eligibility_error = use_signal(|| None::<String>);
     let framework_options = custom_bundle_frameworks(&props.bundles, &props.policies);
 
-    // Local pre-check from data already in the bundle summary.
-    let has_immutable_history = props.bundle.versions.iter().any(|version| {
-        matches!(
-            version.publication_state.as_str(),
-            "accepted" | "deprecated"
-        )
-    });
-    let assigned_count = props.bundle.active_assignment_count;
-
     let can_save = !name.read().trim().is_empty()
         && (!selected_policy_ids.read().is_empty() || !selected_requirement_ids.read().is_empty());
 
@@ -4562,21 +5077,6 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
                                     }
                                 }
                             }
-                        } else if has_immutable_history {
-                            // Fast local gate — matches server would return permanently_blocked.
-                            div { style: "font-size:12px;color:var(--cf-text-muted);",
-                                "This bundle has published compliance history (accepted or deprecated versions). "
-                                "Permanent deletion is unavailable. Deactivate assignments and deprecate the bundle to stop using it; historical records remain for auditability."
-                            }
-                        } else if assigned_count > 0 {
-                            // An active assignment already implies immutable assignment
-                            // history (the server reports `immutable_assignment_history`),
-                            // so permanent deletion is unavailable; no preflight needed.
-                            div { style: "font-size:12px;color:var(--cf-text-muted);",
-                                "This bundle has active assignments and therefore has immutable assignment history. "
-                                "Permanent deletion is unavailable. Deactivate assignments to stop using the bundle; "
-                                "historical assignment records are retained for auditability."
-                            }
                         } else {
                             // No local blockers detected — fetch authoritative check.
                             button {
@@ -4798,6 +5298,63 @@ mod tests {
         assert!(!is_standard_bundle_framework("CMMC 3.0"));
     }
 
+    /// Fails against the old preview-only size check: the preview fit its own
+    /// check, but the complete draft could exceed the storage guard and pause
+    /// failed instead of writing the required metadata-only recovery state.
+    #[test]
+    fn oversized_complete_stig_draft_falls_back_to_metadata_only() {
+        let preview = XccdfPreviewResponse {
+            sha256: "a".repeat(64),
+            filename: Some("large.xml".into()),
+            document_class: Some("foreign_xccdf".into()),
+            fidelity: Some("preserved_opaque".into()),
+            fidelity_losses: vec![],
+            xccdf_version: Some("1.2".into()),
+            benchmark: None,
+            profiles: vec![],
+            rules: vec![],
+            rule_count: 0,
+            profile_count: 0,
+            errors: vec![],
+            // Inflate only the restorable preview payload. Metadata remains
+            // comfortably below the deliberately small test guard.
+            warnings: vec![XccdfDiagnostic {
+                code: "OVERSIZED_TEST_PAYLOAD".to_string(),
+                summary: "x".repeat(4096),
+                blocking: false,
+            }],
+            cf_native_reconciliation: None,
+            foreign_stig_reconciliation: None,
+        };
+        let selected = "SV-TEST-001_rule".to_string();
+        let draft = StigImportDraftMetadata {
+            version: 1,
+            step: "refine".to_string(),
+            original_filename: "large.xml".to_string(),
+            expected_sha256: Some("a".repeat(64)),
+            bundle_name: "Large STIG".to_string(),
+            environment_ids: vec![uuid::Uuid::new_v4()],
+            refine_cursor: 7,
+            selected_rule_ids: vec![selected.clone()],
+            refined_rule_ids: vec![selected.clone()],
+            refined_rules: Vec::new(),
+            preview_payload: Some(preview),
+        };
+
+        let raw = serialize_stig_import_draft(&draft, 1024)
+            .expect("oversized restorable payload must fall back to metadata");
+        assert!(raw.len() <= 1024);
+        let restored: StigImportDraftMetadata =
+            serde_json::from_str(&raw).expect("metadata-only draft must deserialize");
+        assert!(restored.preview_payload.is_none());
+        assert!(restored.refined_rules.is_empty());
+        assert_eq!(restored.step, "upload");
+        assert_eq!(restored.refine_cursor, 7);
+        assert_eq!(restored.selected_rule_ids, vec![selected.clone()]);
+        assert_eq!(restored.refined_rule_ids, vec![selected]);
+        assert_eq!(restored.environment_ids, draft.environment_ids);
+    }
+
     #[test]
     fn foreign_nix_looking_fix_defaults_to_unbound_without_assertions() {
         let preview = XccdfPreviewResponse {
@@ -4857,30 +5414,173 @@ mod tests {
 fn RequirementCoverageCard(
     report: BundleCoverageReport,
     expanded: Signal<bool>,
+    #[props(default)] detail: bool,
+    #[props(default)] on_open: EventHandler<()>,
+    #[props(default)] on_open_policy: EventHandler<(uuid::Uuid, uuid::Uuid)>,
 ) -> Element {
+    let mut filter = use_signal(|| "all".to_string());
+    let mut query = use_signal(String::new);
     let total = report.total_requirements;
     let full = report.full;
     let partial = report.partial;
     let unmapped = report.unmapped;
     let recovery_required = report.recovery_required;
+    let show_details = detail || *expanded.read();
+    let framework_label = if report.frameworks.is_empty() {
+        report
+            .source_framework
+            .as_ref()
+            .map(|source| format!("{} ({})", source.framework_name, source.framework_version))
+            .unwrap_or_else(|| "this framework".to_string())
+    } else {
+        report
+            .frameworks
+            .iter()
+            .map(|framework| {
+                format!(
+                    "{} ({})",
+                    framework.framework_name, framework.framework_version
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    // The DISA invariant signal MUST come from the bundle's authoritative
+    // source framework, not from `frameworks`: that list is derived from
+    // requirement membership, which is empty by construction in the exact
+    // corruption state this check exists to diagnose.
+    let disa_invariant = report
+        .source_framework
+        .as_ref()
+        .and_then(|f| f.framework_publisher.as_deref())
+        == Some("DISA")
+        && report.total_requirements == 0;
+    let query_value = query.read().trim().to_ascii_lowercase();
+    let visible_rows: Vec<_> = report
+        .rows
+        .iter()
+        .filter(|row| {
+            let coverage_match = match filter.read().as_str() {
+                "full" => row.coverage == RequirementCoverage::Full,
+                "partial" => row.coverage == RequirementCoverage::Partial,
+                "unmapped" => matches!(
+                    row.coverage,
+                    RequirementCoverage::Unmapped | RequirementCoverage::RecoveryRequired
+                ),
+                _ => true,
+            };
+            coverage_match
+                && (query_value.is_empty()
+                    || row.external_id.to_ascii_lowercase().contains(&query_value)
+                    || row
+                        .title
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                        .contains(&query_value))
+        })
+        .collect();
 
-    rsx! {
-         div { class: "card", "data-testid": "requirement-coverage-card", style: "display:flex;flex-direction:column;gap:10px;",
-            // Header row with expand toggle.
-            div { style: "display:flex;align-items:center;justify-content:space-between;",
-                div { style: "font-size:13px;font-weight:600;", "Requirement coverage" }
-                button {
-                    class: "btn btn-ghost xs focus-ring",
-                    style: "font-size:11px;",
-                    onclick: move |_| {
-                        let current = *expanded.read();
-                        expanded.set(!current);
-                    },
-                    if *expanded.read() { "Collapse" } else { "Expand" }
+    // Group rows by their top-level parent for hierarchy rendering
+    let mut row_map: std::collections::HashMap<uuid::Uuid, &BundleCoverageRow> =
+        std::collections::HashMap::new();
+    for row in report.rows.iter() {
+        row_map.insert(row.requirement_version_id, row);
+    }
+
+    let mut groups: Vec<(Option<&BundleCoverageRow>, Vec<&BundleCoverageRow>)> = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+
+    for row in visible_rows.iter() {
+        if seen_ids.contains(&row.requirement_version_id) {
+            continue;
+        }
+
+        // Walk up the parent chain to find the root
+        let mut current_id = row.requirement_version_id;
+        let mut root_row: Option<&BundleCoverageRow> = None;
+
+        loop {
+            if let Some(r) = row_map.get(&current_id) {
+                root_row = Some(r);
+                if let Some(parent_id) = r.parent_requirement_version_id {
+                    current_id = parent_id;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Collect all rows with this root
+        let mut group_rows: Vec<&BundleCoverageRow> = Vec::new();
+        for vr in visible_rows.iter() {
+            // Check if this row belongs to this root
+            let mut check_id = vr.requirement_version_id;
+            let mut check_root: Option<uuid::Uuid> = None;
+
+            loop {
+                if let Some(r) = row_map.get(&check_id) {
+                    if r.parent_requirement_version_id.is_none() {
+                        check_root = Some(r.requirement_version_id);
+                        break;
+                    }
+                    if let Some(parent_id) = r.parent_requirement_version_id {
+                        if row_map.contains_key(&parent_id) {
+                            check_id = parent_id;
+                        } else {
+                            // Imported bundle membership can contain a rule
+                            // without its grouping parent. Keep the last known
+                            // row as the root so the rule is not dropped.
+                            check_root = Some(r.requirement_version_id);
+                            break;
+                        }
+                    } else {
+                        check_root = Some(r.requirement_version_id);
+                        break;
+                    }
+                } else {
+                    break;
                 }
             }
-            // Summary chips.
-            div { style: "display:flex;gap:8px;flex-wrap:wrap;",
+
+            if let Some(root_id) = check_root {
+                if root_row.map(|r| r.requirement_version_id) == Some(root_id) {
+                    group_rows.push(vr);
+                    seen_ids.insert(vr.requirement_version_id);
+                }
+            }
+        }
+
+        groups.push((root_row, group_rows));
+    }
+
+    rsx! {
+        div { class: "card", "data-testid": "requirement-coverage-card", style: "display:flex;flex-direction:column;gap:10px;",
+            button {
+                class: "focus-ring",
+                "data-testid": "requirement-coverage-open",
+                style: "display:flex;align-items:center;justify-content:space-between;width:100%;padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer;",
+                onclick: move |_| {
+                    if detail {
+                        // Detail mode: no action on click
+                    } else {
+                        // Overview mode: navigate directly to coverage view
+                        on_open.call(());
+                    }
+                },
+                div {
+                    div { style: "font-size:13px;font-weight:600;", "Requirement coverage" }
+                    div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:3px;",
+                        "{framework_label} · {total} requirements · derived from mapped policies, not policy tags"
+                    }
+                }
+                if !detail {
+                    Icon { name: if *expanded.read() { IconName::ChevronDown } else { IconName::ChevronRight }, size: 15 }
+                }
+            }
+            div { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;",
                 div { style: "display:flex;align-items:center;gap:4px;",
                     span { class: "chip chip-success", "{full}" }
                     span { style: "font-size:11px;color:var(--cf-text-muted);", "Fully covered" }
@@ -4903,44 +5603,84 @@ fn RequirementCoverageCard(
                     span { style: "font-size:11px;color:var(--cf-text-muted);", "{total} total" }
                 }
             }
-            // Expanded requirement rows.
-            if *expanded.read() && !report.rows.is_empty() {
-                div { style: "display:flex;flex-direction:column;gap:2px;max-height:360px;overflow-y:auto;",
-                    for row in report.rows.iter() {
+            if total == 0 {
+                if disa_invariant {
+                    div {
+                        class: "q-empty",
+                        "data-testid": "coverage-invariant-error",
+                        style: "color:var(--cf-error);white-space:normal;text-align:center;",
+                        "No normalized requirements are attached to this bundle revision. A DISA STIG import must always produce normalized requirement membership — this is a data-integrity violation, not an empty coverage state."
+                    }
+                } else {
+                    div { class: "q-empty", "No requirement catalog modeled for {framework_label} yet." }
+                }
+            } else if show_details {
+                div { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;",
+                    div { class: "seg",
+                        for (value, label, count) in [("all", "All", total), ("full", "Full", full), ("partial", "Partial", partial), ("unmapped", "Unmapped", unmapped + recovery_required)] {
+                            button { class: if *filter.read() == value { "active" } else { "" }, onclick: move |_| filter.set(value.to_string()), "{label} {count}" }
+                        }
+                    }
+                    input { class: "q-search-input", placeholder: "Filter requirements…", value: "{query}", oninput: move |event| query.set(event.value()) }
+                }
+                if visible_rows.is_empty() {
+                    div { style: "font-size:12px;color:var(--cf-text-muted);text-align:center;padding:24px 0;", "No requirements match." }
+                } else {
+                    div { style: "display:flex;flex-direction:column;gap:16px;",
+                        for (group_root, group_rows) in groups.iter() {
                         {
-                            let row_id = row.requirement_version_id;
-                            let coverage_color = match row.coverage {
-                                RequirementCoverage::Full => "var(--cf-success)",
-                                RequirementCoverage::Partial => "var(--cf-warn)",
-                                RequirementCoverage::Unmapped => "var(--cf-text-muted)",
-                                RequirementCoverage::RecoveryRequired => "var(--cf-error)",
-                            };
-                            let coverage_label = match row.coverage {
-                                RequirementCoverage::Full => "Full",
-                                RequirementCoverage::Partial => "Partial",
-                                RequirementCoverage::Unmapped => "Unmapped",
-                                RequirementCoverage::RecoveryRequired => "Recovery required",
-                            };
+                            // Render group heading only if: group has >1 row OR the single row is not the root
+                            let should_show_heading = group_rows.len() > 1 || group_root.map(|r| r.requirement_version_id) != group_rows.first().map(|r| r.requirement_version_id);
                             rsx! {
-                                 div { key: "{row_id}", "data-testid": "requirement-coverage-row",
-                                    style: "display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;padding:5px 8px;border-radius:6px;font-size:11px;background:var(--cf-subtle-bg);",
-                                    span { class: "mono", style: "color:var(--cf-text-secondary);", "{row.external_id}" }
-                                    span { style: "color:var(--cf-text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
-                                        {row.title.as_deref().unwrap_or("-")}
+                                if should_show_heading {
+                                    if let Some(root) = group_root {
+                                        div { style: "font-size:11.5px;font-weight:700;margin-bottom:6px;", "{root.external_id} — {root.title.as_deref().unwrap_or(\"-\")}" }
                                     }
-                                     div { style: "display:flex;flex-direction:column;align-items:flex-end;gap:3px;",
-                                         span { style: "color:{coverage_color};font-weight:600;white-space:nowrap;", "{coverage_label}" }
-                                         for mapping in row.mappings.iter() {
-                                             span { style: "font-size:10px;color:var(--cf-text-muted);white-space:nowrap;", "{mapping.policy_name} · {mapping.relationship} · {mapping.coverage}" }
-                                         }
-                                     }
-                                 }
+                                }
+                                div { style: "display:flex;flex-direction:column;gap:2px;",
+                                    for row in group_rows.iter() {
+                                    {
+                                        let row_id = row.requirement_version_id;
+                                        let coverage_color = match row.coverage {
+                                            RequirementCoverage::Full => "var(--cf-success)",
+                                            RequirementCoverage::Partial => "var(--cf-warn)",
+                                            RequirementCoverage::Unmapped => "var(--cf-text-muted)",
+                                            RequirementCoverage::RecoveryRequired => "var(--cf-error)",
+                                        };
+                                        let coverage_label = match row.coverage {
+                                            RequirementCoverage::Full => "Fully covered",
+                                            RequirementCoverage::Partial => "Partially covered",
+                                            RequirementCoverage::Unmapped => "Unmapped",
+                                            RequirementCoverage::RecoveryRequired => "Recovery required",
+                                        };
+                                        rsx! {
+                                             div { key: "{row_id}", "data-testid": "requirement-coverage-row",
+                                                style: "display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;padding:5px 8px;border-radius:6px;font-size:11px;background:var(--cf-subtle-bg);",
+                                                span { class: "mono", style: "color:var(--cf-text-secondary);", "{row.external_id}" }
+                                                span { style: "color:var(--cf-text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                                                    {row.title.as_deref().unwrap_or("-")}
+                                                }
+                                                 div { style: "display:flex;flex-direction:column;align-items:flex-end;gap:3px;",
+                                                     span { style: "color:{coverage_color};font-weight:600;white-space:nowrap;", "{coverage_label}" }
+                                                      for mapping in row.mappings.iter() {
+                                                          {
+                                                               let policy_id = mapping.policy_id;
+                                                               let policy_version_id = mapping.policy_version_id;
+                                                              let policy_name = mapping.policy_name.clone();
+                                                               rsx! { button { class: "cf-policy-link", onclick: move |_| on_open_policy.call((policy_id, policy_version_id)), Icon { name: IconName::File, size: 10 }, "{policy_name}", Icon { name: IconName::ArrowRight, size: 10 } } }
+                                                          }
+                                                      }
+                                                 }
+                                             }
+                                        }
+                                    }
+                                    }
+                                }
                             }
+                        }
                         }
                     }
                 }
-            } else if *expanded.read() && report.rows.is_empty() {
-                div { style: "font-size:11px;color:var(--cf-text-muted);", "No requirements in this bundle version's baseline." }
             }
         }
     }

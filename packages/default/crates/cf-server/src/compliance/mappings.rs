@@ -211,6 +211,199 @@ pub fn extract_cci_ids(metadata: &serde_json::Value) -> Vec<String> {
     Vec::new()
 }
 
+/// Extract evidence specifications from compliance_metadata.
+///
+/// Returns an array of evidence spec objects as stored in compliance_metadata.evidence_specs.
+/// If the key is absent or not an array, returns an empty array.
+pub fn extract_evidence_specs(metadata: &serde_json::Value) -> Vec<serde_json::Value> {
+    metadata
+        .get("evidence_specs")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.clone())
+        .unwrap_or_default()
+}
+
+/// Validate a single evidence spec for required fields per kind.
+///
+/// Returns an error if validation fails; returns Ok(()) if valid.
+pub fn validate_evidence_spec(spec: &serde_json::Value) -> Result<()> {
+    let obj = spec
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("evidence_specs: item must be an object"))?;
+
+    let kind = obj
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("evidence_specs: missing or invalid 'kind' field"))?;
+
+    // Match case-insensitively to handle both serialization formats
+    let kind_lower = kind.to_lowercase();
+
+    // Helper: get field from either flattened format (top-level) or details-nested format
+    let get_field = |field_name: &str| {
+        obj.get(field_name).and_then(|v| v.as_str()).or_else(|| {
+            obj.get("details")
+                .and_then(|v| v.as_object())
+                .and_then(|d| d.get(field_name))
+                .and_then(|v| v.as_str())
+        })
+    };
+
+    match kind_lower.as_str() {
+        "command" => {
+            // Command requires both cmd and expect (matching editor validation)
+            let cmd = get_field("cmd");
+            if cmd.is_none() || cmd.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: Command evidence must have non-empty 'cmd' field");
+            }
+            let expect = get_field("expect");
+            if expect.is_none() || expect.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: Command evidence must have non-empty 'expect' field");
+            }
+        }
+        "file" => {
+            let path = get_field("path");
+            if path.is_none() || path.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: File evidence must have non-empty 'path' field");
+            }
+        }
+        "unitstate" | "unit_state" => {
+            let unit = get_field("unit");
+            let state = get_field("state");
+            if unit.is_none() || unit.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: UnitState evidence must have non-empty 'unit' field");
+            }
+            if state.is_none() || state.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: UnitState evidence must have non-empty 'state' field");
+            }
+        }
+        "evalattr" | "eval_attr" => {
+            let attr = get_field("attr");
+            if attr.is_none() || attr.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: EvalAttr evidence must have non-empty 'attr' field");
+            }
+        }
+        "attestation" => {
+            let note = get_field("note");
+            if note.is_none() || note.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: Attestation evidence must have non-empty 'note' field");
+            }
+        }
+        "log" => {
+            // Log requires unit and match_text in addition to source (matching editor validation)
+            let source = get_field("source");
+            if source.is_none() || source.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: Log evidence must have non-empty 'source' field");
+            }
+            let unit = get_field("unit");
+            if unit.is_none() || unit.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: Log evidence must have non-empty 'unit' field");
+            }
+            let match_text = get_field("match_text");
+            if match_text.is_none() || match_text.map_or(false, |s| s.is_empty()) {
+                bail!("evidence_specs: Log evidence must have non-empty 'match_text' field");
+            }
+        }
+        _ => {
+            bail!("evidence_specs: unknown kind '{}'", kind);
+        }
+    }
+    Ok(())
+}
+
+/// Strictly decode Evidence specs from compliance_metadata.
+///
+/// This is fail-closed: malformed persisted Evidence causes an error instead of silently disappearing.
+///
+/// Semantics:
+/// - key absent → Ok([])
+/// - key present as empty array → Ok([])
+/// - key present with valid specs → Ok(Vec<EvidenceSpec>)
+/// - key present but not array → Err
+/// - any array entry malformed/invalid → Err
+///
+/// This is used when loading stored policy versions where data integrity matters.
+/// Do not use filter_map or other lenient parsing.
+pub fn decode_evidence_specs_strict(
+    metadata: &serde_json::Value,
+) -> Result<Vec<crate::api::models::EvidenceSpec>> {
+    match metadata.get("evidence_specs") {
+        None => {
+            // Key absent: no evidence configured
+            Ok(Vec::new())
+        }
+        Some(evidence_value) => {
+            // Key present: must be an array
+            let arr = evidence_value.as_array().ok_or_else(|| {
+                let type_name = match evidence_value {
+                    serde_json::Value::Null => "null",
+                    serde_json::Value::Bool(_) => "bool",
+                    serde_json::Value::Number(_) => "number",
+                    serde_json::Value::String(_) => "string",
+                    serde_json::Value::Array(_) => "array",
+                    serde_json::Value::Object(_) => "object",
+                };
+                anyhow::anyhow!("evidence_specs: field must be array, got {}", type_name)
+            })?;
+
+            // Decode and validate each entry
+            let mut result = Vec::with_capacity(arr.len());
+            for (idx, entry) in arr.iter().enumerate() {
+                let spec: crate::api::models::EvidenceSpec = serde_json::from_value(entry.clone())
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "evidence_specs[{}]: failed to decode evidence spec: {}",
+                            idx,
+                            e
+                        )
+                    })?;
+                // Validate the decoded spec (fail-closed on semantic errors)
+                validate_evidence_spec(&serde_json::to_value(&spec)?)
+                    .map_err(|e| anyhow::anyhow!("evidence_specs[{}]: {}", idx, e))?;
+                result.push(spec);
+            }
+            Ok(result)
+        }
+    }
+}
+
+/// Merge evidence specs into an existing `compliance_metadata` JSON object.
+///
+/// Semantics:
+/// - `None` → caller did not touch this field; preserve existing value exactly.
+/// - `Some([])` → caller cleared evidence; store empty array.
+/// - `Some([...])` → validate and replace evidence array.
+///
+/// All other keys in `existing` survive unchanged.
+///
+/// Returns an error if any evidence spec is invalid.
+pub fn merge_evidence_into_metadata(
+    existing: &serde_json::Value,
+    evidence_specs: Option<&[crate::api::models::EvidenceSpec]>,
+) -> Result<serde_json::Value> {
+    if evidence_specs.is_none() {
+        // Caller did not specify evidence; preserve existing
+        return Ok(existing.clone());
+    }
+
+    let mut obj = existing.as_object().cloned().unwrap_or_default();
+
+    if let Some(specs) = evidence_specs {
+        // Validate all specs before updating
+        for spec in specs {
+            let spec_json = serde_json::to_value(spec)?;
+            validate_evidence_spec(&spec_json)?;
+        }
+        // All valid; store the array
+        obj.insert("evidence_specs".to_string(), serde_json::to_value(specs)?);
+    } else {
+        // Empty array; clear evidence
+        obj.insert("evidence_specs".to_string(), serde_json::json!([]));
+    }
+
+    Ok(serde_json::Value::Object(obj))
+}
+
 /// Merge SRG/CCI mappings into an existing `compliance_metadata` JSON object.
 ///
 /// Semantics:
@@ -802,5 +995,128 @@ mod tests {
         assert!(merged["references"].is_array());
         assert!(merged["checks"].is_array());
         assert!(merged["fixes"].is_array());
+    }
+
+    // ── Evidence validation ──────────────────────────────────────────────────────
+
+    #[test]
+    fn evidence_command_requires_expect() {
+        // Valid: both cmd and expect
+        let valid = serde_json::json!({
+            "kind": "command",
+            "cmd": "systemctl status ssh",
+            "expect": "active"
+        });
+        assert!(validate_evidence_spec(&valid).is_ok());
+
+        // Invalid: missing expect
+        let missing_expect = serde_json::json!({
+            "kind": "command",
+            "cmd": "systemctl status ssh"
+        });
+        assert!(validate_evidence_spec(&missing_expect).is_err());
+
+        // Invalid: empty expect
+        let empty_expect = serde_json::json!({
+            "kind": "command",
+            "cmd": "systemctl status ssh",
+            "expect": ""
+        });
+        assert!(validate_evidence_spec(&empty_expect).is_err());
+    }
+
+    #[test]
+    fn evidence_log_requires_unit_and_match_text() {
+        // Valid: all three fields
+        let valid = serde_json::json!({
+            "kind": "log",
+            "source": "journald",
+            "unit": "auditd.service",
+            "match_text": "audit: rules loaded"
+        });
+        assert!(validate_evidence_spec(&valid).is_ok());
+
+        // Invalid: missing unit
+        let missing_unit = serde_json::json!({
+            "kind": "log",
+            "source": "journald",
+            "match_text": "audit: rules loaded"
+        });
+        assert!(validate_evidence_spec(&missing_unit).is_err());
+
+        // Invalid: missing match_text
+        let missing_match = serde_json::json!({
+            "kind": "log",
+            "source": "journald",
+            "unit": "auditd.service"
+        });
+        assert!(validate_evidence_spec(&missing_match).is_err());
+
+        // Invalid: empty unit
+        let empty_unit = serde_json::json!({
+            "kind": "log",
+            "source": "journald",
+            "unit": "",
+            "match_text": "audit: rules loaded"
+        });
+        assert!(validate_evidence_spec(&empty_unit).is_err());
+    }
+
+    #[test]
+    fn evidence_file_requires_path() {
+        let valid = serde_json::json!({
+            "kind": "file",
+            "path": "/etc/ssh/sshd_config"
+        });
+        assert!(validate_evidence_spec(&valid).is_ok());
+
+        let missing_path = serde_json::json!({
+            "kind": "file"
+        });
+        assert!(validate_evidence_spec(&missing_path).is_err());
+    }
+
+    #[test]
+    fn evidence_eval_attr_requires_attr() {
+        let valid = serde_json::json!({
+            "kind": "eval_attr",
+            "attr": "config.services.openssh.settings.PermitRootLogin"
+        });
+        assert!(validate_evidence_spec(&valid).is_ok());
+
+        let missing_attr = serde_json::json!({
+            "kind": "eval_attr"
+        });
+        assert!(validate_evidence_spec(&missing_attr).is_err());
+    }
+
+    #[test]
+    fn evidence_unit_state_requires_unit_and_state() {
+        let valid = serde_json::json!({
+            "kind": "unit_state",
+            "unit": "auditd.service",
+            "state": "active"
+        });
+        assert!(validate_evidence_spec(&valid).is_ok());
+
+        let missing_state = serde_json::json!({
+            "kind": "unit_state",
+            "unit": "auditd.service"
+        });
+        assert!(validate_evidence_spec(&missing_state).is_err());
+    }
+
+    #[test]
+    fn evidence_attestation_requires_note() {
+        let valid = serde_json::json!({
+            "kind": "attestation",
+            "note": "Manually verified and approved"
+        });
+        assert!(validate_evidence_spec(&valid).is_ok());
+
+        let missing_note = serde_json::json!({
+            "kind": "attestation"
+        });
+        assert!(validate_evidence_spec(&missing_note).is_err());
     }
 }

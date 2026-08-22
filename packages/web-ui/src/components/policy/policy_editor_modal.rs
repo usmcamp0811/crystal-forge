@@ -6,28 +6,26 @@
 //! evidence-for-ATO builder, and an edit-mode danger zone with typed-confirmation
 //! delete.
 //!
-//! The deployment-policy API persists classification with the exact policy
-//! version, while Evidence remains unavailable in the current API.
+//! The deployment-policy API persists classification and evidence specifications
+//! with each policy version.
 
 use dioxus::prelude::*;
 use uuid::Uuid;
 
 use crate::api::client::{
-    create_deployment_policy, delete_deployment_policy,
-    fetch_compliance_frameworks, fetch_compliance_framework_versions,
-    fetch_policy_requirement_mappings, create_policy_mapping, delete_policy_mapping,
+    create_deployment_policy, create_policy_mapping, delete_deployment_policy,
+    delete_policy_mapping, fetch_compliance_framework_versions, fetch_compliance_frameworks,
+    fetch_policy_requirement_mappings, search_requirements, update_deployment_policy,
     update_policy_mapping,
-    search_requirements, update_deployment_policy,
 };
 use crate::api::models::{
-    ComplianceFrameworkSummary, ComplianceFrameworkVersionSummary,
-    CreateDeploymentPolicyRequest, CreatePolicyMappingRequest,
-    PolicyMappingRow, RequirementVersionSummary, UpdateDeploymentPolicyRequest,
-    UpdatePolicyMappingRequest,
+    ComplianceFrameworkSummary, ComplianceFrameworkVersionSummary, CreateDeploymentPolicyRequest,
+    CreatePolicyMappingRequest, EvidenceKind, EvidenceSpec, PolicyMappingRow, RequirementVersionSummary,
+    UpdateDeploymentPolicyRequest, UpdatePolicyMappingRequest,
 };
 use crate::views::policies_api;
 
-use super::types::{is_policy_version_editable, PolicyCategory, PolicyDefinition, PolicyFormat};
+use super::types::{PolicyCategory, PolicyDefinition, PolicyFormat, is_policy_version_editable};
 
 #[derive(Clone, Debug, PartialEq)]
 struct PendingPolicyMapping {
@@ -119,9 +117,21 @@ fn remove_pending_mapping(mappings: &mut Vec<PendingPolicyMapping>, requirement_
 const STANDARD_FRAMEWORKS: [&str; 4] = ["DISA STIG", "NIST 800-53", "CMMC 2.0", "CIS Benchmark"];
 const NIST_CONTROL_FAMILIES: [&str; 7] = ["AC", "AU", "CM", "IA", "SC", "SI", "MP"];
 const MAPPING_RELATIONSHIPS: [(&str, &str, &str); 3] = [
-    ("implements", "Implements", "The policy directly satisfies this requirement."),
-    ("supports", "Supports", "The policy contributes to satisfying the requirement but does not satisfy it alone."),
-    ("provides_evidence_for", "Provides evidence for", "The policy gathers or produces evidence relevant to determining compliance."),
+    (
+        "implements",
+        "Implements",
+        "The policy directly satisfies this requirement.",
+    ),
+    (
+        "supports",
+        "Supports",
+        "The policy contributes to satisfying the requirement but does not satisfy it alone.",
+    ),
+    (
+        "provides_evidence_for",
+        "Provides evidence for",
+        "The policy gathers or produces evidence relevant to determining compliance.",
+    ),
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -208,6 +218,8 @@ struct PolicyEvidence {
     note: String,
     state: String,
     attr: String,
+    /// Preserved from original EvidenceSpec to prevent round-trip destruction
+    required_fields: std::collections::HashMap<String, String>,
 }
 
 impl PolicyEvidence {
@@ -223,6 +235,142 @@ impl PolicyEvidence {
             note: "Must contain USG banner text".to_string(),
             state: "active".to_string(),
             attr: "config.services.openssh.settings.PermitRootLogin".to_string(),
+            required_fields: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Convert EvidenceSpec to editable PolicyEvidence form.
+    /// Handles all evidence kinds and reconstructs form fields for editing.
+    fn from_evidence_spec(spec: &EvidenceSpec) -> Self {
+        let mut evidence = match &spec.kind {
+            EvidenceKind::Command { cmd, expect } => Self {
+                kind: "command".to_string(),
+                cmd: cmd.clone(),
+                expect: expect.clone(),
+                ..Self::new("command")
+            },
+            EvidenceKind::Log {
+                source,
+                unit,
+                match_text,
+            } => Self {
+                kind: "log".to_string(),
+                source: source.clone(),
+                unit: unit.clone(),
+                r#match: match_text.clone(),
+                ..Self::new("log")
+            },
+            EvidenceKind::File { path, note } => Self {
+                kind: "file".to_string(),
+                path: path.clone(),
+                note: note.clone().unwrap_or_default(),
+                ..Self::new("file")
+            },
+            EvidenceKind::UnitState { unit, state } => Self {
+                kind: "unit_state".to_string(),
+                unit: unit.clone(),
+                state: state.clone(),
+                ..Self::new("unit_state")
+            },
+            EvidenceKind::EvalAttr { attr } => Self {
+                kind: "eval_attr".to_string(),
+                attr: attr.clone(),
+                ..Self::new("eval_attr")
+            },
+            EvidenceKind::Attestation { note } => Self {
+                kind: "attestation".to_string(),
+                note: note.clone(),
+                ..Self::new("attestation")
+            },
+        };
+        // Preserve required_fields metadata from original spec
+        evidence.required_fields = spec.required_fields.clone();
+        evidence
+    }
+
+    /// Validate this evidence row and return error message if invalid.
+    /// Returns None if valid, Some(error_msg) if invalid.
+    fn validate(&self) -> Option<String> {
+        match self.kind.as_str() {
+            "command" => {
+                if self.cmd.is_empty() {
+                    return Some("Command is required".to_string());
+                }
+                if self.expect.is_empty() {
+                    return Some("Expected output is required".to_string());
+                }
+            }
+            "log" => {
+                if self.unit.is_empty() {
+                    return Some("Unit/source is required".to_string());
+                }
+                if self.r#match.is_empty() {
+                    return Some("Match pattern is required".to_string());
+                }
+            }
+            "file" => {
+                if self.path.is_empty() {
+                    return Some("File path is required".to_string());
+                }
+            }
+            "unit_state" => {
+                if self.unit.is_empty() {
+                    return Some("Unit is required".to_string());
+                }
+                if self.state.is_empty() {
+                    return Some("State is required".to_string());
+                }
+            }
+            "eval_attr" => {
+                if self.attr.is_empty() {
+                    return Some("Attribute path is required".to_string());
+                }
+            }
+            "attestation" => {
+                if self.note.is_empty() {
+                    return Some("Attestation text is required".to_string());
+                }
+            }
+            _ => return Some(format!("Unknown evidence kind: {}", self.kind)),
+        }
+        None
+    }
+
+    /// Convert PolicyEvidence to EvidenceSpec for the API.
+    /// Does NOT validate - call validate() first.
+    /// Preserves required_fields metadata loaded from original spec.
+    fn to_evidence_spec(&self) -> EvidenceSpec {
+        let kind = match self.kind.as_str() {
+            "command" => EvidenceKind::Command {
+                cmd: self.cmd.clone(),
+                expect: self.expect.clone(),
+            },
+            "log" => EvidenceKind::Log {
+                source: self.source.clone(),
+                unit: self.unit.clone(),
+                match_text: self.r#match.clone(),
+            },
+            "file" => EvidenceKind::File {
+                path: self.path.clone(),
+                note: if self.note.is_empty() { None } else { Some(self.note.clone()) },
+            },
+            "unit_state" => EvidenceKind::UnitState {
+                unit: self.unit.clone(),
+                state: self.state.clone(),
+            },
+            "eval_attr" => EvidenceKind::EvalAttr {
+                attr: self.attr.clone(),
+            },
+            "attestation" => EvidenceKind::Attestation {
+                note: self.note.clone(),
+            },
+            _ => EvidenceKind::Attestation {
+                note: "invalid".to_string(),
+            },
+        };
+        EvidenceSpec {
+            kind,
+            required_fields: self.required_fields.clone(),
         }
     }
 }
@@ -435,10 +583,12 @@ fn custom_check_config_is_representable(config: &serde_json::Value) -> bool {
 
     if let Some(entries) = config.get("rules").and_then(|value| value.as_array()) {
         return entries.iter().all(|entry| {
-            object_keys_are_subset(entry, &["expression", "description", "field_name", "strict"])
-                && entry
-                    .get("description")
-                    .is_none_or(|value| value.as_str().is_some())
+            object_keys_are_subset(
+                entry,
+                &["expression", "description", "field_name", "strict"],
+            ) && entry
+                .get("description")
+                .is_none_or(|value| value.as_str().is_some())
                 && entry
                     .get("strict")
                     .is_none_or(|value| value.as_bool() == Some(true))
@@ -642,11 +792,8 @@ fn PolicyMappingsTab(
     mut mappings: Signal<Vec<PolicyMappingRow>>,
     mut pending_mappings: Signal<Vec<PendingPolicyMapping>>,
 ) -> Element {
-    let mapping_target = mapping_editor_target(
-        is_editing,
-        editing_policy_version_id,
-        mappings_editable,
-    );
+    let mapping_target =
+        mapping_editor_target(is_editing, editing_policy_version_id, mappings_editable);
     let mut loaded = use_signal(|| false);
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut frameworks: Signal<Vec<ComplianceFrameworkSummary>> = use_signal(Vec::new);
@@ -1031,19 +1178,33 @@ pub fn PolicyEditorModal(
     });
     let framework_options = custom_frameworks(&policy_library.read());
     let mut rules = use_signal(|| seed_rules);
-    let mut evidence: Signal<Vec<PolicyEvidence>> = use_signal(Vec::new);
-    let mut add_rule_kind = use_signal(String::new);
-    let mut add_evidence_kind = use_signal(String::new);
-    let mut active_tab = use_signal(|| PolicyEditorTab::Details);
+     // Initialize evidence from existing policy specs, or empty if creating new
+     let initial_evidence: Vec<PolicyEvidence> = existing_policy
+         .as_ref()
+         .and_then(|p| p.evidence_specs.as_ref())
+         .map(|specs| {
+             specs
+                 .iter()
+                 .map(PolicyEvidence::from_evidence_spec)
+                 .collect()
+         })
+         .unwrap_or_default();
+     let initial_evidence_count = initial_evidence.len();
+     let mut evidence: Signal<Vec<PolicyEvidence>> = use_signal({
+         let ev = initial_evidence.clone();
+         move || ev.clone()
+     });
+     let mut add_rule_kind = use_signal(String::new);
+     let mut add_evidence_kind = use_signal(String::new);
+     let mut active_tab = use_signal(|| PolicyEditorTab::Details);
 
     // ── Mappings tab state ────────────────────────────────────────────────────
     let mut mappings: Signal<Vec<PolicyMappingRow>> = use_signal(Vec::new);
     let mut pending_mappings: Signal<Vec<PendingPolicyMapping>> = use_signal(Vec::new);
 
     // Capture the editing policy version ID for mapping API calls.
-    let editing_policy_version_id: Option<Uuid> = existing_policy
-        .as_ref()
-        .and_then(|p| p.version_id);
+    let editing_policy_version_id: Option<Uuid> =
+        existing_policy.as_ref().and_then(|p| p.version_id);
     let mappings_editable = existing_policy
         .as_ref()
         .is_some_and(is_policy_version_editable);
@@ -1074,6 +1235,7 @@ pub fn PolicyEditorModal(
             onclick: move |_| on_close.call(()),
             div {
                 class: "modal cf-policy-modal-panel",
+                "data-testid": "policy-editor-modal",
                 style: "width:min(680px,96vw);max-height:92vh;",
                 onclick: |evt| evt.stop_propagation(),
 
@@ -1178,8 +1340,9 @@ pub fn PolicyEditorModal(
                         if *active_tab.read() == PolicyEditorTab::Details {
                         div { style: "display:grid;grid-template-columns:1fr;gap:14px;",
                             div { class: "field",
-                                label { "Name" }
+                                label { r#for: "policy-editor-name", "Name" }
                                 input {
+                                    id: "policy-editor-name",
                                     class: if name_missing { "input focus-ring mono cf-policy-modal-field-error" } else { "input focus-ring mono" },
                                     placeholder: "e.g. canary-25",
                                     value: "{edit_name}",
@@ -1191,8 +1354,9 @@ pub fn PolicyEditorModal(
                             }
                         }
                         div { class: "field",
-                            label { "Description" }
+                            label { r#for: "policy-editor-description", "Description" }
                             input {
+                                id: "policy-editor-description",
                                 class: "input focus-ring",
                                 placeholder: "One-line summary shown in the registry",
                                 value: "{edit_description}",
@@ -1386,6 +1550,7 @@ pub fn PolicyEditorModal(
                                         RuleEditorRow { index, rule: rule.clone(), rules }
                                         button {
                                             class: "btn-icon focus-ring",
+                                            "data-testid": "policy-rule-remove-{index}",
                                             title: "Remove rule",
                                             onclick: move |_| {
                                                 let mut next = rules.read().clone();
@@ -1402,6 +1567,7 @@ pub fn PolicyEditorModal(
                             div { style: "margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;",
                                 select {
                                     class: "input focus-ring",
+                                    "data-testid": "policy-editor-add-rule",
                                     style: "max-width:260px;font-size:12px;",
                                     value: "{add_rule_kind}",
                                     onchange: move |event| {
@@ -1435,69 +1601,80 @@ pub fn PolicyEditorModal(
                         }
 
                         // Evidence for ATO builder (UI-only / not persisted)
-                        if *active_tab.read() == PolicyEditorTab::Evidence {
-                        div { style: "margin-top:6px;",
-                            div { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;",
-                                label { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);",
-                                    "Evidence for ATO ({evidence_count}) "
-                                    span { class: "cf-policy-ui-only-badge", "UI only — not persisted yet" }
-                                }
-                                span { style: "font-size:11px;color:var(--cf-text-muted);", "Artifacts collected to prove compliance to an assessor." }
-                            }
-                            if evidence_count == 0 {
-                                div { class: "sd-callout sd-callout-info", style: "margin-bottom:8px;",
-                                    svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                                        path { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }
-                                        polyline { points: "14 2 14 8 20 8" }
-                                    }
-                                    div { style: "font-size:12px;",
-                                        "No evidence defined. Without it, this policy gates deploys but produces nothing for an audit package. Add command output, logs, or attestations."
-                                    }
-                                }
-                            }
-                            div { style: "display:flex;flex-direction:column;gap:6px;",
-                                for (index, ev) in evidence.read().iter().cloned().enumerate() {
-                                    div {
-                                        key: "ev-{index}",
-                                        style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:flex-start;padding:8px 10px;background:var(--cf-subtle-bg);border-radius:8px;",
-                                        EvidenceEditorRow { index, evidence: ev.clone(), evidence_list: evidence }
-                                        button {
-                                            class: "btn-icon focus-ring",
-                                            title: "Remove evidence",
-                                            onclick: move |_| {
-                                                let mut next = evidence.read().clone();
-                                                if index < next.len() { next.remove(index); }
-                                                evidence.set(next);
-                                            },
-                                            svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                                                path { d: "M18 6 6 18M6 6l12 12" }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            div { style: "margin-top:8px;",
-                                select {
-                                    class: "input focus-ring",
-                                    style: "max-width:260px;font-size:12px;",
-                                    value: "{add_evidence_kind}",
-                                    onchange: move |event| {
-                                        let kind = event.value();
-                                        if !kind.is_empty() {
-                                            let mut next = evidence.read().clone();
-                                            next.push(PolicyEvidence::new(&kind));
-                                            evidence.set(next);
-                                        }
-                                        add_evidence_kind.set(String::new());
-                                    },
-                                    option { value: "", "+ Add evidence source…" }
-                                    for (id, label) in EVIDENCE_OPTIONS {
-                                        option { value: "{id}", "{label}" }
-                                    }
-                                }
-                            }
-                        }
-                        }
+                         if *active_tab.read() == PolicyEditorTab::Evidence {
+                         div { style: "margin-top:6px;",
+                             div { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;",
+                                 label { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);",
+                                     "Evidence for ATO ({evidence_count})"
+                                 }
+                                 span { style: "font-size:11px;color:var(--cf-text-muted);", "Artifacts collected to prove compliance to an assessor." }
+                             }
+                             if evidence_count == 0 {
+                                 div { class: "sd-callout sd-callout-info", style: "margin-bottom:8px;",
+                                     svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                         path { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }
+                                         polyline { points: "14 2 14 8 20 8" }
+                                     }
+                                     div { style: "font-size:12px;",
+                                         "No evidence defined. Without it, this policy gates deploys but produces nothing for an audit package. Add command output, logs, or attestations."
+                                     }
+                                 }
+                             }
+                             div { style: "display:flex;flex-direction:column;gap:6px;",
+                                 for (index, ev) in evidence.read().iter().cloned().enumerate() {
+                                     div {
+                                         key: "ev-{index}",
+                                         style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:flex-start;padding:8px 10px;background:var(--cf-subtle-bg);border-radius:8px;",
+                                         EvidenceEditorRow { index, evidence: ev.clone(), evidence_list: evidence }
+                                         button {
+                                             class: "btn-icon focus-ring",
+                                             title: "Remove evidence",
+                                             onclick: move |_| {
+                                                 let mut next = evidence.read().clone();
+                                                 if index < next.len() { next.remove(index); }
+                                                 evidence.set(next);
+                                             },
+                                             svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                                 path { d: "M18 6 6 18M6 6l12 12" }
+                                             }
+                                         }
+                                     }
+                                 }
+                             }
+                             div { style: "margin-top:8px;display:flex;gap:6px;",
+                                 select {
+                                     class: "input focus-ring",
+                                     "data-testid": "policy-editor-add-evidence",
+                                     style: "flex:1;font-size:12px;",
+                                     value: "{add_evidence_kind}",
+                                     onchange: move |event| {
+                                         let kind = event.value();
+                                         if !kind.is_empty() {
+                                             let mut next = evidence.read().clone();
+                                             next.push(PolicyEvidence::new(&kind));
+                                             evidence.set(next);
+                                         }
+                                         add_evidence_kind.set(String::new());
+                                     },
+                                     option { value: "", "+ Add evidence source…" }
+                                     for (id, label) in EVIDENCE_OPTIONS {
+                                         option { value: "{id}", "{label}" }
+                                     }
+                                 }
+                                 if evidence_count > 0 {
+                                     button {
+                                         class: "btn btn-ghost focus-ring",
+                                         style: "color:#f87171;border-color:rgba(248,113,113,0.3);",
+                                         title: "Clear all evidence",
+                                         onclick: move |_| {
+                                             evidence.set(Vec::new());
+                                         },
+                                         "Clear all"
+                                     }
+                                 }
+                             }
+                         }
+                         }
 
                         }
 
@@ -1594,52 +1771,101 @@ pub fn PolicyEditorModal(
                                 let selected_cis_section = if is_security && selected_framework.as_deref() == Some("CIS Benchmark") { non_empty(cis_section.read().clone()) } else { None };
                                 let selected_rationale = non_empty(rationale.read().clone());
 
-                                save_error.set(String::new());
+                                 save_error.set(String::new());
                                 is_saving.set(true);
 
-                                spawn(async move {
-                                    let result = if let Some(policy_id) = editing_id {
-                                        let request = UpdateDeploymentPolicyRequest {
-                                            name: Some(name.clone()),
-                                            description: Some(description.clone()),
-                                            policy_type: Some(policy_type),
-                                            config: Some(config),
-                                            enabled: None,
-                                            // Always send Some(...) so the server replaces
-                                            // the curated mapping (Some([]) clears it).
-                                            srg_ids: Some(srg_raw),
-                                            cci_ids: Some(cci_raw),
-                                            category: selected_category,
-                                            framework: selected_framework,
-                                            severity: selected_severity,
-                                            control_family: selected_control_family,
-                                            cmmc_level: selected_cmmc_level,
-                                            cis_section: selected_cis_section,
-                                            rationale: selected_rationale,
-                                        };
+                                 // Validate evidence rows BEFORE async block
+                                 {
+                                     let current_evidence = evidence.read();
+                                     let validation_errors: Vec<String> = current_evidence
+                                         .iter()
+                                         .enumerate()
+                                         .filter_map(|(idx, ev)| {
+                                             ev.validate().map(|err| format!("Evidence row {}: {}", idx + 1, err))
+                                         })
+                                         .collect();
+                                     
+                                     if !validation_errors.is_empty() {
+                                         save_error.set(validation_errors.join("; "));
+                                         is_saving.set(false);
+                                         return;
+                                     }
+                                 }
+
+                                 let initial_evidence_clone = initial_evidence.clone();
+                                 spawn(async move {
+                                     let result = if let Some(policy_id) = editing_id {
+                                          // Determine evidence_specs dirty state:
+                                          // Compare current evidence against initial state
+                                          // - None if unchanged (preserve existing)
+                                          // - Some([]) if cleared to empty
+                                          // - Some(items) if modified/added
+                                          let evidence_specs = {
+                                              let current_evidence = evidence.read();
+                                              let current_count = current_evidence.len();
+                                              let initial_count = initial_evidence_clone.len();
+                                              
+                                              // No change = preserve
+                                              if current_count == initial_count && current_evidence.clone() == initial_evidence_clone {
+                                                  None
+                                              } else {
+                                                  // Changed: convert and send (including empty array if cleared)
+                                                  let specs: Vec<EvidenceSpec> = current_evidence
+                                                      .iter()
+                                                      .map(|ev| ev.to_evidence_spec())
+                                                      .collect();
+                                                  Some(specs)
+                                              }
+                                          };
+
+                                         let request = UpdateDeploymentPolicyRequest {
+                                              name: Some(name.clone()),
+                                              description: Some(description.clone()),
+                                              policy_type: Some(policy_type),
+                                              config: Some(config),
+                                              enabled: None,
+                                              // Always send Some(...) so the server replaces
+                                              // the curated mapping (Some([]) clears it).
+                                              srg_ids: Some(srg_raw),
+                                              cci_ids: Some(cci_raw),
+                                              category: selected_category,
+                                              framework: selected_framework,
+                                              severity: selected_severity,
+                                              control_family: selected_control_family,
+                                              cmmc_level: selected_cmmc_level,
+                                              cis_section: selected_cis_section,
+                                              rationale: selected_rationale,
+                                              evidence_specs,
+                                          };
                                         update_deployment_policy(&policy_id, &request).await.map(|_| None)
-                                    } else {
-                                        let request = CreateDeploymentPolicyRequest {
-                                            name: name.clone(),
-                                            description: Some(description.clone()),
-                                            policy_type,
-                                            config,
-                                            enabled: Some(true),
-                                            srg_ids: srg_raw,
-                                            cci_ids: cci_raw,
-                                            category: selected_category,
-                                            framework: selected_framework,
-                                            severity: selected_severity,
-                                            control_family: selected_control_family,
-                                            cmmc_level: selected_cmmc_level,
-                                            cis_section: selected_cis_section,
-                                            rationale: selected_rationale,
-                                            requirement_mappings: pending_mappings
-                                                .read()
-                                                .iter()
-                                                .map(PendingPolicyMapping::mapping_request)
-                                                .collect(),
-                                        };
+                                     } else {
+                                          let evidence_specs: Vec<EvidenceSpec> = evidence.read()
+                                              .iter()
+                                              .map(|ev| ev.to_evidence_spec())
+                                              .collect();
+
+                                         let request = CreateDeploymentPolicyRequest {
+                                              name: name.clone(),
+                                              description: Some(description.clone()),
+                                              policy_type,
+                                              config,
+                                              enabled: Some(true),
+                                              srg_ids: srg_raw,
+                                              cci_ids: cci_raw,
+                                              category: selected_category,
+                                              framework: selected_framework,
+                                              severity: selected_severity,
+                                              control_family: selected_control_family,
+                                              cmmc_level: selected_cmmc_level,
+                                              cis_section: selected_cis_section,
+                                              rationale: selected_rationale,
+                                              evidence_specs,
+                                              requirement_mappings: pending_mappings
+                                                  .read()
+                                                  .iter()
+                                                  .map(PendingPolicyMapping::mapping_request)
+                                                  .collect(),
+                                          };
                                         create_deployment_policy(&request).await.map(Some)
                                     };
 
@@ -1763,6 +1989,7 @@ fn RuleEditorRow(index: usize, rule: PolicyRule, rules: Signal<Vec<PolicyRule>>)
                     div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
                         span { "Block deploy when" }
                         select {
+                            "data-testid": "policy-evidence-log-source-{index}",
                             class: "input focus-ring",
                             style: "width:auto;font-size:12px;padding:4px 8px;",
                             value: "{rule.severity}",
@@ -1800,6 +2027,7 @@ fn RuleEditorRow(index: usize, rule: PolicyRule, rules: Signal<Vec<PolicyRule>>)
                             oninput: move |event| set_rule_field!(path, event.value()),
                         }
                         select {
+                            "data-testid": "policy-evidence-unit-state-{index}",
                             class: "input focus-ring mono",
                             style: "width:auto;font-size:12px;padding:5px 6px;",
                             value: "{rule.op}",
@@ -1820,6 +2048,7 @@ fn RuleEditorRow(index: usize, rule: PolicyRule, rules: Signal<Vec<PolicyRule>>)
                 "custom_eval" => rsx! {
                     textarea {
                         class: "input focus-ring mono code-editor",
+                        "data-testid": "policy-rule-custom-eval-expr-{index}",
                         rows: "3",
                         style: "font-size:12px;resize:vertical;",
                         placeholder: "config.networking.firewall.enable == true",
@@ -1913,15 +2142,16 @@ fn EvidenceEditorRow(
             span { style: "display:flex;align-items:center;gap:6px;font-weight:600;", "{label}" }
             match kind.as_str() {
                 "command" => rsx! {
-                    input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "sshd -T | grep permitrootlogin", value: "{evidence.cmd}", oninput: move |event| set_ev_field!(cmd, event.value()) }
+                    input { "data-testid": "policy-evidence-command-cmd-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "sshd -T | grep permitrootlogin", value: "{evidence.cmd}", oninput: move |event| set_ev_field!(cmd, event.value()) }
                     div { style: "display:flex;align-items:center;gap:6px;",
                         span { style: "font-size:11px;color:var(--cf-text-muted);", "expect output contains" }
-                        input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;", placeholder: "permitrootlogin no", value: "{evidence.expect}", oninput: move |event| set_ev_field!(expect, event.value()) }
+                        input { "data-testid": "policy-evidence-command-expect-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;", placeholder: "permitrootlogin no", value: "{evidence.expect}", oninput: move |event| set_ev_field!(expect, event.value()) }
                     }
                 },
                 "log" => rsx! {
                     div { style: "display:flex;gap:6px;flex-wrap:wrap;",
                         select {
+                            "data-testid": "policy-evidence-log-source-{index}",
                             class: "input focus-ring",
                             style: "font-size:11px;padding:5px 8px;width:auto;",
                             value: "{evidence.source}",
@@ -1930,19 +2160,20 @@ fn EvidenceEditorRow(
                             option { value: "auditd", "auditd" }
                             option { value: "file", "file" }
                         }
-                        input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;min-width:140px;", placeholder: "auditd.service", value: "{evidence.unit}", oninput: move |event| set_ev_field!(unit, event.value()) }
+                        input { "data-testid": "policy-evidence-log-unit-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;min-width:140px;", placeholder: "auditd.service", value: "{evidence.unit}", oninput: move |event| set_ev_field!(unit, event.value()) }
                     }
-                    input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "regex / substring to match", value: "{match_value}", oninput: move |event| set_ev_field!(r#match, event.value()) }
+                    input { "data-testid": "policy-evidence-log-match-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "regex / substring to match", value: "{match_value}", oninput: move |event| set_ev_field!(r#match, event.value()) }
                 },
                 "file" => rsx! {
-                    input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "/etc/issue", value: "{evidence.path}", oninput: move |event| set_ev_field!(path, event.value()) }
+                    input { "data-testid": "policy-evidence-file-path-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "/etc/issue", value: "{evidence.path}", oninput: move |event| set_ev_field!(path, event.value()) }
                     input { class: "input focus-ring", style: "font-size:11px;padding:5px 8px;", placeholder: "What to look for / why it proves compliance", value: "{evidence.note}", oninput: move |event| set_ev_field!(note, event.value()) }
                 },
                 "unit_state" => rsx! {
                     div { style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;",
-                        input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;min-width:140px;", placeholder: "auditd.service", value: "{evidence.unit}", oninput: move |event| set_ev_field!(unit, event.value()) }
+                        input { "data-testid": "policy-evidence-unit-name-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;min-width:140px;", placeholder: "auditd.service", value: "{evidence.unit}", oninput: move |event| set_ev_field!(unit, event.value()) }
                         span { style: "font-size:11px;color:var(--cf-text-muted);", "is" }
                         select {
+                            "data-testid": "policy-evidence-unit-state-{index}",
                             class: "input focus-ring",
                             style: "font-size:11px;padding:5px 8px;width:auto;",
                             value: "{evidence.state}",
@@ -1954,11 +2185,11 @@ fn EvidenceEditorRow(
                     }
                 },
                 "eval_attr" => rsx! {
-                    input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "config.services.openssh.settings.PermitRootLogin", value: "{evidence.attr}", oninput: move |event| set_ev_field!(attr, event.value()) }
+                    input { "data-testid": "policy-evidence-eval-attr-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "config.services.openssh.settings.PermitRootLogin", value: "{evidence.attr}", oninput: move |event| set_ev_field!(attr, event.value()) }
                     span { class: "mono", style: "font-size:10px;color:var(--cf-text-muted);", "Captured from the evaluated config — no host access needed." }
                 },
                 "attestation" => rsx! {
-                    input { class: "input focus-ring", style: "font-size:11px;padding:5px 8px;", placeholder: "What the agent attests to (signed snapshot)", value: "{evidence.note}", oninput: move |event| set_ev_field!(note, event.value()) }
+                    input { "data-testid": "policy-evidence-attestation-note-{index}", class: "input focus-ring", style: "font-size:11px;padding:5px 8px;", placeholder: "What the agent attests to (signed snapshot)", value: "{evidence.note}", oninput: move |event| set_ev_field!(note, event.value()) }
                     span { class: "mono", style: "font-size:10px;color:var(--cf-text-muted);", "Ed25519-signed by the agent at collection time." }
                 },
                 _ => rsx! { span { style: "font-style:italic;", "{kind}" } },
@@ -1973,7 +2204,15 @@ mod tests {
 
     fn pending(id: u128) -> PendingPolicyMapping {
         PendingPolicyMapping {
-            requirement_version_id: Uuid::from_u128(id), framework_name: "NIST 800-53".into(), framework_version: "Rev 5".into(), requirement_external_id: "SC-45".into(), requirement_kind: "control".into(), requirement_title: Some("System time synchronization".into()), relationship: "supports".into(), coverage: "partial".into(), rationale: Some("reviewed mapping".into()),
+            requirement_version_id: Uuid::from_u128(id),
+            framework_name: "NIST 800-53".into(),
+            framework_version: "Rev 5".into(),
+            requirement_external_id: "SC-45".into(),
+            requirement_kind: "control".into(),
+            requirement_title: Some("System time synchronization".into()),
+            relationship: "supports".into(),
+            coverage: "partial".into(),
+            rationale: Some("reviewed mapping".into()),
         }
     }
 
@@ -1996,24 +2235,74 @@ mod tests {
     #[test]
     fn mapping_editor_target_distinguishes_create_edit_and_immutable_modes() {
         let version = Uuid::from_u128(7);
-        assert_eq!(mapping_editor_target(false, None, false), MappingEditorTarget::Pending);
-        assert_eq!(mapping_editor_target(true, Some(version), true), MappingEditorTarget::Persisted(version));
-        assert_eq!(mapping_editor_target(true, Some(version), false), MappingEditorTarget::Unavailable);
-        assert_eq!(mapping_editor_target(true, None, true), MappingEditorTarget::Unavailable);
+        assert_eq!(
+            mapping_editor_target(false, None, false),
+            MappingEditorTarget::Pending
+        );
+        assert_eq!(
+            mapping_editor_target(true, Some(version), true),
+            MappingEditorTarget::Persisted(version)
+        );
+        assert_eq!(
+            mapping_editor_target(true, Some(version), false),
+            MappingEditorTarget::Unavailable
+        );
+        assert_eq!(
+            mapping_editor_target(true, None, true),
+            MappingEditorTarget::Unavailable
+        );
     }
 
     #[test]
     fn pending_mapping_builder_captures_selection_metadata() {
-        let framework = ComplianceFrameworkSummary { id: Uuid::from_u128(1), name: "NIST 800-53".into(), publisher: None, canonical_source_key: "nist".into(), description: None, version_count: 1 };
-        let version = ComplianceFrameworkVersionSummary { id: Uuid::from_u128(2), framework_id: framework.id, version: "Rev 5".into(), canonical_release_key: "rev5".into(), title: None, published_at: None, semantic_digest: "digest".into(), migration_recovery_status: "finalized".into(), migration_recovery_reason: None, requirement_count: 1 };
-        let requirement = RequirementVersionSummary { id: Uuid::from_u128(3), requirement_id: Uuid::from_u128(4), framework_version_id: version.id, external_id: "SC-45".into(), title: Some("System time synchronization".into()), kind: "control".into(), severity: None, parent_requirement_version_id: None, semantic_digest: "req".into() };
-        let mapping = pending_mapping_from_selection(&framework, &version, &requirement, "supports".into(), "partial".into(), Some("reviewed".into()));
+        let framework = ComplianceFrameworkSummary {
+            id: Uuid::from_u128(1),
+            name: "NIST 800-53".into(),
+            publisher: None,
+            canonical_source_key: "nist".into(),
+            description: None,
+            version_count: 1,
+        };
+        let version = ComplianceFrameworkVersionSummary {
+            id: Uuid::from_u128(2),
+            framework_id: framework.id,
+            version: "Rev 5".into(),
+            canonical_release_key: "rev5".into(),
+            title: None,
+            published_at: None,
+            semantic_digest: "digest".into(),
+            migration_recovery_status: "finalized".into(),
+            migration_recovery_reason: None,
+            requirement_count: 1,
+        };
+        let requirement = RequirementVersionSummary {
+            id: Uuid::from_u128(3),
+            requirement_id: Uuid::from_u128(4),
+            framework_version_id: version.id,
+            external_id: "SC-45".into(),
+            title: Some("System time synchronization".into()),
+            kind: "control".into(),
+            severity: None,
+            parent_requirement_version_id: None,
+            semantic_digest: "req".into(),
+        };
+        let mapping = pending_mapping_from_selection(
+            &framework,
+            &version,
+            &requirement,
+            "supports".into(),
+            "partial".into(),
+            Some("reviewed".into()),
+        );
         assert_eq!(mapping.requirement_version_id, requirement.id);
         assert_eq!(mapping.framework_name, "NIST 800-53");
         assert_eq!(mapping.framework_version, "Rev 5");
         assert_eq!(mapping.requirement_external_id, "SC-45");
         assert_eq!(mapping.requirement_kind, "control");
-        assert_eq!(mapping.requirement_title.as_deref(), Some("System time synchronization"));
+        assert_eq!(
+            mapping.requirement_title.as_deref(),
+            Some("System time synchronization")
+        );
         assert_eq!(mapping.relationship, "supports");
         assert_eq!(mapping.coverage, "partial");
         assert_eq!(mapping.rationale.as_deref(), Some("reviewed"));
@@ -2182,31 +2471,34 @@ mod tests {
 
     #[test]
     fn custom_frameworks_excludes_standard_and_empty_values() {
-        let policy = |framework: Option<&str>| PolicyDefinition {
-            id: Uuid::new_v4(),
-            lineage_id: Uuid::new_v4(),
-            version_id: None,
-            revision: None,
-            publication_state: None,
-            semantic_digest: None,
-            revisions: Vec::new(),
-            name: "test".to_string(),
-            description: String::new(),
-            format: PolicyFormat::Json,
-            body: "{}".to_string(),
-            policy_type: None,
-            updated_at: String::new(),
-            system_count: 0,
-            srg_ids: Vec::new(),
-            cci_ids: Vec::new(),
-            category: Some("security".to_string()),
-            framework: framework.map(str::to_string),
-            severity: None,
-            control_family: None,
-            cmmc_level: None,
-            cis_section: None,
-            rationale: None,
-        };
+         let policy = |framework: Option<&str>| PolicyDefinition {
+             id: Uuid::new_v4(),
+             lineage_id: Uuid::new_v4(),
+             version_id: None,
+             revision: None,
+             publication_state: None,
+             semantic_digest: None,
+             revisions: Vec::new(),
+             name: "test".to_string(),
+             description: String::new(),
+             format: PolicyFormat::Json,
+             body: "{}".to_string(),
+             policy_type: None,
+             updated_at: String::new(),
+             system_count: 0,
+             srg_ids: Vec::new(),
+             cci_ids: Vec::new(),
+             category: Some("security".to_string()),
+             framework: framework.map(str::to_string),
+             severity: None,
+             control_family: None,
+             cmmc_level: None,
+             cis_section: None,
+             rationale: None,
+             mapped_requirement_count: 0,
+             bundle_usage_count: 0,
+             evidence_specs: None,
+         };
 
         let frameworks = custom_frameworks(&[
             policy(Some("DISA STIG")),
@@ -2217,5 +2509,59 @@ mod tests {
         ]);
 
         assert_eq!(frameworks, vec!["Internal Baseline"]);
+    }
+
+    #[test]
+    fn evidence_required_fields_round_trip_preserves_metadata() {
+        use std::collections::HashMap;
+
+        // Create an EvidenceSpec with non-empty required_fields metadata
+        let mut required_fields = HashMap::new();
+        required_fields.insert("field1".to_string(), "value1".to_string());
+        required_fields.insert("field2".to_string(), "value2".to_string());
+
+        let original_spec = EvidenceSpec {
+            kind: EvidenceKind::Command {
+                cmd: "systemctl status ssh".to_string(),
+                expect: "active".to_string(),
+            },
+            required_fields: required_fields.clone(),
+        };
+
+        // Round-trip: EvidenceSpec -> PolicyEvidence -> EvidenceSpec
+        let evidence = PolicyEvidence::from_evidence_spec(&original_spec);
+        assert_eq!(evidence.required_fields, required_fields, "from_evidence_spec should preserve required_fields");
+
+        let round_tripped_spec = evidence.to_evidence_spec();
+        
+        // Assert the required_fields map survived intact
+        assert_eq!(
+            round_tripped_spec.required_fields, original_spec.required_fields,
+            "required_fields must be exactly equal after round-trip"
+        );
+        
+        // Assert the metadata is not empty (regression guard)
+        assert!(!round_tripped_spec.required_fields.is_empty(),
+            "required_fields must not be destroyed to empty HashMap");
+    }
+
+    #[test]
+    fn evidence_required_fields_empty_round_trip_preserves_empty() {
+        // Verify that empty required_fields also round-trips correctly
+        let original_spec = EvidenceSpec {
+            kind: EvidenceKind::File {
+                path: "/etc/ssh/sshd_config".to_string(),
+                note: Some("SSH config".to_string()),
+            },
+            required_fields: std::collections::HashMap::new(),
+        };
+
+        let evidence = PolicyEvidence::from_evidence_spec(&original_spec);
+        let round_tripped_spec = evidence.to_evidence_spec();
+
+        assert!(
+            round_tripped_spec.required_fields.is_empty(),
+            "empty required_fields must remain empty after round-trip"
+        );
     }
 }

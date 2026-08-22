@@ -521,6 +521,10 @@ async fn main() -> anyhow::Result<()> {
             get(compliance::get_bundle_version_policy_membership),
         )
         .route(
+            "/api/v1/policy-versions/:version_id/usage",
+            get(compliance::get_policy_version_usage),
+        )
+        .route(
             "/api/v1/compliance/bundle-versions/:version_id/requirements",
             get(compliance::get_bundle_version_requirement_membership),
         )

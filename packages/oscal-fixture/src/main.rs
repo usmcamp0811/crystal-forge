@@ -76,6 +76,12 @@ struct ComplianceSystemRollup {
     fail: i64,
     waiver: i64,
     total: i64,
+    #[serde(default)]
+    assignment_status: Option<String>,
+    #[serde(default)]
+    assignment_reason: Option<String>,
+    #[serde(default)]
+    assignment_approved_by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -595,6 +601,9 @@ fn build_fixture() -> String {
             fail: 1,
             waiver: 0,
             total: 3,
+            assignment_status: None,
+            assignment_reason: None,
+            assignment_approved_by: None,
         },
         ComplianceSystemRollup {
             system_id: sys2_id,
@@ -606,6 +615,9 @@ fn build_fixture() -> String {
             fail: 0,
             waiver: 0,
             total: 3,
+            assignment_status: None,
+            assignment_reason: None,
+            assignment_approved_by: None,
         },
     ];
 

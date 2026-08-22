@@ -42,7 +42,7 @@ pub struct NixosOptionAssertionDraft {
     /// The expected value.
     pub expected_value: NixosLiteralValue,
     /// The Nix expression that should evaluate to `true` when the option
-    /// matches the expected value.  E.g. `cfg.config.networking.firewall.enable == true`.
+    /// matches the expected value.  E.g. `config.networking.firewall.enable == true`.
     pub nix_expression: String,
     /// A human-readable label for the assertion.
     pub description: String,
@@ -118,7 +118,7 @@ pub fn infer_nixos_assertions(fix_text: &str) -> Vec<NixosOptionAssertionDraft> 
 
         let nix_repr = value.nix_repr();
         let nix_expression = format!(
-            "cfg.config.{} {} {}",
+            "config.{} {} {}",
             path,
             value.comparison_operator(),
             nix_repr,
@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(a.expected_value, NixosLiteralValue::Boolean(true));
         assert_eq!(
             a.nix_expression,
-            "cfg.config.networking.firewall.enable == true"
+            "config.networking.firewall.enable == true"
         );
     }
 
@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(assertions[0].expected_value, NixosLiteralValue::Integer(4));
         assert_eq!(
             assertions[0].nix_expression,
-            "cfg.config.services.openssh.maxAuthTries == 4"
+            "config.services.openssh.maxAuthTries == 4"
         );
     }
 
@@ -373,7 +373,7 @@ mod tests {
         assert_eq!(a.expected_value, NixosLiteralValue::Boolean(true));
         assert_eq!(
             a.nix_expression,
-            "cfg.config.networking.firewall.enable == true"
+            "config.networking.firewall.enable == true"
         );
     }
 

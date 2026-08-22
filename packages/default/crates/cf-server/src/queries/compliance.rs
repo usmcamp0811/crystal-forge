@@ -13,8 +13,9 @@ use crate::compliance::digest::{
     write_bundle_version_digest, write_policy_version_digest,
 };
 use crate::compliance::resolver::{
-    ResolutionOutcome, resolve_system_effective_policies,
+    EffectivePolicySource, ResolutionOutcome, resolve_system_effective_policies,
     resolve_systems_effective_policies_for_bundle_version_batch,
+    resolve_systems_effective_policies_for_bundle_versions_batch,
 };
 use crate::queries::deletion::{blocker, eligibility};
 
@@ -215,6 +216,7 @@ pub async fn ensure_bundle_draft(
         name: String,
         framework: String,
         framework_version: Option<String>,
+        framework_version_id: Option<Uuid>,
         description: Option<String>,
         layer: String,
         owner: String,
@@ -222,7 +224,7 @@ pub async fn ensure_bundle_draft(
     }
     let pub_ver: PublishedBundleVersion = sqlx::query_as(
         r#"
-        SELECT name, framework, framework_version, description, layer, owner, version
+        SELECT name, framework, framework_version, framework_version_id, description, layer, owner, version
         FROM compliance_bundle_versions
         WHERE id = $1
         "#,
@@ -240,10 +242,10 @@ pub async fn ensure_bundle_draft(
     let new_draft_id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO compliance_bundle_versions (
-            bundle_id, version, name, framework, framework_version,
+            bundle_id, version, name, framework, framework_version, framework_version_id,
             description, layer, owner, semantic_digest, derived_from_version_id,
             created_by
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11)
         RETURNING id
         "#,
     )
@@ -252,6 +254,7 @@ pub async fn ensure_bundle_draft(
     .bind(&pub_ver.name)
     .bind(&pub_ver.framework)
     .bind(&pub_ver.framework_version)
+    .bind(pub_ver.framework_version_id)
     .bind(&pub_ver.description)
     .bind(&pub_ver.layer)
     .bind(&pub_ver.owner)
@@ -482,6 +485,11 @@ pub enum BundleValidationError {
     EmptyBaseline,
     DuplicateRequirement(Uuid),
     RequirementNotFound(Uuid),
+    RequirementFrameworkMismatch {
+        requirement_version_id: Uuid,
+        expected_framework_version_id: Uuid,
+        actual_framework_version_id: Uuid,
+    },
 }
 
 impl std::fmt::Display for BundleValidationError {
@@ -494,6 +502,16 @@ impl std::fmt::Display for BundleValidationError {
                 write!(f, "Duplicate requirement version {id} in request")
             }
             Self::RequirementNotFound(id) => write!(f, "Requirement version {id} was not found"),
+            Self::RequirementFrameworkMismatch {
+                requirement_version_id,
+                expected_framework_version_id,
+                actual_framework_version_id,
+            } => write!(
+                f,
+                "Requirement version {requirement_version_id} belongs to framework version \
+                 {actual_framework_version_id}, but this bundle revision is sourced from \
+                 framework version {expected_framework_version_id}"
+            ),
         }
     }
 }
@@ -560,12 +578,59 @@ async fn validate_requirement_versions(
     Ok(())
 }
 
+async fn validate_requirement_framework_version(
+    tx: &mut Transaction<'_, Postgres>,
+    bundle_version_id: Uuid,
+    requirement_version_ids: &[Uuid],
+) -> Result<()> {
+    if requirement_version_ids.is_empty() {
+        return Ok(());
+    }
+
+    let source_framework_version_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT framework_version_id FROM compliance_bundle_versions WHERE id = $1",
+    )
+    .bind(bundle_version_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let Some(expected_framework_version_id) = source_framework_version_id else {
+        return Ok(());
+    };
+
+    let mismatch: Option<(Uuid, Uuid)> = sqlx::query_as(
+        r#"
+        SELECT requested.id, rv.framework_version_id
+        FROM unnest($1::uuid[]) WITH ORDINALITY AS requested(id, request_order)
+        JOIN compliance_requirement_versions rv ON rv.id = requested.id
+        WHERE rv.framework_version_id <> $2
+        ORDER BY requested.request_order
+        LIMIT 1
+        "#,
+    )
+    .bind(requirement_version_ids)
+    .bind(expected_framework_version_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    if let Some((requirement_version_id, actual_framework_version_id)) = mismatch {
+        return Err(BundleValidationError::RequirementFrameworkMismatch {
+            requirement_version_id,
+            expected_framework_version_id,
+            actual_framework_version_id,
+        }
+        .into());
+    }
+
+    Ok(())
+}
+
 use crate::api::models::{
     BundleVersionPolicyMembership, ComplianceBundleSummary, ComplianceBundleSystemsResponse,
     ComplianceBundleVersionSummary, ComplianceControlEvidence, ComplianceControlStatus,
     ComplianceEnvironmentRef, ComplianceEvidenceArtifact, ComplianceEvidenceItem,
     ComplianceEvidenceResponse, ComplianceRollupTotals, ComplianceSystemRollup,
-    CreateComplianceBundleRequest, UpdateComplianceBundleRequest,
+    CreateComplianceBundleRequest, PolicyVersionBundleUsage, PolicyVersionSystemUsage,
+    PolicyVersionUsageResponse, UpdateComplianceBundleRequest,
 };
 
 /// Load the exact immutable policy versions selected by one bundle version.
@@ -605,6 +670,165 @@ pub async fn list_bundle_version_policy_membership(
     .await?;
 
     Ok(Some(members))
+}
+
+/// Return immutable bundle membership and assignment-resolved system usage for
+/// one exact policy version. Bundle membership and effective usage are kept
+/// separate because assignment overlays can exclude or add policy versions.
+pub async fn load_policy_version_usage(
+    pool: &PgPool,
+    policy_version_id: Uuid,
+) -> Result<Option<PolicyVersionUsageResponse>> {
+    let policy_version_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM deployment_policy_versions WHERE id = $1)",
+    )
+    .bind(policy_version_id)
+    .fetch_one(pool)
+    .await?;
+    if !policy_version_exists {
+        return Ok(None);
+    }
+
+    let bundle_versions = sqlx::query_as::<_, PolicyVersionBundleUsage>(
+        r#"
+        SELECT b.id AS bundle_id,
+               b.name AS bundle_name,
+               bv.id AS bundle_version_id,
+               bv.version AS bundle_version,
+               bv.publication_state,
+               bvp.policy_order,
+               COALESCE(b.current_published_version_id = bv.id, false) AS is_current_published,
+               COALESCE(b.current_draft_version_id = bv.id, false) AS is_current_draft
+        FROM compliance_bundle_version_policies bvp
+        JOIN compliance_bundle_versions bv ON bv.id = bvp.bundle_version_id
+        JOIN compliance_bundles b ON b.id = bv.bundle_id
+        WHERE bvp.policy_version_id = $1
+          AND bvp.selected = true
+        ORDER BY b.name, bv.created_at DESC, bv.id
+        "#,
+    )
+    .bind(policy_version_id)
+    .fetch_all(pool)
+    .await
+    .context("load exact policy-version bundle usage")?;
+
+    #[derive(Debug, Clone, FromRow)]
+    struct CandidateSystemUsage {
+        system_id: Uuid,
+        hostname: String,
+        environment: Option<String>,
+        bundle_id: Uuid,
+        bundle_name: String,
+        bundle_version_id: Uuid,
+        bundle_version: String,
+    }
+
+    let candidates = sqlx::query_as::<_, CandidateSystemUsage>(
+        r#"
+        WITH candidate_assignments AS (
+            SELECT a.bundle_id,
+                   av.bundle_version_id,
+                   a.scope_type,
+                   a.environment_id,
+                   a.system_id
+            FROM compliance_bundle_assignments a
+            JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
+            WHERE a.active
+              AND a.current_version_id IS NOT NULL
+              AND (
+                  EXISTS (
+                      SELECT 1
+                      FROM compliance_bundle_version_policies bvp
+                      WHERE bvp.bundle_version_id = av.bundle_version_id
+                        AND bvp.policy_version_id = $1
+                        AND bvp.selected = true
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                      FROM compliance_assignment_additions addition
+                      WHERE addition.assignment_version_id = a.current_version_id
+                        AND addition.policy_version_id = $1
+                  )
+              )
+        )
+        SELECT DISTINCT
+               s.id AS system_id,
+               s.hostname,
+               e.name AS environment,
+               b.id AS bundle_id,
+               b.name AS bundle_name,
+               bv.id AS bundle_version_id,
+               bv.version AS bundle_version
+        FROM candidate_assignments a
+        JOIN compliance_bundles b ON b.id = a.bundle_id
+        JOIN compliance_bundle_versions bv ON bv.id = a.bundle_version_id
+        JOIN systems s ON
+             (a.scope_type = 'system' AND a.system_id = s.id)
+             OR (a.scope_type = 'environment' AND a.environment_id = s.environment_id)
+        LEFT JOIN environments e ON e.id = s.environment_id
+        ORDER BY b.name, bv.version, s.hostname, s.id
+        "#,
+    )
+    .bind(policy_version_id)
+    .fetch_all(pool)
+    .await
+    .context("load exact policy-version system candidates")?;
+
+    let mut requests = std::collections::BTreeMap::<Uuid, Vec<Uuid>>::new();
+    for candidate in &candidates {
+        requests
+            .entry(candidate.bundle_version_id)
+            .or_default()
+            .push(candidate.system_id);
+    }
+    let requests: Vec<_> = requests.into_iter().collect();
+    let resolved = resolve_systems_effective_policies_for_bundle_versions_batch(pool, &requests)
+        .await
+        .context("resolve exact policy-version system usage")?;
+
+    let mut systems = Vec::new();
+    for candidate in candidates {
+        let Some(ResolutionOutcome::Resolved(set)) =
+            resolved.get(&(candidate.bundle_version_id, candidate.system_id))
+        else {
+            continue;
+        };
+        let Some(bundle_provenance) = set.policies.iter().find_map(|policy| {
+            (policy.policy_version_id == policy_version_id)
+                .then(|| {
+                    policy.provenance.iter().find(|entry| {
+                        entry.authoritative
+                            && entry.bundle_id == Some(candidate.bundle_id)
+                            && entry.bundle_version_id == Some(candidate.bundle_version_id)
+                    })
+                })
+                .flatten()
+        }) else {
+            continue;
+        };
+        let source = match &bundle_provenance.source {
+            EffectivePolicySource::Baseline => "baseline",
+            EffectivePolicySource::Addition => "addition",
+            EffectivePolicySource::LegacyDirect => "legacy_direct",
+        };
+        systems.push(PolicyVersionSystemUsage {
+            system_id: candidate.system_id,
+            hostname: candidate.hostname,
+            environment: candidate.environment,
+            bundle_id: candidate.bundle_id,
+            bundle_name: candidate.bundle_name,
+            bundle_version_id: candidate.bundle_version_id,
+            bundle_version: candidate.bundle_version,
+            source: source.to_string(),
+            enforcement_mode: bundle_provenance.enforcement_mode.clone(),
+        });
+    }
+
+    Ok(Some(PolicyVersionUsageResponse {
+        policy_version_id,
+        bundle_versions,
+        systems,
+    }))
 }
 
 pub async fn list_bundle_version_requirement_membership(
@@ -730,7 +954,204 @@ fn bundle_from_row(row: BundleRow) -> ComplianceBundleSummary {
         current_draft_version: row.current_draft_version,
         current_published_version: row.current_published_version,
         versions: Vec::new(),
+        applicable_system_count: 0,
+        aggregate_score: None,
     }
+}
+
+fn aggregate_score(pass: i64, evaluated_controls: i64) -> Option<i64> {
+    if evaluated_controls > 0 {
+        Some((pass * 100) / evaluated_controls)
+    } else {
+        None
+    }
+}
+
+async fn list_bundle_summary_aggregates(
+    pool: &PgPool,
+    bundles: &[ComplianceBundleSummary],
+) -> Result<std::collections::HashMap<Uuid, (i64, Option<i64>)>> {
+    let pairs: Vec<(Uuid, Uuid)> = bundles
+        .iter()
+        .filter_map(|bundle| {
+            bundle
+                .current_published_version_id
+                .or(bundle.current_draft_version_id)
+                .map(|version_id| (bundle.id, version_id))
+        })
+        .collect();
+    if pairs.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    // Load every bundle/version's applicable systems in one set-based query.
+    // Environment membership is only an eligibility boundary; active
+    // assignments are the sole source of applicability for every revision.
+    let bundle_ids: Vec<Uuid> = pairs.iter().map(|(bundle_id, _)| *bundle_id).collect();
+    let version_ids: Vec<Uuid> = pairs.iter().map(|(_, version_id)| *version_id).collect();
+    let rows: Vec<(Uuid, Uuid, Uuid, String, Option<String>, String, i32, i32)> = sqlx::query_as(
+        r#"
+        WITH requested(bundle_id, bundle_version_id) AS (
+            SELECT * FROM unnest($1::uuid[], $2::uuid[])
+        )
+        SELECT DISTINCT requested.bundle_id, requested.bundle_version_id,
+               v.id, v.hostname, v.environment, v.health_status,
+               v.critical_cve_count, v.high_cve_count
+        FROM requested
+        JOIN compliance_bundles b ON b.id = requested.bundle_id
+         JOIN view_system_list v ON EXISTS (
+             SELECT 1
+             FROM compliance_bundle_assignments a
+             JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
+             LEFT JOIN environments system_env ON system_env.name = v.environment
+             WHERE a.bundle_id = b.id
+               AND av.bundle_version_id = requested.bundle_version_id
+               AND a.active
+               AND (
+                   (a.scope_type = 'system' AND a.system_id = v.id)
+                   OR (a.scope_type = 'environment' AND a.environment_id = system_env.id)
+               )
+          )
+        ORDER BY requested.bundle_id, requested.bundle_version_id, v.hostname
+        "#,
+    )
+    .bind(&bundle_ids)
+    .bind(&version_ids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut systems_by_pair = std::collections::HashMap::<(Uuid, Uuid), Vec<SystemRow>>::new();
+    for (
+        bundle_id,
+        version_id,
+        id,
+        hostname,
+        environment,
+        health_status,
+        critical_cve_count,
+        high_cve_count,
+    ) in rows
+    {
+        let system = SystemRow {
+            id,
+            hostname,
+            environment,
+            health_status,
+            critical_cve_count,
+            high_cve_count,
+        };
+        systems_by_pair
+            .entry((bundle_id, version_id))
+            .or_default()
+            .push(system);
+    }
+
+    // Resolve each distinct version once for all systems that need it. This is
+    // the bounded batch path; no bundle calls the detailed systems endpoint.
+    let mut system_ids_by_version = std::collections::HashMap::<Uuid, Vec<Uuid>>::new();
+    for ((_, version_id), systems) in &systems_by_pair {
+        let ids = system_ids_by_version.entry(*version_id).or_default();
+        ids.extend(systems.iter().map(|system| system.id));
+    }
+    for ids in system_ids_by_version.values_mut() {
+        ids.sort_unstable();
+        ids.dedup();
+    }
+    let resolver_requests: Vec<(Uuid, Vec<Uuid>)> = system_ids_by_version.into_iter().collect();
+    let effective_by_version_system =
+        resolve_systems_effective_policies_for_bundle_versions_batch(pool, &resolver_requests)
+            .await?;
+
+    // Collect all (bundle_id, system_id) pairs for batch assignment loading
+    let mut pair_list = Vec::new();
+    for (bundle_id, version_id) in &pairs {
+        if let Some(systems) = systems_by_pair.get(&(*bundle_id, *version_id)) {
+            for system in systems {
+                pair_list.push((*bundle_id, system.id));
+            }
+        }
+    }
+
+    // Load all assignment statuses in one batch query
+    let assignment_statuses = if !pair_list.is_empty() {
+        load_assignment_statuses_for_pairs(pool, &pair_list).await?
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    let mut evidence_work = Vec::new();
+    let mut unresolved_by_pair =
+        std::collections::HashMap::<(Uuid, Uuid), Vec<ComplianceSystemRollup>>::new();
+    for (bundle_id, version_id) in pairs {
+        let Some(systems) = systems_by_pair.get(&(bundle_id, version_id)) else {
+            unresolved_by_pair.insert((bundle_id, version_id), Vec::new());
+            continue;
+        };
+        for system in systems {
+            // Look up pre-loaded assignment status
+            let assignment_status = assignment_statuses
+                .get(&(bundle_id, system.id))
+                .cloned()
+                .flatten();
+            let rollup = match effective_by_version_system.get(&(version_id, system.id)) {
+                Some(ResolutionOutcome::Resolved(set)) if set.bundle_version_id == version_id => {
+                    evidence_work.push((
+                        (bundle_id, version_id),
+                        system.clone(),
+                        set.policies.clone(),
+                    ));
+                    None
+                }
+                Some(ResolutionOutcome::Conflict(conflicts)) => Some(unresolved_system_rollup(
+                    system.clone(),
+                    0,
+                    conflicts
+                        .first()
+                        .map(|conflict| conflict.code.as_str())
+                        .unwrap_or("conflict"),
+                    assignment_status,
+                )),
+                _ => Some(unresolved_system_rollup(
+                    system.clone(),
+                    0,
+                    "not_applicable",
+                    assignment_status,
+                )),
+            };
+            if let Some(rollup) = rollup {
+                unresolved_by_pair
+                    .entry((bundle_id, version_id))
+                    .or_default()
+                    .push(rollup);
+            }
+        }
+    }
+
+    // Note: assignment_status is now determined per-system inside the batch function
+    let dummy_assignment_status = std::collections::HashMap::new();
+    let batched_rollups = effective_policy_rollups_with_evidence_batch(
+        pool,
+        &evidence_work,
+        &dummy_assignment_status,
+    )
+    .await?;
+    let mut rollups_by_pair = unresolved_by_pair;
+    for (pair, rollup) in batched_rollups {
+        rollups_by_pair.entry(pair).or_default().push(rollup);
+    }
+
+    let mut aggregates = std::collections::HashMap::new();
+    for ((bundle_id, version_id), rollups) in rollups_by_pair {
+        let totals = totals_for_rollups(&rollups);
+        aggregates.insert(
+            bundle_id,
+            (
+                totals.system_count,
+                aggregate_score(totals.pass, totals.evaluated_controls),
+            ),
+        );
+    }
+    Ok(aggregates)
 }
 
 pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>> {
@@ -761,19 +1182,24 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
         FROM compliance_bundles b
         LEFT JOIN LATERAL (
             SELECT
-                array_agg(cbp.policy_id ORDER BY dp.name) AS policy_ids,
+                array_agg(pv.policy_id ORDER BY pv.name) AS policy_ids,
                 count(*)::bigint AS policy_count
-            FROM compliance_bundle_policies cbp
-            JOIN deployment_policies dp ON dp.id = cbp.policy_id
-            WHERE cbp.bundle_id = b.id
+            FROM compliance_bundle_version_policies cbvp
+            JOIN deployment_policy_versions pv ON pv.id = cbvp.policy_version_id
+            WHERE cbvp.bundle_version_id = COALESCE(
+                b.current_published_version_id,
+                b.current_draft_version_id
+            )
+              AND cbvp.selected = true
         ) p ON TRUE
         LEFT JOIN LATERAL (
             SELECT count(*)::bigint AS requirement_count
             FROM compliance_bundle_version_requirements bvr
             WHERE bvr.bundle_version_id = COALESCE(
-                b.current_draft_version_id,
-                b.current_published_version_id
+                b.current_published_version_id,
+                b.current_draft_version_id
             )
+              AND bvr.selected = true
         ) r ON TRUE
         LEFT JOIN LATERAL (
             SELECT
@@ -863,6 +1289,14 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
                 is_current_draft: bundle.current_draft_version_id == Some(row.0),
             })
             .collect();
+    }
+
+    let aggregates = list_bundle_summary_aggregates(pool, &bundles).await?;
+    for bundle in &mut bundles {
+        if let Some((system_count, score)) = aggregates.get(&bundle.id) {
+            bundle.applicable_system_count = *system_count;
+            bundle.aggregate_score = *score;
+        }
     }
 
     Ok(bundles)
@@ -1134,6 +1568,12 @@ pub async fn update_bundle(
     )
     .await?;
     validate_requirement_versions(&mut tx, &request.requirement_version_ids).await?;
+    validate_requirement_framework_version(
+        &mut tx,
+        draft_version_id,
+        &request.requirement_version_ids,
+    )
+    .await?;
 
     // Load layer and owner from the current draft version (not from constants).
     let (stored_layer, stored_owner): (String, String) =
@@ -1529,6 +1969,16 @@ pub async fn delete_bundle(pool: &PgPool, bundle_id: Uuid) -> Result<BundleDelet
         return Ok(BundleDeleteOutcome::Blocked(eligibility));
     }
 
+    // Versionless draft assignment lineages can be created by the legacy
+    // bundle-environment synchronization trigger. Remove those rows before
+    // deleting the bundle because they hold RESTRICT references to its draft
+    // version. Any lineage with immutable version history was blocked above.
+    sqlx::query("DELETE FROM compliance_bundle_assignments WHERE bundle_id = $1")
+        .bind(bundle_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to remove disposable bundle assignments")?;
+
     sqlx::query("DELETE FROM compliance_source_object_mappings m USING compliance_bundle_versions bv WHERE m.bundle_version_id = bv.id AND bv.bundle_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim') AND NOT EXISTS (SELECT 1 FROM deployment_policy_versions pv WHERE pv.id = m.policy_version_id AND pv.publication_state IN ('accepted', 'deprecated'))")
         .bind(bundle_id).execute(&mut *tx).await.context("Failed to remove disposable bundle source mappings")?;
     sqlx::query("DELETE FROM compliance_bundle_version_policies bvp USING compliance_bundle_versions bv WHERE bvp.bundle_version_id = bv.id AND bv.bundle_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim')")
@@ -1598,7 +2048,10 @@ async fn list_explicit_bundle_version_system_rows(
         FROM view_system_list v
         LEFT JOIN environments e ON e.name = v.environment
         JOIN compliance_bundle_assignments a
-          ON a.bundle_version_id = $2 AND a.active
+          ON a.bundle_id = $1 AND a.active
+        JOIN compliance_bundle_assignment_versions av
+          ON av.id = a.current_version_id
+         AND av.bundle_version_id = $2
          AND (
              (a.scope_type = 'system' AND a.system_id = v.id)
              OR (a.scope_type = 'environment' AND a.environment_id = e.id)
@@ -1632,6 +2085,15 @@ pub async fn list_bundle_systems_for_version(
         return Ok(None);
     }
 
+    // Get the bundle's current published version for assignment status determination
+    let current_published_version: Option<Uuid> = sqlx::query_scalar(
+        "SELECT current_published_version_id FROM compliance_bundles WHERE id = $1",
+    )
+    .bind(bundle_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+
     let policies = sqlx::query_as::<_, PolicyRow>(
         r#"SELECT pv.policy_id AS id, $2 AS bundle_id, pv.name, pv.description,
                   pv.policy_type, pv.config, (dp.enabled AND pv.publication_state IN ('accepted', 'deprecated')) AS enabled
@@ -1645,18 +2107,8 @@ pub async fn list_bundle_systems_for_version(
     .bind(bundle_id)
     .fetch_all(pool)
     .await?;
-    let is_current_published: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM compliance_bundles WHERE id = $1 AND current_published_version_id = $2)",
-    )
-    .bind(bundle_id)
-    .bind(bundle_version_id)
-    .fetch_one(pool)
-    .await?;
-    let systems = if is_current_published {
-        list_applicable_system_rows(pool, bundle_id).await?
-    } else {
-        list_explicit_bundle_version_system_rows(pool, bundle_id, bundle_version_id).await?
-    };
+    let systems =
+        list_explicit_bundle_version_system_rows(pool, bundle_id, bundle_version_id).await?;
     let system_ids: Vec<Uuid> = systems.iter().map(|system| system.id).collect();
     let effective = resolve_systems_effective_policies_for_bundle_version_batch(
         pool,
@@ -1664,25 +2116,146 @@ pub async fn list_bundle_systems_for_version(
         bundle_version_id,
     )
     .await?;
+
+    // Load assignment metadata for all systems in one batch query
+    let assignment_metadata = load_assignment_metadata_for_systems(
+        pool,
+        bundle_id,
+        current_published_version,
+        &system_ids,
+    )
+    .await?;
+
+    // Collect all effective policies from all systems and materialize once
+    let all_effective_policies: Vec<crate::compliance::resolver::EffectivePolicy> = effective
+        .values()
+        .flat_map(|outcome| match outcome {
+            ResolutionOutcome::Resolved(set) => set.policies.iter().cloned().collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+
+    let materialized_policies = if !all_effective_policies.is_empty() {
+        materialize_effective_policies(pool, &all_effective_policies).await?
+    } else {
+        Vec::new()
+    };
+
+    // Index materialized policies by version ID for fast lookup
+    let policies_by_version: std::collections::HashMap<Uuid, PolicyRow> = all_effective_policies
+        .into_iter()
+        .zip(materialized_policies)
+        .map(|(effective, policy)| (effective.policy_version_id, policy))
+        .collect();
+
+    // Load assessment context for all systems in one batch
+    let contexts: std::collections::HashMap<Uuid, AssessmentContext> = {
+        let context_rows: Vec<(Uuid, i32, Value)> = sqlx::query_as(
+            r#"
+            SELECT s.id, d.id AS derivation_id, d.policy_results
+            FROM systems s
+            JOIN LATERAL (
+                SELECT ss.store_path
+                FROM system_states ss
+                WHERE ss.hostname = s.hostname
+                ORDER BY ss.timestamp DESC, ss.id DESC
+                LIMIT 1
+            ) deployed ON true
+            JOIN derivations d ON COALESCE(d.store_path, d.expected_store_path) = deployed.store_path
+            WHERE s.id = ANY($1)
+              AND d.derivation_type = 'nixos'
+            ORDER BY s.id, d.completed_at DESC NULLS LAST, d.id DESC
+            "#,
+        )
+        .bind(&system_ids)
+        .fetch_all(pool)
+        .await?;
+
+        context_rows.into_iter().fold(
+            std::collections::HashMap::new(),
+            |mut contexts, (system_id, derivation_id, policy_results)| {
+                contexts.entry(system_id).or_insert(AssessmentContext {
+                    derivation_id,
+                    policy_results,
+                });
+                contexts
+            },
+        )
+    };
+
+    // CVE controls must use the same latest-completed-scan semantics as the
+    // catalog aggregate path. Batch once for every deployed derivation rather
+    // than issuing one query per policy/system while assembling rows.
+    let derivation_ids: Vec<i32> = contexts
+        .values()
+        .map(|context| context.derivation_id)
+        .collect();
+    let cve_scans = latest_completed_cve_scans(pool, &derivation_ids).await?;
+
     let mut rollups = Vec::with_capacity(systems.len());
     for system in systems {
+        // Retrieve pre-loaded assignment metadata
+        let metadata = assignment_metadata.get(&system.id);
+
         let rollup = match effective.get(&system.id) {
             Some(ResolutionOutcome::Resolved(set))
                 if set.bundle_version_id == bundle_version_id =>
             {
-                effective_policy_rollup_with_evidence(pool, &system, &set.policies).await?
+                // Construct rollup from pre-loaded data (no DB queries in loop)
+                let system_policies: Vec<PolicyRow> = set
+                    .policies
+                    .iter()
+                    .filter_map(|ep| policies_by_version.get(&ep.policy_version_id).cloned())
+                    .collect();
+
+                let mut statuses = Vec::with_capacity(system_policies.len());
+                let context = contexts.get(&system.id).cloned();
+                let cve_scan = context
+                    .as_ref()
+                    .and_then(|context| cve_scans.get(&context.derivation_id));
+
+                for policy in system_policies {
+                    statuses.push(
+                        resolve_control_evidence_with_context(
+                            context.clone(),
+                            cve_scan,
+                            &system,
+                            policy,
+                        )
+                        .status,
+                    );
+                }
+
+                let report_only = set
+                    .policies
+                    .iter()
+                    .filter(|policy| {
+                        matches!(
+                            policy.effective_mode,
+                            crate::compliance::resolver::AssignmentMode::ReportOnly
+                        )
+                    })
+                    .count() as i64;
+
+                rollup_from_statuses_with_metadata(system.clone(), &statuses, report_only, metadata)
             }
-            Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup(
+            Some(ResolutionOutcome::Conflict(conflicts)) => unresolved_system_rollup_with_metadata(
                 system,
                 policies.len() as i64,
                 conflicts
                     .first()
                     .map(|c| c.code.as_str())
                     .unwrap_or("conflict"),
+                metadata,
             ),
             // Missing or mismatched resolution has no authoritative effective
             // set. Never substitute lineage/current membership for this view.
-            _ => unresolved_system_rollup(system, policies.len() as i64, "not_applicable"),
+            _ => unresolved_system_rollup_with_metadata(
+                system,
+                policies.len() as i64,
+                "not_applicable",
+                metadata,
+            ),
         };
         rollups.push(rollup);
     }
@@ -1790,20 +2363,23 @@ pub async fn list_system_bundles(
         FROM compliance_bundles b
         LEFT JOIN environments e ON e.name = $2
         WHERE b.id = ANY($1)
-          AND (
-            NOT EXISTS (
-                SELECT 1 FROM compliance_bundle_environments cbe
-                WHERE cbe.bundle_id = b.id
-            )
-            OR EXISTS (
-                SELECT 1 FROM compliance_bundle_environments cbe
-                WHERE cbe.bundle_id = b.id AND cbe.environment_id = e.id
-            )
+          AND EXISTS (
+              SELECT 1
+              FROM compliance_bundle_assignments a
+              JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
+              WHERE a.bundle_id = b.id
+                AND av.bundle_version_id = COALESCE(b.current_published_version_id, b.current_draft_version_id)
+                AND a.active
+                AND (
+                    (a.scope_type = 'system' AND a.system_id = $3)
+                    OR (a.scope_type = 'environment' AND a.environment_id = e.id)
+                )
           )
         "#,
         )
         .bind(all_bundles.iter().map(|b| b.id).collect::<Vec<_>>())
         .bind(&system.environment)
+        .bind(system.id)
         .fetch_all(pool)
         .await?
     };
@@ -1863,32 +2439,82 @@ pub async fn list_system_bundles(
                     .map_or(0, |policies| policies.len() as i64);
                 (
                     bundle,
-                    unresolved_system_rollup(system.clone(), total, &state),
+                    unresolved_system_rollup(system.clone(), total, &state, None),
                 )
             })
             .collect();
         return Ok(Some(SystemBundleRollups {
             bundles,
-            direct_rollup: unresolved_system_rollup(system.clone(), 0, &state),
-            overall_rollup: unresolved_system_rollup(system, 0, &state),
+            direct_rollup: unresolved_system_rollup(system.clone(), 0, &state, None),
+            overall_rollup: unresolved_system_rollup(system, 0, &state, None),
         }));
     };
 
     let (mut policies_by_bundle, direct_policies) =
         partition_effective_policies_by_bundle(&effective.policies);
 
+    // Batch load assignment statuses for all visible bundles and the effective bundle
+    // in a single query to avoid N+1 per-bundle lookups
+    let mut all_pairs = Vec::new();
+    for bundle in &visible_bundles {
+        all_pairs.push((bundle.id, system.id));
+    }
+
+    // Also include the overall effective bundle if it differs from visible bundles
+    let bundle_for_effective: Option<Uuid> =
+        sqlx::query_scalar("SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1")
+            .bind(effective.bundle_version_id)
+            .fetch_optional(pool)
+            .await?;
+    if let Some(eff_bundle_id) = bundle_for_effective {
+        // Only add if not already in visible_bundles
+        if !all_pairs.iter().any(|(bid, _)| *bid == eff_bundle_id) {
+            all_pairs.push((eff_bundle_id, system.id));
+        }
+    }
+
+    // Load all assignment statuses in one batch query
+    let assignment_statuses = if !all_pairs.is_empty() {
+        load_assignment_statuses_for_pairs(pool, &all_pairs).await?
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    // The effective policy set's bundle_id is from the effective resolution,
+    // which may not match all visible bundles. Use preloaded assignment statuses.
     let mut bundles = Vec::with_capacity(visible_bundles.len());
     for bundle in visible_bundles {
+        // Look up pre-loaded assignment status
+        let assignment_status = assignment_statuses
+            .get(&(bundle.id, system.id))
+            .cloned()
+            .flatten();
         let policies = policies_by_bundle.remove(&bundle.id).unwrap_or_default();
         bundles.push((
             bundle,
-            effective_policy_rollup_with_evidence(pool, &system, &policies).await?,
+            effective_policy_rollup_with_evidence(pool, &system, &policies, assignment_status)
+                .await?,
         ));
     }
     let direct_rollup =
-        effective_policy_rollup_with_evidence(pool, &system, &direct_policies).await?;
-    let overall_rollup =
-        effective_policy_rollup_with_evidence(pool, &system, &effective.policies).await?;
+        effective_policy_rollup_with_evidence(pool, &system, &direct_policies, None).await?;
+
+    // For overall rollup, use the preloaded assignment status
+    let overall_assignment_status = if let Some(eff_bundle_id) = bundle_for_effective {
+        assignment_statuses
+            .get(&(eff_bundle_id, system.id))
+            .cloned()
+            .flatten()
+    } else {
+        None
+    };
+    let overall_rollup = effective_policy_rollup_with_evidence(
+        pool,
+        &system,
+        &effective.policies,
+        overall_assignment_status,
+    )
+    .await?;
 
     Ok(Some(SystemBundleRollups {
         bundles,
@@ -1905,6 +2531,7 @@ pub async fn list_system_bundles(
 /// - All bundles
 /// - The set of applicable bundle IDs
 /// - Policies grouped by bundle_id
+/// - Optional assignment status for the bundle
 ///
 /// Returns bundles with computed rollups, filtered to only applicable bundles.
 pub(crate) fn assemble_system_compliance_bundles(
@@ -1926,7 +2553,7 @@ pub(crate) fn assemble_system_compliance_bundles(
             .unwrap_or_default();
 
         // system_rollup is pure deterministic computation with no fallible operations
-        let rollup = system_rollup(system.clone(), &policies);
+        let rollup = system_rollup(system.clone(), &policies, None);
         result.push((bundle, rollup));
     }
 
@@ -2006,10 +2633,19 @@ pub async fn get_system_evidence(
     } else if bundle_version_id.is_some() {
         resolution_state = Some("conflict".to_string());
     }
+    let context = assessment_context(pool, system.id).await?;
+    let cve_scan = match context.as_ref() {
+        Some(context) => latest_completed_cve_scan(pool, context.derivation_id).await?,
+        None => None,
+    };
     let mut controls = Vec::with_capacity(policies.len());
     for policy in policies {
-        let evidence = resolve_control_evidence(pool, &system, policy).await?;
-        controls.push(evidence);
+        controls.push(resolve_control_evidence_with_context(
+            context.clone(),
+            cve_scan.as_ref(),
+            &system,
+            policy,
+        ));
     }
 
     Ok(Some(ComplianceEvidenceResponse {
@@ -2049,17 +2685,24 @@ async fn find_applicable_system_row(
             v.critical_cve_count,
             v.high_cve_count
         FROM view_system_list v
+        JOIN compliance_bundle_versions bv
+          ON bv.id = COALESCE(
+              (SELECT current_published_version_id FROM compliance_bundles WHERE id = $1),
+              (SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1)
+          )
         LEFT JOIN environments e ON e.name = v.environment
         WHERE v.id = $2
-          AND (
-            NOT EXISTS (
-                SELECT 1 FROM compliance_bundle_environments cbe
-                WHERE cbe.bundle_id = $1
-            )
-            OR EXISTS (
-                SELECT 1 FROM compliance_bundle_environments cbe
-                WHERE cbe.bundle_id = $1 AND cbe.environment_id = e.id
-            )
+          AND EXISTS (
+              SELECT 1
+              FROM compliance_bundle_assignments a
+              JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
+              WHERE a.bundle_id = $1
+                AND av.bundle_version_id = bv.id
+                AND a.active
+                AND (
+                    (a.scope_type = 'system' AND a.system_id = v.id)
+                    OR (a.scope_type = 'environment' AND a.environment_id = e.id)
+                )
           )
         "#,
     )
@@ -2095,14 +2738,21 @@ async fn list_applicable_system_rows(pool: &PgPool, bundle_id: Uuid) -> Result<V
             v.critical_cve_count,
             v.high_cve_count
         FROM view_system_list v
+        JOIN compliance_bundles b ON b.id = $1
+        JOIN compliance_bundle_versions bv
+          ON bv.id = COALESCE(b.current_published_version_id, b.current_draft_version_id)
         LEFT JOIN environments e ON e.name = v.environment
-        WHERE NOT EXISTS (
-            SELECT 1 FROM compliance_bundle_environments cbe
-            WHERE cbe.bundle_id = $1
-        )
-        OR EXISTS (
-            SELECT 1 FROM compliance_bundle_environments cbe
-            WHERE cbe.bundle_id = $1 AND cbe.environment_id = e.id
+        WHERE EXISTS (
+            SELECT 1
+            FROM compliance_bundle_assignments a
+            JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
+            WHERE a.bundle_id = b.id
+              AND av.bundle_version_id = bv.id
+              AND a.active
+              AND (
+                  (a.scope_type = 'system' AND a.system_id = v.id)
+                  OR (a.scope_type = 'environment' AND a.environment_id = e.id)
+              )
         )
         ORDER BY v.hostname ASC
         "#,
@@ -2112,7 +2762,409 @@ async fn list_applicable_system_rows(pool: &PgPool, bundle_id: Uuid) -> Result<V
     .await?)
 }
 
-pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> ComplianceSystemRollup {
+/// Determine assignment status for a system assigned to a bundle version.
+///
+/// Determine assignment status for a specific system and bundle.
+/// Queries the compliance_bundle_assignments table to find if the system has an
+/// active assignment and determines if it targets the current published version.
+///
+/// Returns:
+/// - "current" if the system has an active assignment to the bundle's current published version
+/// - "pinned" if the system has an active assignment to an older accepted version  
+/// - None if no active assignment exists for the system
+pub async fn determine_assignment_status_for_system(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    system_id: Uuid,
+) -> Result<Option<String>> {
+    // Get the bundle's current published version
+    let current_published_version: Option<Uuid> = sqlx::query_scalar(
+        "SELECT current_published_version_id FROM compliance_bundles WHERE id = $1",
+    )
+    .bind(bundle_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+
+    // Check for active assignment targeting this system (system scope takes precedence)
+    // Use the authoritative assignment snapshot: current_version_id -> compliance_bundle_assignment_versions -> bundle_version_id
+    let assigned_version: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT av.bundle_version_id 
+           FROM compliance_bundle_assignments cba
+           JOIN compliance_bundle_assignment_versions av ON av.id = cba.current_version_id
+           WHERE cba.bundle_id = $1 AND cba.system_id = $2 AND cba.active = true
+           LIMIT 1"#,
+    )
+    .bind(bundle_id)
+    .bind(system_id)
+    .fetch_optional(pool)
+    .await?;
+
+    // If system has no direct assignment, check for environment scope assignment
+    let assigned_version = match assigned_version {
+        Some(v) => Some(v),
+        None => {
+            // Check for environment-scoped assignment
+            // Use the authoritative assignment snapshot
+            sqlx::query_scalar(
+                r#"SELECT av.bundle_version_id 
+                   FROM compliance_bundle_assignments cba
+                   JOIN compliance_bundle_assignment_versions av ON av.id = cba.current_version_id
+                   WHERE cba.bundle_id = $1 AND cba.scope_type = 'environment' AND cba.active = true
+                   AND EXISTS (
+                       SELECT 1 FROM systems s 
+                       WHERE s.id = $2 AND s.environment_id = cba.environment_id
+                    )
+                    LIMIT 1"#,
+            )
+            .bind(bundle_id)
+            .bind(system_id)
+            .fetch_optional(pool)
+            .await?
+        }
+    };
+
+    // Determine status based on which version we're assigned to
+    match assigned_version {
+        Some(v) => {
+            // System has an assignment; determine if it's current or pinned
+            match current_published_version {
+                Some(current) if v == current => Ok(Some("current".to_string())),
+                Some(_) => Ok(Some("pinned".to_string())),
+                None => Ok(Some("pinned".to_string())), // No current published, but assigned to something
+            }
+        }
+        None => Ok(None), // No assignment for this system
+    }
+}
+
+/// Load assignment statuses for multiple systems in a single batch query.
+///
+/// This is the production path for determining assignment status across many systems.
+/// Uses set-oriented queries to minimize database round trips.
+///
+/// Returns a map of system_id -> assignment_status string (or None if no applicable assignment).
+///
+/// Assignment precedence:
+/// Assignment metadata for compliance bundle assignment.
+#[derive(Clone, Debug)]
+pub struct AssignmentMetadata {
+    pub status: Option<String>,      // "current" or "pinned" when assigned
+    pub approved_by: Option<String>, // User name who created the assignment version
+    pub reason: Option<String>,      // User-provided reason for the pinned assignment
+}
+
+/// 1. System-scoped assignments (take precedence over environment-scoped)
+/// 2. Environment-scoped assignments for the system's environment
+/// 3. No assignment
+pub async fn load_assignment_statuses_for_systems(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    current_published_version: Option<Uuid>,
+    system_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, Option<String>>> {
+    let metadata = load_assignment_metadata_for_systems(
+        pool,
+        bundle_id,
+        current_published_version,
+        system_ids,
+    )
+    .await?;
+    Ok(metadata.into_iter().map(|(k, v)| (k, v.status)).collect())
+}
+
+/// Load assignment metadata including status and creator information.
+pub async fn load_assignment_metadata_for_systems(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    current_published_version: Option<Uuid>,
+    system_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, AssignmentMetadata>> {
+    if system_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    // Single query to load effective assignments with metadata
+    // System-scoped assignments take precedence over environment-scoped
+    // Uses DISTINCT ON to ensure each system gets only one assignment
+    #[derive(sqlx::FromRow)]
+    struct AssignmentRow {
+        system_id: Uuid,
+        assigned_version_id: Uuid,
+        created_by: Option<Uuid>,
+        reason: Option<String>,
+    }
+
+    let assignments: Vec<AssignmentRow> = sqlx::query_as(
+        r#"
+        WITH requested_systems AS (
+            SELECT DISTINCT UNNEST($2::uuid[]) AS system_id
+        ),
+        system_assignments AS (
+            -- System-scoped assignments take absolute precedence
+            SELECT DISTINCT ON (sys.id)
+                sys.id AS system_id,
+                av.bundle_version_id AS assigned_version_id,
+                av.created_by,
+                av.reason
+            FROM requested_systems rs
+            JOIN systems sys ON sys.id = rs.system_id
+            JOIN compliance_bundle_assignments cba ON cba.system_id = sys.id 
+                AND cba.bundle_id = $1 AND cba.active = true AND cba.scope_type = 'system'
+            JOIN compliance_bundle_assignment_versions av ON av.id = cba.current_version_id
+            
+            UNION ALL
+            
+            -- Environment-scoped assignments as fallback (only if no system-scoped assignment)
+            SELECT DISTINCT ON (sys.id)
+                sys.id AS system_id,
+                av.bundle_version_id AS assigned_version_id,
+                av.created_by,
+                av.reason
+            FROM requested_systems rs
+            JOIN systems sys ON sys.id = rs.system_id
+            JOIN compliance_bundle_assignments cba ON cba.bundle_id = $1 
+                AND cba.active = true AND cba.scope_type = 'environment'
+                AND cba.environment_id = sys.environment_id
+            JOIN compliance_bundle_assignment_versions av ON av.id = cba.current_version_id
+            WHERE NOT EXISTS (
+                -- Exclude if system already has a system-scoped assignment
+                SELECT 1 FROM compliance_bundle_assignments cba_sys
+                WHERE cba_sys.bundle_id = $1 AND cba_sys.active = true 
+                  AND cba_sys.scope_type = 'system' AND cba_sys.system_id = sys.id
+            )
+        )
+        SELECT system_id, assigned_version_id, created_by, reason FROM system_assignments
+        "#,
+    )
+    .bind(bundle_id)
+    .bind(system_ids)
+    .fetch_all(pool)
+    .await?;
+
+    // Collect user IDs for batched lookup
+    let user_ids: Vec<Uuid> = assignments.iter().filter_map(|a| a.created_by).collect();
+
+    // Batch load user names (email or name field)
+    let users: std::collections::HashMap<Uuid, String> = if !user_ids.is_empty() {
+        let user_rows: Vec<(Uuid, Option<String>)> = sqlx::query_as(
+            "SELECT id, COALESCE(name, email) AS display_name FROM users WHERE id = ANY($1)",
+        )
+        .bind(&user_ids)
+        .fetch_all(pool)
+        .await?;
+        user_rows
+            .into_iter()
+            .filter_map(|(id, name)| name.map(|n| (id, n)))
+            .collect()
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    // Build the result map
+    let mut result = std::collections::HashMap::new();
+    for AssignmentRow {
+        system_id,
+        assigned_version_id,
+        created_by,
+        reason,
+    } in assignments
+    {
+        let status = match current_published_version {
+            Some(current) if assigned_version_id == current => Some("current".to_string()),
+            Some(_) => Some("pinned".to_string()),
+            None => Some("pinned".to_string()),
+        };
+        // Map created_by to assignment_approved_by: the user who made the assignment decision
+        let approved_by = created_by.and_then(|uid| users.get(&uid).cloned());
+        result.insert(
+            system_id,
+            AssignmentMetadata {
+                status,
+                approved_by,
+                reason,
+            },
+        );
+    }
+
+    // Ensure all requested systems are in the map (with None status for unassigned)
+    for &system_id in system_ids {
+        result.entry(system_id).or_insert(AssignmentMetadata {
+            status: None,
+            approved_by: None,
+            reason: None,
+        });
+    }
+
+    Ok(result)
+}
+
+/// Batch load assignment statuses for arbitrary (bundle_id, system_id) pairs.
+/// Returns a map keyed by (bundle_id, system_id) tuple with optional status strings.
+/// All requested pairs are present in the result; unassigned pairs have None.
+pub async fn load_assignment_statuses_for_pairs(
+    pool: &PgPool,
+    pairs: &[(Uuid, Uuid)], // (bundle_id, system_id)
+) -> Result<std::collections::HashMap<(Uuid, Uuid), Option<String>>> {
+    if pairs.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    // Extract unique bundles and systems
+    let mut bundle_ids = std::collections::HashSet::new();
+    let mut system_ids = std::collections::HashSet::new();
+    for &(bundle_id, system_id) in pairs {
+        bundle_ids.insert(bundle_id);
+        system_ids.insert(system_id);
+    }
+    let bundle_ids: Vec<Uuid> = bundle_ids.into_iter().collect();
+    let system_ids: Vec<Uuid> = system_ids.into_iter().collect();
+
+    // Get current published version for each bundle
+    #[derive(sqlx::FromRow)]
+    struct BundleVersion {
+        bundle_id: Uuid,
+        current_published_version_id: Option<Uuid>,
+    }
+    let versions: Vec<BundleVersion> = sqlx::query_as(
+        "SELECT id AS bundle_id, current_published_version_id FROM compliance_bundles WHERE id = ANY($1)",
+    )
+    .bind(&bundle_ids)
+    .fetch_all(pool)
+    .await?;
+    let versions_by_bundle: std::collections::HashMap<Uuid, Option<Uuid>> = versions
+        .into_iter()
+        .map(|v| (v.bundle_id, v.current_published_version_id))
+        .collect();
+
+    // Load assignments for all (bundle, system) pairs in one query
+    // System-scoped assignments take precedence over environment-scoped
+    #[derive(sqlx::FromRow)]
+    struct AssignmentPair {
+        bundle_id: Uuid,
+        system_id: Uuid,
+        assigned_version_id: Uuid,
+    }
+    let bundle_pairs: Vec<(Uuid, Uuid)> = pairs.to_vec();
+    let assignments: Vec<AssignmentPair> = sqlx::query_as(
+        r#"
+        WITH requested_pairs AS (
+            SELECT DISTINCT * FROM UNNEST($1::uuid[], $2::uuid[]) AS t(bundle_id, system_id)
+        ),
+        pair_assignments AS (
+            -- System-scoped assignments take absolute precedence
+            SELECT DISTINCT ON (req.bundle_id, req.system_id)
+                req.bundle_id,
+                req.system_id,
+                av.bundle_version_id AS assigned_version_id
+            FROM requested_pairs req
+            JOIN compliance_bundle_assignments cba ON cba.bundle_id = req.bundle_id
+                AND cba.system_id = req.system_id
+                AND cba.active = true AND cba.scope_type = 'system'
+            JOIN compliance_bundle_assignment_versions av ON av.id = cba.current_version_id
+            
+            UNION ALL
+            
+            -- Environment-scoped assignments as fallback
+            SELECT DISTINCT ON (req.bundle_id, req.system_id)
+                req.bundle_id,
+                req.system_id,
+                av.bundle_version_id AS assigned_version_id
+            FROM requested_pairs req
+            JOIN systems sys ON sys.id = req.system_id
+            JOIN compliance_bundle_assignments cba ON cba.bundle_id = req.bundle_id
+                AND cba.active = true AND cba.scope_type = 'environment'
+                AND cba.environment_id = sys.environment_id
+            JOIN compliance_bundle_assignment_versions av ON av.id = cba.current_version_id
+            WHERE NOT EXISTS (
+                -- Exclude if this (bundle, system) already has a system-scoped assignment
+                SELECT 1 FROM compliance_bundle_assignments cba_sys
+                WHERE cba_sys.bundle_id = req.bundle_id AND cba_sys.active = true
+                  AND cba_sys.scope_type = 'system' AND cba_sys.system_id = req.system_id
+            )
+        )
+        SELECT * FROM pair_assignments
+        "#,
+    )
+    .bind(
+        bundle_pairs
+            .iter()
+            .map(|(b, _)| b)
+            .copied()
+            .collect::<Vec<_>>(),
+    )
+    .bind(
+        bundle_pairs
+            .iter()
+            .map(|(_, s)| s)
+            .copied()
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // Build result map with status determination
+    let mut result = std::collections::HashMap::new();
+    for AssignmentPair {
+        bundle_id,
+        system_id,
+        assigned_version_id,
+    } in assignments
+    {
+        let current_published = versions_by_bundle.get(&bundle_id).copied().flatten();
+        let status = match current_published {
+            Some(current) if assigned_version_id == current => Some("current".to_string()),
+            Some(_) => Some("pinned".to_string()),
+            None => Some("pinned".to_string()),
+        };
+        result.insert((bundle_id, system_id), status);
+    }
+
+    // Ensure all requested pairs are in the result
+    for &(bundle_id, system_id) in pairs {
+        result.entry((bundle_id, system_id)).or_insert(None);
+    }
+
+    Ok(result)
+}
+
+/// Legacy function that determined status per bundle version (kept for backwards compatibility).
+/// Deprecated: Use determine_assignment_status_for_system() instead.
+pub(crate) async fn determine_assignment_status_for_bundle_version(
+    pool: &PgPool,
+    bundle_version_id: Uuid,
+) -> Result<Option<String>> {
+    // Get the current published version of the bundle
+    let current_published_version: Option<Uuid> = sqlx::query_scalar(
+        "SELECT current_published_version_id FROM compliance_bundles WHERE id = (SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1)",
+    )
+    .bind(bundle_version_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+
+    let current_published = match current_published_version {
+        Some(v) => v,
+        None => {
+            // Bundle has no published version yet; assignment cannot be "current"
+            return Ok(Some("pinned".to_string()));
+        }
+    };
+
+    // Determine the status based on which version we're assigned to
+    if bundle_version_id == current_published {
+        Ok(Some("current".to_string()))
+    } else {
+        // Assignment targets an older/other accepted version
+        Ok(Some("pinned".to_string()))
+    }
+}
+
+pub(crate) fn system_rollup(
+    system: SystemRow,
+    policies: &[PolicyRow],
+    assignment_status: Option<String>,
+) -> ComplianceSystemRollup {
     let statuses = policies
         .iter()
         .map(|policy| match evaluate_policy(&system, policy) {
@@ -2120,7 +3172,7 @@ pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> Compli
             PolicyEval::Disabled | PolicyEval::Unsupported => ComplianceControlStatus::NotChecked,
         })
         .collect::<Vec<_>>();
-    rollup_from_statuses(system, &statuses, 0)
+    rollup_from_statuses(system, &statuses, 0, assignment_status)
 }
 
 async fn system_rollup_with_evidence(
@@ -2136,13 +3188,29 @@ async fn system_rollup_with_evidence(
                 .status,
         );
     }
-    Ok(rollup_from_statuses(system, &statuses, 0))
+    Ok(rollup_from_statuses(system, &statuses, 0, None))
 }
 
 fn rollup_from_statuses(
     system: SystemRow,
     statuses: &[ComplianceControlStatus],
     report_only: i64,
+    assignment_status: Option<String>,
+) -> ComplianceSystemRollup {
+    // Wrapper for legacy use cases; convert status to metadata for consistency
+    let metadata = assignment_status.map(|status| AssignmentMetadata {
+        status: Some(status),
+        approved_by: None,
+        reason: None,
+    });
+    rollup_from_statuses_with_metadata(system, statuses, report_only, metadata.as_ref())
+}
+
+fn rollup_from_statuses_with_metadata(
+    system: SystemRow,
+    statuses: &[ComplianceControlStatus],
+    report_only: i64,
+    assignment_metadata: Option<&AssignmentMetadata>,
 ) -> ComplianceSystemRollup {
     let mut pass = 0i64;
     let mut warn = 0i64;
@@ -2216,6 +3284,18 @@ fn rollup_from_statuses(
         report_only,
         score,
         resolution_state: None,
+        assignment_status: assignment_metadata
+            .as_ref()
+            .map(|m| m.status.clone())
+            .flatten(),
+        assignment_reason: assignment_metadata
+            .as_ref()
+            .map(|m| m.reason.clone())
+            .flatten(),
+        assignment_approved_by: assignment_metadata
+            .as_ref()
+            .map(|m| m.approved_by.clone())
+            .flatten(),
     }
 }
 
@@ -2223,6 +3303,22 @@ fn unresolved_system_rollup(
     system: SystemRow,
     selected_controls: i64,
     state: &str,
+    assignment_status: Option<String>,
+) -> ComplianceSystemRollup {
+    // Wrapper for legacy use cases; convert status to metadata for consistency
+    let metadata = assignment_status.map(|status| AssignmentMetadata {
+        status: Some(status),
+        approved_by: None,
+        reason: None,
+    });
+    unresolved_system_rollup_with_metadata(system, selected_controls, state, metadata.as_ref())
+}
+
+fn unresolved_system_rollup_with_metadata(
+    system: SystemRow,
+    selected_controls: i64,
+    state: &str,
+    assignment_metadata: Option<&AssignmentMetadata>,
 ) -> ComplianceSystemRollup {
     ComplianceSystemRollup {
         system_id: system.id,
@@ -2241,6 +3337,18 @@ fn unresolved_system_rollup(
         report_only: 0,
         score: 0,
         resolution_state: Some(state.to_string()),
+        assignment_status: assignment_metadata
+            .as_ref()
+            .map(|m| m.status.clone())
+            .flatten(),
+        assignment_reason: assignment_metadata
+            .as_ref()
+            .map(|m| m.reason.clone())
+            .flatten(),
+        assignment_approved_by: assignment_metadata
+            .as_ref()
+            .map(|m| m.approved_by.clone())
+            .flatten(),
     }
 }
 
@@ -2252,6 +3360,7 @@ fn unresolved_system_rollup(
 pub(crate) fn effective_policy_rollup(
     system: &SystemRow,
     effective_policies: &[crate::compliance::resolver::EffectivePolicy],
+    assignment_status: Option<String>,
 ) -> ComplianceSystemRollup {
     let mut pass = 0i64;
     let mut warn = 0i64;
@@ -2355,6 +3464,9 @@ pub(crate) fn effective_policy_rollup(
         report_only,
         score,
         resolution_state: None,
+        assignment_status,
+        assignment_reason: None,
+        assignment_approved_by: None,
     }
 }
 
@@ -2365,6 +3477,28 @@ pub(crate) async fn effective_policy_rollup_with_evidence(
     pool: &PgPool,
     system: &SystemRow,
     effective_policies: &[crate::compliance::resolver::EffectivePolicy],
+    assignment_status: Option<String>,
+) -> Result<ComplianceSystemRollup> {
+    // Wrapper for legacy use cases; convert status to metadata for consistency
+    let metadata = assignment_status.map(|status| AssignmentMetadata {
+        status: Some(status),
+        approved_by: None,
+        reason: None,
+    });
+    effective_policy_rollup_with_evidence_and_metadata(
+        pool,
+        system,
+        effective_policies,
+        metadata.as_ref(),
+    )
+    .await
+}
+
+pub(crate) async fn effective_policy_rollup_with_evidence_and_metadata(
+    pool: &PgPool,
+    system: &SystemRow,
+    effective_policies: &[crate::compliance::resolver::EffectivePolicy],
+    assignment_metadata: Option<&AssignmentMetadata>,
 ) -> Result<ComplianceSystemRollup> {
     let policies = materialize_effective_policies(pool, effective_policies).await?;
     let report_only = effective_policies
@@ -2377,11 +3511,237 @@ pub(crate) async fn effective_policy_rollup_with_evidence(
         })
         .count() as i64;
 
+    // Batch-load assessment context for this system (not per-policy)
+    let context = assessment_context(pool, system.id).await?;
+    let cve_scan = match context.as_ref() {
+        Some(context) => latest_completed_cve_scan(pool, context.derivation_id).await?,
+        None => None,
+    };
+
     let mut statuses = Vec::with_capacity(policies.len());
     for policy in policies {
-        statuses.push(resolve_control_evidence(pool, system, policy).await?.status);
+        statuses.push(
+            resolve_control_evidence_with_context(
+                context.clone(),
+                cve_scan.as_ref(),
+                system,
+                policy,
+            )
+            .status,
+        );
     }
-    Ok(rollup_from_statuses(system.clone(), &statuses, report_only))
+    Ok(rollup_from_statuses_with_metadata(
+        system.clone(),
+        &statuses,
+        report_only,
+        assignment_metadata,
+    ))
+}
+
+/// Batch the evidence inputs needed by catalog aggregates. The detail path is
+/// intentionally unchanged, while this path loads policy metadata, deployed
+/// assessment contexts, and latest completed CVE scans once for the complete
+/// set of `(bundle version, system)` work.
+async fn effective_policy_rollups_with_evidence_batch(
+    pool: &PgPool,
+    work: &[(
+        (Uuid, Uuid),
+        SystemRow,
+        Vec<crate::compliance::resolver::EffectivePolicy>,
+    )],
+    _assignment_status_by_version: &std::collections::HashMap<Uuid, Option<String>>,
+) -> Result<Vec<((Uuid, Uuid), ComplianceSystemRollup)>> {
+    if work.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let effective_policies: Vec<_> = work
+        .iter()
+        .flat_map(|(_, _, policies)| policies.iter().cloned())
+        .collect();
+    let materialized = materialize_effective_policies(pool, &effective_policies).await?;
+    let policies_by_version = materialized
+        .into_iter()
+        .zip(
+            effective_policies
+                .iter()
+                .map(|policy| policy.policy_version_id),
+        )
+        .map(|(policy, version_id)| (version_id, policy))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    let system_ids: Vec<Uuid> = work
+        .iter()
+        .map(|(_, system, _)| system.id)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let context_rows: Vec<(Uuid, i32, Value)> = sqlx::query_as(
+        r#"
+        SELECT s.id, d.id AS derivation_id, d.policy_results
+        FROM systems s
+        JOIN LATERAL (
+            SELECT ss.store_path
+            FROM system_states ss
+            WHERE ss.hostname = s.hostname
+            ORDER BY ss.timestamp DESC, ss.id DESC
+            LIMIT 1
+        ) deployed ON true
+        JOIN derivations d ON COALESCE(d.store_path, d.expected_store_path) = deployed.store_path
+        WHERE s.id = ANY($1)
+          AND d.derivation_type = 'nixos'
+        ORDER BY s.id, d.completed_at DESC NULLS LAST, d.id DESC
+        "#,
+    )
+    .bind(&system_ids)
+    .fetch_all(pool)
+    .await?;
+    let contexts = context_rows.into_iter().fold(
+        std::collections::HashMap::<Uuid, AssessmentContext>::new(),
+        |mut contexts, (system_id, derivation_id, policy_results)| {
+            contexts.entry(system_id).or_insert(AssessmentContext {
+                derivation_id,
+                policy_results,
+            });
+            contexts
+        },
+    );
+    let derivation_ids: Vec<i32> = contexts
+        .values()
+        .map(|context| context.derivation_id)
+        .collect();
+    let scans = latest_completed_cve_scans(pool, &derivation_ids).await?;
+
+    // Collect all (bundle_id, system_id) pairs for batch assignment loading
+    let assignment_pairs: Vec<(Uuid, Uuid)> = work
+        .iter()
+        .map(|((bundle_id, _), system, _)| (*bundle_id, system.id))
+        .collect();
+
+    // Load all assignment statuses in one batch query
+    let assignment_statuses = if !assignment_pairs.is_empty() {
+        load_assignment_statuses_for_pairs(pool, &assignment_pairs).await?
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    let mut result = Vec::with_capacity(work.len());
+    for (pair, system, policies) in work {
+        let (bundle_id, _version_id) = *pair;
+        // Look up pre-loaded assignment status
+        let assignment_status = assignment_statuses
+            .get(&(bundle_id, system.id))
+            .cloned()
+            .flatten();
+        let context = contexts.get(&system.id);
+        let mut statuses = Vec::with_capacity(policies.len());
+        let report_only = policies
+            .iter()
+            .filter(|policy| {
+                matches!(
+                    policy.effective_mode,
+                    crate::compliance::resolver::AssignmentMode::ReportOnly
+                )
+            })
+            .count() as i64;
+        for effective in policies {
+            let mut policy = policies_by_version
+                .get(&effective.policy_version_id)
+                .context("missing materialized effective policy in batch evidence")?
+                .clone();
+            // Policy metadata is immutable and may be shared by many systems,
+            // but effective_config is runtime state after assignment overlays.
+            // Never let one system's override overwrite another's evaluation.
+            policy.config = effective.effective_config.clone();
+            statuses.push(batch_evidence_status(
+                &policy,
+                context,
+                context.and_then(|context| scans.get(&context.derivation_id)),
+            ));
+        }
+        result.push((
+            *pair,
+            rollup_from_statuses(system.clone(), &statuses, report_only, assignment_status),
+        ));
+    }
+    Ok(result)
+}
+
+type CompletedCveScan = (Uuid, i32, i32);
+
+async fn latest_completed_cve_scans(
+    pool: &PgPool,
+    derivation_ids: &[i32],
+) -> Result<std::collections::HashMap<i32, CompletedCveScan>> {
+    if derivation_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    Ok(sqlx::query_as(
+        r#"
+        SELECT DISTINCT ON (derivation_id) id, derivation_id, critical_count, high_count
+        FROM cve_scans
+        WHERE derivation_id = ANY($1) AND status = 'completed'
+        ORDER BY derivation_id, completed_at DESC NULLS LAST, id DESC
+        "#,
+    )
+    .bind(&derivation_ids)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|(id, derivation_id, critical, high)| (derivation_id, (id, critical, high)))
+    .collect())
+}
+
+async fn latest_completed_cve_scan(
+    pool: &PgPool,
+    derivation_id: i32,
+) -> Result<Option<CompletedCveScan>> {
+    Ok(latest_completed_cve_scans(pool, &[derivation_id])
+        .await?
+        .remove(&derivation_id))
+}
+
+fn batch_evidence_status(
+    policy: &PolicyRow,
+    context: Option<&AssessmentContext>,
+    scan: Option<&(Uuid, i32, i32)>,
+) -> ComplianceControlStatus {
+    if !policy.enabled {
+        return ComplianceControlStatus::NotChecked;
+    }
+    match policy.policy_type.as_str() {
+        "require_cf_agent" | "require_packages" | "custom_check" => {
+            let Some(context) = context else {
+                return ComplianceControlStatus::NotChecked;
+            };
+            match nix_policy_result(&context.policy_results, policy.id) {
+                Ok(None) => ComplianceControlStatus::NotChecked,
+                Ok(Some((true, _))) => ComplianceControlStatus::Pass,
+                Ok(Some((false, _))) => ComplianceControlStatus::Fail,
+                Err(_) => ComplianceControlStatus::Error,
+            }
+        }
+        "require_cve_check" => {
+            let Some((_, critical_count, high_count)) = scan else {
+                return ComplianceControlStatus::NotChecked;
+            };
+            let max_critical = policy
+                .config
+                .get("max_critical")
+                .and_then(Value::as_i64)
+                .unwrap_or(i64::MAX);
+            let max_high = policy.config.get("max_high").and_then(Value::as_i64);
+            if i64::from(*critical_count) > max_critical
+                || max_high.is_some_and(|max| i64::from(*high_count) > max)
+            {
+                ComplianceControlStatus::Fail
+            } else {
+                ComplianceControlStatus::Pass
+            }
+        }
+        _ => ComplianceControlStatus::NotChecked,
+    }
 }
 
 /// Materialize an assignment resolver output for evidence. `PolicyRow::id` is
@@ -2548,13 +3908,13 @@ async fn assessment_context(pool: &PgPool, system_id: Uuid) -> Result<Option<Ass
         SELECT d.id AS derivation_id, d.policy_results
         FROM systems s
         JOIN LATERAL (
-            SELECT ss.derivation_path
+            SELECT ss.store_path
             FROM system_states ss
             WHERE ss.hostname = s.hostname
             ORDER BY ss.timestamp DESC, ss.id DESC
             LIMIT 1
         ) deployed ON true
-        JOIN derivations d ON d.derivation_path = deployed.derivation_path
+        JOIN derivations d ON COALESCE(d.store_path, d.expected_store_path) = deployed.store_path
         WHERE s.id = $1
           AND d.derivation_type = 'nixos'
         ORDER BY d.completed_at DESC NULLS LAST, d.id DESC
@@ -2594,13 +3954,14 @@ fn nix_policy_result(
     Ok(Some((passed, details)))
 }
 
-async fn resolve_control_evidence(
-    pool: &PgPool,
+fn resolve_control_evidence_with_context(
+    context: Option<AssessmentContext>,
+    cve_scan: Option<&CompletedCveScan>,
     system: &SystemRow,
     policy: PolicyRow,
-) -> Result<ComplianceControlEvidence> {
+) -> ComplianceControlEvidence {
     if !policy.enabled {
-        return Ok(control_evidence_with_resolved_status(
+        return control_evidence_with_resolved_status(
             system,
             policy,
             ComplianceControlStatus::NotChecked,
@@ -2608,12 +3969,9 @@ async fn resolve_control_evidence(
             "No evidence is collected for disabled policies.".to_string(),
             "policy_eval",
             "Disabled policy",
-        ));
+        );
     }
-    let context = assessment_context(pool, system.id).await?;
     let (status, summary, body, artifact_type, artifact_title) = match policy.policy_type.as_str() {
-        // All Nix-evaluated policy types write an assigned per-lineage result
-        // during evaluation. Heartbeat health is not policy evidence.
         "require_cf_agent" | "require_packages" | "custom_check" => match context {
             None => (
                 ComplianceControlStatus::NotChecked,
@@ -2683,49 +4041,43 @@ async fn resolve_control_evidence(
                 "No applicable CVE scan",
             ),
             Some(context) => {
-                let scan: Option<(Uuid, i32, i32)> = sqlx::query_as(
-                    r#"SELECT id, critical_count, high_count
-                       FROM cve_scans
-                       WHERE derivation_id = $1 AND status = 'completed'
-                       ORDER BY completed_at DESC NULLS LAST, id DESC
-                       LIMIT 1"#,
-                )
-                .bind(context.derivation_id)
-                .fetch_optional(pool)
-                .await?;
-                match scan {
+                let max_critical = policy
+                    .config
+                    .get("max_critical")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(i64::MAX);
+                let max_high = policy.config.get("max_high").and_then(Value::as_i64);
+                match cve_scan {
                     None => (
                         ComplianceControlStatus::NotChecked,
                         format!(
-                            "No completed CVE scan is available for '{}' on {}.",
-                            policy.name, system.hostname
+                            "Derivation {} has no completed CVE scan for '{}'.",
+                            context.derivation_id, policy.name
                         ),
                         format!("derivation_id={}", context.derivation_id),
                         "cve_scan",
                         "No applicable CVE scan",
                     ),
                     Some((scan_id, critical_count, high_count)) => {
-                        let max_critical = policy
-                            .config
-                            .get("max_critical")
-                            .and_then(Value::as_i64)
-                            .unwrap_or(i64::MAX);
-                        let max_high = policy.config.get("max_high").and_then(Value::as_i64);
-                        let failed = i64::from(critical_count) > max_critical
-                            || max_high.is_some_and(|max| i64::from(high_count) > max);
-                        let status = if failed {
-                            ComplianceControlStatus::Fail
-                        } else {
-                            ComplianceControlStatus::Pass
-                        };
+                        let passed = i64::from(*critical_count) <= max_critical
+                            && max_high.is_none_or(|max| i64::from(*high_count) <= max);
                         (
-                            status,
+                            if passed {
+                                ComplianceControlStatus::Pass
+                            } else {
+                                ComplianceControlStatus::Fail
+                            },
                             format!(
-                                "Completed CVE scan assessed '{}' on {}.",
-                                policy.name, system.hostname
+                                "Completed CVE scan for '{}' found {} critical and {} high findings.",
+                                policy.name, critical_count, high_count
                             ),
                             format!(
-                                "scan_id={scan_id} critical_count={critical_count} high_count={high_count}"
+                                "scan_id={scan_id}; derivation_id={}; critical={critical_count}; high={high_count}; max_critical={max_critical}; max_high={}",
+                                context.derivation_id,
+                                max_high.map_or_else(
+                                    || "unbounded".to_string(),
+                                    |value| value.to_string()
+                                )
                             ),
                             "cve_scan",
                             "Completed CVE scan",
@@ -2737,19 +4089,15 @@ async fn resolve_control_evidence(
         _ => (
             ComplianceControlStatus::NotChecked,
             format!(
-                "No applicable evidence found for '{}' on {}; control is not checked.",
-                policy.name, system.hostname
+                "Unknown policy type '{}' for '{}'.",
+                policy.policy_type, policy.name
             ),
-            format!(
-                "policy_type={} enabled={}",
-                policy.policy_type, policy.enabled
-            ),
-            "policy_eval",
-            "No applicable evidence",
+            format!("policy_type={}", policy.policy_type),
+            "unknown",
+            "Unknown policy type",
         ),
     };
-
-    Ok(control_evidence_with_resolved_status(
+    control_evidence_with_resolved_status(
         system,
         policy,
         status,
@@ -2757,6 +4105,24 @@ async fn resolve_control_evidence(
         body,
         artifact_type,
         artifact_title,
+    )
+}
+
+async fn resolve_control_evidence(
+    pool: &PgPool,
+    system: &SystemRow,
+    policy: PolicyRow,
+) -> Result<ComplianceControlEvidence> {
+    let context = assessment_context(pool, system.id).await?;
+    let cve_scan = match context.as_ref() {
+        Some(context) => latest_completed_cve_scan(pool, context.derivation_id).await?,
+        None => None,
+    };
+    Ok(resolve_control_evidence_with_context(
+        context,
+        cve_scan.as_ref(),
+        system,
+        policy,
     ))
 }
 
@@ -3035,6 +4401,14 @@ mod tests {
         .await
         .unwrap();
         let draft_id = created.current_draft_version_id.unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundle_versions SET framework_version_id = $1 WHERE id = $2",
+        )
+        .bind(framework_version_id)
+        .bind(draft_id)
+        .execute(&pool)
+        .await
+        .unwrap();
         let members = list_bundle_version_requirement_membership(&pool, draft_id)
             .await
             .unwrap()
@@ -3150,6 +4524,74 @@ mod tests {
         let published_summary = find_bundle(&pool, created.id).await.unwrap().unwrap();
         assert_eq!(published_summary.requirement_count, 2);
 
+        let other_framework_version_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_framework_versions \
+             (framework_id, version, canonical_release_key) \
+             VALUES ($1, '2', $2) RETURNING id",
+        )
+        .bind(framework_id)
+        .bind(format!("release-2-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let other_requirement_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_requirements \
+             (framework_id, canonical_requirement_key) VALUES ($1, $2) RETURNING id",
+        )
+        .bind(framework_id)
+        .bind(format!("REQ-OTHER-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let other_requirement_version_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_requirement_versions \
+             (requirement_id, framework_version_id, external_id, kind) \
+             VALUES ($1, $2, 'REQ-OTHER', 'rule') RETURNING id",
+        )
+        .bind(other_requirement_id)
+        .bind(other_framework_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let cross_release = update_bundle(
+            &pool,
+            created.id,
+            UpdateComplianceBundleRequest {
+                name: created.name.clone(),
+                framework: created.framework.clone(),
+                version: Some(created.version.clone()),
+                description: created.description.clone(),
+                required_envs: vec![],
+                policy_ids: vec![],
+                requirement_version_ids: vec![other_requirement_version_id],
+            },
+            None,
+        )
+        .await
+        .expect_err("requirements from another source release must be rejected");
+        assert!(matches!(
+            cross_release.downcast_ref::<BundleValidationError>(),
+            Some(BundleValidationError::RequirementFrameworkMismatch {
+                requirement_version_id,
+                expected_framework_version_id,
+                actual_framework_version_id,
+            }) if *requirement_version_id == other_requirement_version_id
+                && *expected_framework_version_id == framework_version_id
+                && *actual_framework_version_id == other_framework_version_id
+        ));
+        let current_draft_after_rejection: Option<Uuid> = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1",
+        )
+        .bind(created.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            current_draft_after_rejection, None,
+            "rejected cross-release update must roll back its derived draft"
+        );
+
         let derived = update_bundle(
             &pool,
             created.id,
@@ -3211,6 +4653,330 @@ mod tests {
         assert!(missing.is_err());
     }
 
+    #[tokio::test]
+    #[ignore = "requires live database with pg_stat_statements"]
+    async fn bundle_summary_aggregate_query_count_is_bounded_across_versions() {
+        let pool = PgPool::connect(
+            &std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests"),
+        )
+        .await
+        .unwrap();
+        sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
+            .execute(&pool)
+            .await
+            .expect("pg_stat_statements extension must be available");
+
+        let suffix = Uuid::new_v4().simple().to_string()[..8].to_string();
+        let env_id = create_query_count_environment(&pool, &suffix).await;
+        let system_ids = create_query_count_systems(&pool, env_id, &suffix).await;
+        let custom_policy_id = create_published_query_count_policy(
+            &pool,
+            &format!("aggregate-query-custom-{suffix}"),
+            "custom_check",
+            serde_json::json!({ "expression": "config.security.auditd.enable", "strict": true }),
+            &format!("aggregate-query-custom-digest-{suffix}"),
+        )
+        .await;
+        let cve_policy_id = create_published_query_count_policy(
+            &pool,
+            &format!("aggregate-query-cve-{suffix}"),
+            "require_cve_check",
+            serde_json::json!({ "max_critical": 0, "max_high": 0 }),
+            &format!("aggregate-query-cve-digest-{suffix}"),
+        )
+        .await;
+        set_query_count_policy_results(&pool, custom_policy_id, &suffix).await;
+
+        let mut summaries = Vec::new();
+        for index in 0..20 {
+            summaries.push(
+                create_query_count_bundle(
+                    &pool,
+                    env_id,
+                    &[custom_policy_id, cve_policy_id],
+                    system_ids[index % system_ids.len()],
+                    index,
+                    &suffix,
+                )
+                .await,
+            );
+        }
+
+        let one_version_calls =
+            measured_bundle_summary_aggregate_calls(&pool, &summaries[..1]).await;
+        let twenty_version_calls = measured_bundle_summary_aggregate_calls(&pool, &summaries).await;
+        println!(
+            "aggregate query count regression: one={one_version_calls}, twenty={twenty_version_calls}"
+        );
+
+        assert!(
+            twenty_version_calls <= one_version_calls + 8,
+            "aggregate query count should stay bounded across versions: one={one_version_calls}, twenty={twenty_version_calls}"
+        );
+    }
+
+    async fn create_query_count_environment(pool: &PgPool, suffix: &str) -> Uuid {
+        sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
+            .bind(format!("aggregate-query-env-{suffix}"))
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn create_query_count_systems(pool: &PgPool, env_id: Uuid, suffix: &str) -> Vec<Uuid> {
+        let flake_id: i32 =
+            sqlx::query_scalar("INSERT INTO flakes (name, repo_url) VALUES ($1, $2) RETURNING id")
+                .bind(format!("aggregate-query-flake-{suffix}"))
+                .bind(format!("https://example.invalid/{suffix}.git"))
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, now()) RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(format!("aggregate-query-{suffix}"))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+
+        let mut system_ids = Vec::new();
+        for index in 0..10 {
+            let system_id = Uuid::new_v4();
+            let hostname = format!("aggregate-query-system-{index}-{suffix}");
+            let derivation_path = format!("/nix/store/{suffix}-{index}-system.drv");
+            sqlx::query("INSERT INTO systems (id, hostname, environment_id, public_key, flake_id, derivation, is_active) VALUES ($1, $2, $3, $4, $5, $6, TRUE)")
+                .bind(system_id)
+                .bind(&hostname)
+                .bind(env_id)
+                .bind(format!("ssh-ed25519 aggregate-query-{index}"))
+                .bind(flake_id)
+                .bind(&derivation_path)
+                .execute(pool)
+                .await
+                .unwrap();
+            let derivation_id: i32 = sqlx::query_scalar(
+                "INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, store_path, expected_store_path, status_id, attempt_count, completed_at, policy_results) VALUES ($1, 'nixos', $2, $3, $3, $3, 10, 0, now(), '{}'::jsonb) RETURNING id",
+            )
+            .bind(commit_id)
+            .bind(&hostname)
+            .bind(&derivation_path)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO system_states (hostname, store_path, change_reason) VALUES ($1, $2, 'startup')")
+                .bind(&hostname)
+                .bind(&derivation_path)
+                .execute(pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO cve_scans (derivation_id, status, scanner_name, critical_count, high_count, completed_at) VALUES ($1, 'completed', 'query-count-test', 0, 0, now())")
+                .bind(derivation_id)
+                .execute(pool)
+                .await
+                .unwrap();
+            system_ids.push(system_id);
+        }
+        system_ids
+    }
+
+    async fn create_published_query_count_policy(
+        pool: &PgPool,
+        name: &str,
+        policy_type: &str,
+        config: Value,
+        digest: &str,
+    ) -> Uuid {
+        let policy_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind(name)
+        .bind(policy_type)
+        .bind(config)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let version_id: Uuid =
+            sqlx::query_scalar("SELECT id FROM deployment_policy_versions WHERE policy_id = $1")
+                .bind(policy_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("UPDATE deployment_policies SET current_draft_version_id = NULL WHERE id = $1 AND current_draft_version_id = $2")
+            .bind(policy_id)
+            .bind(version_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET publication_state = 'accepted', semantic_digest = $2, trust_state = 'trusted', implementation_state = 'native' WHERE id = $1",
+        )
+        .bind(version_id)
+        .bind(digest)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(version_id)
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        version_id
+    }
+
+    async fn set_query_count_policy_results(pool: &PgPool, policy_version_id: Uuid, suffix: &str) {
+        let (policy_id,): (Uuid,) =
+            sqlx::query_as("SELECT policy_id FROM deployment_policy_versions WHERE id = $1")
+                .bind(policy_version_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        let policy_results = serde_json::json!({
+            "assigned": {
+                policy_id.to_string(): { "passed": true, "details": "ok" }
+            }
+        });
+        sqlx::query("UPDATE derivations SET policy_results = $1 WHERE derivation_path LIKE $2")
+            .bind(policy_results)
+            .bind(format!("/nix/store/{suffix}-%-system.drv"))
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn create_query_count_bundle(
+        pool: &PgPool,
+        env_id: Uuid,
+        policy_version_ids: &[Uuid],
+        system_id: Uuid,
+        index: usize,
+        suffix: &str,
+    ) -> ComplianceBundleSummary {
+        let bundle_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_bundles (name, framework, version, layer, owner) VALUES ($1, 'QUERY', '1.0', 'os', 'Tests') RETURNING id",
+        )
+        .bind(format!("aggregate-query-bundle-{index}-{suffix}"))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let bundle_version_id: Uuid =
+            sqlx::query_scalar("SELECT id FROM compliance_bundle_versions WHERE bundle_id = $1")
+                .bind(bundle_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        for (order, policy_version_id) in policy_version_ids.iter().enumerate() {
+            sqlx::query("INSERT INTO compliance_bundle_version_policies (bundle_version_id, policy_version_id, policy_order, selected) VALUES ($1, $2, $3, TRUE)")
+                .bind(bundle_version_id)
+                .bind(policy_version_id)
+                .bind(order as i32)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("UPDATE compliance_bundles SET current_draft_version_id = NULL WHERE id = $1 AND current_draft_version_id = $2")
+            .bind(bundle_id)
+            .bind(bundle_version_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundle_versions SET publication_state = 'accepted', semantic_digest = $2, trust_state = 'trusted' WHERE id = $1",
+        )
+        .bind(bundle_version_id)
+        .bind(format!("aggregate-query-bundle-digest-{index}-{suffix}"))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(bundle_version_id)
+        .bind(bundle_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        sqlx::query("INSERT INTO compliance_bundle_environments (bundle_id, environment_id) VALUES ($1, $2)")
+            .bind(bundle_id)
+            .bind(env_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let assignment_id = Uuid::new_v4();
+        let assignment_version_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO compliance_bundle_assignments (id, bundle_id, bundle_version_id, scope_type, system_id, enforcement_mode, assignment_overlay_digest, active) VALUES ($1, $2, $3, 'system', $4, 'report_only', $5, TRUE)")
+            .bind(assignment_id)
+            .bind(bundle_id)
+            .bind(bundle_version_id)
+            .bind(system_id)
+            .bind(format!("aggregate-query-assignment-digest-{index}-{suffix}"))
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO compliance_bundle_assignment_versions (id, assignment_id, version_number, bundle_version_id, enforcement_mode, assignment_overlay_digest) VALUES ($1, $2, 1, $3, 'report_only', $4)")
+            .bind(assignment_version_id)
+            .bind(assignment_id)
+            .bind(bundle_version_id)
+            .bind(format!("aggregate-query-assignment-version-digest-{index}-{suffix}"))
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundle_assignments SET current_version_id = $1 WHERE id = $2",
+        )
+        .bind(assignment_version_id)
+        .bind(assignment_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO compliance_assignment_value_overrides (assignment_id, assignment_version_id, policy_version_id, value_path, value) VALUES ($1, $2, $3, 'max_high', '0'::jsonb)")
+            .bind(assignment_id)
+            .bind(assignment_version_id)
+            .bind(policy_version_ids[1])
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let mut summary = bundle(
+            bundle_id,
+            &format!("aggregate-query-bundle-{index}-{suffix}"),
+        );
+        summary.current_published_version_id = Some(bundle_version_id);
+        summary
+    }
+
+    async fn measured_bundle_summary_aggregate_calls(
+        pool: &PgPool,
+        summaries: &[ComplianceBundleSummary],
+    ) -> i64 {
+        sqlx::query("SELECT pg_stat_statements_reset()")
+            .execute(pool)
+            .await
+            .unwrap();
+        let aggregates = list_bundle_summary_aggregates(pool, summaries)
+            .await
+            .unwrap();
+        assert_eq!(aggregates.len(), summaries.len());
+        sqlx::query_scalar(
+            r#"
+            SELECT COALESCE(SUM(calls), 0)::bigint
+            FROM pg_stat_statements
+            WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+              AND query NOT ILIKE '%pg_stat_statements%'
+            "#,
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
     fn named_policy(policy_type: &str, name: &str, config: Value, enabled: bool) -> PolicyRow {
         PolicyRow {
             id: Uuid::nil(),
@@ -3248,6 +5014,47 @@ mod tests {
             critical_cve_count: 0,
             high_cve_count: 0,
         }
+    }
+
+    /// Regression for catalog/detail parity: the aggregate path has always
+    /// evaluated completed CVE scans, while the drawer/evidence path used to
+    /// ignore the same scan and return NotChecked unconditionally.
+    #[test]
+    fn detailed_cve_evidence_uses_completed_scan_thresholds() {
+        let context = AssessmentContext {
+            derivation_id: 42,
+            policy_results: Value::Null,
+        };
+        let cve_policy = policy(
+            "require_cve_check",
+            serde_json::json!({"max_critical": 0, "max_high": 0}),
+            true,
+        );
+
+        let passing_scan = (Uuid::new_v4(), 0, 0);
+        let passing = resolve_control_evidence_with_context(
+            Some(context.clone()),
+            Some(&passing_scan),
+            &system("healthy", 0, 0),
+            cve_policy.clone(),
+        );
+        assert!(matches!(passing.status, ComplianceControlStatus::Pass));
+        let passing_artifact = passing.evidence_items[0]
+            .artifact
+            .as_ref()
+            .expect("completed scan evidence must include an artifact");
+        assert_eq!(passing_artifact.artifact_type, "cve_scan");
+        assert!(passing_artifact.body.contains("critical=0"));
+
+        let failing_scan = (Uuid::new_v4(), 1, 0);
+        let failing = resolve_control_evidence_with_context(
+            Some(context),
+            Some(&failing_scan),
+            &system("healthy", 1, 0),
+            cve_policy,
+        );
+        assert!(matches!(failing.status, ComplianceControlStatus::Fail));
+        assert!(failing.evidence_items[0].body.contains("critical=1"));
     }
 
     #[test]
@@ -3368,6 +5175,8 @@ mod tests {
             current_draft_version: None,
             current_published_version: None,
             versions: vec![],
+            applicable_system_count: 0,
+            aggregate_score: None,
         }
     }
 
@@ -3494,6 +5303,7 @@ mod tests {
         let rollup = system_rollup(
             sys,
             &[policy("require_cf_agent", serde_json::json!({}), false)],
+            None,
         );
         assert_eq!(
             rollup.not_checked, 1,
@@ -3541,6 +5351,7 @@ mod tests {
                 serde_json::json!({}),
                 true,
             )],
+            None,
         );
         assert_eq!(
             rollup.not_checked, 1,
@@ -3566,7 +5377,7 @@ mod tests {
             // not evaluated → not_checked (excluded from denominator)
             policy("require_cf_agent", serde_json::json!({}), false),
         ];
-        let rollup = system_rollup(sys, &policies);
+        let rollup = system_rollup(sys, &policies, None);
 
         assert_eq!(rollup.pass, 1, "one passing control");
         assert_eq!(rollup.not_checked, 1, "one disabled increments not_checked");
@@ -3587,7 +5398,7 @@ mod tests {
             policy("require_cf_agent", serde_json::json!({}), false), // not_checked
             policy("custom_check", serde_json::json!({}), true),     // not_checked (unsupported)
         ];
-        let rollup = system_rollup(sys, &policies);
+        let rollup = system_rollup(sys, &policies, None);
         let canonical_total = rollup.pass
             + rollup.warn
             + rollup.fail
@@ -3608,7 +5419,7 @@ mod tests {
             policy("require_cf_agent", serde_json::json!({}), true), // pass
             policy("require_cf_agent", serde_json::json!({}), false), // disabled → not_checked
         ];
-        let rollup = system_rollup(sys, &policies);
+        let rollup = system_rollup(sys, &policies, None);
         let totals = totals_for_rollups(&[rollup]);
 
         // Overall score must use evaluated_controls (1) not total_controls (2).
@@ -3621,13 +5432,28 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_score_returns_none_without_evaluated_controls() {
+        assert_eq!(aggregate_score(0, 0), None);
+    }
+
+    #[test]
+    fn aggregate_score_returns_zero_for_one_failed_control() {
+        assert_eq!(aggregate_score(0, 1), Some(0));
+    }
+
+    #[test]
+    fn aggregate_score_returns_100_for_one_passing_control() {
+        assert_eq!(aggregate_score(1, 1), Some(100));
+    }
+
+    #[test]
     fn fully_compliant_count_ignores_not_evaluated_controls() {
         let sys = system("healthy", 0, 0);
         let policies = vec![
             policy("require_cf_agent", serde_json::json!({}), true), // pass
             policy("require_cf_agent", serde_json::json!({}), false), // disabled → not_checked
         ];
-        let rollup = system_rollup(sys, &policies);
+        let rollup = system_rollup(sys, &policies, None);
         // not_checked = 1 (from disabled), warn = 0.
         // All *evaluated* controls pass, so the host must count as fully compliant.
         assert_eq!(rollup.not_checked, 1, "disabled maps to not_checked");
@@ -3794,7 +5620,7 @@ mod tests {
         let sys = system_with_hostname("test-host-123", Some("staging"));
         let policies = vec![bundled_policy(Uuid::new_v4(), "test-policy", true)];
 
-        let rollup = system_rollup(sys.clone(), &policies);
+        let rollup = system_rollup(sys.clone(), &policies, None);
 
         assert_eq!(rollup.hostname, "test-host-123");
         assert_eq!(rollup.environment, Some("staging".to_string()));
@@ -3842,7 +5668,7 @@ mod tests {
             },
         ];
 
-        let rollup = effective_policy_rollup(&sys, &effective);
+        let rollup = effective_policy_rollup(&sys, &effective, None);
 
         assert_eq!(rollup.total, 2);
         assert_eq!(rollup.pass, 2);
@@ -3901,7 +5727,7 @@ mod tests {
             },
         ];
 
-        let rollup = effective_policy_rollup(&sys, &effective);
+        let rollup = effective_policy_rollup(&sys, &effective, None);
 
         assert_eq!(rollup.total, 2);
         assert_eq!(rollup.pass, 1);
@@ -3943,13 +5769,32 @@ mod tests {
             provenance: vec![],
         };
 
-        let rollup = effective_policy_rollup(&sys, &[effective]);
+        let rollup = effective_policy_rollup(&sys, &[effective], None);
 
         assert_eq!(rollup.total, 1);
         assert_eq!(rollup.pass, 1);
         assert_eq!(rollup.fail, 0);
         assert_eq!(rollup.evaluated_total, 1);
         assert_eq!(rollup.score, 100);
+    }
+
+    #[test]
+    fn assignment_status_passed_through_rollup() {
+        let sys = system("healthy", 0, 0);
+        let statuses = vec![ComplianceControlStatus::Pass];
+
+        // Test that assignment_status is correctly passed through
+        let rollup = rollup_from_statuses(sys.clone(), &statuses, 0, Some("current".to_string()));
+        assert_eq!(rollup.assignment_status, Some("current".to_string()));
+        assert_eq!(rollup.pass, 1);
+
+        // Test pinned status
+        let rollup2 = rollup_from_statuses(sys.clone(), &statuses, 0, Some("pinned".to_string()));
+        assert_eq!(rollup2.assignment_status, Some("pinned".to_string()));
+
+        // Test no assignment
+        let rollup3 = rollup_from_statuses(sys, &statuses, 0, None);
+        assert_eq!(rollup3.assignment_status, None);
     }
 }
 

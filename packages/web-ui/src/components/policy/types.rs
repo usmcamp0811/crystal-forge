@@ -50,6 +50,12 @@ pub struct PolicyDefinition {
     pub cis_section: Option<String>,
     /// Human-readable rationale from the current version's compliance_metadata.
     pub rationale: Option<String>,
+    /// Count of unique requirements this policy is mapped to (from compliance metadata).
+    pub mapped_requirement_count: i64,
+    /// Count of bundles (compliance frameworks) this policy is used by.
+    pub bundle_usage_count: i64,
+    /// Evidence specs from the current version's deployment policy.
+    pub evidence_specs: Option<Vec<crate::api::models::EvidenceSpec>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -85,6 +91,12 @@ pub struct PolicyRevisionSummary {
     pub cis_section: Option<String>,
     /// Human-readable rationale for this revision.
     pub rationale: Option<String>,
+    /// User who created this policy version (UUID from server, display name on server).
+    pub created_by: Option<uuid::Uuid>,
+    /// Human-readable display name of the user who created this version (username or email).
+    pub created_by_display: Option<String>,
+    /// Evidence collection specifications for ATO audits.
+    pub evidence_specs: Vec<crate::api::models::EvidenceSpec>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

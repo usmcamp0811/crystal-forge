@@ -99,33 +99,306 @@ fn custom_field_name(name: &str, id: uuid::Uuid) -> String {
     }
 }
 
-fn normalize_custom_policy_expression(expression: &str) -> (String, bool) {
-    let mut cursor = 0usize;
-    let mut changed = false;
-    let mut normalized = String::with_capacity(expression.len() + 16);
+pub(crate) fn normalize_custom_policy_expression(expression: &str) -> (String, bool) {
+    let chars = expression.chars().collect::<Vec<_>>();
+    let legacy = "cfg.config.";
+    let legacy_chars = legacy.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(expression.len());
+    let mut index = 0;
+    let mut state = LexicalState::Normal;
 
-    while let Some(rel_idx) = expression[cursor..].find("config.") {
-        let idx = cursor + rel_idx;
-        let prev_char = expression[..idx].chars().next_back();
-        let has_safe_boundary = prev_char
-            .map(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
-            .unwrap_or(true);
-        let already_cfg_prefixed = idx >= 4 && expression.get(idx - 4..idx) == Some("cfg.");
-
-        normalized.push_str(&expression[cursor..idx]);
-
-        if has_safe_boundary && !already_cfg_prefixed {
-            normalized.push_str("cfg.config.");
-            changed = true;
-        } else {
-            normalized.push_str("config.");
+    while index < chars.len() {
+        match state {
+            LexicalState::Normal => {
+                if chars[index] == '"' {
+                    state = LexicalState::DoubleQuoted;
+                    output.push(chars[index]);
+                    index += 1;
+                } else if chars[index] == '#' {
+                    state = LexicalState::LineComment;
+                    output.push(chars[index]);
+                    index += 1;
+                } else if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+                    state = LexicalState::BlockComment;
+                    output.push('/');
+                    output.push('*');
+                    index += 2;
+                } else if chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
+                    state = LexicalState::IndentedString;
+                    output.push('\'');
+                    output.push('\'');
+                    index += 2;
+                } else if index + legacy_chars.len() <= chars.len()
+                    && chars[index..index + legacy_chars.len()] == legacy_chars
+                    && (index == 0 || !is_nix_identifier_char(chars[index - 1]))
+                    && chars
+                        .get(index + legacy_chars.len())
+                        .is_some_and(|character| is_nix_identifier_char(*character))
+                {
+                    output.push_str("config.");
+                    index += legacy_chars.len();
+                } else {
+                    output.push(chars[index]);
+                    index += 1;
+                }
+            }
+            LexicalState::DoubleQuoted => {
+                let character = chars[index];
+                output.push(character);
+                index += 1;
+                if character == '\\' {
+                    if let Some(escaped) = chars.get(index) {
+                        output.push(*escaped);
+                        index += 1;
+                    }
+                } else if character == '"' {
+                    state = LexicalState::Normal;
+                }
+            }
+            LexicalState::IndentedString => {
+                if chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
+                    if chars
+                        .get(index + 2)
+                        .is_some_and(|next| matches!(next, '$' | '\\' | '\''))
+                    {
+                        output.push('\'');
+                        output.push('\'');
+                        index += 2;
+                        continue;
+                    }
+                    output.push('\'');
+                    output.push('\'');
+                    index += 2;
+                    state = LexicalState::Normal;
+                } else {
+                    output.push(chars[index]);
+                    index += 1;
+                }
+            }
+            LexicalState::LineComment => {
+                let character = chars[index];
+                output.push(character);
+                index += 1;
+                if character == '\n' {
+                    state = LexicalState::Normal;
+                }
+            }
+            LexicalState::BlockComment => {
+                if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
+                    output.push('*');
+                    output.push('/');
+                    index += 2;
+                    state = LexicalState::Normal;
+                } else {
+                    output.push(chars[index]);
+                    index += 1;
+                }
+            }
         }
-
-        cursor = idx + "config.".len();
     }
 
-    normalized.push_str(&expression[cursor..]);
-    (normalized, changed)
+    let output = normalize_string_interpolations(&output);
+    let changed = output != expression;
+    (output, changed)
+}
+
+/// Normalize legacy references inside Nix string interpolations. The main
+/// scanner intentionally treats string bodies as opaque, but `${...}` is an
+/// embedded Nix expression and must be scanned as code. Escaped `\${` remains
+/// literal; indented strings use the same rule for their interpolation body.
+fn normalize_string_interpolations(expression: &str) -> String {
+    let chars: Vec<char> = expression.chars().collect();
+    let mut output = String::with_capacity(expression.len());
+    let mut index = 0;
+    let mut string_kind = None::<bool>; // false = double quoted, true = indented
+    while index < chars.len() {
+        if string_kind.is_none() {
+            if chars[index] == '"' {
+                string_kind = Some(false);
+                output.push(chars[index]);
+                index += 1;
+                continue;
+            }
+            if chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
+                string_kind = Some(true);
+                output.push('\'');
+                output.push('\'');
+                index += 2;
+                continue;
+            }
+            output.push(chars[index]);
+            index += 1;
+            continue;
+        }
+
+        let indented = string_kind == Some(true);
+        if !indented && chars[index] == '\\' {
+            output.push(chars[index]);
+            if let Some(next) = chars.get(index + 1) {
+                output.push(*next);
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if indented && chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
+            if chars.get(index + 2) == Some(&'\\') {
+                output.push('\'');
+                output.push('\'');
+                index += 2;
+                output.push(chars[index]);
+                index += 1;
+                if let Some(escaped) = chars.get(index) {
+                    output.push(*escaped);
+                    index += 1;
+                }
+                continue;
+            }
+            if chars
+                .get(index + 2)
+                .is_some_and(|next| matches!(next, '$' | '\''))
+            {
+                output.push('\'');
+                output.push('\'');
+                index += 2;
+                if let Some(escaped) = chars.get(index) {
+                    output.push(*escaped);
+                    index += 1;
+                }
+                continue;
+            }
+            output.push('\'');
+            output.push('\'');
+            index += 2;
+            string_kind = None;
+            continue;
+        }
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+            let start = index + 2;
+            if let Some(end) = interpolation_end(&chars, start) {
+                let inner: String = chars[start..end].iter().collect();
+                let (normalized, _) = normalize_custom_policy_expression(&inner);
+                output.push_str("${");
+                output.push_str(&normalized);
+                output.push('}');
+                index = end + 1;
+                continue;
+            }
+        }
+        if !indented && chars[index] == '"' {
+            output.push(chars[index]);
+            index += 1;
+            string_kind = None;
+        } else {
+            output.push(chars[index]);
+            index += 1;
+        }
+    }
+    output
+}
+
+fn interpolation_end(chars: &[char], mut index: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut state = LexicalState::Normal;
+    while index < chars.len() {
+        match state {
+            LexicalState::Normal => match chars[index] {
+                '"' => {
+                    state = LexicalState::DoubleQuoted;
+                    index += 1;
+                }
+                '#' => {
+                    state = LexicalState::LineComment;
+                    index += 1;
+                }
+                '/' if chars.get(index + 1) == Some(&'*') => {
+                    state = LexicalState::BlockComment;
+                    index += 2;
+                }
+                '\'' if chars.get(index + 1) == Some(&'\'') => {
+                    state = LexicalState::IndentedString;
+                    index += 2;
+                }
+                '{' => {
+                    depth += 1;
+                    index += 1;
+                }
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(index);
+                    }
+                    index += 1;
+                }
+                _ => index += 1,
+            },
+            LexicalState::DoubleQuoted => {
+                if chars[index] == '\\' {
+                    index += 2;
+                } else if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+                    let nested_start = index + 2;
+                    index = interpolation_end(chars, nested_start)? + 1;
+                } else if chars[index] == '"' {
+                    state = LexicalState::Normal;
+                    index += 1;
+                } else {
+                    index += 1;
+                }
+            }
+            LexicalState::IndentedString => {
+                if chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
+                    if chars.get(index + 2) == Some(&'\\') {
+                        index += 3;
+                        if index < chars.len() {
+                            index += 1;
+                        }
+                    } else if chars
+                        .get(index + 2)
+                        .is_some_and(|next| matches!(next, '$' | '\''))
+                    {
+                        index += 3;
+                    } else {
+                        state = LexicalState::Normal;
+                        index += 2;
+                    }
+                } else if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+                    let nested_start = index + 2;
+                    index = interpolation_end(chars, nested_start)? + 1;
+                } else {
+                    index += 1;
+                }
+            }
+            LexicalState::LineComment => {
+                if chars[index] == '\n' {
+                    state = LexicalState::Normal;
+                }
+                index += 1;
+            }
+            LexicalState::BlockComment => {
+                if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
+                    state = LexicalState::Normal;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy)]
+enum LexicalState {
+    Normal,
+    DoubleQuoted,
+    IndentedString,
+    LineComment,
+    BlockComment,
+}
+
+fn is_nix_identifier_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
 }
 
 async fn run_post_finalize_derivation_side_effects(
@@ -439,7 +712,7 @@ fn parse_deployment_policy_record(
                         }
                     };
                     let expression = match rule_obj.get("expression").and_then(|v| v.as_str()) {
-                        Some(e) => e.to_string(),
+                        Some(e) => normalize_custom_policy_expression(e).0,
                         None => {
                             warn!(
                                 "Skipping custom_check policy '{}' ({}): rules[{}] missing expression",
@@ -496,7 +769,7 @@ fn parse_deployment_policy_record(
                     normalize_custom_policy_expression(&raw_expression);
                 if normalized_legacy_ref {
                     warn!(
-                        "Auto-normalized legacy custom_check expression for policy '{}' ({}): replaced `config.` with `cfg.config.`",
+                        "Normalized legacy custom_check expression for policy '{}' ({}): replaced `cfg.config.` with `config.`",
                         record.name, record.id
                     );
                 }
@@ -1920,6 +2193,8 @@ mod tests {
             enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
         };
 
         let parsed = parse_deployment_policy_record(&record).expect("policy should parse");
@@ -1940,6 +2215,8 @@ mod tests {
             enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
         };
 
         assert!(parse_deployment_policy_record(&record).is_none());
@@ -1956,6 +2233,8 @@ mod tests {
             enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
         };
 
         assert!(parse_deployment_policy_record(&record).is_none());
@@ -1964,17 +2243,17 @@ mod tests {
     #[test]
     fn normalize_custom_policy_expression_rewrites_legacy_config_prefix() {
         let (normalized, changed) =
-            normalize_custom_policy_expression("config.services.auditd.enable or false");
+            normalize_custom_policy_expression("cfg.config.services.auditd.enable or false");
         assert!(changed);
-        assert_eq!(normalized, "cfg.config.services.auditd.enable or false");
+        assert_eq!(normalized, "config.services.auditd.enable or false");
     }
 
     #[test]
     fn normalize_custom_policy_expression_keeps_cfg_config_prefix() {
         let (normalized, changed) =
             normalize_custom_policy_expression("cfg.config.networking.firewall.enable");
-        assert!(!changed);
-        assert_eq!(normalized, "cfg.config.networking.firewall.enable");
+        assert!(changed);
+        assert_eq!(normalized, "config.networking.firewall.enable");
     }
 
     #[test]
@@ -1991,15 +2270,106 @@ mod tests {
             enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
         };
 
         let parsed = parse_deployment_policy_record(&record).expect("policy should parse");
         match parsed {
             DeploymentPolicy::CustomCheck { expression, .. } => {
-                assert_eq!(expression, "cfg.config.services.auditd.enable or false")
+                assert_eq!(expression, "config.services.auditd.enable or false")
             }
             _ => panic!("expected CustomCheck variant"),
         }
+    }
+
+    #[test]
+    fn normalize_custom_policy_expression_preserves_nix_literals_comments_and_boundaries() {
+        let expression = r##"cfg.config.services.auditd.enable &&
+            "cfg.config.in_a_string" == "cfg.config.foo" # cfg.config.comment
+            && mycfg.config.not_a_reference
+            && ''cfg.config.in_an_indented_string''
+            && /* cfg.config.block_comment */ cfg.config.services.audit.enable
+            && "${cfg.config.interpolated}"
+            && ''${cfg.config.indented_interpolated}''
+            && "\${cfg.config.literal_interpolated}""##;
+        let (normalized, changed) = normalize_custom_policy_expression(expression);
+
+        assert!(changed);
+        assert!(normalized.contains("config.services.auditd.enable"));
+        assert!(normalized.contains("\"cfg.config.in_a_string\""));
+        assert!(normalized.contains("# cfg.config.comment"));
+        assert!(normalized.contains("mycfg.config.not_a_reference"));
+        assert!(normalized.contains("''cfg.config.in_an_indented_string''"));
+        assert!(normalized.contains("/* cfg.config.block_comment */"));
+        assert!(normalized.contains("config.services.audit.enable"));
+        assert!(normalized.contains("\"${config.interpolated}\""));
+        assert!(normalized.contains("''${config.indented_interpolated}''"));
+        assert!(
+            normalized.contains("\"\\${cfg.config.literal_interpolated}\""),
+            "normalized={normalized:?}"
+        );
+    }
+
+    #[test]
+    fn normalize_custom_policy_expression_respects_indented_string_escapes() {
+        let expression = "''\n  ${cfg.config.real}\n  echo ''${cfg.config.literal}\n  echo ''\\${cfg.config.literal_backslash}\n  echo '''cfg.config.literal_quotes\n''";
+        let (normalized, changed) = normalize_custom_policy_expression(expression);
+
+        assert!(changed);
+        assert!(normalized.contains("${config.real}"));
+        assert!(
+            normalized.contains("''${cfg.config.literal}"),
+            "normalized={normalized:?}"
+        );
+        assert!(
+            normalized.contains("''\\${cfg.config.literal_backslash}"),
+            "normalized={normalized:?}"
+        );
+        assert!(normalized.contains("'''cfg.config.literal_quotes"));
+    }
+
+    #[test]
+    fn normalize_custom_policy_expression_ignores_braces_in_nested_interpolation_strings() {
+        let expression = r#""${let x = ''}''; in cfg.config.services.auditd.enable}""#;
+        let (normalized, changed) = normalize_custom_policy_expression(expression);
+
+        assert!(changed);
+        assert_eq!(
+            normalized,
+            r#""${let x = ''}''; in config.services.auditd.enable}""#
+        );
+    }
+
+    #[test]
+    fn normalize_custom_policy_expression_ignores_braces_in_nested_interpolation_comments() {
+        let expression = "\"${let\n  x = 1; # }\nin cfg.config.services.auditd.enable}\"";
+        let (normalized, changed) = normalize_custom_policy_expression(expression);
+
+        assert!(changed);
+        assert_eq!(
+            normalized,
+            "\"${let\n  x = 1; # }\nin config.services.auditd.enable}\""
+        );
+    }
+
+    #[test]
+    fn normalize_custom_policy_expression_handles_combined_nested_interpolation_lexing() {
+        let expression = r#""${let
+  a = ''literal } and ''${notInterpolation}'';
+  b = "also }";
+  # }
+  /* } */
+in cfg.config.security.auditd.enable}""#;
+        let (normalized, changed) = normalize_custom_policy_expression(expression);
+
+        assert!(changed);
+        assert!(normalized.contains("''literal } and ''${notInterpolation}''"));
+        assert!(normalized.contains("\"also }\""));
+        assert!(normalized.contains("# }"));
+        assert!(normalized.contains("/* } */"));
+        assert!(normalized.contains("in config.security.auditd.enable}"));
+        assert!(!normalized.contains("cfg.config.security.auditd.enable"));
     }
 
     #[test]

@@ -283,6 +283,7 @@ pub fn validate_cf_native_document(
             layer: Some(bundle_canonical.layer),
             owner: Some(bundle_canonical.owner),
             description: bundle_canonical.description,
+            environment_ids: Vec::new(),
         },
         is_disa_stig: false,
         rules_to_import: rules,
@@ -386,10 +387,12 @@ pub fn validate_import_plan(
                         "assertion field_name, expression, and description are required",
                     ));
                 }
-                if !assertion.expression.contains("cfg.config") {
+                if !assertion.expression.contains("config.")
+                    || assertion.expression.contains("cfg.config.")
+                {
                     return Err(ImportPlanError::native_check_invalid(
                         rule_id,
-                        "assertion expression must use the cfg.config binding",
+                        "assertion expression must use the canonical config binding",
                     ));
                 }
             }
@@ -677,6 +680,7 @@ mod tests {
                 title: Some("Test".into()),
                 description: None,
                 version: Some("1.0".into()),
+                release_info: None,
                 status: Some("draft".into()),
                 status_date: None,
                 platforms: vec![],
@@ -739,6 +743,7 @@ mod tests {
                 layer: None,
                 owner: None,
                 description: None,
+                environment_ids: Vec::new(),
             },
         }
     }
@@ -809,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn native_custom_check_requires_cfg_binding_and_preserves_assertions() {
+    fn native_custom_check_requires_config_binding_and_preserves_assertions() {
         let parsed = minimal_foreign_parsed(&["rule-1"]);
         let mut plan = valid_plan(&["rule-1"]);
         plan.rule_actions = vec![XccdfRuleImportAction::CreateNativeCustom {
@@ -819,7 +824,7 @@ mod tests {
                 mode: "any".into(),
                 rules: vec![ImportedCustomCheckRule {
                     field_name: "firewallEnabled".into(),
-                    expression: "cfg.config.networking.firewall.enable".into(),
+                    expression: "config.networking.firewall.enable".into(),
                     description: "Firewall is enabled".into(),
                     strict: false,
                 }],
@@ -1227,6 +1232,7 @@ mod tests {
                 layer: None,
                 owner: None,
                 description: None,
+                environment_ids: Vec::new(),
             },
         };
         let validated = validate_import_plan(plan, &parsed).unwrap();
@@ -1234,6 +1240,19 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].source_rule_id, "r1");
         assert_eq!(records[0].implementation_state, "manual");
+    }
+
+    #[test]
+    fn duplicate_foreign_rule_titles_remain_source_faithful_before_commit() {
+        let mut parsed = minimal_foreign_parsed(&["r1", "r2"]);
+        parsed.rules[0].title = Some("Repeated title".into());
+        parsed.rules[1].title = Some("Repeated title".into());
+        let validated = validate_import_plan(valid_plan(&["r1", "r2"]), &parsed).unwrap();
+
+        let records = build_policy_records(&validated);
+
+        assert_eq!(records[0].name, "Repeated title");
+        assert_eq!(records[1].name, "Repeated title");
     }
 
     #[test]

@@ -26,8 +26,9 @@
 //! Any failure rolls back every write in this list.
 //! Shared policy creation ensures exactly one policy lineage/version per group.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use sqlx::PgPool;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::compliance::digest::{
@@ -61,9 +62,9 @@ use crate::compliance::xccdf::reconciliation::{
 use crate::queries::compliance::{PolicyDraftIntent, ensure_policy_draft};
 use crate::queries::framework_requirements::{
     insert_bundle_version_requirement, insert_framework_version,
-    insert_framework_version_with_requirement_digests_and_hierarchy, insert_policy_mapping_in_tx,
-    insert_requirement_version, insert_requirement_version_pending, upsert_framework_lineage,
-    upsert_requirement_lineage,
+    insert_framework_version_with_requirement_digests_and_hierarchy,
+    insert_import_policy_mapping_in_tx, insert_policy_mapping_in_tx, insert_requirement_version,
+    insert_requirement_version_pending, upsert_framework_lineage, upsert_requirement_lineage,
 };
 
 async fn revalidate_reviewed_related_candidate(
@@ -152,6 +153,26 @@ async fn revalidate_reviewed_related_candidate(
         );
     }
     Ok(())
+}
+
+fn allocate_unique_import_policy_names(
+    policy_records: &mut [ImportedPolicyRecord],
+    mut reserved_names: HashSet<String>,
+) {
+    for record in policy_records {
+        let base_name = record.name.clone();
+        if reserved_names.insert(base_name.clone()) {
+            continue;
+        }
+
+        let mut disambiguated = format!("{base_name} [{}]", record.source_rule_id);
+        let mut suffix = 2;
+        while !reserved_names.insert(disambiguated.clone()) {
+            disambiguated = format!("{base_name} [{}-{suffix}]", record.source_rule_id);
+            suffix += 1;
+        }
+        record.name = disambiguated;
+    }
 }
 
 // ── Parser version identifier ─────────────────────────────────────────────────
@@ -445,7 +466,7 @@ pub async fn commit_foreign_import(
     importing_user_id: Uuid,
     pkg: ProcessedXccdfPackage,
     validated: ValidatedImportPlan,
-    policy_records: Vec<ImportedPolicyRecord>,
+    mut policy_records: Vec<ImportedPolicyRecord>,
 ) -> Result<XccdfCommittedImportResult> {
     #[derive(Debug, Clone, Copy)]
     struct NormalizedRequirementImport {
@@ -553,6 +574,22 @@ pub async fn commit_foreign_import(
         });
     }
 
+    // Serialize allocation of globally unique policy names across concurrent
+    // imports, then reserve every existing name (including previously generated
+    // source-ID variants) before allocating this batch.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('xccdf-import-policy-names', 0))")
+        .execute(&mut *tx)
+        .await
+        .context("failed to lock imported policy name allocation")?;
+    let reserved_names: HashSet<String> =
+        sqlx::query_scalar("SELECT name FROM deployment_policies")
+            .fetch_all(&mut *tx)
+            .await
+            .context("failed to load imported policy names")?
+            .into_iter()
+            .collect();
+    allocate_unique_import_policy_names(&mut policy_records, reserved_names);
+
     // ── 2. Bundle lineage ─────────────────────────────────────────────────────
     let bundle_name = validated.bundle.name.trim().to_owned();
     let bundle_framework = validated.bundle.framework.trim().to_owned();
@@ -581,6 +618,21 @@ pub async fn commit_foreign_import(
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
 
+    let mut environment_ids = validated.bundle.environment_ids.clone();
+    environment_ids.sort_unstable();
+    environment_ids.dedup();
+    let valid_environment_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM environments WHERE id = ANY($1::uuid[])")
+            .bind(&environment_ids)
+            .fetch_one(&mut *tx)
+            .await
+            .context("failed to validate imported bundle environments")?;
+    if valid_environment_count != environment_ids.len() as i64 {
+        bail!(
+            "IMPORT_ENVIRONMENT_NOT_FOUND: import plan references one or more unknown environments"
+        );
+    }
+
     let bundle_id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO compliance_bundles (name, framework, version, description, layer, owner)
@@ -597,6 +649,17 @@ pub async fn commit_foreign_import(
     .fetch_one(&mut *tx)
     .await
     .context("failed to insert bundle lineage")?;
+
+    for environment_id in environment_ids {
+        sqlx::query(
+            "INSERT INTO compliance_bundle_environments (bundle_id, environment_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(bundle_id)
+        .bind(environment_id)
+        .execute(&mut *tx)
+        .await
+        .context("failed to persist imported bundle environment")?;
+    }
 
     // The INSERT above fires a trigger that creates the initial draft bundle
     // version and sets current_draft_version_id. We load that pointer now.
@@ -621,9 +684,16 @@ pub async fn commit_foreign_import(
     // DISA STIGs have a stable framework/release identity and requirement
     // lineages.  Persist those authoritative objects before choosing policy
     // implementations; the legacy policy metadata remains source provenance.
-    let normalized_requirements = if is_disa_stig(&pkg.parsed)
-        && let Some(identity) = identify_framework(&pkg.parsed)
-    {
+    //
+    // Fail closed: a document classified as a DISA STIG must never degrade into
+    // a policy-only bundle with zero normalized requirements. If a stable
+    // framework identity cannot be produced, abort the whole import transaction.
+    let normalized_requirements = if is_disa_stig(&pkg.parsed) {
+        let Some(identity) = identify_framework(&pkg.parsed) else {
+            bail!(
+                "IMPORT_FRAMEWORK_NORMALIZATION_FAILED: DISA STIG import could not derive a stable framework identity"
+            );
+        };
         let framework_name = identity
             .title
             .as_deref()
@@ -647,6 +717,13 @@ pub async fn commit_foreign_import(
         .context("failed to load prior framework release for STIG reconciliation")?;
         let authoritative_requirements =
             canonical_framework_requirements_for_framework(&pkg.parsed);
+        // Fail closed on a degenerate DISA document that carries no rules at
+        // all: such an import must never succeed as a policy-only bundle.
+        if authoritative_requirements.is_empty() {
+            bail!(
+                "IMPORT_FRAMEWORK_NORMALIZATION_FAILED: DISA STIG produced no authoritative requirements"
+            );
+        }
         let incoming_requirement_digests =
             requirement_semantic_digests(&authoritative_requirements);
         let hierarchy_edges = hierarchy_edges_for_framework(&pkg.parsed);
@@ -666,6 +743,19 @@ pub async fn commit_foreign_import(
             &hierarchy_edges,
         )
         .await?;
+
+        // The bundle version records the framework release it was normalized
+        // against. This survives zero-requirement corruption: the coverage
+        // report reads bundle -> framework through this column, never through
+        // requirement membership.
+        sqlx::query(
+            "UPDATE compliance_bundle_versions SET framework_version_id = $1 WHERE id = $2",
+        )
+        .bind(framework_version_id)
+        .bind(bundle_version_id)
+        .execute(&mut *tx)
+        .await
+        .context("failed to record framework version on bundle version")?;
 
         let mut group_versions = std::collections::HashMap::new();
         for group in &pkg.parsed.groups {
@@ -1233,7 +1323,7 @@ pub async fn commit_foreign_import(
                     (relationship, coverage, rationale, provenance)
                 };
 
-            insert_policy_mapping_in_tx(
+            insert_import_policy_mapping_in_tx(
                 &mut tx,
                 policy_version_id,
                 requirement.requirement_version_id,
@@ -1245,6 +1335,96 @@ pub async fn commit_foreign_import(
                 importing_user_id,
             )
             .await?;
+        }
+    }
+
+    // ── 7b. Fail-closed cardinality gate for normalized STIG imports ────────
+    // Every selected imported rule must carry both a selected bundle
+    // requirement membership and an effective trusted mapping before the
+    // transaction commits. Do not rely on the present parser shape: enforce
+    // the complete invariant explicitly.
+    //
+    // The mapping check is exact-pair, not aggregate: the pair
+    // (policy_version_id, requirement_version_id) is unique in
+    // policy_requirement_mappings, so counting trusted mappings that merely
+    // touch a selected requirement would let an unrelated trusted mapping
+    // satisfy (or, after deduplication, falsify) the check. Each selected rule
+    // must resolve to its own trusted mapping between the effective policy
+    // version and the normalized requirement version, plus possibly inherited
+    // reuses that are validated separately.
+    if let Some(requirement_versions) = &normalized_requirements {
+        let selected_rule_count = policy_records.len() as i64;
+        let membership_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_bundle_version_requirements \
+             WHERE bundle_version_id = $1 AND selected = true",
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("failed to verify STIG bundle membership cardinality")?;
+        if membership_count != selected_rule_count {
+            bail!(
+                "IMPORT_FRAMEWORK_NORMALIZATION_FAILED: DISA STIG import selected {selected_rule_count} rules but produced {membership_count} selected bundle requirements"
+            );
+        }
+
+        let mut expected_pairs: Vec<(Uuid, Uuid)> = Vec::with_capacity(policy_records.len());
+        for rec in &policy_records {
+            let policy_version_id = rule_to_policy_version
+                .get(&rec.source_rule_id)
+                .copied()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "IMPORT_INTERNAL_ERROR: no policy resolution for rule {}",
+                        rec.source_rule_id
+                    )
+                })?;
+            let requirement = requirement_versions
+                .get(&rec.source_rule_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "IMPORT_REQUIREMENT_NOT_FOUND: missing normalized requirement for rule {}",
+                        rec.source_rule_id
+                    )
+                })?;
+            expected_pairs.push((requirement.requirement_version_id, policy_version_id));
+        }
+        expected_pairs.sort_unstable();
+        expected_pairs.dedup();
+
+        let policy_ids: Vec<Uuid> = expected_pairs.iter().map(|(_, pv)| *pv).collect();
+        let requirement_ids: Vec<Uuid> = expected_pairs.iter().map(|(rv, _)| *rv).collect();
+        let trusted_pairs = sqlx::query_as::<_, (Uuid, Uuid)>(
+            r#"
+            SELECT DISTINCT m.requirement_version_id, m.policy_version_id
+            FROM policy_requirement_mappings m
+            JOIN UNNEST($1::uuid[], $2::uuid[]) AS p(policy_version_id, requirement_version_id)
+              ON p.policy_version_id = m.policy_version_id
+             AND p.requirement_version_id = m.requirement_version_id
+            WHERE m.trust_state = 'trusted'
+            "#,
+        )
+        .bind(&policy_ids)
+        .bind(&requirement_ids)
+        .fetch_all(&mut *tx)
+        .await
+        .context("failed to verify STIG import mapping pairs")?;
+
+        let trusted_pair_set: HashSet<(Uuid, Uuid)> = trusted_pairs.into_iter().collect();
+        let missing_pairs: Vec<(Uuid, Uuid)> = expected_pairs
+            .iter()
+            .copied()
+            .filter(|pair| !trusted_pair_set.contains(pair))
+            .collect();
+        if !missing_pairs.is_empty() {
+            let missing_desc = missing_pairs
+                .iter()
+                .map(|(rv, pv)| format!("policy {pv} -> requirement {rv}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "IMPORT_FRAMEWORK_NORMALIZATION_FAILED: DISA STIG import is missing trusted mappings for {missing_desc}"
+            );
         }
     }
 
@@ -2249,6 +2429,7 @@ mod tests {
                 layer: Some("os".into()),
                 owner: Some("Security Team".into()),
                 description: Some("Imported from test fixture".into()),
+                environment_ids: Vec::new(),
             },
         };
 
@@ -2260,6 +2441,23 @@ mod tests {
             record.name = format!("{}-{suffix}", record.name);
         }
         (validated, records)
+    }
+
+    #[test]
+    fn imported_policy_name_allocation_skips_existing_generated_variants() {
+        let pkg = make_package(minimal_xccdf_bytes());
+        let (_, mut records) = make_plan(&pkg, &["xccdf_test_rule_001", "xccdf_test_rule_002"]);
+        records[0].name = "Repeated title".into();
+        records[1].name = "Repeated title".into();
+        let reserved = HashSet::from([
+            "Repeated title".to_string(),
+            "Repeated title [xccdf_test_rule_001]".to_string(),
+        ]);
+
+        allocate_unique_import_policy_names(&mut records, reserved);
+
+        assert_eq!(records[0].name, "Repeated title [xccdf_test_rule_001-2]");
+        assert_eq!(records[1].name, "Repeated title [xccdf_test_rule_002]");
     }
 
     async fn test_pool() -> Option<PgPool> {
@@ -3214,6 +3412,7 @@ mod tests {
                 layer: Some("os".to_string()),
                 owner: Some("Security Team".to_string()),
                 description: None,
+                environment_ids: Vec::new(),
             },
         };
         let mut validated =
@@ -3292,6 +3491,7 @@ mod tests {
                 layer: Some("os".to_string()),
                 owner: Some("Security Team".to_string()),
                 description: None,
+                environment_ids: Vec::new(),
             },
         };
         let mut validated =
@@ -3340,6 +3540,7 @@ mod tests {
                 layer: Some("os".into()),
                 owner: Some("Security Team".into()),
                 description: None,
+                environment_ids: Vec::new(),
             },
         };
         let validated = validate_import_plan(plan, &pkg.parsed).expect("valid MapExisting plan");
@@ -3966,6 +4167,243 @@ mod tests {
         );
     }
 
+    /// Discriminating regression for the STIG import gate refinement: the
+    /// import gate must validate exact (policy_version_id,
+    /// requirement_version_id) pairs, never aggregate counts over trusted
+    /// mappings that merely touch a selected requirement.
+    ///
+    /// This scenario is a false negative of the aggregate gate: an unrelated
+    /// trusted mapping sharing only the requirement version must not make a
+    /// legitimate re-import fail.
+    ///
+    /// The re-import deliberately runs the full commit path: the
+    /// exact-artifact idempotent shortcut is defeated by removing the
+    /// benchmark source-object mapping, and the ExactTechnicalMatch proof
+    /// re-uses the current draft, so the step-7 machinery — and therefore the
+    /// gate — all run.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn stig_import_succeeds_with_unrelated_trusted_mapping() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+
+        let ssh_config = serde_json::json!({
+            "services.openssh.enable": false,
+            "services.openssh.settings.PermitRootLogin": "no",
+        });
+        let (_existing_policy_id, existing_policy_version_id) =
+            insert_published_technical_policy(&pool, "existing-ssh-hardening", ssh_config).await;
+
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_Task422_UnrelatedGate_{}",
+            Uuid::new_v4().simple()
+        );
+        let fix_text =
+            "services.openssh.enable = false;\nservices.openssh.settings.PermitRootLogin = \"no\";";
+        let pkg = make_package(stig_bytes_with_fix(
+            &benchmark_id,
+            "V-418-201",
+            "SSH root login must be disabled",
+            fix_text,
+        ));
+        let (validated, records) = exact_match_plan(
+            &pkg,
+            existing_policy_version_id,
+            Some(MapExistingProof::ExactTechnicalMatch),
+            Some(ImportedMappingSemantics {
+                relationship: Some("supports".into()),
+                coverage: Some("partial".into()),
+                rationale: Some("independent reviewed rationale".into()),
+                reviewed_related_candidate: None,
+            }),
+        );
+        let next = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("import should derive the current draft");
+        let requirement_id: Uuid = sqlx::query_scalar(
+            "SELECT requirement_version_id FROM compliance_bundle_version_requirements WHERE bundle_version_id = $1 AND selected = true",
+        )
+        .bind(next.bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load current release requirement version");
+        let draft_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(_existing_policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load derived draft");
+
+        // Unrelated trusted mapping sharing only requirement R1 with the
+        // importer's own pair: the aggregate trusted count over {R1} is now 2
+        // while only 1 rule is selected, which would reject the re-import
+        // under an aggregate gate. The exact-pair gate ignores it.
+        insert_unrelated_draft_mapping(&pool, user_id, requirement_id).await;
+
+        // Defeat the exact-artifact idempotent shortcut so the same-sha
+        // re-import runs the full commit path and reaches the gate.
+        sqlx::query(
+            "DELETE FROM compliance_source_object_mappings WHERE source_artifact_id = $1 AND object_kind = 'benchmark'",
+        )
+        .bind(next.source_artifact_id)
+        .execute(&pool)
+        .await
+        .expect("remove benchmark source mapping");
+
+        // Same-release re-import: the current draft's pair (D,R1) still
+        // exists and stays trusted, so the exact-pair gate must accept it.
+        let pkg = make_package(stig_bytes_with_fix(
+            &benchmark_id,
+            "V-418-201",
+            "SSH root login must be disabled",
+            fix_text,
+        ));
+        let (validated, records) = exact_match_plan(
+            &pkg,
+            existing_policy_version_id,
+            Some(MapExistingProof::ExactTechnicalMatch),
+            Some(ImportedMappingSemantics {
+                relationship: Some("supports".into()),
+                coverage: Some("partial".into()),
+                rationale: Some("independent reviewed rationale".into()),
+                ..Default::default()
+            }),
+        );
+        let reimport = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("re-import with unrelated trusted mapping must succeed");
+        let membership_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_bundle_version_requirements WHERE bundle_version_id = $1 AND selected = true",
+        )
+        .bind(reimport.bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count re-import bundle memberships");
+        assert_eq!(membership_count, 1);
+    }
+
+    /// Discriminating fail-closed regression for the STIG import gate: the
+    /// effective pair for a selected rule is no longer trusted, while an
+    /// unrelated trusted mapping to the same requirement version keeps the
+    /// aggregate trusted count equal to the selected rule count. The exact-pair
+    /// gate must fail the import; an aggregate gate would pass it.
+    ///
+    /// The corrupted pair lives on the current draft (D,R1v1): the import
+    /// derives D from the seeded published policy and step 7 creates the pair,
+    /// then the test marks it 'suggested'. A same-release re-import via the
+    /// ExactTechnicalMatch proof re-uses the same draft — the step-7 mapping
+    /// insert is inert because the row already exists, so the pair stays
+    /// non-trusted when the gate runs. The unrelated trusted mapping on a
+    /// throwaway draft keeps the aggregate trusted count equal to the selected
+    /// rule count, which is what an aggregate gate would wrongly accept.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn stig_import_fails_closed_when_exact_mapping_pair_is_not_trusted() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+
+        let ssh_config = serde_json::json!({
+            "services.openssh.enable": false,
+            "services.openssh.settings.PermitRootLogin": "no",
+        });
+        let (_existing_policy_id, existing_policy_version_id) =
+            insert_published_technical_policy(&pool, "existing-ssh-hardening", ssh_config).await;
+
+        let benchmark_id = format!(
+            "xccdf_mil.disa.stig_benchmark_Task422_FailClosedGate_{}",
+            Uuid::new_v4().simple()
+        );
+        let fix_text =
+            "services.openssh.enable = false;\nservices.openssh.settings.PermitRootLogin = \"no\";";
+        let pkg = make_package(stig_bytes_with_fix(
+            &benchmark_id,
+            "V-418-202",
+            "SSH root login must be disabled",
+            fix_text,
+        ));
+        let (validated, records) = exact_match_plan(
+            &pkg,
+            existing_policy_version_id,
+            Some(MapExistingProof::ExactTechnicalMatch),
+            Some(ImportedMappingSemantics {
+                relationship: Some("implements".into()),
+                coverage: Some("full".into()),
+                ..Default::default()
+            }),
+        );
+        let next = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("import should derive the current draft");
+        let requirement_id: Uuid = sqlx::query_scalar(
+            "SELECT requirement_version_id FROM compliance_bundle_version_requirements WHERE bundle_version_id = $1 AND selected = true",
+        )
+        .bind(next.bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load current release requirement version");
+        let draft_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(_existing_policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load derived draft");
+
+        // Corrupt only the importer's own effective pair (D,R1v1). The
+        // unrelated trusted mapping on a throwaway draft keeps the aggregate
+        // trusted count equal to the selected rule count (1), which is what an
+        // aggregate gate would wrongly accept.
+        sqlx::query(
+            "UPDATE policy_requirement_mappings SET trust_state = 'suggested' WHERE policy_version_id = $1 AND requirement_version_id = $2",
+        )
+        .bind(draft_id)
+        .bind(requirement_id)
+        .execute(&pool)
+        .await
+        .expect("untrust the exact effective pair");
+        insert_unrelated_draft_mapping(&pool, user_id, requirement_id).await;
+
+        // Defeat the exact-artifact idempotent shortcut so the same-sha
+        // re-import runs the full commit path and reaches the gate.
+        sqlx::query(
+            "DELETE FROM compliance_source_object_mappings WHERE source_artifact_id = $1 AND object_kind = 'benchmark'",
+        )
+        .bind(next.source_artifact_id)
+        .execute(&pool)
+        .await
+        .expect("remove benchmark source mapping");
+
+        // Same-release re-import: the step-7 mapping insert is inert because
+        // the pair already exists on the current draft, the corrupted pair
+        // stays suggested, and the exact-pair gate must reject the import.
+        let pkg = make_package(stig_bytes_with_fix(
+            &benchmark_id,
+            "V-418-202",
+            "SSH root login must be disabled",
+            fix_text,
+        ));
+        let (validated, records) = exact_match_plan(
+            &pkg,
+            existing_policy_version_id,
+            Some(MapExistingProof::ExactTechnicalMatch),
+            Some(ImportedMappingSemantics {
+                relationship: Some("implements".into()),
+                coverage: Some("full".into()),
+                ..Default::default()
+            }),
+        );
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect_err("untrusted effective pair must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("IMPORT_FRAMEWORK_NORMALIZATION_FAILED"),
+            "unexpected gate error: {error}"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn successful_import_creates_all_expected_rows() {
@@ -4100,6 +4538,175 @@ mod tests {
 
         // Cleanup.
         cleanup_import(&pool, result.bundle_id, &result.created_policy_version_ids).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn foreign_import_valid_environment_persists_bundle_association() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let environment_id: Uuid =
+            sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
+                .bind(format!("xccdf-env-{}", Uuid::new_v4().simple()))
+                .fetch_one(&pool)
+                .await
+                .expect("insert test environment");
+        let mut bytes = minimal_xccdf_bytes();
+        bytes.extend_from_slice(format!("\n<!-- {} -->", Uuid::new_v4()).as_bytes());
+        let pkg = make_package(bytes);
+        let (mut validated, policy_records) = make_plan(&pkg, &["xccdf_test_rule_001"]);
+        validated.bundle.environment_ids = vec![environment_id, environment_id];
+
+        let result = commit_foreign_import(&pool, user_id, pkg, validated, policy_records)
+            .await
+            .expect("environment-scoped import should commit");
+
+        let association_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_bundle_environments WHERE bundle_id = $1 AND environment_id = $2",
+        )
+        .bind(result.bundle_id)
+        .bind(environment_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(association_count, 1);
+
+        cleanup_import(&pool, result.bundle_id, &result.created_policy_version_ids).await;
+        sqlx::query("DELETE FROM environments WHERE id = $1")
+            .bind(environment_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn foreign_import_invalid_environment_rolls_back_bundle_policies_and_associations() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let mut bytes = minimal_xccdf_bytes();
+        bytes.extend_from_slice(format!("\n<!-- {} -->", Uuid::new_v4()).as_bytes());
+        let pkg = make_package(bytes);
+        let source_sha256 = pkg.provenance.sha256.clone();
+        let (mut validated, policy_records) = make_plan(&pkg, &["xccdf_test_rule_001"]);
+        let bundle_name = validated.bundle.name.clone();
+        let policy_names: Vec<String> = policy_records
+            .iter()
+            .map(|record| record.name.clone())
+            .collect();
+        let before_bundles: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundles")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let before_bundle_versions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundle_versions")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let before_policies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let before_policy_versions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policy_versions")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let before_memberships: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundle_version_policies")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let before_associations: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundle_environments")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        validated.bundle.environment_ids = vec![Uuid::new_v4()];
+
+        let error = commit_foreign_import(&pool, user_id, pkg, validated, policy_records)
+            .await
+            .expect_err("unknown environment must reject the import");
+        assert!(
+            error.to_string().contains("IMPORT_ENVIRONMENT_NOT_FOUND"),
+            "unexpected error: {error:?}"
+        );
+
+        let bundle_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundles WHERE name = $1")
+                .bind(&bundle_name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(bundle_count, 0, "bundle row must roll back");
+
+        let policy_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policy_versions WHERE name = ANY($1)",
+        )
+        .bind(&policy_names)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(policy_count, 0, "policy versions must roll back");
+
+        let source_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_source_artifacts WHERE sha256 = $1",
+        )
+        .bind(&source_sha256)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(source_count, 0, "source artifact must roll back");
+
+        let association_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_bundle_environments cbe LEFT JOIN compliance_bundles b ON b.id = cbe.bundle_id WHERE b.name = $1",
+        )
+        .bind(&bundle_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            association_count, 0,
+            "environment associations must roll back"
+        );
+        let after_counts: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+            r#"
+            SELECT
+                (SELECT COUNT(*) FROM compliance_bundles),
+                (SELECT COUNT(*) FROM compliance_bundle_versions),
+                (SELECT COUNT(*) FROM deployment_policies),
+                (SELECT COUNT(*) FROM deployment_policy_versions),
+                (SELECT COUNT(*) FROM compliance_bundle_version_policies),
+                (SELECT COUNT(*) FROM compliance_bundle_environments)
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            after_counts.0, before_bundles,
+            "no compliance bundle persisted"
+        );
+        assert_eq!(
+            after_counts.1, before_bundle_versions,
+            "no compliance bundle version persisted"
+        );
+        assert_eq!(
+            after_counts.2, before_policies,
+            "no deployment policy persisted"
+        );
+        assert_eq!(
+            after_counts.3, before_policy_versions,
+            "no deployment policy version persisted"
+        );
+        assert_eq!(
+            after_counts.4, before_memberships,
+            "no bundle-policy membership persisted"
+        );
+        assert_eq!(
+            after_counts.5, before_associations,
+            "no bundle-environment association persisted"
+        );
     }
 
     #[tokio::test]
@@ -4240,6 +4847,7 @@ mod tests {
                 layer: None,
                 owner: None,
                 description: None,
+                environment_ids: Vec::new(),
             },
         };
 
@@ -5328,6 +5936,7 @@ mod tests {
                 layer: Some("os".into()),
                 owner: Some("Security Team".into()),
                 description: None,
+                environment_ids: Vec::new(),
             },
         };
         let validated = validate_import_plan(plan, &pkg.parsed).expect("valid exact match plan");
@@ -5421,6 +6030,74 @@ mod tests {
 
         tx.commit().await.unwrap();
         (policy_id, policy_version_id)
+    }
+
+    /// Create a throwaway mutable draft policy version (not published) and add
+    /// a trusted mapping from it to the given requirement version.  Draft
+    /// versions are mutable, so the immutability guard does not apply; the
+    /// policy does not need to exist as a real, usable policy.  This lets a
+    /// test plant a trusted mapping that touches a selected requirement without
+    /// belonging to the importer's effective policy version, which is exactly
+    /// the aggregate-count false positive the exact-pair gate must reject.
+    async fn insert_unrelated_draft_mapping(
+        pool: &PgPool,
+        user_id: Uuid,
+        requirement_version_id: Uuid,
+    ) -> Uuid {
+        let trusted_user_id = ensure_test_user(pool).await;
+        let policy_id = Uuid::new_v4();
+        let policy_version_id = Uuid::new_v4();
+        let policy_name = format!("unrelated-draft-{}", Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO deployment_policies (id, name, description, policy_type) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(policy_id)
+        .bind(&policy_name)
+        .bind(format!("{policy_name} unrelated trusted mapping"))
+        .bind("native")
+        .execute(pool)
+        .await
+        .unwrap();
+        // Insert version in draft state (required by trigger guard_version_insert_state).
+        sqlx::query(
+            "INSERT INTO deployment_policy_versions \
+             (id, policy_id, version, publication_state, name, policy_type, \
+              implementation_state, execution_phase, config, compliance_metadata, \
+              dependencies, semantic_digest, digest_algorithm, created_by) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+        )
+        .bind(policy_version_id)
+        .bind(policy_id)
+        .bind("1.0")
+        .bind("draft")
+        .bind(&policy_name)
+        .bind("native")
+        .bind("native")
+        .bind("deploy")
+        .bind(serde_json::json!({}))
+        .bind(serde_json::json!({}))
+        .bind(serde_json::json!([]))
+        .bind("test-digest")
+        .bind("sha-256")
+        .bind(trusted_user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO policy_requirement_mappings \
+             (policy_version_id, requirement_version_id, relationship, coverage, \
+              rationale, provenance, trust_state, created_by) \
+             VALUES ($1, $2, 'implements', 'full', 'unrelated manual mapping', \
+              'manual', 'trusted', $3)",
+        )
+        .bind(policy_version_id)
+        .bind(requirement_version_id)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        policy_version_id
     }
 
     #[tokio::test]

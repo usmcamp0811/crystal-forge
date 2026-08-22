@@ -108,6 +108,14 @@ pub enum RequirementCoverage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BundleCoverageReport {
     pub bundle_version_id: Uuid,
+    /// Authoritative source framework release the bundle was normalized
+    /// against. Populated through `compliance_bundle_versions.framework_version_id`,
+    /// which survives a bundle with **zero** selected requirement rows so the
+    /// UI can distinguish a genuine empty bundle from a DISA STIG invariant
+    /// violation. `None` for bundles created without normalized requirements.
+    pub source_framework: Option<BundleCoverageSourceFramework>,
+    /// Authoritative framework releases represented by the selected requirements.
+    pub frameworks: Vec<BundleCoverageFramework>,
     pub total_requirements: i64,
     pub full: i64,
     pub partial: i64,
@@ -116,6 +124,31 @@ pub struct BundleCoverageReport {
     /// Included in `total_requirements`; cannot provide authoritative evidence.
     pub recovery_required: i64,
     pub rows: Vec<BundleCoverageRow>,
+}
+
+/// Authoritative source framework identity of a bundle version, independent of
+/// requirement membership. A DISA STIG bundle with zero normalized requirements
+/// (the data-integrity corruption the coverage invariant exists to diagnose)
+/// still reports its source framework through this field.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
+pub struct BundleCoverageSourceFramework {
+    pub framework_id: Uuid,
+    pub framework_name: String,
+    pub framework_version_id: Uuid,
+    pub framework_version: String,
+    pub framework_publisher: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
+pub struct BundleCoverageFramework {
+    pub framework_id: Uuid,
+    pub framework_name: String,
+    pub framework_version_id: Uuid,
+    pub framework_version: String,
+    /// Publisher of the framework lineage (e.g. "DISA"). Used by the UI to
+    /// distinguish a genuine empty bundle from a DISA STIG import invariant
+    /// violation (STIG bundles must always carry normalized requirements).
+    pub framework_publisher: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +166,7 @@ pub struct BundleCoverageRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BundleCoverageMapping {
+    pub policy_id: Uuid,
     pub policy_version_id: Uuid,
     pub policy_name: String,
     pub relationship: String,
@@ -573,6 +607,56 @@ pub async fn compute_bundle_requirement_coverage(
     pool: &PgPool,
     bundle_version_id: Uuid,
 ) -> Result<BundleCoverageReport> {
+    // Source framework identity reads through the bundle version's own
+    // framework_version_id. Unlike `frameworks` below it does NOT depend on
+    // requirement membership, so it survives the zero-requirement corruption
+    // state the DISA invariant must diagnose.
+    let source_framework = sqlx::query_as::<_, BundleCoverageSourceFramework>(
+        r#"
+        SELECT
+            f.id AS framework_id,
+            f.name AS framework_name,
+            fv.id AS framework_version_id,
+            fv.version AS framework_version,
+            f.publisher AS framework_publisher
+        FROM compliance_bundle_versions bv
+        JOIN compliance_framework_versions fv
+          ON fv.id = bv.framework_version_id
+        JOIN compliance_frameworks f
+          ON f.id = fv.framework_id
+        WHERE bv.id = $1
+        "#,
+    )
+    .bind(bundle_version_id)
+    .fetch_optional(pool)
+    .await
+    .context("failed to load bundle coverage source framework")?;
+
+    let frameworks = sqlx::query_as::<_, BundleCoverageFramework>(
+        r#"
+        SELECT DISTINCT
+            f.id AS framework_id,
+            f.name AS framework_name,
+            fv.id AS framework_version_id,
+            fv.version AS framework_version,
+            f.publisher AS framework_publisher
+        FROM compliance_bundle_version_requirements bvr
+        JOIN compliance_requirement_versions rv
+          ON rv.id = bvr.requirement_version_id
+        JOIN compliance_framework_versions fv
+          ON fv.id = rv.framework_version_id
+        JOIN compliance_frameworks f
+          ON f.id = fv.framework_id
+        WHERE bvr.bundle_version_id = $1
+          AND bvr.selected = true
+        ORDER BY f.name, fv.version, fv.id
+        "#,
+    )
+    .bind(bundle_version_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to load bundle coverage framework releases")?;
+
     // Fetch all selected baseline requirements with their framework release status.
     #[derive(sqlx::FromRow)]
     struct RawRow {
@@ -700,6 +784,7 @@ pub async fn compute_bundle_requirement_coverage(
     #[derive(Debug, sqlx::FromRow)]
     struct RawMapping {
         requirement_version_id: Uuid,
+        policy_id: Uuid,
         policy_version_id: Uuid,
         policy_name: String,
         relationship: String,
@@ -710,7 +795,8 @@ pub async fn compute_bundle_requirement_coverage(
 
     let mappings = sqlx::query_as::<_, RawMapping>(
         r#"
-        SELECT m.requirement_version_id,
+            SELECT m.requirement_version_id,
+               pv.policy_id,
                m.policy_version_id,
                pv.name AS policy_name,
                m.relationship,
@@ -754,6 +840,7 @@ pub async fn compute_bundle_requirement_coverage(
             .find(|row| row.requirement_version_id == mapping.requirement_version_id)
         {
             row.mappings.push(BundleCoverageMapping {
+                policy_id: mapping.policy_id,
                 policy_version_id: mapping.policy_version_id,
                 policy_name: mapping.policy_name,
                 relationship: mapping.relationship,
@@ -766,6 +853,8 @@ pub async fn compute_bundle_requirement_coverage(
 
     Ok(BundleCoverageReport {
         bundle_version_id,
+        source_framework,
+        frameworks,
         total_requirements: total,
         full: full_count,
         partial: partial_count,
@@ -1687,22 +1776,9 @@ pub async fn insert_bundle_version_requirement(
 
 /// Insert a policy-requirement mapping within an open transaction.
 ///
-/// Uses ON CONFLICT DO NOTHING so re-importing does not fail on existing mappings.
-///
-/// # ON CONFLICT semantics (TASK-418 review)
-///
-/// The unique target is `(policy_version_id, requirement_version_id)`. In the
-/// current commit path (`commit_foreign_import`) every mapping target is a
-/// freshly created policy version or a freshly derived mutable draft, so the
-/// conflict cannot fire within a single import: each rule appears once per
-/// import and each draft UUID is unique to its transaction. Across imports the
-/// draft is always newly derived, so no existing pair is ever revisited either.
-/// DO NOTHING is therefore inert today; it is kept as a defensive guard for
-/// future paths that might map onto stable version IDs.  Mappings on an
-/// accepted/deprecated policy version are additionally write-protected by the
-/// `guard_policy_mapping_immutability` trigger, so a DO UPDATE counterpart
-/// would fail loudly there instead of silently overwriting authoritative
-/// semantics.
+/// Exact replays are idempotent so trusted imports can be retried. A duplicate
+/// pair with different mapping semantics is rejected rather than silently
+/// retaining the first row while making the caller believe its values won.
 pub async fn insert_policy_mapping_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     policy_version_id: Uuid,
@@ -1714,8 +1790,65 @@ pub async fn insert_policy_mapping_in_tx(
     source_artifact_id: Option<Uuid>,
     created_by: Uuid,
 ) -> Result<()> {
+    insert_policy_mapping_internal(
+        tx,
+        policy_version_id,
+        requirement_version_id,
+        relationship,
+        coverage,
+        rationale,
+        provenance,
+        source_artifact_id,
+        created_by,
+        false,
+    )
+    .await
+}
+
+/// Insert an import mapping while allowing an exact semantic replay of an
+/// existing non-trusted row. The import's exact-pair cardinality gate remains
+/// responsible for rejecting that row before the transaction can commit.
+pub async fn insert_import_policy_mapping_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    policy_version_id: Uuid,
+    requirement_version_id: Uuid,
+    relationship: &str,
+    coverage: &str,
+    rationale: Option<&str>,
+    provenance: &str,
+    source_artifact_id: Option<Uuid>,
+    created_by: Uuid,
+) -> Result<()> {
+    insert_policy_mapping_internal(
+        tx,
+        policy_version_id,
+        requirement_version_id,
+        relationship,
+        coverage,
+        rationale,
+        provenance,
+        source_artifact_id,
+        created_by,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_policy_mapping_internal(
+    tx: &mut Transaction<'_, Postgres>,
+    policy_version_id: Uuid,
+    requirement_version_id: Uuid,
+    relationship: &str,
+    coverage: &str,
+    rationale: Option<&str>,
+    provenance: &str,
+    source_artifact_id: Option<Uuid>,
+    created_by: Uuid,
+    allow_nontrusted_exact_replay: bool,
+) -> Result<()> {
     require_framework_requirement_usable(tx, requirement_version_id).await?;
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         INSERT INTO policy_requirement_mappings
             (policy_version_id, requirement_version_id, relationship, coverage,
@@ -1735,6 +1868,34 @@ pub async fn insert_policy_mapping_in_tx(
     .execute(&mut **tx)
     .await
     .context("failed to insert policy requirement mapping in transaction")?;
+
+    if result.rows_affected() == 0 {
+        let existing =
+            sqlx::query_as::<_, (String, String, Option<String>, String, String, Option<Uuid>)>(
+                r#"
+            SELECT relationship, coverage, rationale, provenance, trust_state, source_artifact_id
+            FROM policy_requirement_mappings
+            WHERE policy_version_id = $1 AND requirement_version_id = $2
+            "#,
+            )
+            .bind(policy_version_id)
+            .bind(requirement_version_id)
+            .fetch_one(&mut **tx)
+            .await
+            .context("failed to inspect existing policy requirement mapping")?;
+
+        let is_exact_replay = existing.0 == relationship
+            && existing.1 == coverage
+            && existing.2.as_deref() == rationale
+            && existing.3 == provenance
+            && (existing.4 == "trusted" || allow_nontrusted_exact_replay)
+            && existing.5 == source_artifact_id;
+        if !is_exact_replay {
+            bail!(
+                "policy requirement mapping already exists with different semantics for policy version {policy_version_id} and requirement version {requirement_version_id}"
+            );
+        }
+    }
 
     refresh_policy_mapping_digest(tx, policy_version_id).await?;
 
@@ -3049,12 +3210,12 @@ pub mod tests {
             .unwrap();
         tx.commit().await.unwrap();
 
-        // Create a policy + draft version, add it to the bundle.
+        // Create two policies + draft versions, add both to the bundle.
         let pol_id: Uuid = sqlx::query_scalar(
             "INSERT INTO deployment_policies (name, policy_type, config, enabled) \
-             VALUES ($1, 'custom_check', '{\"expression\":\"true\"}', false) RETURNING id",
+              VALUES ($1, 'custom_check', '{\"expression\":\"true\"}', false) RETURNING id",
         )
-        .bind(format!("coverage-policy-{}", Uuid::new_v4()))
+        .bind(format!("coverage-policy-full-{}", Uuid::new_v4()))
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -3063,6 +3224,21 @@ pub mod tests {
             "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
         )
         .bind(pol_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let pol_id2: Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config, enabled) \
+             VALUES ($1, 'custom_check', '{\"expression\":\"true\"}', false) RETURNING id",
+        )
+        .bind(format!("coverage-policy-partial-{}", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let pv_id2: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(pol_id2)
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -3078,9 +3254,19 @@ pub mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        sqlx::query(
+            "INSERT INTO compliance_bundle_version_policies \
+             (bundle_version_id, policy_version_id, policy_order, selected) \
+             VALUES ($1, $2, 1, true)",
+        )
+        .bind(bv_id)
+        .bind(pv_id2)
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        // Map the policy to V-001 (full/implements) → full coverage.
-        // Map the policy to V-002 (partial/supports) → partial coverage.
+        // Map P1 to V-001 (full/implements) → full coverage.
+        // Map P2 to V-002 (partial/supports) → partial coverage.
         // V-003 has no mapping → unmapped.
         //
         // Use a real user ID to satisfy the FK on policy_requirement_mappings.
@@ -3101,7 +3287,7 @@ pub mod tests {
         .await
         .unwrap();
         create_policy_mapping(
-            &pool, pv_id, rv_id2, "supports", "partial", None, "manual", actor,
+            &pool, pv_id2, rv_id2, "supports", "partial", None, "manual", actor,
         )
         .await
         .unwrap();
@@ -3115,5 +3301,133 @@ pub mod tests {
         assert_eq!(report.full, 1);
         assert_eq!(report.partial, 1);
         assert_eq!(report.unmapped, 1);
+        assert_eq!(report.frameworks.len(), 1);
+        assert_eq!(report.frameworks[0].framework_id, fw_id);
+        assert_eq!(report.frameworks[0].framework_name, "Coverage FW");
+        assert_eq!(report.frameworks[0].framework_version_id, fv_id);
+        assert_eq!(report.frameworks[0].framework_version, "V1R1");
+        assert_eq!(report.frameworks[0].framework_publisher, None);
+
+        let row = |external_id: &str| {
+            report
+                .rows
+                .iter()
+                .find(|row| row.external_id == external_id)
+                .unwrap_or_else(|| panic!("missing coverage row {external_id}"))
+        };
+        let full = row("V-001");
+        assert_eq!(full.coverage, RequirementCoverage::Full);
+        assert_eq!(full.mapped_policy_version_ids, vec![pv_id]);
+        assert_eq!(full.mappings.len(), 1);
+        assert_eq!(full.mappings[0].policy_id, pol_id);
+        assert_eq!(full.mappings[0].policy_version_id, pv_id);
+        assert!(
+            full.mappings[0]
+                .policy_name
+                .starts_with("coverage-policy-full-")
+        );
+        assert_eq!(full.mappings[0].coverage, "full");
+
+        let partial = row("V-002");
+        assert_eq!(partial.coverage, RequirementCoverage::Partial);
+        assert_eq!(partial.mapped_policy_version_ids, vec![pv_id2]);
+        assert_eq!(partial.mappings.len(), 1);
+        assert_eq!(partial.mappings[0].policy_id, pol_id2);
+        assert_eq!(partial.mappings[0].policy_version_id, pv_id2);
+        assert_eq!(partial.mappings[0].coverage, "partial");
+
+        let unmapped = row("V-003");
+        assert_eq!(unmapped.coverage, RequirementCoverage::Unmapped);
+        assert!(unmapped.mapped_policy_version_ids.is_empty());
+        assert!(unmapped.mappings.is_empty());
+
+        for row in &report.rows {
+            match row.coverage {
+                RequirementCoverage::Full | RequirementCoverage::Partial => {
+                    assert!(!row.mapped_policy_version_ids.is_empty());
+                    assert!(!row.mappings.is_empty());
+                }
+                RequirementCoverage::Unmapped => {
+                    assert!(row.mapped_policy_version_ids.is_empty());
+                    assert!(row.mappings.is_empty());
+                }
+                RequirementCoverage::RecoveryRequired => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a database"]
+    async fn bundle_coverage_source_framework_survives_zero_requirements() {
+        let pool = test_pool().await;
+
+        // DISA framework + release.
+        let fw_key = format!("test-disa-source-{}", Uuid::new_v4());
+        let mut tx = pool.begin().await.unwrap();
+        let fw_id = upsert_framework_lineage(
+            &mut tx,
+            "Anduril NixOS Security Technical Implementation Guide",
+            Some("DISA"),
+            &fw_key,
+            None,
+        )
+        .await
+        .unwrap();
+        let fv_canonical = FrameworkVersionCanonical {
+            canonical_source_key: fw_key.clone(),
+            canonical_release_key: "V1R2".to_string(),
+            version: "V1R2".to_string(),
+            publisher: Some("DISA".to_string()),
+            title: None,
+        };
+        let fv_id = insert_framework_version(&mut tx, fw_id, &fv_canonical, None, None)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        // Bundle version linked to the framework release but with ZERO
+        // selected requirement membership — the exact corruption state the
+        // DISA coverage invariant exists to diagnose.
+        let bundle_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_bundles (name, framework, version, layer, owner) \
+             VALUES ($1, 'test', '1.0', 'fleet', 'test') RETURNING id",
+        )
+        .bind(format!("coverage-invariant-bundle-{}", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let bv_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1",
+        )
+        .bind(bundle_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundle_versions SET framework_version_id = $1 WHERE id = $2",
+        )
+        .bind(fv_id)
+        .bind(bv_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let report = compute_bundle_requirement_coverage(&pool, bv_id)
+            .await
+            .unwrap();
+        assert_eq!(report.total_requirements, 0);
+        assert!(
+            report.frameworks.is_empty(),
+            "frameworks derives from requirement membership and must be empty"
+        );
+        let source = report
+            .source_framework
+            .expect("source framework must survive zero requirements");
+        assert_eq!(
+            source.framework_name,
+            "Anduril NixOS Security Technical Implementation Guide"
+        );
+        assert_eq!(source.framework_version, "V1R2");
+        assert_eq!(source.framework_publisher.as_deref(), Some("DISA"));
     }
 }

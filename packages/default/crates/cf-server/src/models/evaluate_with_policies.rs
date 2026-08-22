@@ -705,11 +705,12 @@ pub(crate) fn build_single_system_eval_expression(
 let
   flake = builtins.getFlake {flake_ref};
   cfg = builtins.getAttr {system_name} flake.nixosConfigurations;
+  config = cfg.config;
   drv = cfg.config.system.build.toplevel;
   policyResults = {{
-    cfAgentEnabled = (cfg.config.systemd.services.crystal-forge-agent.enable or false)
-      || ((cfg.config.services.crystal-forge.enable or false)
-          && (cfg.config.services.crystal-forge.client.enable or false));{policy_fields}
+    cfAgentEnabled = (config.systemd.services.crystal-forge-agent.enable or false)
+      || ((config.services.crystal-forge.enable or false)
+          && (config.services.crystal-forge.client.enable or false));{policy_fields}
   }};
 in {{
   drvPath = drv.drvPath;

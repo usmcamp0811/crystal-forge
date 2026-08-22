@@ -18,10 +18,7 @@ use uuid::Uuid;
 
 use crate::api::models::{DeletionEligibility, DeploymentPolicyVersionSummary};
 use crate::auth::extractors::{RequireAdmin, RequireAuth, RequireOperator};
-use crate::compliance::mappings::{
-    extract_cci_ids, extract_classification, extract_srg_ids, infer_legacy_category,
-    normalise_cci_ids, normalise_srg_ids,
-};
+use crate::compliance::mappings::{normalise_cci_ids, normalise_srg_ids};
 use crate::handlers::agent_request::CFState;
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
@@ -100,10 +97,8 @@ fn normalize_required_packages(packages: &[Value]) -> Result<Vec<String>, (Statu
 
 /// Validate and normalize a Nix expression for custom policy checks.
 ///
-/// This function ensures expressions use the correct variable scope by:
-/// 1. Replacing standalone `config.` with `cfg.config.` (the correct scope in policy evaluation)
-/// 2. Preserving `cfg.config.` if already correct
-/// 3. Warning about potential issues
+/// This function ensures expressions use the canonical `config.` variable scope.
+/// Legacy `cfg.config.` expressions are normalized for compatibility.
 ///
 /// Returns the normalized expression or an error if validation fails.
 fn validate_and_normalize_nix_expression(expr: &str) -> Result<String, (StatusCode, String)> {
@@ -116,41 +111,14 @@ fn validate_and_normalize_nix_expression(expr: &str) -> Result<String, (StatusCo
         ));
     }
 
-    // Check for common mistakes and auto-fix them
-    let normalized = if trimmed.contains("config.") && !trimmed.contains("cfg.config.") {
-        // Replace `config.` with `cfg.config.` but be careful not to replace `cfg.config.`
-        // Use a simple regex-like replacement: replace `config.` with `cfg.config.` only when not preceded by `cfg.`
-        let mut result = String::new();
-        let mut chars = trimmed.chars().peekable();
-        let mut last_three = String::new();
-
-        while let Some(c) = chars.next() {
-            result.push(c);
-            last_three.push(c);
-            if last_three.len() > 3 {
-                last_three.remove(0);
-            }
-
-            // Check if we just wrote "config" and next char is "."
-            if result.ends_with("config") && chars.peek() == Some(&'.') {
-                // Check if it's preceded by "cfg."
-                if !result.ends_with("cfg.config") {
-                    // Insert "cfg." before "config"
-                    let len = result.len();
-                    result.insert_str(len - 6, "cfg.");
-                }
-            }
-        }
-
+    let (normalized, changed) = crate::server::normalize_custom_policy_expression(trimmed);
+    if changed {
         tracing::warn!(
-            "Auto-corrected policy expression from 'config.' to 'cfg.config.': {} -> {}",
+            "Normalized legacy policy expression from 'cfg.config.' to 'config.': {} -> {}",
             trimmed,
-            result
+            normalized
         );
-        result
-    } else {
-        trimmed.to_string()
-    };
+    }
 
     Ok(normalized)
 }
@@ -567,82 +535,63 @@ pub async fn list_deployment_policies(
     .into_iter()
     .collect();
 
-    let pointer_rows: HashMap<Uuid, (Option<Uuid>, Option<Uuid>)> = sqlx::query_as::<_, (Uuid, Option<Uuid>, Option<Uuid>)>(
-        "SELECT id, current_published_version_id, current_draft_version_id FROM deployment_policies WHERE id = ANY($1)",
-    )
-    .bind(&policy_ids)
-    .fetch_all(&state.pool)
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to load policy version pointers: {}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to retrieve policy version pointers".to_string())
-    })?
-    .into_iter()
-    .map(|(id, published, draft)| (id, (published, draft)))
-    .collect();
+    // Fetch full version summaries (users JOIN for display names, evidence
+    // specs from compliance_metadata, current-version pointers) in one batched
+    // production query. No N+1: one query covers all policies in the page.
+    let version_summaries =
+        deployment_policies::fetch_policy_version_summaries(&state.pool, &policy_ids)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load policy version history: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to retrieve policy version history".to_string(),
+                )
+            })?;
 
-    // Fetch all version rows in one query, including compliance_metadata for
-    // SRG/CCI extraction. No N+1: one query covers all policies in the page.
-    let version_rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, String, String, chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>, Option<Uuid>, String, Option<String>, String, Value, bool, Value)>(
-        "SELECT id, policy_id, version, publication_state, trust_state, semantic_digest, created_at, published_at, derived_from_version_id, name, description, policy_type, config, COALESCE(enabled_by_default, true), compliance_metadata FROM deployment_policy_versions WHERE policy_id = ANY($1) ORDER BY policy_id, created_at DESC, id DESC",
-    )
-    .bind(&policy_ids)
-    .fetch_all(&state.pool)
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to load policy version history: {}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to retrieve policy version history".to_string())
-    })?;
+    // Load mapped requirement and bundle usage counts for every version in one
+    // batched query (no N+1, real data, errors propagated).
+    let all_version_ids: Vec<Uuid> = version_summaries
+        .values()
+        .flatten()
+        .map(|summary| summary.id)
+        .collect();
+    let usage_counts =
+        deployment_policies::load_policy_version_usage_counts(&state.pool, &all_version_ids)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load policy counts: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to load policy counts".to_string(),
+                )
+            })?;
 
     Ok(Json(DeploymentPoliciesListResponse {
         policies: policies
             .into_iter()
-            .map(|policy| DeploymentPolicyListItem {
-                current_version_id: versions.get(&policy.id).copied(),
-                versions: version_rows
-                    .iter()
-                    .filter(|row| row.1 == policy.id)
-                    .map(|row| {
-                        let pointers = pointer_rows
-                            .get(&policy.id)
-                            .copied()
-                            .unwrap_or((None, None));
-                        let compliance_meta = &row.14;
-                        let (cat, fw, sev, cf, cmmc, cis, rat) =
-                            extract_classification(compliance_meta);
-                        let inferred_category = cat.clone().unwrap_or_else(|| {
-                            infer_legacy_category(&row.11, compliance_meta).to_string()
-                        });
-                        DeploymentPolicyVersionSummary {
-                            id: row.0,
-                            policy_id: row.1,
-                            version: row.2.clone(),
-                            publication_state: row.3.clone(),
-                            trust_state: row.4.clone(),
-                            semantic_digest: row.5.clone(),
-                            created_at: row.6,
-                            published_at: row.7,
-                            derived_from_version_id: row.8,
-                            is_current_published: pointers.0 == Some(row.0),
-                            is_current_draft: pointers.1 == Some(row.0),
-                            name: row.9.clone(),
-                            description: row.10.clone(),
-                            policy_type: row.11.clone(),
-                            config: row.12.clone(),
-                            enabled: row.13,
-                            srg_ids: extract_srg_ids(compliance_meta),
-                            cci_ids: extract_cci_ids(compliance_meta),
-                            category: Some(inferred_category),
-                            framework: fw,
-                            severity: sev,
-                            control_family: cf,
-                            cmmc_level: cmmc,
-                            cis_section: cis,
-                            rationale: rat,
-                        }
-                    })
-                    .collect(),
-                policy,
+            .map(|mut policy| {
+                let current_version_id = versions.get(&policy.id).copied();
+                // Get mapped requirement count from current version if available
+                let mapped_requirement_count = current_version_id
+                    .and_then(|vid| usage_counts.get(&vid).map(|(mapped, _)| *mapped))
+                    .unwrap_or(0);
+                // Get bundle usage count from current version if available
+                let bundle_usage_count = current_version_id
+                    .and_then(|vid| usage_counts.get(&vid).map(|(_, bundle)| *bundle))
+                    .unwrap_or(0);
+
+                policy.mapped_requirement_count = mapped_requirement_count;
+                policy.bundle_usage_count = bundle_usage_count;
+
+                DeploymentPolicyListItem {
+                    current_version_id,
+                    versions: version_summaries
+                        .get(&policy.id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    policy,
+                }
             })
             .collect(),
         total: total as usize,
@@ -661,8 +610,8 @@ pub async fn get_deployment_policy(
     RequireAuth(_user): RequireAuth,
     State(state): State<CFState>,
     Path(policy_id): Path<Uuid>,
-) -> Result<Json<DeploymentPolicyRecord>, (StatusCode, String)> {
-    let policy = deployment_policies::get_deployment_policy_by_id(&state.pool, &policy_id)
+) -> Result<Json<DeploymentPolicyListItem>, (StatusCode, String)> {
+    let mut policy = deployment_policies::get_deployment_policy_by_id(&state.pool, &policy_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to fetch deployment policy {}: {}", policy_id, e);
@@ -676,7 +625,46 @@ pub async fn get_deployment_policy(
             "Deployment policy not found".to_string(),
         ))?;
 
-    Ok(Json(policy))
+    let mut version_summaries =
+        deployment_policies::fetch_policy_version_summaries(&state.pool, &[policy_id])
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load policy version history: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to retrieve policy version history".to_string(),
+                )
+            })?;
+    let versions = version_summaries.remove(&policy_id).unwrap_or_default();
+    let current_version_id = versions
+        .iter()
+        .find(|version| version.is_current_draft)
+        .or_else(|| versions.iter().find(|version| version.is_current_published))
+        .map(|version| version.id);
+    let version_ids: Vec<Uuid> = versions.iter().map(|version| version.id).collect();
+    let usage_counts =
+        deployment_policies::load_policy_version_usage_counts(&state.pool, &version_ids)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load policy counts: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to load policy counts".to_string(),
+                )
+            })?;
+    if let Some(version_id) = current_version_id {
+        if let Some((mapped_requirement_count, bundle_usage_count)) = usage_counts.get(&version_id)
+        {
+            policy.mapped_requirement_count = *mapped_requirement_count;
+            policy.bundle_usage_count = *bundle_usage_count;
+        }
+    }
+
+    Ok(Json(DeploymentPolicyListItem {
+        policy,
+        current_version_id,
+        versions,
+    }))
 }
 
 /// POST /api/v1/deployment-policies - Create a new deployment policy
@@ -1204,30 +1192,30 @@ mod tests {
     fn validate_policy_config_accepts_valid_custom_check() {
         let result = validate_policy_config(
             "custom_check",
-            &serde_json::json!({"expression": "cfg.config.services.ssh.enable", "strict": true}),
+            &serde_json::json!({"expression": "config.services.ssh.enable", "strict": true}),
         )
         .expect("valid custom_check config must pass");
 
         // Verify expression is preserved when already correct
         assert_eq!(
             result.get("expression").and_then(|v| v.as_str()),
-            Some("cfg.config.services.ssh.enable")
+            Some("config.services.ssh.enable")
         );
     }
 
     #[test]
-    fn validate_policy_config_auto_fixes_config_prefix() {
+    fn validate_policy_config_auto_fixes_legacy_cfg_prefix() {
         let result = validate_policy_config(
             "custom_check",
-            &serde_json::json!({"expression": "config.services.ssh.enable", "strict": true}),
+            &serde_json::json!({"expression": "cfg.config.services.ssh.enable", "strict": true}),
         )
-        .expect("should auto-fix config. to cfg.config.");
+        .expect("should normalize cfg.config. to config.");
 
         // Verify expression was auto-corrected
         assert_eq!(
             result.get("expression").and_then(|v| v.as_str()),
-            Some("cfg.config.services.ssh.enable"),
-            "Expression should be auto-corrected from 'config.' to 'cfg.config.'"
+            Some("config.services.ssh.enable"),
+            "Expression should be normalized from 'cfg.config.' to 'config.'"
         );
     }
 
@@ -1240,12 +1228,12 @@ mod tests {
                 "strict": false
             }),
         )
-        .expect("should auto-fix complex expression");
+        .expect("complex canonical expression should validate");
 
         assert_eq!(
             result.get("expression").and_then(|v| v.as_str()),
-            Some("!cfg.config.services.openssh.settings.PasswordAuthentication"),
-            "Complex expressions should be auto-corrected"
+            Some("!config.services.openssh.settings.PasswordAuthentication"),
+            "Complex expressions should remain canonical"
         );
     }
 
@@ -1304,11 +1292,11 @@ mod tests {
 
         assert_eq!(
             rules[0].get("expression").and_then(|v| v.as_str()),
-            Some("cfg.config.services.openssh.enable")
+            Some("config.services.openssh.enable")
         );
         assert_eq!(
             rules[1].get("expression").and_then(|v| v.as_str()),
-            Some("cfg.config.services.nginx.enable")
+            Some("config.services.nginx.enable")
         );
     }
 
