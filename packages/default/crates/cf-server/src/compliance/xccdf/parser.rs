@@ -399,6 +399,7 @@ struct ParserState {
     current_fix: Option<FixContent>,
     current_ident: Option<StandardIdentifier>,
     current_ref: Option<Reference>,
+    current_plain_text_id: Option<String>,
 }
 
 struct PendingCheck {
@@ -448,6 +449,7 @@ impl ParserState {
             current_fix: None,
             current_ident: None,
             current_ref: None,
+            current_plain_text_id: None,
         }
     }
 
@@ -579,6 +581,10 @@ impl ParserState {
                     system,
                     value: String::new(),
                 });
+                ParseControl::Continue
+            }
+            (ElementNamespace::Xccdf, b"plain-text") => {
+                self.current_plain_text_id = attr(&attrs, b"id").map(String::from);
                 ParseControl::Continue
             }
             // ── Crystal Forge extension elements ───────────────────────────
@@ -764,9 +770,28 @@ impl ParserState {
                 }
             }
             (ElementNamespace::Xccdf, b"version") => {
+                // Only the benchmark-level <version> is authoritative. DISA STIG
+                // rules each carry their own <version> (e.g. "ANIX-00-001670")
+                // which must never clobber the benchmark release version.
                 if let Some(ref mut bm) = self.benchmark {
-                    bm.version = Some(self.current_text.clone());
+                    if self.current_rule.is_none()
+                        && self.current_group.is_none()
+                        && self.current_profile.is_none()
+                    {
+                        bm.version = Some(self.current_text.clone());
+                    }
                 }
+            }
+            (ElementNamespace::Xccdf, b"plain-text") => {
+                // DISA STIGs publish the release counter ("Release: 2 ...") in the
+                // <plain-text id="release-info"> block; the benchmark <version>
+                // element alone cannot distinguish V1R1 from V1R2.
+                if self.current_plain_text_id.as_deref() == Some("release-info") {
+                    if let Some(ref mut bm) = self.benchmark {
+                        bm.release_info = Some(self.current_text.trim().to_string());
+                    }
+                }
+                self.current_plain_text_id = None;
             }
             (ElementNamespace::Xccdf, b"status") => {
                 if let Some(ref mut bm) = self.benchmark {
@@ -1098,6 +1123,7 @@ impl ParserState {
             title: None,
             description: None,
             version: None,
+            release_info: None,
             status: None,
             status_date: None,
             platforms: vec![],

@@ -2,12 +2,12 @@ use dioxus::prelude::*;
 
 use crate::api::models::{
     ForeignStigPolicyCandidate, ImportedCustomCheck, ImportedCustomCheckRule,
-    ImportedEvidenceRequirement, ImportedPolicyCustomization, ImportedMappingSemantics,
+    ImportedEvidenceRequirement, ImportedMappingSemantics, ImportedPolicyCustomization,
     MapExistingProof, ReviewedRelatedCandidate, XccdfRuleImportAction,
 };
 use crate::components::icon::{Icon, IconName};
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SourceCheck {
     pub system: String,
     pub selector: Option<String>,
@@ -17,13 +17,13 @@ pub struct SourceCheck {
     pub body_parts: Vec<SourceCheckBodyPart>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SourceCheckBodyPart {
     Inline(String),
     Reference { href: String, name: Option<String> },
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SourceStigRule {
     pub rule_id: String,
     pub group_id: Option<String>,
@@ -39,7 +39,7 @@ pub struct SourceStigRule {
     pub rule_order: usize,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum RefinedRuleAction {
     Native,
     Manual,
@@ -48,7 +48,7 @@ pub enum RefinedRuleAction {
     Existing(Option<uuid::Uuid>),
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ComparisonOperator {
     Equal,
     NotEqual,
@@ -56,7 +56,7 @@ pub enum ComparisonOperator {
     LessOrEqual,
 }
 impl ComparisonOperator {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Equal => "==",
             Self::NotEqual => "!=",
@@ -66,7 +66,7 @@ impl ComparisonOperator {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum TypedPolicyValue {
     Boolean(bool),
     Integer(String),
@@ -86,7 +86,7 @@ impl TypedPolicyValue {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PolicyAssertionDraft {
     NixosOption {
         path: String,
@@ -109,7 +109,7 @@ pub enum PolicyAssertionDraft {
 }
 
 impl PolicyAssertionDraft {
-    fn to_rule(&self, index: usize) -> ImportedCustomCheckRule {
+    pub(crate) fn to_rule(&self, index: usize) -> ImportedCustomCheckRule {
         match self {
             Self::NixosOption {
                 path,
@@ -120,7 +120,7 @@ impl PolicyAssertionDraft {
             } => ImportedCustomCheckRule {
                 field_name: format!("nixosOption{index}"),
                 expression: format!(
-                    "cfg.config.{path} {} {}",
+                    "config.{path} {} {}",
                     operator.as_str(),
                     expected_value.as_nix()
                 ),
@@ -140,7 +140,7 @@ impl PolicyAssertionDraft {
                 ImportedCustomCheckRule {
                     field_name: format!("packagesInstalled{index}"),
                     expression: format!(
-                        "builtins.all (required: builtins.any (package: (package.pname or (package.name or \"\")) == required) cfg.config.environment.systemPackages) [ {required} ]"
+                        "builtins.all (required: builtins.any (package: (package.pname or (package.name or \"\")) == required) config.environment.systemPackages) [ {required} ]"
                     ),
                     description: failure_message.clone(),
                     strict: *strict,
@@ -161,7 +161,7 @@ impl PolicyAssertionDraft {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum EvidenceRequirementDraft {
     Command {
         command: String,
@@ -221,7 +221,7 @@ impl EvidenceRequirementDraft {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RefinedPolicyDraft {
     pub local_name: String,
     pub local_description: String,
@@ -234,7 +234,7 @@ pub struct RefinedPolicyDraft {
     pub evidence_requirements: Vec<EvidenceRequirementDraft>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RefinedStigRule {
     pub source: SourceStigRule,
     pub draft: RefinedPolicyDraft,
@@ -327,7 +327,10 @@ pub fn action_to_import(rule: &RefinedStigRule) -> XccdfRuleImportAction {
         RefinedRuleAction::Existing(Some(id)) => XccdfRuleImportAction::MapExisting {
             rule_id: rule.source.rule_id.clone(),
             policy_version_id: *id,
-            proof: rule.selected_candidate.as_ref().and_then(proof_for_candidate),
+            proof: rule
+                .selected_candidate
+                .as_ref()
+                .and_then(proof_for_candidate),
         },
         RefinedRuleAction::Existing(None) => XccdfRuleImportAction::CreateUnbound {
             rule_id: rule.source.rule_id.clone(),
@@ -338,19 +341,24 @@ pub fn action_to_import(rule: &RefinedStigRule) -> XccdfRuleImportAction {
 
 pub fn mapping_semantics_for(rule: &RefinedStigRule) -> Option<ImportedMappingSemantics> {
     let candidate = rule.selected_candidate.as_ref()?;
-    let related = (candidate.match_type == "related_mapping").then(|| {
-        let evidence = candidate.related_evidence.as_ref()?;
-        Some(ReviewedRelatedCandidate {
-            policy_version_id: candidate.policy_version_id,
-            related_requirement_version_id: evidence.related_requirement_version_id,
-            shared_cci_ids: evidence.shared_cci_ids.clone(),
-            shared_srg_ids: evidence.shared_srg_ids.clone(),
+    let related = (candidate.match_type == "related_mapping")
+        .then(|| {
+            let evidence = candidate.related_evidence.as_ref()?;
+            Some(ReviewedRelatedCandidate {
+                policy_version_id: candidate.policy_version_id,
+                related_requirement_version_id: evidence.related_requirement_version_id,
+                shared_cci_ids: evidence.shared_cci_ids.clone(),
+                shared_srg_ids: evidence.shared_srg_ids.clone(),
+            })
         })
-    }).flatten();
+        .flatten();
     Some(ImportedMappingSemantics {
         relationship: rule.mapping_relationship.clone(),
         coverage: rule.mapping_coverage.clone(),
-        rationale: rule.mapping_rationale.clone().filter(|value| !value.trim().is_empty()),
+        rationale: rule
+            .mapping_rationale
+            .clone()
+            .filter(|value| !value.trim().is_empty()),
         reviewed_related_candidate: related,
     })
 }
@@ -386,9 +394,10 @@ pub fn RefinePolicyStep(mut props: RefinePolicyStepProps) -> Element {
         .iter()
         .enumerate()
         .filter_map(|(i, r)| {
-            let in_review_scope = props.review_rule_ids.as_ref().map_or(true, |ids| {
-                ids.iter().any(|id| id == &r.source.rule_id)
-            });
+            let in_review_scope = props
+                .review_rule_ids
+                .as_ref()
+                .map_or(true, |ids| ids.iter().any(|id| id == &r.source.rule_id));
             (r.selected && in_review_scope).then_some(i)
         })
         .collect();
@@ -560,6 +569,8 @@ pub struct ImportReviewProps {
     pub rules: Signal<Vec<RefinedStigRule>>,
     pub on_back: EventHandler<()>,
     pub on_confirm: EventHandler<()>,
+    pub committing: bool,
+    pub import_error: Option<String>,
 }
 
 #[component]
@@ -592,9 +603,12 @@ pub fn ImportReview(props: ImportReviewProps) -> Element {
         div { class: "modal-head", h2 { "Review policy choices" }, p { class: "page-subtitle", "Confirm the selected policy mappings before creating the draft bundle." } }
         div { class: "modal-body",
             div { class: "stat-strip", div { class: "stat", div { class: "stat-label", "Selected" } div { class: "stat-value", "{selected.len()}" } } div { class: "stat", div { class: "stat-label", "Native" } div { class: "stat-value", "{native}" } } div { class: "stat", div { class: "stat-label", "Manual" } div { class: "stat-value", "{manual}" } } div { class: "stat", div { class: "stat-label", "Unresolved" } div { class: "stat-value", "{unresolved}" } } }
-            if unresolved > 0 { div { class: "sd-callout sd-callout-warn", "Unbound and opaque controls will remain visible but will not be executable." } }
-            div { style: "display:grid;gap:6px;margin-top:12px;", for rule in selected.iter() { div { class: "card", style: "padding:9px 11px;display:flex;gap:10px;align-items:center;", span { class: "mono", style: "font-size:10px;", "{rule.source.stig_id.clone().unwrap_or_else(|| rule.source.rule_id.clone())}" } div { style: "flex:1;min-width:0;", strong { "{rule.draft.local_name}" } div { class: "text-xs text-gray-500", "{action_label(&rule.draft.action)}" } } } } }
-        div { class: "modal-foot", style: "justify-content:space-between;", button { class: "btn btn-ghost", onclick: move |_| props.on_back.call(()), "Back to refine" } button { class: "btn btn-primary", disabled: selected.is_empty(), onclick: move |_| props.on_confirm.call(()), "Create draft bundle" } }
+             if unresolved > 0 { div { class: "sd-callout sd-callout-warn", "Unbound and opaque controls will remain visible but will not be executable." } }
+             if let Some(error) = props.import_error.as_ref() {
+                 div { class: "sd-callout sd-callout-danger", style: "margin-top:10px;", "{error}" }
+             }
+             div { style: "display:grid;gap:6px;margin-top:12px;", for rule in selected.iter() { div { class: "card", style: "padding:9px 11px;display:flex;gap:10px;align-items:center;", span { class: "mono", style: "font-size:10px;", "{rule.source.stig_id.clone().unwrap_or_else(|| rule.source.rule_id.clone())}" } div { style: "flex:1;min-width:0;", strong { "{rule.draft.local_name}" } div { class: "text-xs text-gray-500", "{action_label(&rule.draft.action)}" } } } } }
+         div { class: "modal-foot", style: "justify-content:space-between;", button { class: "btn btn-ghost", disabled: props.committing, onclick: move |_| props.on_back.call(()), "Back to refine" } button { class: "btn btn-primary", disabled: selected.is_empty() || props.committing, onclick: move |_| props.on_confirm.call(()), if props.committing { "Creating…" } else { "Create draft bundle" } } }
         }
     }
 }
@@ -733,10 +747,7 @@ fn normalize_source_text(value: &str) -> Option<String> {
 }
 
 #[component]
-fn ImplementationChoice(
-    rules: Signal<Vec<RefinedStigRule>>,
-    index: usize,
-) -> Element {
+fn ImplementationChoice(rules: Signal<Vec<RefinedStigRule>>, index: usize) -> Element {
     let current = action_key(&rules.read()[index].draft.action);
     let candidate_value = rules.read()[index]
         .selected_candidate
@@ -803,6 +814,7 @@ fn set_action(rule: &mut RefinedStigRule, key: &str) {
 #[component]
 fn AssertionSection(rules: Signal<Vec<RefinedStigRule>>, index: usize) -> Element {
     let count = rules.read()[index].draft.assertions.len();
+    let mut selected_kind_signal = use_signal(String::new);
     rsx! {
         section { class: "refine-section",
             div { class: "refine-section-label", "Enforcement rules" span { class: "refine-eval-badge", "CHECKED AT BUILD TIME" } }
@@ -812,23 +824,23 @@ fn AssertionSection(rules: Signal<Vec<RefinedStigRule>>, index: usize) -> Elemen
                 AssertionEditor { rules, index, assertion_index, assertion }
             }
             select {
-                key: "add-assertion-{count}",
                 class: "input focus-ring refine-add-assertion",
                 "data-testid": "xccdf-add-assertion",
-                value: "",
+                value: "{selected_kind_signal}",
                 onchange: move |e| {
                     let selected_kind = e.value();
                     if selected_kind.is_empty() {
                         return;
                     }
                     let draft = match selected_kind.as_str() {
-                        "option" => PolicyAssertionDraft::NixosOption { path: String::new(), operator: ComparisonOperator::Equal, expected_value: TypedPolicyValue::String(String::new()), failure_message: "Option assertion failed".into(), strict: true },
+                        "option" => PolicyAssertionDraft::NixosOption { path: String::new(), operator: ComparisonOperator::Equal, expected_value: TypedPolicyValue::Boolean(false), failure_message: "Option assertion failed".into(), strict: true },
                         "packages" => PolicyAssertionDraft::PackagesInstalled { packages: vec![], failure_message: "Required package is not installed".into(), strict: true },
                         _ => PolicyAssertionDraft::CustomExpression { field_name: format!("customAssertion{}", count + 1), expression: String::new(), failure_message: "Custom assertion failed".into(), strict: true },
                     };
                     let mut all_rules = rules.write();
                     all_rules[index].draft.action = RefinedRuleAction::Native;
                     all_rules[index].draft.assertions.push(draft);
+                    selected_kind_signal.set(String::new());
                 },
                 option { value: "", "＋ Add rule…" }
                 option { value: "option", "Check a NixOS option value" }
@@ -907,12 +919,18 @@ fn AssertionEditor(props: AssertionEditorProps) -> Element {
             div { class: "refine-inferred-badge", "user-authored" }
             div { class: "refine-editor-row",
             div { class: "refine-editor-content", match props.assertion.clone() {
-                PolicyAssertionDraft::NixosOption { path, operator, expected_value, .. } => rsx! {
-                    div { class: "refine-editor-title", Icon { name: IconName::File, size: 11 } " Assert a NixOS option value" }
-                    div { class: "refine-option-row", input { class: "input focus-ring mono", placeholder: "services.openssh.settings.PermitRootLogin", value: "{path}", oninput: move |e| { if let PolicyAssertionDraft::NixosOption { path, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *path = e.value(); } } } select { class: "input focus-ring mono refine-operator", value: "{operator.as_str()}", onchange: move |e| { if let PolicyAssertionDraft::NixosOption { operator, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *operator = match e.value().as_str() { "!=" => ComparisonOperator::NotEqual, ">=" => ComparisonOperator::GreaterOrEqual, "<=" => ComparisonOperator::LessOrEqual, _ => ComparisonOperator::Equal }; } }, option { value: "==", "==" } option { value: "!=", "!=" } option { value: ">=", "≥" } option { value: "<=", "≤" } } input { class: "input focus-ring mono refine-expected", placeholder: "true", value: "{typed_value_text(&expected_value)}", oninput: move |e| { if let PolicyAssertionDraft::NixosOption { expected_value, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expected_value = TypedPolicyValue::String(e.value()); } } } }
-                    div { class: "mono refine-expression-hint", "→ config.{path} {operator.as_str()} {typed_value_text(&expected_value)}" }
-                    input { class: "input focus-ring refine-failure", placeholder: "Failure message shown when assertion fails", value: "{failure}", oninput: move |e| { set_assertion_failure(&mut rules, index, assertion_index, e.value()); } }
-                },
+                 PolicyAssertionDraft::NixosOption { path, operator, expected_value, .. } => {
+                     let value_kind = typed_value_kind(&expected_value);
+                     let value_text = typed_value_text(&expected_value);
+                     let value_input_type = if value_kind == "integer" { "number" } else { "text" };
+                     let value_placeholder = if value_kind == "integer" { "4" } else { "value" };
+                     rsx! {
+                     div { class: "refine-editor-title", Icon { name: IconName::File, size: 11 } " Assert a NixOS option value" }
+                     div { class: "refine-option-row", input { class: "input focus-ring mono", placeholder: "services.openssh.settings.PermitRootLogin", value: "{path}", oninput: move |e| { if let PolicyAssertionDraft::NixosOption { path, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *path = e.value(); } } } select { class: "input focus-ring mono refine-operator", value: "{operator.as_str()}", onchange: move |e| { if let PolicyAssertionDraft::NixosOption { operator, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *operator = match e.value().as_str() { "!=" => ComparisonOperator::NotEqual, ">=" => ComparisonOperator::GreaterOrEqual, "<=" => ComparisonOperator::LessOrEqual, _ => ComparisonOperator::Equal }; } }, option { value: "==", "==" } option { value: "!=", "!=" } option { value: ">=", "≥" } option { value: "<=", "≤" } } select { class: "input focus-ring mono refine-value-kind", value: "{value_kind}", onchange: move |e| { let current = typed_value_text(&rules.read()[index].draft.assertions[assertion_index].expected_value()); if let PolicyAssertionDraft::NixosOption { expected_value, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expected_value = typed_policy_value(e.value().as_str(), &current); } }, option { value: "boolean", "Boolean" } option { value: "integer", "Integer" } option { value: "string", "String" } }, if value_kind == "boolean" { select { class: "input focus-ring mono refine-expected", value: "{value_text}", onchange: move |e| { if let PolicyAssertionDraft::NixosOption { expected_value, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expected_value = TypedPolicyValue::Boolean(e.value() == "true"); } }, option { value: "true", "true" } option { value: "false", "false" } } } else { input { class: "input focus-ring mono refine-expected", r#type: value_input_type, placeholder: value_placeholder, value: "{value_text}", oninput: move |e| { if let PolicyAssertionDraft::NixosOption { expected_value, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expected_value = typed_policy_value(value_kind, &e.value()); } } } } }
+                     div { class: "mono refine-expression-hint", "→ config.{path} {operator.as_str()} {typed_value_text(&expected_value)}" }
+                     input { class: "input focus-ring refine-failure", placeholder: "Failure message shown when assertion fails", value: "{failure}", oninput: move |e| { set_assertion_failure(&mut rules, index, assertion_index, e.value()); } }
+                     }
+                 },
                 PolicyAssertionDraft::PackagesInstalled { packages, .. } => {
                     let packages_text = packages.join(", ");
                     rsx! {
@@ -924,7 +942,7 @@ fn AssertionEditor(props: AssertionEditorProps) -> Element {
                 },
                 PolicyAssertionDraft::CustomExpression { expression, .. } => rsx! {
                     div { class: "refine-editor-title", Icon { name: IconName::Terminal, size: 11 } " Custom nix expression (must evaluate to " span { class: "mono", "true" } ")" }
-                    textarea { class: "input focus-ring mono code-editor", rows: 3, placeholder: "cfg.config.networking.firewall.enable == true", value: "{expression}", oninput: move |e| { if let PolicyAssertionDraft::CustomExpression { expression, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expression = e.value(); } } }
+                    textarea { class: "input focus-ring mono code-editor", rows: 3, placeholder: "config.networking.firewall.enable == true", value: "{expression}", oninput: move |e| { if let PolicyAssertionDraft::CustomExpression { expression, .. } = &mut rules.write()[index].draft.assertions[assertion_index] { *expression = e.value(); } } }
                     input { class: "input focus-ring refine-failure", placeholder: "Failure message shown when assertion fails", value: "{failure}", oninput: move |e| { set_assertion_failure(&mut rules, index, assertion_index, e.value()); } }
                 },
             } }
@@ -1004,6 +1022,35 @@ fn typed_value_text(value: &TypedPolicyValue) -> String {
     }
 }
 
+fn typed_value_kind(value: &TypedPolicyValue) -> &'static str {
+    match value {
+        TypedPolicyValue::Boolean(_) => "boolean",
+        TypedPolicyValue::Integer(_) => "integer",
+        _ => "string",
+    }
+}
+
+fn typed_policy_value(kind: &str, value: &str) -> TypedPolicyValue {
+    match kind {
+        "boolean" => TypedPolicyValue::Boolean(value == "true"),
+        "integer" => TypedPolicyValue::Integer(value.to_string()),
+        _ => TypedPolicyValue::String(value.to_string()),
+    }
+}
+
+trait NixosAssertionValue {
+    fn expected_value(&self) -> &TypedPolicyValue;
+}
+
+impl NixosAssertionValue for PolicyAssertionDraft {
+    fn expected_value(&self) -> &TypedPolicyValue {
+        match self {
+            PolicyAssertionDraft::NixosOption { expected_value, .. } => expected_value,
+            _ => unreachable!("value editor only renders NixOS option assertions"),
+        }
+    }
+}
+
 fn slugify(value: &str) -> String {
     let mut out = String::new();
     for c in value.chars() {
@@ -1019,6 +1066,29 @@ fn slugify(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_nixos_values_preserve_editor_kind_and_text() {
+        let boolean = typed_policy_value("boolean", "true");
+        let integer = typed_policy_value("integer", "4");
+        let string = typed_policy_value("string", "enabled");
+
+        assert_eq!(typed_value_kind(&boolean), "boolean");
+        assert_eq!(typed_value_text(&boolean), "true");
+        assert_eq!(typed_value_kind(&integer), "integer");
+        assert_eq!(typed_value_text(&integer), "4");
+        assert_eq!(typed_value_kind(&string), "string");
+        assert_eq!(typed_value_text(&string), "enabled");
+    }
+
+    #[test]
+    fn invalid_boolean_editor_text_fails_closed_to_false() {
+        assert_eq!(
+            typed_policy_value("boolean", "not-a-boolean"),
+            TypedPolicyValue::Boolean(false)
+        );
+    }
+
     #[test]
     fn source_and_local_fields_are_independent() {
         let rule = RefinedStigRule {
@@ -1063,7 +1133,10 @@ mod tests {
         assert_eq!(slugify("V-268/089 (STIG)"), "v-268-089-stig");
     }
 
-    fn candidate(match_type: &str, related_evidence: Option<crate::api::models::ForeignStigRelatedEvidence>) -> ForeignStigPolicyCandidate {
+    fn candidate(
+        match_type: &str,
+        related_evidence: Option<crate::api::models::ForeignStigRelatedEvidence>,
+    ) -> ForeignStigPolicyCandidate {
         ForeignStigPolicyCandidate {
             policy_id: uuid::Uuid::nil(),
             policy_version_id: uuid::Uuid::from_u128(1),
@@ -1077,10 +1150,22 @@ mod tests {
 
     #[test]
     fn candidate_proof_is_derived_not_selected() {
-        assert_eq!(proof_for_candidate(&candidate("inherited_mapping", None)), Some(MapExistingProof::InheritedMapping));
-        assert_eq!(proof_for_candidate(&candidate("exact_technical_match", None)), Some(MapExistingProof::ExactTechnicalMatch));
-        assert_eq!(proof_for_candidate(&candidate("related_mapping", None)), None);
-        assert_eq!(proof_for_candidate(&candidate("authoritative_mapping", None)), None);
+        assert_eq!(
+            proof_for_candidate(&candidate("inherited_mapping", None)),
+            Some(MapExistingProof::InheritedMapping)
+        );
+        assert_eq!(
+            proof_for_candidate(&candidate("exact_technical_match", None)),
+            Some(MapExistingProof::ExactTechnicalMatch)
+        );
+        assert_eq!(
+            proof_for_candidate(&candidate("related_mapping", None)),
+            None
+        );
+        assert_eq!(
+            proof_for_candidate(&candidate("authoritative_mapping", None)),
+            None
+        );
     }
 
     #[test]
@@ -1095,8 +1180,31 @@ mod tests {
         };
         let selected = candidate("related_mapping", Some(evidence.clone()));
         let rule = RefinedStigRule {
-            source: SourceStigRule { rule_id: "rule".into(), group_id: None, stig_id: None, title: None, description: None, source_severity: None, fix_text: None, checks: vec![], identifiers: vec![], references: vec![], platforms: vec![], rule_order: 0 },
-            draft: RefinedPolicyDraft { local_name: "name".into(), local_description: String::new(), local_severity: "medium".into(), local_rationale: String::new(), implementation_note: String::new(), action: RefinedRuleAction::Existing(Some(selected.policy_version_id)), assertion_mode: "all".into(), assertions: vec![], evidence_requirements: vec![] },
+            source: SourceStigRule {
+                rule_id: "rule".into(),
+                group_id: None,
+                stig_id: None,
+                title: None,
+                description: None,
+                source_severity: None,
+                fix_text: None,
+                checks: vec![],
+                identifiers: vec![],
+                references: vec![],
+                platforms: vec![],
+                rule_order: 0,
+            },
+            draft: RefinedPolicyDraft {
+                local_name: "name".into(),
+                local_description: String::new(),
+                local_severity: "medium".into(),
+                local_rationale: String::new(),
+                implementation_note: String::new(),
+                action: RefinedRuleAction::Existing(Some(selected.policy_version_id)),
+                assertion_mode: "all".into(),
+                assertions: vec![],
+                evidence_requirements: vec![],
+            },
             selected: true,
             mapping_relationship: Some("supports".into()),
             mapping_coverage: Some("partial".into()),
@@ -1105,8 +1213,14 @@ mod tests {
             selected_candidate: Some(selected),
         };
         let semantics = mapping_semantics_for(&rule).unwrap();
-        assert_eq!(semantics.reviewed_related_candidate.unwrap().shared_cci_ids, evidence.shared_cci_ids);
-        assert!(matches!(action_to_import(&rule), XccdfRuleImportAction::MapExisting { proof: None, .. }));
+        assert_eq!(
+            semantics.reviewed_related_candidate.unwrap().shared_cci_ids,
+            evidence.shared_cci_ids
+        );
+        assert!(matches!(
+            action_to_import(&rule),
+            XccdfRuleImportAction::MapExisting { proof: None, .. }
+        ));
     }
 
     #[test]
@@ -1126,8 +1240,31 @@ mod tests {
         fn make_rule(selected_candidate: ForeignStigPolicyCandidate) -> RefinedStigRule {
             let policy_version_id = selected_candidate.policy_version_id;
             RefinedStigRule {
-                source: SourceStigRule { rule_id: "rule".into(), group_id: None, stig_id: None, title: None, description: None, source_severity: None, fix_text: None, checks: vec![], identifiers: vec![], references: vec![], platforms: vec![], rule_order: 0 },
-                draft: RefinedPolicyDraft { local_name: "name".into(), local_description: String::new(), local_severity: "medium".into(), local_rationale: String::new(), implementation_note: String::new(), action: RefinedRuleAction::Existing(Some(policy_version_id)), assertion_mode: "all".into(), assertions: vec![], evidence_requirements: vec![] },
+                source: SourceStigRule {
+                    rule_id: "rule".into(),
+                    group_id: None,
+                    stig_id: None,
+                    title: None,
+                    description: None,
+                    source_severity: None,
+                    fix_text: None,
+                    checks: vec![],
+                    identifiers: vec![],
+                    references: vec![],
+                    platforms: vec![],
+                    rule_order: 0,
+                },
+                draft: RefinedPolicyDraft {
+                    local_name: "name".into(),
+                    local_description: String::new(),
+                    local_severity: "medium".into(),
+                    local_rationale: String::new(),
+                    implementation_note: String::new(),
+                    action: RefinedRuleAction::Existing(Some(policy_version_id)),
+                    assertion_mode: "all".into(),
+                    assertions: vec![],
+                    evidence_requirements: vec![],
+                },
                 selected: true,
                 mapping_relationship: None,
                 mapping_coverage: None,
@@ -1146,8 +1283,18 @@ mod tests {
         related_rule.mapping_coverage = Some("partial".into());
         assert!(exact_rule.is_valid());
         assert!(related_rule.is_valid());
-        assert_eq!(mapping_semantics_for(&exact_rule).unwrap().reviewed_related_candidate, None);
-        assert!(mapping_semantics_for(&related_rule).unwrap().reviewed_related_candidate.is_some());
+        assert_eq!(
+            mapping_semantics_for(&exact_rule)
+                .unwrap()
+                .reviewed_related_candidate,
+            None
+        );
+        assert!(
+            mapping_semantics_for(&related_rule)
+                .unwrap()
+                .reviewed_related_candidate
+                .is_some()
+        );
     }
     #[test]
     fn source_identity_prefers_vulnerability_group_over_rule_id() {

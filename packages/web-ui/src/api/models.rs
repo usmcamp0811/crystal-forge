@@ -1028,6 +1028,14 @@ pub struct ComplianceBundleSummary {
     pub current_published_version: Option<String>,
     #[serde(default)]
     pub versions: Vec<ComplianceBundleVersionSummary>,
+    #[serde(default)]
+    pub policy_count: i64,
+    #[serde(default)]
+    pub requirement_count: i64,
+    #[serde(default)]
+    pub applicable_system_count: i64,
+    #[serde(default)]
+    pub aggregate_score: Option<i64>,
 }
 
 /// A server-backed arrangement of Security-domain policy controls.
@@ -1155,6 +1163,12 @@ pub struct ComplianceSystemRollup {
     pub score: i64,
     #[serde(default)]
     pub resolution_state: Option<String>,
+    #[serde(default)]
+    pub assignment_status: Option<String>,
+    #[serde(default)]
+    pub assignment_reason: Option<String>,
+    #[serde(default)]
+    pub assignment_approved_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1331,6 +1345,46 @@ pub struct DeploymentPolicyRecord {
     pub current_version_id: Option<Uuid>,
     #[serde(default)]
     pub versions: Vec<DeploymentPolicyVersionSummary>,
+    /// Number of trusted/eligible policy_requirement_mappings for this policy version
+    #[serde(default)]
+    pub mapped_requirement_count: i64,
+    /// Number of distinct bundle lineages using this policy version
+    #[serde(default)]
+    pub bundle_usage_count: i64,
+}
+
+/// Evidence collection specification for a control or policy.
+/// Describes the authoritative evidence needed to satisfy an ATO requirement.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "details")]
+pub enum EvidenceKind {
+    /// Command execution proof: cmd output must match expect pattern
+    Command { cmd: String, expect: String },
+    /// System journal or event log: unit/source with match_text filter
+    Log {
+        source: String,
+        unit: String,
+        match_text: String,
+    },
+    /// File presence/state: path with optional annotation
+    File { path: String, note: Option<String> },
+    /// systemd/systemctl unit state: requires exact state value
+    UnitState { unit: String, state: String },
+    /// NixOS eval attribute: attr path to be evaluated
+    EvalAttr { attr: String },
+    /// Human attestation: reviewer assertion with optional note
+    Attestation { note: String },
+}
+
+/// Single versioned evidence spec within a policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceSpec {
+    /// Spec type and parameters
+    #[serde(flatten)]
+    pub kind: EvidenceKind,
+    /// Optional required-fields map (validation dictionary)
+    #[serde(default)]
+    pub required_fields: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1371,7 +1425,7 @@ pub struct DeploymentPolicyVersionSummary {
     /// Framework string, e.g. "DISA STIG", "NIST 800-53", "CMMC 2.0", "CIS Benchmark", or custom
     #[serde(default)]
     pub framework: Option<String>,
-    /// Severity: "high", "medium", "low" — None means unrated
+    /// Severity: "hard", "medium", "low" — None means unrated
     #[serde(default)]
     pub severity: Option<String>,
     /// NIST 800-53 control family, e.g. "AC", "AU", "CM", "IA", "SC", "SI", "MP"
@@ -1386,6 +1440,15 @@ pub struct DeploymentPolicyVersionSummary {
     /// Human-readable rationale for this control
     #[serde(default)]
     pub rationale: Option<String>,
+    /// User UUID who created this version (if available)
+    #[serde(default)]
+    pub created_by: Option<Uuid>,
+    /// Human-readable display name of the user who created this version (username or email)
+    #[serde(default)]
+    pub created_by_display: Option<String>,
+    /// Evidence collection specifications for ATO audits
+    #[serde(default)]
+    pub evidence_specs: Vec<EvidenceSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1397,6 +1460,38 @@ pub struct BundleVersionPolicyMembership {
     pub description: Option<String>,
     pub policy_type: String,
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyVersionUsageResponse {
+    pub policy_version_id: Uuid,
+    pub bundle_versions: Vec<PolicyVersionBundleUsage>,
+    pub systems: Vec<PolicyVersionSystemUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyVersionBundleUsage {
+    pub bundle_id: Uuid,
+    pub bundle_name: String,
+    pub bundle_version_id: Uuid,
+    pub bundle_version: String,
+    pub publication_state: String,
+    pub policy_order: i32,
+    pub is_current_published: bool,
+    pub is_current_draft: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyVersionSystemUsage {
+    pub system_id: Uuid,
+    pub hostname: String,
+    pub environment: Option<String>,
+    pub bundle_id: Uuid,
+    pub bundle_name: String,
+    pub bundle_version_id: Uuid,
+    pub bundle_version: String,
+    pub source: String,
+    pub enforcement_mode: String,
 }
 
 /// Response for listing deployment policies with pagination.
@@ -1815,6 +1910,8 @@ pub struct ImportedBundlePlan {
     pub layer: Option<String>,
     pub owner: Option<String>,
     pub description: Option<String>,
+    #[serde(default)]
+    pub environment_ids: Vec<Uuid>,
 }
 
 /// Import plan submitted to `POST /api/v1/compliance/xccdf/import`.
@@ -1877,7 +1974,10 @@ mod xccdf_mapping_contract_tests {
             }),
         };
         let value = serde_json::to_value(semantics).expect("serialize reviewed semantics");
-        assert_eq!(value["reviewed_related_candidate"]["shared_cci_ids"][0], "CCI-000770");
+        assert_eq!(
+            value["reviewed_related_candidate"]["shared_cci_ids"][0],
+            "CCI-000770"
+        );
         assert_eq!(value["coverage"], "partial");
     }
 }
@@ -1980,6 +2080,8 @@ pub struct CreateAssignmentRequest {
     pub exclusions: Option<Vec<Uuid>>,
     pub additions: Option<Vec<Uuid>>,
     pub value_overrides: Option<Vec<PolicyValueOverride>>,
+    /// User-provided reason/justification for the assignment.
+    pub reason: Option<String>,
 }
 
 /// Request to replace an assignment's mutable overlay and enforcement mode.
@@ -1987,6 +2089,11 @@ pub struct CreateAssignmentRequest {
 /// The server creates a new immutable assignment version and compares
 /// `expected_version_id` with the current version before doing so. Bundle
 /// version rebinding is deliberately not part of this request.
+///
+/// Reason updates use tri-state semantics:
+/// - omitted: preserve reason from current immutable version
+/// - null: explicitly clear the reason
+/// - value: replace reason
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpdateAssignmentRequest {
     pub expected_version_id: Uuid,
@@ -1994,6 +2101,9 @@ pub struct UpdateAssignmentRequest {
     pub exclusions: Option<Vec<Uuid>>,
     pub additions: Option<Vec<Uuid>>,
     pub value_overrides: Option<Vec<PolicyValueOverride>>,
+    /// Tri-state reason/justification for the assignment update.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
+    pub reason: FieldUpdate<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2014,6 +2124,8 @@ pub struct AssignmentResponse {
     pub assignment_overlay_digest: String,
     #[serde(default = "default_assignment_active")]
     pub active: bool,
+    /// Reason/justification from the current immutable assignment version.
+    pub reason: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -2119,6 +2231,9 @@ pub struct CreateDeploymentPolicyRequest {
     pub cis_section: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
+    /// Evidence collection specifications for ATO audits
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_specs: Vec<EvidenceSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requirement_mappings: Vec<CreatePolicyMappingRequest>,
 }
@@ -2158,6 +2273,10 @@ pub struct UpdateDeploymentPolicyRequest {
     pub cis_section: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
+    /// When `Some`, replace evidence specs; `Some([])` clears them.
+    /// `None` (omitted) preserves the existing value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_specs: Option<Vec<EvidenceSpec>>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4029,6 +4148,7 @@ pub struct BundleCoverageRow {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BundleCoverageMapping {
+    pub policy_id: Uuid,
     pub policy_version_id: Uuid,
     pub policy_name: String,
     pub relationship: String,
@@ -4041,6 +4161,10 @@ pub struct BundleCoverageMapping {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BundleCoverageReport {
     pub bundle_version_id: Uuid,
+    #[serde(default)]
+    pub source_framework: Option<BundleCoverageSourceFramework>,
+    #[serde(default)]
+    pub frameworks: Vec<BundleCoverageFramework>,
     pub total_requirements: i64,
     pub full: i64,
     pub partial: i64,
@@ -4048,6 +4172,29 @@ pub struct BundleCoverageReport {
     #[serde(default)]
     pub recovery_required: i64,
     pub rows: Vec<BundleCoverageRow>,
+}
+
+/// Authoritative source framework identity of a bundle version, independent of
+/// requirement membership. A DISA STIG bundle with zero normalized requirements
+/// still reports its source framework through this field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BundleCoverageSourceFramework {
+    pub framework_id: Uuid,
+    pub framework_name: String,
+    pub framework_version_id: Uuid,
+    pub framework_version: String,
+    #[serde(default)]
+    pub framework_publisher: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BundleCoverageFramework {
+    pub framework_id: Uuid,
+    pub framework_name: String,
+    pub framework_version_id: Uuid,
+    pub framework_version: String,
+    #[serde(default)]
+    pub framework_publisher: Option<String>,
 }
 
 /// Request body for creating a requirement mapping.
@@ -4125,7 +4272,13 @@ mod tests {
         let candidate = group.existing_candidate.as_ref().expect("candidate");
         assert_eq!(candidate.policy_name, "Fixture authoritative policy");
         assert_eq!(candidate.confidence, 100);
-        assert_eq!(group.member_proofs.get("V-999001").map(String::as_str), Some("exact_technical"));
-        assert_eq!(group.member_proofs.get("V-999002").map(String::as_str), Some("shared_implementation"));
+        assert_eq!(
+            group.member_proofs.get("V-999001").map(String::as_str),
+            Some("exact_technical")
+        );
+        assert_eq!(
+            group.member_proofs.get("V-999002").map(String::as_str),
+            Some("shared_implementation")
+        );
     }
 }

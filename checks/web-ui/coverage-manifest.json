@@ -238,7 +238,7 @@
       ],
       "semanticAssertions": true,
       "interactions": false,
-      "mockedData": true,
+      "mockedData": false,
       "baseline": "advisory"
     },
     {
@@ -386,7 +386,7 @@
       ],
       "semanticAssertions": true,
       "interactions": true,
-      "mockedData": true,
+      "mockedData": false,
       "baseline": "advisory"
     },
     {
@@ -1520,6 +1520,34 @@
       "baseline": "advisory"
     },
     {
+      "name": "20ad-stig-nixos-assertion-roundtrip",
+      "description": "STIG auditd assertions remain structured through refinement and import serialization",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "20ae-anduril-nixos-stig-import-roundtrip",
+      "description": "The full Anduril NixOS STIG reaches import and preserves the complete backend response",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
       "name": "20b-policies-cve-gate-create-roundtrip",
       "description": "API: create require_cve_check policy and verify it round-trips correctly",
       "route": "/deployment-policies",
@@ -1816,7 +1844,7 @@
     },
     {
       "name": "29a-compliance-populated",
-      "description": "Compliance view renders bundle catalog, header, score strip, and systems matrix",
+      "description": "Compliance view renders server-backed imported requirement coverage and exact mapped policy details",
       "route": "/compliance",
       "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
       "profiles": [
@@ -1825,7 +1853,21 @@
       ],
       "semanticAssertions": true,
       "interactions": false,
-      "mockedData": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29aa-imported-draft-policy-deletion",
+      "description": "Imported draft policy deletion preserves source provenance while updating backend coverage",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
       "baseline": "advisory"
     },
     {
@@ -1881,6 +1923,20 @@
       ],
       "semanticAssertions": true,
       "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29f-compliance-assignment-reason-semantics",
+      "description": "Compliance assignment reason survives unrelated edits, changes, and explicit clearing",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
       "mockedData": true,
       "baseline": "advisory"
     },
@@ -1952,6 +2008,34 @@
       "semanticAssertions": true,
       "interactions": true,
       "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "30d-evidence-lifecycle",
+      "description": "Evidence editor lifecycle: create → add → save → reopen → edit → clear → save",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "30e-policy-card-direct-edit-preserves-evidence",
+      "description": "Direct card Edit (never opening the drawer) shows existing evidence and adding more extends rather than replaces it",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
       "baseline": "advisory"
     },
     {

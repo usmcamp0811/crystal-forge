@@ -1,7 +1,8 @@
 // Unit tests for time window policy evaluation
 
+use chrono::TimeZone;
 use crystal_forge::models::deployment_policies::TimeWindowConfig;
-use crystal_forge::services::time_window_policy::check_time_window;
+use crystal_forge::services::time_window_policy::{check_time_window, check_time_window_at};
 
 #[test]
 fn test_invalid_timezone() {
@@ -38,8 +39,7 @@ fn test_invalid_time_format() {
 
 #[test]
 fn test_time_window_logic_with_utc() {
-    // This test uses UTC timezone for deterministic testing
-    // Note: This test may be time-dependent
+    // This test uses UTC timezone and a fixed timestamp for deterministic testing.
     let config = TimeWindowConfig {
         description: "24/7 window".to_string(),
         days: vec![
@@ -57,7 +57,10 @@ fn test_time_window_logic_with_utc() {
         action: "block".to_string(),
     };
 
-    let result = check_time_window(&config);
+    let result = check_time_window_at(
+        &config,
+        chrono::Utc.with_ymd_and_hms(2026, 8, 16, 12, 0, 0).unwrap(),
+    );
     // Should always allow since it's 24/7
     assert!(result.deployment_allowed);
 }

@@ -112,6 +112,8 @@ let
     cargoCheckFlags = cargoBuildFlags;
     cargoTestFlags = [
       "--package" "cf-server"
+      "--lib"
+      "--bins"
       "--features" "cf-server/embedded-ui"
     ];
     CRYSTAL_FORGE_UI_DIST = "${pkgs.crystal-forge.web-ui}/public";

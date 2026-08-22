@@ -731,7 +731,7 @@ function PolicyCard({ group, onOpen, onEdit, selectMode, selected }) {
       <div className="sys-card-head">
         <div className="sys-title">
           <div className="sys-hostname"><Icon name="file" size={13}/>&nbsp;{policy.name}</div>
-          <div style={{ fontSize:11, color:"var(--cf-text-secondary)" }}>{policy.description}</div>
+          <div style={{ fontSize:11, color:"var(--cf-text-secondary)", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical", overflow:"hidden" }} title={policy.description}>{policy.description}</div>
         </div>
         <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:5 }}>
           {policy.type === "builtin"

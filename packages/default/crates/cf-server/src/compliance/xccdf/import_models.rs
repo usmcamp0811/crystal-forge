@@ -108,6 +108,10 @@ pub struct ImportedBundlePlan {
     pub layer: Option<String>,
     pub owner: Option<String>,
     pub description: Option<String>,
+    /// Environments to which the imported bundle applies. An empty list means
+    /// the caller explicitly selected no environments, not "all".
+    #[serde(default)]
+    pub environment_ids: Vec<Uuid>,
 }
 
 /// Proof/justification for reusing an existing policy via MapExisting.

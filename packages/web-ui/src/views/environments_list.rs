@@ -128,8 +128,10 @@ pub fn EnvironmentsListView() -> Element {
     let mut form_draft = use_signal(|| None::<EnvironmentFormDraft>);
     let mut form_error = use_signal(|| None::<String>);
     // Snapshot of bundle assignments at modal open — used to diff on Save.
-    let mut original_assignments = use_signal(|| Vec::<crate::components::environments::EnvBundleAssignment>::new());
-    let mut assignment_load_state = use_signal(|| crate::components::environments::AssignmentLoadState::Ready);
+    let mut original_assignments =
+        use_signal(|| Vec::<crate::components::environments::EnvBundleAssignment>::new());
+    let mut assignment_load_state =
+        use_signal(|| crate::components::environments::AssignmentLoadState::Ready);
     let mut pending_remove = use_signal(|| None::<EnvironmentItem>);
     let mut view_env = use_signal(|| None::<EnvironmentItem>);
 
@@ -542,7 +544,8 @@ fn open_edit_modal(
     assignment_load_state.set(crate::components::environments::AssignmentLoadState::Loading);
     // Load authoritative assignments in the background.
     spawn(async move {
-        let assignments_result = crate::environments::adapter::load_environment_bundle_assignments(&env_id).await;
+        let assignments_result =
+            crate::environments::adapter::load_environment_bundle_assignments(&env_id).await;
         match assignments_result {
             Ok(loaded) => {
                 original_assignments.set(loaded.clone());
@@ -551,13 +554,17 @@ fn open_edit_modal(
                     if current.id == Some(env_id) {
                         current.bundle_assignments = loaded;
                         form_draft.set(Some(current));
-                        assignment_load_state.set(crate::components::environments::AssignmentLoadState::Ready);
+                        assignment_load_state
+                            .set(crate::components::environments::AssignmentLoadState::Ready);
                     }
                 }
             }
             Err(err) => {
-                assignment_load_state.set(crate::components::environments::AssignmentLoadState::Failed(err.clone()));
-                web_sys::console::warn_1(&format!("Failed to load environment assignments: {err}").into());
+                assignment_load_state
+                    .set(crate::components::environments::AssignmentLoadState::Failed(err.clone()));
+                web_sys::console::warn_1(
+                    &format!("Failed to load environment assignments: {err}").into(),
+                );
             }
         }
     });

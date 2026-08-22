@@ -351,9 +351,9 @@ impl DeploymentPolicy {
         match self {
             DeploymentPolicy::RequireCrystalForgeAgent { .. } => (
                 "cfAgentEnabled".to_string(),
-                "(cfg.config.systemd.services.crystal-forge-agent.enable or false) || \
-                 ((cfg.config.services.crystal-forge.enable or false) && \
-                  (cfg.config.services.crystal-forge.client.enable or false))"
+                "(config.systemd.services.crystal-forge-agent.enable or false) || \
+                 ((config.services.crystal-forge.enable or false) && \
+                  (config.services.crystal-forge.client.enable or false))"
                     .to_string(),
             ),
             DeploymentPolicy::RequirePackages { packages, .. } => {
@@ -369,9 +369,9 @@ impl DeploymentPolicy {
                     format!("hasRequiredPackages_{index}"),
                     format!(
                         "builtins.all \
-                         (required: builtins.any \
-                           (pkg: (pkg.pname or (pkg.name or \"\")) == required) \
-                           cfg.config.environment.systemPackages) \
+                          (required: builtins.any \
+                            (pkg: (pkg.pname or (pkg.name or \"\")) == required) \
+                            config.environment.systemPackages) \
                          [ {} ]",
                         package_list
                     ),
@@ -1197,7 +1197,7 @@ fn build_policy_fields_for_config_indented(
             } if rules.is_empty() => {
                 // Legacy single-expression custom check: emit under the configured
                 // field_name so the parser can find it. The expression is inserted
-                // verbatim and must use the `cfg.config.*` lexical contract.
+                // verbatim and must use the `config.*` lexical contract.
                 if is_reserved_policy_result_field(field_name) {
                     warn!(
                         policy_id = %ap.policy_id,
@@ -1216,7 +1216,7 @@ fn build_policy_fields_for_config_indented(
             DeploymentPolicy::CustomCheck { rules, .. } => {
                 // Multi-rule: emit one line per rule using the rule's own field_name
                 // (existing convention; rules predate stable-ID keys).
-                // Expressions are expected to use `cfg.config.*` per the documented
+                // Expressions are expected to use `config.*` per the documented
                 // policy fragment lexical contract.
                 for rule in rules {
                     if is_reserved_policy_result_field(&rule.field_name) {
@@ -1237,9 +1237,8 @@ fn build_policy_fields_for_config_indented(
             }
             _ => {
                 // All built-in Nix-evaluated policies (require_cf_agent,
-                // require_packages) use `cfg.config.*` in their expression
-                // fragments because the checker function receives the full
-                // nixosConfigurations.<name> object as `cfg`.
+                // require_packages) use `config.*` in their expression fragments
+                // because the checker function receives the configuration object.
                 let (_, expr) = ap.policy.to_nix_expression_with_index(idx);
                 lines.push(format!("{}{} = {};", indent, key, expr));
             }
@@ -1262,14 +1261,14 @@ fn build_policy_fields_for_config_indented(
 /// let
 ///   flake = builtins.getFlake "<flakeRef>";
 ///   policyCheckers = {
-///     "<config>" = cfg: { policy_<id> = <expr>; ... };
+///     "<config>" = config: { policy_<id> = <expr>; ... };
 ///     ...
 ///   };
 /// in builtins.mapAttrs (name: cfg:
 ///   let
 ///     drv = cfg.config.system.build.toplevel;
 ///     checker = policyCheckers.${name} or (_: {});
-///   in drv // { meta = (drv.meta or {}) // { policies = (checker cfg) // { cfAgentEnabled = cfAgentEnabledExpr cfg; }; }; }
+///   in drv // { meta = (drv.meta or {}) // { policies = (checker cfg.config) // { cfAgentEnabled = cfAgentEnabledExpr cfg.config; }; }; }
 /// ) flake.nixosConfigurations
 /// ```
 pub fn build_nix_eval_expression(
@@ -1301,10 +1300,10 @@ pub fn build_nix_eval_expression(
 let
   flake = builtins.getFlake {flake_ref};
   policyCheckers = {checkers};
-  cfAgentEnabledExpr = cfg:
-    (cfg.config.systemd.services.crystal-forge-agent.enable or false)
-    || ((cfg.config.services.crystal-forge.enable or false)
-        && (cfg.config.services.crystal-forge.client.enable or false));
+  cfAgentEnabledExpr = config:
+    (config.systemd.services.crystal-forge-agent.enable or false)
+    || ((config.services.crystal-forge.enable or false)
+        && (config.services.crystal-forge.client.enable or false));
 in
   builtins.mapAttrs (name: cfg:
     let
@@ -1313,7 +1312,7 @@ in
     in
       drv // {{
         meta = (drv.meta or {{}}) // {{
-          policies = (checker cfg) // {{ cfAgentEnabled = cfAgentEnabledExpr cfg; }};
+          policies = (checker cfg.config) // {{ cfAgentEnabled = cfAgentEnabledExpr cfg.config; }};
         }};
       }}
   ) flake.nixosConfigurations
@@ -1340,6 +1339,14 @@ pub struct DeploymentPolicyRecord {
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Number of trusted/eligible policy_requirement_mappings for this policy version
+    #[sqlx(skip)]
+    #[serde(default)]
+    pub mapped_requirement_count: i64,
+    /// Number of distinct bundle lineages using this policy version
+    #[sqlx(skip)]
+    #[serde(default)]
+    pub bundle_usage_count: i64,
 }
 
 /// Request to create a new deployment policy
@@ -1379,6 +1386,9 @@ pub struct CreateDeploymentPolicyRequest {
     /// Human-readable rationale for this control
     #[serde(default)]
     pub rationale: Option<String>,
+    /// Evidence collection specifications for ATO audits
+    #[serde(default)]
+    pub evidence_specs: Vec<crate::api::models::EvidenceSpec>,
     /// Normalized requirement mappings to persist with the initial draft.
     #[serde(default)]
     pub requirement_mappings: Vec<CreatePolicyRequirementMapping>,
@@ -1435,6 +1445,10 @@ pub struct UpdateDeploymentPolicyRequest {
     /// When `Some`, replace the rationale; `None` preserves existing.
     #[serde(default)]
     pub rationale: Option<String>,
+    /// When `Some`, replace evidence specs; `Some([])` clears them.
+    /// When `None`, the existing value is preserved.
+    #[serde(default)]
+    pub evidence_specs: Option<Vec<crate::api::models::EvidenceSpec>>,
 }
 
 // ============================================================================
@@ -1480,7 +1494,7 @@ mod tests {
         let (_, expr) = policy.to_nix_expression();
 
         assert!(
-            expr.starts_with("(cfg.config.systemd.services.crystal-forge-agent.enable or false)"),
+            expr.starts_with("(config.systemd.services.crystal-forge-agent.enable or false)"),
             "cf agent policy should use the realized systemd service as the primary signal"
         );
         assert!(
@@ -1812,20 +1826,22 @@ mod tests {
             expr.contains("\"gray\" = cfg:"),
             "bulk checker must bind full cfg object, got:\n{expr}"
         );
-        // The package policy must reference the full cfg object.
+        // The checker receives the full cfg object while policy expressions use
+        // the canonical public `config` binding.
         assert!(
-            expr.contains("cfg.config.environment.systemPackages"),
-            "package policy must use cfg.config scope, got:\n{expr}"
+            expr.contains("config.environment.systemPackages"),
+            "package policy must use config scope, got:\n{expr}"
         );
-        // The checker must be invoked with the full cfg object.
+        // The checker is invoked with the public `config` binding from the
+        // full cfg object.
         assert!(
-            expr.contains("checker cfg") && !expr.contains("checker cfg.config"),
-            "checker must receive full cfg object, got:\n{expr}"
+            expr.contains("checker cfg.config"),
+            "checker must receive cfg.config as its public config binding, got:\n{expr}"
         );
-        // Sanity: must not mix a `config` binding with a `cfg` expression.
+        // Sanity: the checker lambda itself remains bound to cfg.
         assert!(
-            !expr.contains("\"gray\" = config:"),
-            "checker must not bind `config` while expressions reference `cfg`, got:\n{expr}"
+            expr.contains("\"gray\" = cfg:"),
+            "checker must bind the full nixosConfiguration object as cfg, got:\n{expr}"
         );
     }
 
@@ -1844,19 +1860,12 @@ mod tests {
         );
 
         // Both the unconditional cfAgentEnabled and the assigned-policy stable
-        // key must use cfg.config.
+        // key must use the canonical config binding.
         assert!(
-            expr.contains("cfg.config.systemd.services.crystal-forge-agent.enable"),
-            "standalone agent check must use cfg.config scope, got:\n{expr}"
+            expr.contains("config.systemd.services.crystal-forge-agent.enable"),
+            "standalone agent check must use config scope, got:\n{expr}"
         );
-        // Every occurrence of `config.systemd.services` must be prefixed with `cfg.`;
-        // otherwise the expression references an unbound `config` variable.
-        let cfg_count = expr.matches("cfg.config.systemd.services").count();
-        let config_count = expr.matches("config.systemd.services").count();
-        assert_eq!(
-            cfg_count, config_count,
-            "standalone expression must not reference unbound `config`, got:\n{expr}"
-        );
+        assert!(!expr.contains("cfg.config.systemd.services"));
     }
 
     #[test]

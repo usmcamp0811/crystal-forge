@@ -26,6 +26,18 @@ const baseUrl = process.argv[2] || "http://127.0.0.1:3000";
 const outputDir = process.argv[3] || "/tmp/screenshots";
 const apiBaseUrl = process.env.CF_UI_API_BASE_URL || baseUrl;
 
+// ── Node.js 24 safety net ──────────────────────────────────────────────────
+// Node.js 24 treats unhandled promise rejections as fatal by default.  When a
+// Playwright waitForResponse() promise times out before the await can catch it,
+// the rejection surfaces as an uncaught exception that kills the process before
+// the step runner's try/catch can record a graceful FAIL.  Registering a
+// handler prevents the hard exit; the rejection will still propagate through
+// the await and be caught by the step runner, which records a normal FAIL.
+process.on("unhandledRejection", (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  console.error(`unhandledRejection: ${msg}`);
+});
+
 function firstExistingPath(paths) {
   return paths.find((candidate) => fs.existsSync(candidate));
 }
@@ -231,8 +243,8 @@ async function captureThemedBaselines(page, step, visualThemes) {
 
 // Test user credentials
 const TEST_USER = {
-  username: process.env.CF_UI_TEST_USERNAME || "admin",
-  email: process.env.CF_UI_TEST_EMAIL || "admin@example.com",
+  username: process.env.CF_UI_TEST_USERNAME || "cf-ui-admin",
+  email: process.env.CF_UI_TEST_EMAIL || "cf-ui-admin@example.com",
   password: process.env.CF_UI_TEST_PASSWORD || "testpassword123",
   firstName: process.env.CF_UI_TEST_FIRST_NAME || "Test",
   lastName: process.env.CF_UI_TEST_LAST_NAME || "Admin",
@@ -258,6 +270,174 @@ async function assertVisible(locator, message, timeoutMs = 5000) {
   }
 }
 
+async function fillDioxusInput(locator, value) {
+  await locator.fill(value);
+  await locator.evaluate((element, nextValue) => {
+    element.value = nextValue;
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  }, value);
+}
+
+/**
+ * Remove every rule currently listed in the policy editor.
+ *
+ * A new policy is seeded with two UI-only pipeline gates ("Eval must pass",
+ * "Build must succeed") that the backend does not persist. `save_blocker`
+ * refuses to save while any non-persisted rule is present, so tests that
+ * create a policy must clear these first and then add a supported assertion.
+ *
+ * Always removes index 0 because the list re-indexes after each removal.
+ */
+async function removeAllPolicyRules(page) {
+  for (let guard = 0; guard < 20; guard += 1) {
+    const remove = page.getByTestId("policy-rule-remove-0");
+    if ((await remove.count()) === 0) {
+      return;
+    }
+    await remove.click();
+  }
+  throw new Error("removeAllPolicyRules: rule list did not drain after 20 removals");
+}
+
+/**
+ * Persist the onboarding coach in its collapsed state.
+ *
+ * The coach reads `cf.coach.collapsed` from localStorage on mount, so seeding
+ * the key before the app boots keeps the drawer collapsed across every
+ * subsequent navigation and reload in the session. Clicking "Minimize" after
+ * the fact races the drawer's async mount: the expanded <aside> covers the
+ * content column and swallows pointer events, producing click timeouts that
+ * look like missing elements.
+ */
+/**
+ * Filter the policy catalog down to a single policy by name.
+ *
+ * The seeded catalog holds >100 policies spread across collapsible category
+ * groups, so a freshly created policy is frequently not rendered/visible.
+ * Searching guarantees its card is on screen before interacting with it.
+ */
+async function filterPolicyCatalog(page, name) {
+  const search = page.getByPlaceholder("Search policies…");
+  await search.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+  await search.fill(name);
+  const card = page.locator(`[data-policy-card][data-policy-name="${name}"]`);
+
+  // The catalog splits policies into Platform and Security domains. New
+  // custom-check policies default to Security, while the page opens on
+  // Platform. Search only filters the active domain, so try Security before
+  // concluding that the policy failed to load.
+  if ((await card.count()) === 0) {
+    const securityTab = page.getByRole("tab", { name: /Security controls/i });
+    if ((await securityTab.count()) > 0) {
+      await securityTab.click();
+    }
+  }
+  try {
+    await card.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+  } catch (err) {
+    const diag = await page.evaluate((wanted) => {
+      const cards = Array.from(document.querySelectorAll("[data-policy-card]"));
+      return {
+        totalCards: cards.length,
+        names: cards.slice(0, 15).map((c) => c.getAttribute("data-policy-name")),
+        wantedInDom: cards.some((c) => c.getAttribute("data-policy-name") === wanted),
+        bodyHasName: document.body.innerText.includes(wanted),
+        loadError: Array.from(document.querySelectorAll("*"))
+          .find((element) => element.textContent?.startsWith("Failed to load policies:"))
+          ?.textContent ?? null,
+        bodyText: document.body.innerText.slice(0, 2000),
+      };
+    }, name);
+    throw new Error(
+      `filterPolicyCatalog("${name}") failed: ${err.message}\nDIAG=${JSON.stringify(diag)}`,
+    );
+  }
+}
+
+async function suppressOnboardingCoach(page) {
+  await page.addInitScript(() => {
+    try {
+      window.localStorage.setItem("cf.coach.collapsed", "true");
+      window.localStorage.setItem("cf.coach.force_show", "false");
+    } catch (_) {
+      /* storage unavailable; the runtime fallback below still applies */
+    }
+  });
+}
+
+async function collapseOnboardingCoach(page) {
+  // Best-effort runtime collapse for pages already loaded. Prefer
+  // suppressOnboardingCoach() before the first navigation.
+  const expandedDrawer = () => page.locator("aside[data-testid='onboarding-coach-panel']");
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if ((await expandedDrawer().count()) === 0) {
+      await page.waitForTimeout(200);
+      if ((await expandedDrawer().count()) === 0) {
+        return;
+      }
+    }
+
+    const coachCollapse = page.locator("[data-testid='onboarding-coach-collapse']").first();
+    if ((await coachCollapse.count()) > 0) {
+      // Use a DOM click: the drawer itself intercepts synthetic pointer events.
+      await coachCollapse.evaluate((el) => el.click()).catch(() => {});
+    }
+
+    await page
+      .waitForFunction(
+        () => !document.querySelector("aside[data-testid='onboarding-coach-panel']"),
+        undefined,
+        { timeout: 2000 },
+      )
+      .catch(() => {});
+
+    if ((await expandedDrawer().count()) === 0) {
+      return;
+    }
+  }
+
+  throw new Error(
+    "collapseOnboardingCoach: onboarding coach drawer stayed open and will intercept pointer events",
+  );
+}
+
+async function waitForAssertionCardCount(page, expected, message) {
+  await page.waitForFunction(
+    ({ expected }) => document.querySelectorAll(".refine-assertion-card").length === expected,
+    { expected },
+    { timeout: 5000 },
+  ).catch(async () => {
+    const actual = await page.locator(".refine-assertion-card").count();
+    throw new Error(`${message} (expected ${expected}, got ${actual})`);
+  });
+}
+
+/**
+ * Wait until the element with the given data-testid shows an innerText that
+ * matches every pattern and no longer matches any of the excluded patterns.
+ * Patterns are RegExp source strings, matched against card.innerText.
+ */
+async function assertCardText(page, testId, patterns, message, { excluded = [], timeoutMs = 10000 } = {}) {
+  await page.waitForFunction(
+    ({ testId, patterns, excluded }) => {
+      const card = document.querySelector(`[data-testid='${testId}']`);
+      if (!card) return false;
+      const text = card.innerText || "";
+      const missing = patterns.filter((pattern) => !new RegExp(pattern).test(text));
+      const forbidden = excluded.filter((pattern) => new RegExp(pattern).test(text));
+      return missing.length === 0 && forbidden.length === 0;
+    },
+    { testId, patterns, excluded },
+    { timeout: timeoutMs },
+  ).catch(async () => {
+    const card = page.getByTestId(testId).first();
+    const sample = (await card.innerText().catch(() => "(card not found)")) || "(empty card text)";
+    throw new Error(`${message} (card text was: ${JSON.stringify(sample)})`);
+  });
+}
+
 async function ensureAuthenticated(page) {
   const isAuthenticated = async () => page.evaluate(async (base) => {
     const controller = new AbortController();
@@ -281,23 +461,68 @@ async function ensureAuthenticated(page) {
   // Focused runs skip the ordered registration/login steps. On a fresh local
   // auth instance, reproduce only the registration preflight here so the
   // requested post-login step remains self-contained.
-  const registrationRequired = page.url().includes("/register") ||
+  const setupStatus = await page.evaluate(async (base) => {
+    const response = await fetch(`${base}/api/auth/setup-status`, { credentials: "include" });
+    if (!response.ok) return null;
+    return response.json();
+  }, apiBaseUrl).catch(() => null);
+  const registrationRequired = setupStatus?.requires_setup === true ||
+    page.url().includes("/register") ||
     await page.locator('input[type="email"]').isVisible().catch(() => false);
   if (registrationRequired) {
-    if (!page.url().includes("/register")) {
-      await page.goto(`${baseUrl}/register`, { timeout: LOAD_TIMEOUT, waitUntil: "domcontentloaded" });
+    const registration = await page.evaluate(async ({ base, user }) => {
+      const response = await fetch(`${base}/api/auth/local/register`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: user.username,
+          email: user.email,
+          password: user.password,
+          first_name: user.firstName,
+          last_name: user.lastName,
+        }),
+      });
+      return { ok: response.ok, status: response.status, body: await response.text() };
+    }, { base: apiBaseUrl, user: TEST_USER });
+    if (!registration.ok && registration.status !== 409) {
+      throw new Error(`Registration preflight failed (${registration.status}): ${registration.body}`);
     }
-    await page.locator('input[type="text"]').first().fill(TEST_USER.username);
-    await page.locator('input[type="email"]').fill(TEST_USER.email);
-    await page.locator('input[type="password"]').first().fill(TEST_USER.password);
-    await page.locator('input[type="password"]').last().fill(TEST_USER.password);
-    await page.locator('button[type="submit"]').first().click();
+    if (await isAuthenticated()) return;
+  }
+
+  const apiLogin = await page.evaluate(async ({ base, user }) => {
+    const response = await fetch(`${base}/api/auth/local/login`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: user.username, password: user.password }),
+    });
+    return { ok: response.ok, status: response.status, body: await response.text() };
+  }, { base: apiBaseUrl, user: TEST_USER });
+  if (apiLogin.ok && await isAuthenticated()) return;
+
+  await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT, waitUntil: "domcontentloaded" });
+  if (page.url().includes("/register")) {
+    await page.waitForTimeout(2000);
+    await fillDioxusInput(page.locator('input[type="text"]').first(), TEST_USER.username);
+    await fillDioxusInput(page.locator('input[type="email"]'), TEST_USER.email);
+    await fillDioxusInput(page.locator('input[type="password"]').first(), TEST_USER.password);
+    await fillDioxusInput(page.locator('input[type="password"]').last(), TEST_USER.password);
     await page.waitForTimeout(500);
+    await page.locator('button[type="submit"]').first().waitFor({ state: "visible", timeout: 5000 });
+    await page.waitForFunction(() => {
+      const button = document.querySelector('button[type="submit"]');
+      return button && !button.disabled;
+    }, undefined, { timeout: 5000 });
+    await page.locator('button[type="submit"]').first().click();
+    await page.waitForTimeout(3000);
+    if (await isAuthenticated()) return;
     await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT, waitUntil: "domcontentloaded" });
   }
 
-  await page.locator('input[type="text"]').fill(TEST_USER.username);
-  await page.locator('input[type="password"]').fill(TEST_USER.password);
+  await fillDioxusInput(page.locator('input[type="text"]').first(), TEST_USER.username);
+  await fillDioxusInput(page.locator('input[type="password"]').first(), TEST_USER.password);
   await page.locator('button[type="submit"]').click();
   await page.waitForFunction(async (base) => {
     const controller = new AbortController();
@@ -6311,6 +6536,106 @@ const steps = [
     name: "18-policies",
     description: "Policies view",
     action: async (page) => {
+      const laterPagePolicies = new Map();
+      await page.route("**/api/v1/deployment-policies*", async (route) => {
+        if (route.request().method() !== "GET") {
+          await route.continue();
+          return;
+        }
+        const url = new URL(route.request().url());
+        if (!url.pathname.endsWith("/deployment-policies")) {
+          const id = url.pathname.split("/").pop();
+          const policy = laterPagePolicies.get(id);
+          if (policy) {
+            await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(policy) });
+          } else {
+            await route.continue();
+          }
+          return;
+        }
+
+        const upstream = await route.fetch();
+        const original = await upstream.json();
+        const now = new Date().toISOString();
+        const template = original.policies?.[0] || {
+          id: "00000000-0000-4000-8000-000000000001",
+          name: "Pagination template",
+          description: "Pagination regression fixture",
+          policy_type: "custom_check",
+          config: { expression: "true" },
+          enabled: true,
+          created_at: now,
+          updated_at: now,
+          current_version_id: "10000000-0000-4000-8000-000000000001",
+          versions: [{
+            id: "10000000-0000-4000-8000-000000000001",
+            policy_id: "00000000-0000-4000-8000-000000000001",
+            version: "1.0.0",
+            publication_state: "draft",
+            trust_state: "trusted",
+            semantic_digest: "pagination-template",
+            created_at: now,
+            published_at: null,
+            derived_from_version_id: null,
+            is_current_published: false,
+            is_current_draft: true,
+            name: "Pagination template",
+            description: "Pagination regression fixture",
+            policy_type: "custom_check",
+            config: { expression: "true" },
+            enabled: true,
+            srg_ids: [],
+            cci_ids: [],
+            category: null,
+            framework: null,
+            severity: null,
+            control_family: null,
+            cmmc_level: null,
+            cis_section: null,
+            rationale: null,
+            created_by: null,
+            created_by_display: null,
+            evidence_specs: [],
+          }],
+          mapped_requirement_count: 0,
+          bundle_usage_count: 0,
+        };
+        const makePolicy = (index, category, name) => {
+          const policy = structuredClone(template);
+          const id = `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`;
+          const versionId = `10000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`;
+          policy.id = id;
+          policy.name = name;
+          policy.current_version_id = versionId;
+          policy.versions = (policy.versions || []).slice(0, 1).map((version) => ({
+            ...version,
+            id: versionId,
+            policy_id: id,
+            name,
+            category,
+            version: "1.0.0",
+          }));
+          laterPagePolicies.set(id, policy);
+          return policy;
+        };
+        const policies = [
+          ...Array.from({ length: 105 }, (_, index) => makePolicy(index, "security", `Security regression ${String(index).padStart(3, "0")}`)),
+          ...Array.from({ length: 5 }, (_, index) => makePolicy(105 + index, null, `Platform regression ${String(index).padStart(3, "0")}`)),
+        ];
+        const offset = Number(url.searchParams.get("offset") || "0");
+        const limit = Number(url.searchParams.get("limit") || "100");
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            policies: policies.slice(offset, offset + limit),
+            total: policies.length,
+            limit,
+            offset,
+            system_counts: {},
+          }),
+        });
+      });
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
       await page.locator("main h1:has-text('Policies')").first().waitFor({ timeout: 5000 });
       await assertVisible(page.getByText("Criteria a system must satisfy to deploy").first(), "Expected design subtitle on Policies page");
@@ -6318,6 +6643,35 @@ const steps = [
       await assertVisible(page.getByPlaceholder("Search policies…").first(), "Expected policy search filter");
       await assertVisible(page.getByRole("button", { name: /deploy/i }).first(), "Expected deployment category segment filter");
       await assertVisible(page.getByText(/policies?$/).first(), "Expected policy count in filter bar");
+
+      const catalog = await page.evaluate(async (url) => {
+        const response = await fetch(url, { credentials: "include" });
+        return { status: response.status, body: await response.json() };
+      }, `${apiBaseUrl}/api/v1/deployment-policies?limit=100&offset=0`);
+      if (catalog.status !== 200) throw new Error(`Expected policy catalog response 200, got ${catalog.status}`);
+      const expectedCount = Number(catalog.body.total);
+      if (!Number.isInteger(expectedCount) || expectedCount < 1) throw new Error(`Invalid policy catalog total: ${catalog.body.total}`);
+      await assertVisible(
+        page.getByText(new RegExp(`^${expectedCount} policies?$`)).first(),
+        `Expected Policies view to render all ${expectedCount} catalog policies`,
+      );
+      if (expectedCount <= 100) throw new Error(`Pagination regression fixture requires >100 policies, got ${expectedCount}`);
+      const laterPage = await page.evaluate(async (url) => {
+        const response = await fetch(url, { credentials: "include" });
+        return { status: response.status, body: await response.json() };
+      }, `${apiBaseUrl}/api/v1/deployment-policies?limit=100&offset=100`);
+      if (laterPage.status !== 200 || laterPage.body.policies.length === 0) {
+        throw new Error(`Expected a populated second policy page, got HTTP ${laterPage.status}`);
+      }
+      const laterPolicy = laterPage.body.policies[laterPage.body.policies.length - 1];
+      await page.getByRole("button", { name: /^Platform\b/i }).click();
+      const search = page.getByPlaceholder("Search policies…").first();
+      await search.fill(laterPolicy.name);
+      await assertVisible(page.getByText(laterPolicy.name, { exact: true }), "Expected a policy from page 2 in the Platform catalog");
+      await page.getByText(laterPolicy.name, { exact: true }).click();
+      await assertVisible(page.getByRole("dialog", { name: "Policy detail" }), "Expected later-page Platform policy details to open");
+      await page.getByTitle("Close").click();
+      await page.unroute("**/api/v1/deployment-policies*");
     },
   },
   {
@@ -6570,6 +6924,7 @@ const steps = [
     description: "Policies new modal persists two real requirement mappings and reloads them",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+      await collapseOnboardingCoach(page);
       // custom_check policies belong to the security domain; select that tab
       // before creating one so the new card is visible after the modal closes.
       await page.getByRole("tab", { name: /Security controls/ }).click();
@@ -6584,7 +6939,7 @@ const steps = [
         const frameworksResponse = await fetch(`${base}/api/v1/compliance/frameworks`, requestOptions);
         if (!frameworksResponse.ok) throw new Error(`framework list failed: ${frameworksResponse.status}`);
         const frameworks = await frameworksResponse.json();
-         const framework = frameworks.find((item) => item.canonical_source_key === "disa-web-ui-mapping-roundtrip");
+         const framework = frameworks.find((item) => item.canonical_source_key === "web-ui-mapping-roundtrip");
         if (!framework) throw new Error("Mapping round-trip framework fixture missing");
         const versionsResponse = await fetch(`${base}/api/v1/compliance/frameworks/${framework.id}/versions`, requestOptions);
         if (!versionsResponse.ok) throw new Error(`framework versions failed: ${versionsResponse.status}`);
@@ -6768,8 +7123,17 @@ const steps = [
        for (const row of mappingResponse.rows) {
         if (row.provenance !== "manual" || row.trust_state !== "trusted") {
           throw new Error(`Unexpected mapping audit state: ${JSON.stringify(row)}`);
-         }
+        }
        }
+       await assertVisible(drawer.getByText("Used by bundles", { exact: true }), "Expected exact-version bundle usage section");
+       await assertVisible(
+         drawer.getByText(/not selected by any bundle revision/i),
+         "Expected authoritative empty bundle membership for the new policy version",
+       );
+       await assertVisible(
+         drawer.getByText(/No active bundle assignment currently resolves this exact policy version/i),
+         "Expected authoritative empty resolved-system membership",
+       );
 
        // Edit the first mapping in place: Supports/Partial becomes
        // Implements/Full while preserving the exact requirement selection.
@@ -6785,9 +7149,353 @@ const steps = [
        await assertVisible(page.getByText("Mappings · 2", { exact: true }), "Expected two mappings after edit");
 
        // Removing the second mapping must leave the first mapping intact.
-       const secondMappingRow = page.getByTestId("policy-mapping-row").filter({ hasText: requirementB.external_id });
-       await secondMappingRow.getByTitle("Remove mapping").click();
-       await assertVisible(page.getByText("Mappings · 1", { exact: true }), "Expected one mapping after removal");
+        const secondMappingRow = page.getByTestId("policy-mapping-row").filter({ hasText: requirementB.external_id });
+        await secondMappingRow.getByTitle("Remove mapping").click();
+        await assertVisible(page.getByText("Mappings · 1", { exact: true }), "Expected one mapping after removal");
+
+        await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
+        const deleteCard = page.locator(`[data-policy-card="true"][data-policy-id="${createdPolicy.id}"]`);
+        const deletionEligibility = page.waitForResponse(
+          (response) => response.url().includes(`/api/v1/deployment-policies/${createdPolicy.id}/deletion-eligibility`) && response.request().method() === "GET",
+        );
+        await deleteCard.getByRole("button", { name: "Delete", exact: true }).click();
+        const eligibilityResponse = await deletionEligibility;
+        if (eligibilityResponse.status() !== 200) throw new Error(`Expected deletion eligibility 200, got ${eligibilityResponse.status()}`);
+        await assertVisible(page.getByText("Delete permanently", { exact: true }), "Expected permanent deletion action");
+        const deleteResponse = page.waitForResponse(
+          (response) => response.url().includes(`/api/v1/deployment-policies/${createdPolicy.id}`) && response.request().method() === "DELETE",
+        );
+        await page.getByText("Delete permanently", { exact: true }).click();
+        const deleted = await deleteResponse;
+        if (deleted.status() !== 204) throw new Error(`Expected policy deletion 204, got ${deleted.status()}`);
+        await assertHidden(page.locator(`[data-policy-card="true"][data-policy-id="${createdPolicy.id}"]`), "Deleted policy remained in the catalog");
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await assertHidden(page.locator(`[data-policy-card="true"][data-policy-id="${createdPolicy.id}"]`), "Deleted policy returned after reload");
+     },
+  },
+  {
+     name: "20ad-stig-nixos-assertion-roundtrip",
+     description: "STIG auditd assertions remain structured through refinement and import serialization",
+     action: async (page) => {
+       const auditdXccdf = Buffer.from(`<?xml version="1.0" encoding="utf-8"?>
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.1" id="task-426-auditd-benchmark">
+  <status>accepted</status>
+  <title>TASK-426 auditd fixture</title>
+  <version>V1R1</version>
+  <Group id="V-426001">
+    <title>Audit logging</title>
+    <Rule id="SV-426001r1_rule" severity="high">
+      <title>Enable audit logging</title>
+      <description>The audit daemon must be enabled.</description>
+      <fixtext fixref="F-426001">Configure the following:
+security.auditd.enable = true;
+security.audit.enable = true;</fixtext>
+    </Rule>
+  </Group>
+</Benchmark>`, "utf8");
+
+      try {
+        await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+        await collapseOnboardingCoach(page);
+        await page.getByRole("button", { name: /Import \/ Export/i }).click({ force: true });
+        await page.getByText("Import STIG or XCCDF (.xml/.zip)", { exact: true }).click();
+        await page.getByRole("heading", { name: "Import STIG / XCCDF" }).waitFor({ timeout: 5000 });
+        const previewResponsePromise = page.waitForResponse(
+          (response) => response.url().includes("/api/v1/compliance/xccdf/preview") && response.request().method() === "POST",
+        );
+        await page.locator('input[type="file"]').setInputFiles({
+          name: "task-426-auditd.xml",
+          mimeType: "application/xml",
+           buffer: auditdXccdf,
+        });
+        const previewResponse = await previewResponsePromise;
+        const previewBody = await previewResponse.json();
+        const inferred = previewBody.rules?.[0]?.inferred_assertions;
+        if (!Array.isArray(inferred) || inferred.length !== 2) throw new Error(`Expected two inferred assertions: ${JSON.stringify(inferred)}`);
+        for (const [index, assertion] of inferred.entries()) {
+          if (!assertion.option_path || assertion.expected_value?.type !== "boolean" || assertion.expected_value?.value !== true) {
+            throw new Error(`Inference ${index} was not a typed Boolean option assertion: ${JSON.stringify(assertion)}`);
+          }
+          if (!assertion.nix_expression.startsWith("config.") || assertion.nix_expression.includes("cfg.config.")) {
+            throw new Error(`Inference ${index} was not canonical: ${assertion.nix_expression}`);
+          }
+        }
+
+        const reviewReconcileButton = page.getByTestId("xccdf-review-reconcile-button");
+        const reviewReady = await reviewReconcileButton.waitFor({ state: "visible", timeout: 5000 }).then(() => true).catch(() => false);
+        if (!reviewReady || await reviewReconcileButton.isDisabled().catch(() => true)) {
+          const retryPreviewResponsePromise = page.waitForResponse(
+            (response) => response.url().includes("/api/v1/compliance/xccdf/preview") && response.request().method() === "POST",
+          );
+          const fileInput = page.locator('input[type="file"]');
+          await fileInput.setInputFiles([]);
+          await fileInput.setInputFiles({
+            name: "task-426-auditd.xml",
+            mimeType: "application/xml",
+            buffer: auditdXccdf,
+          });
+          await retryPreviewResponsePromise;
+        }
+        await page.waitForFunction(() => {
+          const button = document.querySelector('[data-testid="xccdf-review-reconcile-button"]');
+          return button && !button.disabled;
+        }, { timeout: 10000 });
+        await reviewReconcileButton.click();
+        await page.getByRole("button", { name: "Refine all instead" }).click();
+        await page.getByTestId("xccdf-refine-tab-enforcement").click();
+        const assertionCards = page.locator(".refine-assertion-card");
+        await waitForAssertionCardCount(page, 2, "Expected two structured assertion editors");
+        if (await assertionCards.locator(".code-editor").count() !== 0) throw new Error("Inferred assertions became CustomExpression editors");
+        const inferredPaths = await assertionCards.locator(".refine-option-row input").evaluateAll((inputs) => inputs.map((input) => input.value));
+        if (inferredPaths.join(",") !== "security.auditd.enable,security.audit.enable") throw new Error(`Unexpected inferred editor order: ${inferredPaths.join(",")}`);
+
+        await page.getByTestId("xccdf-add-assertion").selectOption("option");
+        await waitForAssertionCardCount(page, 3, "Expected exactly one independently added assertion");
+        const manualCard = assertionCards.nth(2);
+        await manualCard.locator(".refine-option-row input").fill("security.audit.manual");
+        await manualCard.locator(".refine-expected").selectOption("true");
+        await assertionCards.first().getByTitle("Remove").click();
+        await waitForAssertionCardCount(page, 2, "Expected one assertion removal");
+        const remainingPaths = await assertionCards.locator(".refine-option-row input").evaluateAll((inputs) => inputs.map((input) => input.value));
+        if (remainingPaths.join(",") !== "security.audit.enable,security.audit.manual") throw new Error(`Removal changed source order: ${remainingPaths.join(",")}`);
+
+        await page.getByTitle("Pause — your progress is saved").click();
+        await page.getByText(/Paused STIG import/).waitFor({ timeout: 5000 });
+        await collapseOnboardingCoach(page);
+        await page.getByRole("button", { name: "Resume", exact: true }).click();
+        await page.getByRole("heading", { name: "Import STIG / XCCDF" }).waitFor({ timeout: 5000 });
+        const resumedPreviewResponsePromise = page.waitForResponse(
+          (response) => response.url().includes("/api/v1/compliance/xccdf/preview") && response.request().method() === "POST",
+        );
+        await page.locator('input[type="file"]').setInputFiles({
+          name: "task-426-auditd.xml",
+          mimeType: "application/xml",
+          buffer: Buffer.concat([auditdXccdf, Buffer.from("\n", "utf8")]),
+        });
+        await resumedPreviewResponsePromise;
+        await page.getByText(/does not match the paused import artifact/i).waitFor({ timeout: 5000 });
+        const matchingPreviewResponsePromise = page.waitForResponse(
+          (response) => response.url().includes("/api/v1/compliance/xccdf/preview") && response.request().method() === "POST",
+        );
+        await page.locator('input[type="file"]').setInputFiles({
+          name: "task-426-auditd.xml",
+          mimeType: "application/xml",
+           buffer: auditdXccdf,
+        });
+        await matchingPreviewResponsePromise;
+        const resumedRefineTab = page.getByTestId("xccdf-refine-tab-enforcement");
+        if (!(await resumedRefineTab.isVisible().catch(() => false))) {
+          await page.getByTestId("xccdf-review-reconcile-button").click();
+          await page.getByRole("button", { name: "Refine all instead" }).click();
+        }
+        await resumedRefineTab.click();
+        await page.getByText("Advanced import options", { exact: true }).click();
+        await page.getByTestId("xccdf-implementation-selector").selectOption("native");
+        const restoredCards = page.locator(".refine-assertion-card");
+        await waitForAssertionCardCount(page, 2, "Paused refinement did not restore the remaining assertions");
+        const restoredPaths = await restoredCards.locator(".refine-option-row input").evaluateAll((inputs) => inputs.map((input) => input.value));
+        if (restoredPaths.join(",") !== "security.audit.enable,security.audit.manual") throw new Error(`Paused refinement lost assertion order: ${restoredPaths.join(",")}`);
+        const restoredManualValue = await restoredCards.nth(1).locator(".refine-expected").inputValue();
+        if (restoredManualValue !== "true") throw new Error(`Paused refinement lost edited Boolean value: ${restoredManualValue}`);
+
+        const reviewImportButton = page.getByRole("button", { name: "Review import" });
+        if (await reviewImportButton.isDisabled()) throw new Error("Restored refinement is not valid for import review");
+        await reviewImportButton.click();
+        await page.getByRole("heading", { name: "Review policy choices" }).waitFor({ timeout: 5000 });
+        const createDraftButton = page.getByRole("button", { name: "Create draft bundle" });
+        await createDraftButton.waitFor({ state: "visible", timeout: 5000 });
+        if (await createDraftButton.isDisabled()) throw new Error("Restored import review had no selected rules");
+        await page.evaluate(() => {
+          const originalFetch = window.fetch.bind(window);
+          window.__task426ImportPlans = [];
+          window.fetch = async (...args) => {
+            const request = args[0] instanceof Request ? args[0] : new Request(...args);
+            if (request.url.includes("/api/v1/compliance/xccdf/import") && request.method === "POST") {
+              const form = await request.clone().formData();
+              const plan = form.get("plan");
+              window.__task426ImportPlans.push(typeof plan === "string" ? JSON.parse(plan) : null);
+            }
+            return originalFetch(...args);
+          };
+        });
+        let forceImportFailure = true;
+        await page.route("**/api/v1/compliance/xccdf/import", async (route) => {
+          if (!forceImportFailure) {
+            await route.continue();
+            return;
+          }
+          forceImportFailure = false;
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          await route.fulfill({
+            status: 422,
+            contentType: "application/json",
+            body: JSON.stringify({
+              error: "IMPORT_PLAN_INVALID",
+              message: "synthetic final-review import failure",
+            }),
+          });
+        });
+        await createDraftButton.click();
+        await page.getByRole("button", { name: "Creating…", exact: true }).waitFor({ state: "visible", timeout: 1000 });
+        await page.getByText(/synthetic final-review import failure/).waitFor({ state: "visible", timeout: 5000 });
+        if (!(await page.getByRole("heading", { name: "Review policy choices" }).isVisible())) throw new Error("Import failure left final review");
+        const retryDraftButton = page.getByRole("button", { name: "Create draft bundle", exact: true });
+        await retryDraftButton.waitFor({ state: "visible", timeout: 5000 });
+        if (await retryDraftButton.isDisabled()) throw new Error("Import failure did not re-enable retry");
+        await page.evaluate(() => { window.__task426ImportPlans = []; });
+        await retryDraftButton.click();
+        await page.waitForFunction(() => window.__task426ImportPlans?.length === 1);
+        const importPlans = await page.evaluate(() => window.__task426ImportPlans);
+        const importPlan = importPlans[0];
+        if (!importPlan) throw new Error("Expected exactly one captured import request");
+        const action = importPlan.rule_actions?.[0];
+        const serializedRules = action?.custom_check?.rules || [];
+        if (action?.action !== "create_native_custom" || action.custom_check.mode !== "all" || serializedRules.length !== 2) {
+          throw new Error(`Unexpected import assertion shape: ${JSON.stringify(action)}`);
+        }
+        const expressions = serializedRules.map((rule) => rule.expression);
+        if (expressions.join(",") !== "config.security.audit.enable == true,config.security.audit.manual == true") {
+          throw new Error(`Import did not serialize remaining assertions exactly once and in order: ${expressions.join(",")}`);
+        }
+        if (expressions.some((expression) => expression.includes('"true"'))) throw new Error("Boolean assertion was quoted in import serialization");
+      } finally {
+      }
+    },
+  },
+  {
+    name: "20ae-anduril-nixos-stig-import-roundtrip",
+    description: "The full official Anduril NixOS STIG V1R2 reaches import with 103 normalized requirements and full coverage",
+    action: async (page) => {
+      const andurilXccdf = fs.readFileSync(path.join(__dirname, "fixtures", "U_Anduril_NixOS_STIG_V1R2_Manual-xccdf.xml"));
+      const browserErrors = [];
+      let importPostObserved = false;
+      const onPageError = (error) => browserErrors.push(`pageerror: ${error.message}`);
+      const onConsole = (message) => {
+        if (message.type() === "error") browserErrors.push(`console: ${message.text()}`);
+      };
+      page.on("pageerror", onPageError);
+      page.on("console", onConsole);
+      page.on("request", (request) => {
+        if (request.url().includes("/api/v1/compliance/xccdf/import") && request.method() === "POST") importPostObserved = true;
+      });
+      try {
+        await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+        await collapseOnboardingCoach(page);
+        await page.getByRole("button", { name: /Import \/ Export/i }).click({ force: true });
+        await page.getByText("Import STIG or XCCDF (.xml/.zip)", { exact: true }).click();
+        await page.getByRole("heading", { name: "Import STIG / XCCDF" }).waitFor({ timeout: 5000 });
+        const previewResponsePromise = page.waitForResponse(
+          (response) => response.url().includes("/api/v1/compliance/xccdf/preview") && response.request().method() === "POST",
+        );
+        await page.locator('input[type="file"]').setInputFiles({
+          name: "U_Anduril_NixOS_STIG_V1R2_Manual-xccdf.xml",
+          mimeType: "application/xml",
+          buffer: andurilXccdf,
+        });
+        const previewResponse = await previewResponsePromise;
+        const previewBody = await previewResponse.json();
+        if (!previewResponse.ok()) throw new Error(`Anduril preview failed: HTTP ${previewResponse.status()} ${JSON.stringify(previewBody)}`);
+        if (!Array.isArray(previewBody.rules) || previewBody.rules.length !== 103) {
+          throw new Error(`Expected the official Anduril V1R2 rule set of 103, got ${previewBody.rules?.length ?? 0} rules`);
+        }
+
+        await page.getByTestId("xccdf-review-reconcile-button").click();
+        await page.getByRole("button", { name: "Refine all instead" }).click();
+        await page.getByTestId("xccdf-refine-tab-enforcement").click();
+        const reviewImportButton = page.getByRole("button", { name: "Review import" });
+        const nextButton = page.getByTestId("xccdf-refine-next");
+        for (let index = 0; index < 500 && !(await reviewImportButton.isVisible().catch(() => false)); index += 1) {
+          await nextButton.waitFor({ state: "visible", timeout: 5000 });
+          await nextButton.click();
+        }
+        await reviewImportButton.waitFor({ state: "visible", timeout: 5000 });
+        if (await reviewImportButton.isDisabled()) throw new Error("Full Anduril refinement could not produce a valid import plan");
+        await reviewImportButton.click();
+        await page.getByRole("heading", { name: "Review policy choices" }).waitFor({ timeout: 10000 });
+        const createDraftButton = page.getByRole("button", { name: "Create draft bundle", exact: true });
+        const importResponsePromise = page.waitForResponse(
+          (response) => response.url().includes("/api/v1/compliance/xccdf/import") && response.request().method() === "POST",
+          { timeout: 120000 },
+        );
+        await createDraftButton.click();
+        const importResponse = await importResponsePromise;
+        const importBody = await importResponse.text();
+        console.log(`[20ae] import status=${importResponse.status()} body=${importBody}`);
+        if (!importResponse.ok()) throw new Error(`Anduril import failed: HTTP ${importResponse.status()} ${importBody}`);
+        const importResult = JSON.parse(importBody);
+        const systemsResult = await page.evaluate(async (url) => {
+          const response = await fetch(url);
+          return { ok: response.ok, status: response.status, body: await response.json() };
+        }, `${baseUrl}/api/v1/compliance/bundles/${importResult.bundle_id}/systems`);
+        const systemsBody = systemsResult.body;
+        if (!systemsResult.ok) throw new Error(`Anduril systems lookup failed: HTTP ${systemsResult.status} ${JSON.stringify(systemsBody)}`);
+        if (!Array.isArray(systemsBody.systems) || systemsBody.systems.length !== 0) {
+          throw new Error(`Unassigned Anduril bundle unexpectedly applies to systems: ${JSON.stringify(systemsBody.systems?.map((system) => system.hostname))}`);
+        }
+
+        // P1 data-integrity gate: a full official STIG import must produce
+        // normalized requirement membership and policy-to-requirement mappings
+        // for every selected rule, and the coverage report must reflect it.
+        const coverageResult = await page.evaluate(async (url) => {
+          const response = await fetch(url);
+          return { ok: response.ok, status: response.status, body: await response.json() };
+        }, `${baseUrl}/api/v1/compliance/bundle-versions/${importResult.bundle_version_id}/requirement-coverage`);
+        const coverageBody = coverageResult.body;
+        if (!coverageResult.ok) {
+          throw new Error(`Anduril coverage lookup failed: HTTP ${coverageResult.status} ${JSON.stringify(coverageBody)}`);
+        }
+        if (coverageBody.total_requirements !== 103) {
+          throw new Error(`Expected 103 selected bundle requirements, got ${coverageBody.total_requirements}`);
+        }
+        if (coverageBody.full !== 103 || coverageBody.partial !== 0 || coverageBody.unmapped !== 0) {
+          throw new Error(`Expected 103 fully-mapped Anduril requirements (full=${coverageBody.full}, partial=${coverageBody.partial}, unmapped=${coverageBody.unmapped})`);
+        }
+        const fw = Array.isArray(coverageBody.frameworks) ? coverageBody.frameworks[0] : undefined;
+        if (!fw) throw new Error("Anduril coverage report has no authoritative framework release");
+        if (fw.framework_name !== "Anduril NixOS Security Technical Implementation Guide") {
+          throw new Error(`Unexpected Anduril framework name: ${fw.framework_name}`);
+        }
+        if (fw.framework_version !== "V1R2") {
+          throw new Error(`Unexpected Anduril framework release: ${fw.framework_version}`);
+        }
+        if (fw.framework_publisher !== "DISA") {
+          throw new Error(`Unexpected Anduril framework publisher: ${fw.framework_publisher}`);
+        }
+
+        // Reviewer item 6: the deployed bundle drawer must present the
+        // coverage card with the authoritative source framework and the full
+        // cardinality (103 fully covered / 0 partial / 0 unmapped / 103 total).
+        await page.getByRole("button", { name: "Close", exact: true }).first().click({ force: true });
+        const andurilRow = page.locator("tr").filter({ hasText: "Anduril NixOS Security Technical Implementation Guide" }).first();
+        await assertVisible(andurilRow, "Imported Anduril bundle did not appear in the compliance catalog", 10000);
+        await andurilRow.click();
+        await assertVisible(
+          page.getByTestId("requirement-coverage-card").first(),
+          "Anduril bundle drawer did not show the requirement coverage card",
+          10000,
+        );
+        await assertCardText(
+          page,
+          "requirement-coverage-card",
+          [
+            "Requirement coverage",
+            "Anduril NixOS Security Technical Implementation Guide \\(V1R2\\) · 103 requirements",
+            "103\\s+Fully covered",
+            "0\\s+Partially covered",
+            "0\\s+Unmapped",
+            "103\\s+total",
+          ],
+          "Anduril bundle drawer coverage card did not show source framework V1R2 with 103 fully covered / 0 partial / 0 unmapped / 103 total",
+        );
+      } catch (error) {
+        if (!importPostObserved && browserErrors.length > 0) {
+          throw new Error(`${error.message}; no import POST observed; browser failures: ${browserErrors.join(" | ")}`);
+        }
+        throw error;
+      } finally {
+        page.off("pageerror", onPageError);
+        page.off("console", onConsole);
+      }
     },
   },
   // ── CVE policy API round-trip checks ────────────────────────────────────
@@ -6876,6 +7584,31 @@ const steps = [
     name: "20ab-compliance-bundle-requirement-baseline-roundtrip",
     description: "Compliance bundle requirement and policy memberships remain independent across create, edit, reload, and release changes",
     action: async (page) => {
+      // The bundle-baseline workflow depends on the policy catalog. Assert it
+      // authenticated and before any UI interaction so a catalog failure is
+      // reported as a backend failure instead of a modal timeout. This guards
+      // the `trusted` vs `trust_state` class of schema/query mismatch, which
+      // fails deterministically, so one request is sufficient coverage.
+      const catalogProbe = await page.evaluate(async (base) => {
+        const response = await fetch(`${base}/api/v1/policies`, {
+          method: "GET",
+          credentials: "include",
+          headers: { Accept: "application/json" },
+        });
+        const body = await response.text();
+        return {
+          status: response.status,
+          body: response.ok ? "" : body,
+          count: response.ok ? JSON.parse(body).length : null,
+        };
+      }, apiBaseUrl);
+      console.log(`  [20ab] policy catalog preflight: HTTP ${catalogProbe.status} policies=${catalogProbe.count}`);
+      if (catalogProbe.status !== 200) {
+        throw new Error(
+          `Authenticated policy catalog preflight failed: HTTP ${catalogProbe.status} ${catalogProbe.body}`,
+        );
+      }
+
       await page.evaluate(() => localStorage.setItem("cf_backend_origin", "http://127.0.0.1:3445"));
       // Local Dioxus development is cross-origin. Playwright forwards bundle
       // mutations so this focused proof exercises the real API without making
@@ -6888,16 +7621,55 @@ const steps = [
           await route.continue();
         }
       });
+
+      // Record page-level failures so a modal that never opens reports why.
+      const consoleErrors = [];
+      const pageErrors = [];
+      const failedRequests = [];
+      const onConsole = (message) => {
+        if (message.type() === "error") consoleErrors.push(message.text());
+      };
+      const onPageError = (error) => pageErrors.push(error.message);
+      const onRequestFailed = (request) => {
+        failedRequests.push(`${request.method()} ${request.url()} ${request.failure()?.errorText || ""}`);
+      };
+      page.on("console", onConsole);
+      page.on("pageerror", onPageError);
+      page.on("requestfailed", onRequestFailed);
+
       await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT, waitUntil: "domcontentloaded" });
-      await page.getByRole("button", { name: /New bundle/i }).first().click({ force: true });
-      await page.getByRole("heading", { name: /New compliance bundle/i }).waitFor({ timeout: 10000 });
+      const newBundleButton = page.getByRole("button", { name: /New bundle/i }).first();
+      await assertVisible(newBundleButton, "Expected the New bundle action on the compliance view", 15000);
+      await newBundleButton.click();
+      const modalHeading = page.getByRole("heading", { name: /New compliance bundle/i });
+      const modalOpened = await modalHeading
+        .waitFor({ state: "visible", timeout: 10000 })
+        .then(() => true)
+        .catch(() => false);
+      if (!modalOpened) {
+        const diagnostics = await page.evaluate(() => ({
+          url: window.location.href,
+          title: document.title,
+          headings: Array.from(document.querySelectorAll("h1,h2,h3")).map((node) => node.innerText).slice(0, 20),
+          dialogs: Array.from(document.querySelectorAll("[role='dialog']")).map((node) => node.innerText.slice(0, 200)),
+          bodyText: (document.body.innerText || "").slice(0, 1000),
+        }));
+        throw new Error(
+          "New compliance bundle modal did not open: " +
+          `${JSON.stringify(diagnostics)} consoleErrors=${JSON.stringify(consoleErrors.slice(0, 10))} ` +
+          `pageErrors=${JSON.stringify(pageErrors.slice(0, 10))} failedRequests=${JSON.stringify(failedRequests.slice(0, 10))}`,
+        );
+      }
+      page.off("console", onConsole);
+      page.off("pageerror", onPageError);
+      page.off("requestfailed", onRequestFailed);
 
       const fixture = await page.evaluate(async (base) => {
         const options = { credentials: "include" };
         const frameworksResponse = await fetch(`${base}/api/v1/compliance/frameworks`, options);
         if (!frameworksResponse.ok) throw new Error(`framework list failed: ${frameworksResponse.status}`);
         const frameworks = await frameworksResponse.json();
-        const framework = frameworks.find((item) => item.canonical_source_key === "disa-web-ui-mapping-roundtrip");
+       const framework = frameworks.find((item) => item.canonical_source_key === "web-ui-mapping-roundtrip");
         if (!framework) throw new Error("Bundle baseline framework fixture missing");
         const versionsResponse = await fetch(`${base}/api/v1/compliance/frameworks/${framework.id}/versions`, options);
         if (!versionsResponse.ok) throw new Error(`framework versions failed: ${versionsResponse.status}`);
@@ -6909,15 +7681,17 @@ const steps = [
           requirements[version.canonical_release_key] = await response.json();
         }
         const policiesResponse = await fetch(`${base}/api/v1/policies`, options);
-        if (!policiesResponse.ok) throw new Error(`policy list failed: ${policiesResponse.status}`);
-        const policies = await policiesResponse.json();
+        const policiesBody = await policiesResponse.text();
+        if (!policiesResponse.ok) throw new Error(`policy list failed: ${policiesResponse.status} ${policiesBody}`);
+        const policies = JSON.parse(policiesBody);
         const policy = policies.find((item) => item.version_id);
         if (!policy) throw new Error("No versioned policy fixture available for mixed bundle coverage");
         return { framework, versions, requirements, policy };
       }, apiBaseUrl);
 
-      const frameworkSelect = page.getByRole("combobox").filter({ hasText: "DISA STIG" }).last();
-      await frameworkSelect.selectOption("DISA STIG");
+      const frameworkSelect = page.getByTestId("bundle-framework-select");
+      await frameworkSelect.locator('option[value="Test Mapping Framework"]').waitFor({ state: "attached", timeout: 10000 });
+      await frameworkSelect.selectOption("Test Mapping Framework");
       const v1 = fixture.versions.find((version) => version.canonical_release_key === "web-ui-mapping-roundtrip-v1");
       const v2 = fixture.versions.find((version) => version.canonical_release_key === "web-ui-mapping-roundtrip-v2");
       if (!v1 || !v2) throw new Error("Expected two framework release fixtures for release-switch coverage");
@@ -6927,7 +7701,7 @@ const steps = [
       const requirementB = requirementsV1.find((item) => item.external_id === "MAP-2");
       if (!requirementA || !requirementB) throw new Error("Expected v1 requirement fixtures");
 
-      const releaseSelect = page.getByRole("combobox").filter({ hasText: /v1|v2/ }).last();
+      const releaseSelect = page.getByTestId("bundle-framework-release-select");
       await releaseSelect.locator(`option[value="${v1.id}"]`).waitFor({ state: "attached", timeout: 10000 });
       await releaseSelect.selectOption(v1.id);
       const requirementSearch = page.getByPlaceholder("Search requirement ID or title…");
@@ -6962,7 +7736,7 @@ const steps = [
         base: apiBaseUrl,
         payload: {
           name: requirementOnlyName,
-          framework: "DISA STIG",
+          framework: "Test Mapping Framework",
           version: "v1",
           description: null,
           layer: "fleet",
@@ -6997,12 +7771,13 @@ const steps = [
        // Reload and edit: both requirements must be preselected. Add one policy
        // without changing the requirement set, proving independent membership.
        await page.reload({ waitUntil: "domcontentloaded" });
-       await page.getByRole("button", { name: requirementOnlyName }).click();
+       await page.locator(`[data-testid="compliance-bundle-row"][data-bundle-id="${createdBundle.id}"]`).click();
        const coverageCard = page.getByTestId("requirement-coverage-card");
        await coverageCard.waitFor({ timeout: 15000 });
-       await coverageCard.getByRole("button", { name: "Expand", exact: true }).click();
+       await coverageCard.getByTestId("requirement-coverage-open").click();
        await page.getByTestId("requirement-coverage-row").first().waitFor({ timeout: 10000 });
-       await page.getByRole("button", { name: "Edit bundle", exact: true }).click();
+       await page.getByTestId("requirement-coverage-back").click();
+       await page.getByTestId("compliance-edit-bundle").click();
       await page.getByRole("heading", { name: /Edit compliance bundle/i }).waitFor({ timeout: 10000 });
       await assertVisible(page.getByText("2 selected", { exact: true }), "Existing draft requirements were not preselected");
       const policyButton = page.getByRole("button").filter({ hasText: fixture.policy.name });
@@ -7020,9 +7795,9 @@ const steps = [
 
       // Switching releases must clear release-specific IDs. Search must also
       // remain scoped to the selected framework version.
-      await page.getByRole("button", { name: "Edit bundle", exact: true }).click();
+      await page.getByTestId("compliance-edit-bundle").click();
       await page.getByRole("heading", { name: /Edit compliance bundle/i }).waitFor({ timeout: 10000 });
-      const editReleaseSelect = page.getByRole("combobox").filter({ hasText: /v1|v2/ }).last();
+      const editReleaseSelect = page.getByTestId("bundle-framework-release-select");
       await editReleaseSelect.selectOption(v2.id);
       await assertVisible(page.getByText("0 selected", { exact: true }), "Switching framework releases retained incompatible requirement IDs");
       await page.getByPlaceholder("Search requirement ID or title…").fill("MAP-1");
@@ -7057,7 +7832,9 @@ const steps = [
 
       // Empty baseline validation remains distinct from a valid requirement-only
       // or policy-only baseline.
-      await page.getByRole("button", { name: /New bundle/i }).first().click({ force: true });
+      await page.getByTestId("compliance-drawer-close").click();
+      await collapseOnboardingCoach(page);
+      await page.getByRole("button", { name: /New bundle/i }).first().click();
       await page.getByRole("heading", { name: /New compliance bundle/i }).waitFor({ timeout: 10000 });
       await page.getByPlaceholder("e.g. DISA RHEL9 STIG (v1r5)").fill(`UI empty baseline ${Date.now()}`);
       await assertDisabled(page.getByRole("button", { name: /Create bundle/i }), "Empty baseline should remain blocked");
@@ -8260,73 +9037,61 @@ const steps = [
   },
   {
     name: "29a-compliance-populated",
-    description: "Compliance view renders bundle catalog, header, score strip, and systems matrix",
+    description: "Compliance view renders server-backed imported requirement coverage and exact mapped policy details",
     action: async (page) => {
-      const bundleId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-      const systemId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-      const envId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-      const policyId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
-
-      const bundle = {
-        id: bundleId,
-        name: "NIST 800-53 High",
-        framework: "NIST 800-53",
-        version: "rev5",
-        description: "NIST 800-53 rev5 High baseline for production fleet.",
-        layer: "fleet",
-        owner: "Platform Security",
-        last_review: new Date().toISOString(),
-        policy_ids: [policyId],
-        required_envs: [{ id: envId, name: "production", color_hex: "#3b82f6" }],
-        control_count: 1,
-        environment_count: 1,
-      };
-
-      await page.route("**/api/v1/compliance/bundles*", async (route) => {
-        if (route.request().method() === "GET" && !route.request().url().includes("/systems")) {
-          await route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify([bundle]),
-          });
-        } else {
-          await route.continue();
+      const fixture = await page.evaluate(async (base) => {
+        const bundlesResponse = await fetch(`${base}/api/v1/compliance/bundles`);
+        const bundles = await bundlesResponse.json();
+        if (!bundlesResponse.ok) {
+          throw new Error(`Bundle catalog lookup failed: HTTP ${bundlesResponse.status} ${JSON.stringify(bundles)}`);
         }
-      });
+        const candidates = bundles.filter((bundle) =>
+          bundle.name === "Anduril NixOS Security Technical Implementation Guide"
+          && bundle.current_draft_version_id
+          && bundle.requirement_count === 103
+        );
+        for (const bundle of candidates) {
+          const coverageResponse = await fetch(
+            `${base}/api/v1/compliance/bundle-versions/${bundle.current_draft_version_id}/requirement-coverage`,
+          );
+          const coverage = await coverageResponse.json();
+          if (!coverageResponse.ok) continue;
+          const source = coverage.source_framework || coverage.frameworks?.[0];
+          if (source?.framework_publisher !== "DISA" || source?.framework_version !== "V1R2") continue;
+          const mappedRow = coverage.rows?.find((row) => Array.isArray(row.mappings) && row.mappings.length > 0);
+          if (mappedRow) return { bundle, coverage, mappedRow, mapping: mappedRow.mappings[0] };
+        }
+        throw new Error("The real Anduril import fixture from step 20ae was not available to compliance coverage step 29a");
+      }, baseUrl);
+      const bundleId = fixture.bundle.id;
+      const bundleVersionId = fixture.bundle.current_draft_version_id;
+      const policyId = fixture.mapping.policy_id;
+      const mappedPolicySummary = await page.evaluate(async ({ base, policyId: id }) => {
+        const limit = 100;
+        for (let offset = 0; ; offset += limit) {
+          const response = await fetch(`${base}/api/v1/deployment-policies?limit=${limit}&offset=${offset}`);
+          const body = await response.json();
+          if (!response.ok) {
+            throw new Error(`Policy catalog lookup failed: HTTP ${response.status} ${JSON.stringify(body)}`);
+          }
+          const policy = body.policies?.find((candidate) => candidate.id === id);
+          if (policy) return policy;
+          if (!Array.isArray(body.policies) || body.policies.length < limit) break;
+        }
+        throw new Error(`Mapped policy ${id} was not present in the real paginated policy catalog`);
+      }, { base: baseUrl, policyId });
+      const mappedVersion = mappedPolicySummary.versions?.find((version) => version.id === fixture.mapping.policy_version_id);
+      if (!mappedVersion) {
+        throw new Error(`Paginated policy catalog omitted exact backend version ${fixture.mapping.policy_version_id}`);
+      }
+      let coverageRequests = 0;
 
-      await page.route(`**/api/v1/compliance/bundles/${bundleId}/systems*`, async (route) => {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            bundle_id: bundleId,
-            systems: [
-              {
-                system_id: systemId,
-                hostname: "prod-web-01",
-                environment: "production",
-                applies: true,
-                total: 1,
-                pass: 1,
-                warn: 0,
-                fail: 0,
-                waiver: 0,
-                score: 100,
-              },
-            ],
-            totals: {
-              system_count: 1,
-              fully_compliant_count: 1,
-              pass: 1,
-              warn: 0,
-              fail: 0,
-              waiver: 0,
-              total_controls: 1,
-              overall_score: 100,
-            },
-          }),
-        });
-      });
+      const onCoverageRequest = (request) => {
+        if (request.method() === "GET" && request.url().includes(`/api/v1/compliance/bundle-versions/${bundleVersionId}/requirement-coverage`)) {
+          coverageRequests += 1;
+        }
+      };
+      page.on("request", onCoverageRequest);
 
       await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
@@ -8337,52 +9102,165 @@ const steps = [
         "Expected Compliance page heading",
       );
 
-      // Bundle catalog
+      // Bundle table
       await assertVisible(
-        page.getByText("NIST 800-53 High").first(),
-        "Expected bundle name in catalog",
+        page.getByText(fixture.bundle.name, { exact: true }).first(),
+        "Expected bundle name in bundle table",
       );
       await assertVisible(
-        page.getByText(/fleet/i).first(),
-        "Expected layer chip in bundle catalog",
-      );
-
-      // Bundle header card
-      await assertVisible(
-        page.getByText("Platform Security").first(),
-        "Expected bundle owner in header card",
-      );
-      await assertVisible(
-        page.getByText("production").first(),
-        "Expected required-env badge in header card",
+        page.getByText(fixture.bundle.framework, { exact: true }).first(),
+        "Expected framework chip in bundle table",
       );
 
-      // Score strip
-      await assertVisible(
-        page.getByText(/Overall score/i).first(),
-        "Expected 'Overall score' label in score strip",
-      );
-      await assertVisible(
-        page.getByText(/100%/i).first(),
-        "Expected 100% overall score in score strip",
-      );
-      await assertVisible(
-        page.getByText(/Fully compliant hosts/i).first(),
-        "Expected 'Fully compliant hosts' in score strip",
-      );
+      await page.getByText(fixture.bundle.name, { exact: true }).first().click();
+      await page.waitForTimeout(400);
 
-      // Systems matrix
-      await assertVisible(
-        page.getByText("prod-web-01").first(),
-        "Expected system hostname in systems matrix",
-      );
-      await assertVisible(
-        page.getByRole("button", { name: /View evidence/i }).first(),
-        "Expected 'View evidence' action in systems matrix",
-      );
+      const coverageCard = page.getByTestId("requirement-coverage-card").first();
+      const systemsCard = page.getByTestId("bundle-systems-card").first();
+      await coverageCard.waitFor({ state: "visible", timeout: 5000 });
+      const coverageText = await coverageCard.innerText();
+      if (!coverageText.includes("Anduril NixOS Security Technical Implementation Guide (V1R2) · 103 requirements")) {
+        throw new Error(`Expected authoritative framework release metadata in coverage summary; rendered: ${coverageText}`);
+      }
+      if (coverageRequests !== 1) throw new Error(`Expected exactly one initial coverage request, got ${coverageRequests}`);
+      if (await coverageCard.getByPlaceholder("Filter requirements…").isVisible()) {
+        throw new Error("Expected requirement rows and filters to be collapsed initially");
+      }
+      const coverageBox = await coverageCard.boundingBox();
+      const systemsBox = await systemsCard.boundingBox();
+      if (!coverageBox || !systemsBox || coverageBox.y >= systemsBox.y) {
+        throw new Error("Expected requirement coverage card before the independent Systems card");
+      }
 
-      await page.unroute("**/api/v1/compliance/bundles*");
-      await page.unroute(`**/api/v1/compliance/bundles/${bundleId}/systems*`);
+      await assertVisible(systemsCard.getByText("0 hosts", { exact: true }), "Expected the imported unassigned bundle to use the real empty systems response");
+
+      await coverageCard.getByRole("button").first().click();
+      await assertVisible(page.getByText("Requirement coverage").first(), "Expected requirement coverage drawer view");
+      await assertVisible(page.getByText(`Full ${fixture.coverage.full}`).first(), "Expected full coverage count from backend API");
+      await assertVisible(page.getByText(`Partial ${fixture.coverage.partial}`).first(), "Expected partial coverage count from backend API");
+      await assertVisible(page.getByText(`Unmapped ${fixture.coverage.unmapped}`).first(), "Expected unmapped coverage count from backend API");
+      await assertVisible(page.getByText(`${fixture.coverage.total_requirements} total`).first(), "Expected coverage rows to partition the backend API total");
+      await fillDioxusInput(coverageCard.getByPlaceholder("Filter requirements…"), fixture.mappedRow.external_id);
+      const mappedRequirementRow = page.getByTestId("requirement-coverage-row").filter({ hasText: fixture.mappedRow.external_id }).first();
+      const mappedRequirementVisible = await mappedRequirementRow.waitFor({ state: "visible", timeout: 5000 }).then(() => true).catch(() => false);
+      if (!mappedRequirementVisible) {
+        throw new Error(
+          `Expected backend-mapped requirement ${fixture.mappedRow.external_id} after filtering; rendered coverage: ${await coverageCard.innerText()}`,
+        );
+      }
+      const mappedPolicyLink = page.getByRole("button").filter({ hasText: fixture.mapping.policy_name }).first();
+      await assertVisible(mappedPolicyLink, "Expected backend coverage mapping to render its real policy link");
+      const policyDetailResponsePromise = page.waitForResponse(
+        (response) => response.url().includes(`/api/v1/deployment-policies/${policyId}`) && response.request().method() === "GET",
+      );
+      await mappedPolicyLink.click({ force: true });
+      const policyDetailResponse = await policyDetailResponsePromise;
+      if (policyDetailResponse.status() !== 200) {
+        throw new Error(`Expected mapped policy detail 200, got ${policyDetailResponse.status()}`);
+      }
+      const policyDrawer = page.getByRole("dialog", { name: "Policy detail" });
+      await policyDrawer.waitFor({ timeout: 5000 });
+      await policyDrawer.getByRole("button", { name: new RegExp(`Revisions · ${mappedPolicySummary.versions.length}`) }).click();
+      await assertVisible(
+        policyDrawer.locator(".policy-revision-row.selected").filter({ hasText: `v${mappedVersion.version}` }),
+        `Expected exact mapped policy version ${mappedVersion.version} from backend coverage mapping`,
+      );
+      await policyDrawer.getByRole("button", { name: "Close", exact: true }).click();
+      page.off("request", onCoverageRequest);
+    },
+  },
+  {
+    name: "29aa-imported-draft-policy-deletion",
+    description: "Imported draft policies expose removable provenance blockers and delete cleanly",
+    action: async (page) => {
+      const importedState = await page.evaluate(async (base) => {
+        const bundlesResponse = await fetch(`${base}/api/v1/compliance/bundles`);
+        if (!bundlesResponse.ok) return { error: `bundle list returned ${bundlesResponse.status}` };
+        const bundles = await bundlesResponse.json();
+        const bundle = bundles.find((candidate) =>
+          candidate.name === "Anduril NixOS Security Technical Implementation Guide"
+          && candidate.current_draft_version_id
+          && candidate.requirement_count === 103
+        );
+        if (!bundle) return { error: "Anduril NixOS STIG V1R2 draft bundle was not found" };
+
+        const coverageResponse = await fetch(`${base}/api/v1/compliance/bundle-versions/${bundle.current_draft_version_id}/requirement-coverage`);
+        if (!coverageResponse.ok) return { error: `coverage report returned ${coverageResponse.status}` };
+        const coverage = await coverageResponse.json();
+
+        return {
+          bundleVersionId: bundle.current_draft_version_id,
+          coverage,
+        };
+      }, apiBaseUrl);
+      if (importedState.error) throw new Error(importedState.error);
+
+      const targetRow = importedState.coverage.rows.find((requirement) => requirement.mappings.length === 1);
+      if (!targetRow) throw new Error("Imported coverage did not contain a singly mapped policy");
+      const policyId = targetRow.mappings[0].policy_id;
+      const affectedRequirements = importedState.coverage.rows.filter(
+        (requirement) => requirement.mappings.length === 1 && requirement.mappings[0].policy_id === policyId,
+      ).length;
+      if (affectedRequirements < 1) {
+        throw new Error(`Imported policy ${policyId} did not exclusively map any requirements`);
+      }
+
+      const deletionResult = await page.evaluate(async ({ base, id }) => {
+        const eligibilityResponse = await fetch(`${base}/api/v1/deployment-policies/${id}/deletion-eligibility`);
+        const eligibility = await eligibilityResponse.json();
+        if (!eligibilityResponse.ok) {
+          return { eligibilityStatus: eligibilityResponse.status, eligibility };
+        }
+        const deleteResponse = await fetch(`${base}/api/v1/deployment-policies/${id}`, { method: "DELETE" });
+        return { eligibilityStatus: eligibilityResponse.status, eligibility, deleteStatus: deleteResponse.status };
+      }, { base: apiBaseUrl, id: policyId });
+      if (deletionResult.eligibilityStatus !== 200) {
+        throw new Error(`Expected imported policy deletion eligibility 200, got ${deletionResult.eligibilityStatus}`);
+      }
+      const eligibility = deletionResult.eligibility;
+      if (!eligibility.eligible) {
+        throw new Error(`Expected imported draft policy to be deletable: ${JSON.stringify(eligibility)}`);
+      }
+      const blockerKinds = new Set(eligibility.blockers.map((blocker) => blocker.kind));
+      for (const expectedKind of ["mutable_draft_membership", "disposable_source_mapping"]) {
+        if (!blockerKinds.has(expectedKind)) {
+          throw new Error(`Expected imported policy blocker ${expectedKind}: ${JSON.stringify(eligibility.blockers)}`);
+        }
+      }
+      if (eligibility.blockers.some((blocker) => !blocker.removable)) {
+        throw new Error(`Imported draft policy reported a retained blocker: ${JSON.stringify(eligibility.blockers)}`);
+      }
+      if (deletionResult.deleteStatus !== 204) {
+        throw new Error(`Expected imported policy deletion 204, got ${deletionResult.deleteStatus}`);
+      }
+
+      const deletionState = await page.evaluate(async ({ base, bundleVersionId, deletedPolicyId }) => {
+        const [policyResponse, coverageResponse] = await Promise.all([
+          fetch(`${base}/api/v1/deployment-policies/${deletedPolicyId}`),
+          fetch(`${base}/api/v1/compliance/bundle-versions/${bundleVersionId}/requirement-coverage`),
+        ]);
+        return {
+          policyStatus: policyResponse.status,
+          coverageStatus: coverageResponse.status,
+          coverage: coverageResponse.ok ? await coverageResponse.json() : null,
+        };
+      }, { base: apiBaseUrl, bundleVersionId: importedState.bundleVersionId, deletedPolicyId: policyId });
+      if (deletionState.policyStatus !== 404) {
+        throw new Error(`Expected deleted imported policy to return 404, got ${deletionState.policyStatus}`);
+      }
+      if (deletionState.coverageStatus !== 200) {
+        throw new Error(`Expected post-deletion coverage report 200, got ${deletionState.coverageStatus}`);
+      }
+
+      if (
+        deletionState.coverage.total_requirements !== importedState.coverage.total_requirements ||
+        deletionState.coverage.full !== importedState.coverage.full - affectedRequirements ||
+        deletionState.coverage.unmapped !== importedState.coverage.unmapped + affectedRequirements
+      ) {
+        throw new Error(
+          `Unexpected coverage after imported policy deletion: before=${JSON.stringify(importedState.coverage)} after=${JSON.stringify(deletionState.coverage)} affected=${affectedRequirements}`,
+        );
+      }
     },
   },
   {
@@ -8427,7 +9305,7 @@ const steps = [
           contentType: "application/json",
           body: JSON.stringify({
             bundle_id: bundleId,
-            systems: [{ system_id: systemId, hostname: "prod-web-01", environment: "production", applies: true, total: 1, pass: 0, warn: 0, fail: 1, waiver: 0, score: 0 }],
+            systems: [{ system_id: systemId, hostname: "prod-web-01", environment: "production", applies: true, total: 1, pass: 0, warn: 0, fail: 1, waiver: 0, score: 0, resolution_state: "resolved" }],
             totals: { system_count: 1, fully_compliant_count: 0, pass: 0, warn: 0, fail: 1, waiver: 0, total_controls: 1, overall_score: 0 },
           }),
         });
@@ -8466,6 +9344,9 @@ const steps = [
       await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
+      await page.getByText("NIST 800-53 High").first().click();
+      await page.waitForTimeout(400);
+
       // Click "View evidence" to open the drawer
       const evidenceBtn = page.getByRole("button", { name: /View evidence/i }).first();
       await evidenceBtn.waitFor({ timeout: 5000 });
@@ -8474,9 +9355,10 @@ const steps = [
 
       // Evidence drawer assertions
       await assertVisible(
-        page.getByText(/Evidence · prod-web-01/i).first(),
-        "Expected evidence drawer heading with hostname",
+        page.getByText("prod-web-01", { exact: true }).last(),
+        "Expected evidence drawer header with hostname",
       );
+      await assertVisible(page.getByText("NIST 800-53 High", { exact: true }).last(), "Expected bundle context in evidence header");
       await assertVisible(
         page.getByText("require_no_critical_cves").first(),
         "Expected policy name in evidence control card",
@@ -8485,6 +9367,9 @@ const steps = [
         page.getByText(/3 critical CVEs detected/i).first(),
         "Expected artifact body in evidence item",
       );
+      await assertVisible(page.getByText("production").last(), "Expected selected-system environment in evidence header");
+      await assertVisible(page.getByText("resolved").last(), "Expected authoritative resolver state in evidence header");
+      await assertVisible(page.getByRole("link", { name: /Open system/i }), "Expected system-detail navigation from evidence header");
       await assertVisible(
         page.getByRole("button", { name: /Close/i }).first(),
         "Expected Close button in evidence drawer",
@@ -8631,6 +9516,238 @@ const steps = [
       );
 
       await page.unroute("**/api/v1/compliance/bundles*");
+    },
+  },
+  {
+    name: "29f-compliance-assignment-reason-semantics",
+    description: "Compliance assignment reason survives unrelated edits, changes, and explicit clearing",
+    action: async (page) => {
+      const bundleId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      const versionId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+      const environmentId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+      const assignmentId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+      const assignmentVersionId = "99999999-9999-4999-8999-999999999999";
+      const systemId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+      let reason = null;
+      let versionNumber = 1;
+
+      // The standalone profile has no authenticated server or seeded target.
+      // The server-backed harness runs this same UI flow against the real
+      // assignment endpoints and uses the bundle created by 20ab.
+      if (process.env.CF_UI_TEST_STANDALONE !== "1") {
+        const liveFixture = await page.evaluate(async (base) => {
+          const response = await fetch(`${base}/api/v1/compliance/bundles`, { credentials: "include" });
+          const bundles = await response.json();
+          if (!response.ok) throw new Error(`Live bundle list failed: HTTP ${response.status} ${JSON.stringify(bundles)}`);
+          const candidates = bundles.filter((item) => item.name?.startsWith("UI requirement-only baseline "));
+          const bundle = candidates.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
+          if (!bundle) throw new Error("Live assignment step requires the bundle created by 20ab");
+          const environmentsResponse = await fetch(`${base}/api/v1/environments`, { credentials: "include" });
+          const environments = await environmentsResponse.json();
+          if (!environmentsResponse.ok || !environments[0]) {
+            throw new Error(`Live environment list failed: HTTP ${environmentsResponse.status}`);
+          }
+          return { bundle, environment: environments[0] };
+        }, apiBaseUrl);
+        const liveBundle = liveFixture.bundle;
+        const liveEnvironment = liveFixture.environment;
+        if (!liveBundle.current_draft_version_id && !liveBundle.current_published_version_id) {
+          throw new Error("Live assignment bundle has no assignable version");
+        }
+
+        await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+        await page.getByText(liveBundle.name, { exact: true }).first().click();
+        await page.getByRole("button", { name: /Assign bundle/i }).click();
+        await page.getByPlaceholder(/Enter reason for this assignment/i).fill("Reason A");
+        await page.locator("select").filter({ has: page.locator(`option[value="${liveEnvironment.id}"]`) }).last().selectOption(liveEnvironment.id);
+        await page.getByRole("button", { name: /Preview effective set/i }).click();
+        const createResponse = page.waitForResponse(
+          (response) => response.url().endsWith("/api/v1/compliance/assignments") && response.request().method() === "POST",
+        );
+        // Attach a no-op handler immediately so Node.js 24 does not treat the
+        // rejection as unhandled if the response arrives (or times out) before
+        // the `await` below can catch it.
+        createResponse.catch(() => {});
+        await page.getByRole("button", { name: /Create assignment/i }).click();
+        const created = await createResponse;
+        if (created.status() !== 201) throw new Error(`Live assignment create returned HTTP ${created.status()}: ${await created.text()}`);
+
+        await page.getByRole("button", { name: "Edit mode", exact: true }).click();
+        await assertValue(page.getByPlaceholder("reason (leave empty to preserve)"), "Reason A", "Live create did not persist reason A");
+        await page.locator("select").filter({ has: page.locator("option", { hasText: "Report only" }) }).first().selectOption("report_only");
+        const unrelatedUpdate = page.waitForResponse(
+          (response) => response.url().includes("/api/v1/compliance/assignments/") && response.request().method() === "PUT",
+        );
+        unrelatedUpdate.catch(() => {});
+        await page.getByRole("button", { name: "Save", exact: true }).click();
+        const updated = await unrelatedUpdate;
+        if (updated.status() !== 200) throw new Error(`Live unrelated assignment update returned HTTP ${updated.status()}`);
+        await page.getByRole("button", { name: "Edit mode", exact: true }).click();
+        await assertValue(page.getByPlaceholder("reason (leave empty to preserve)"), "Reason A", "Live unrelated edit changed reason A");
+
+        // ── Exercise Reason A → Reason B → clear against the real server ──
+        await page.getByPlaceholder("reason (leave empty to preserve)").fill("Reason B");
+        const reasonBUpdate = page.waitForResponse(
+          (response) => response.url().includes("/api/v1/compliance/assignments/") && response.request().method() === "PUT",
+        );
+        reasonBUpdate.catch(() => {});
+        await page.getByRole("button", { name: "Save", exact: true }).click();
+        const reasonBResp = await reasonBUpdate;
+        if (reasonBResp.status() !== 200) throw new Error(`Live reason-B update returned HTTP ${reasonBResp.status()}`);
+        await page.getByRole("button", { name: "Edit mode", exact: true }).click();
+        await assertValue(page.getByPlaceholder("reason (leave empty to preserve)"), "Reason B", "Live reason B not persisted after reopen");
+
+        // ── Clear the reason ──
+        await page.getByPlaceholder("reason (leave empty to preserve)").fill("");
+        const clearUpdate = page.waitForResponse(
+          (response) => response.url().includes("/api/v1/compliance/assignments/") && response.request().method() === "PUT",
+        );
+        clearUpdate.catch(() => {});
+        await page.getByRole("button", { name: "Save", exact: true }).click();
+        const clearResp = await clearUpdate;
+        if (clearResp.status() !== 200) throw new Error(`Live reason clear returned HTTP ${clearResp.status()}`);
+        await page.getByRole("button", { name: "Edit mode", exact: true }).click();
+        await assertValue(page.getByPlaceholder("reason (leave empty to preserve)"), "", "Live cleared reason should be absent after reopen");
+        return;
+      }
+
+      const assignment = () => ({
+        id: assignmentId,
+        current_version_id: assignmentVersionId,
+        bundle_id: bundleId,
+        bundle_version_id: versionId,
+        scope_type: "environment",
+        scope_id: environmentId,
+        enforcement_mode: "enforce",
+        exclusions: [],
+        additions: [],
+        value_overrides: [],
+        assignment_overlay_digest: "fixture-digest",
+        active: true,
+        reason,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+      const bundle = {
+        id: bundleId,
+        name: "Assignment reason fixture",
+        framework: "NIST 800-53",
+        version: "rev5",
+        description: "Assignment reason browser fixture.",
+        layer: "fleet",
+        owner: "Platform Security",
+        last_review: new Date().toISOString(),
+        policy_ids: [],
+        required_envs: [{ id: environmentId, name: "production", color_hex: "#3b82f6" }],
+        control_count: 0,
+        policy_count: 0,
+        requirement_count: 0,
+        applicable_system_count: 0,
+        aggregate_score: 0,
+        environment_count: 1,
+        current_published_version_id: versionId,
+        current_published_version: "rev5",
+        versions: [{
+          id: versionId,
+          bundle_id: bundleId,
+          version: "rev5",
+          publication_state: "accepted",
+          trust_state: "trusted",
+          semantic_digest: "fixture-digest",
+          created_at: new Date().toISOString(),
+          published_at: new Date().toISOString(),
+          derived_from_version_id: null,
+          policy_count: 0,
+          requirement_count: 0,
+          control_count: 0,
+          is_current_published: true,
+          is_current_draft: false,
+        }],
+      };
+
+      await page.route("**/api/v1/compliance/bundles*", async (route) => {
+        if (route.request().method() === "GET" && !route.request().url().includes("/systems")) {
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([bundle]) });
+        } else {
+          await route.continue();
+        }
+      });
+      await page.route(`**/api/v1/compliance/bundles/${bundleId}/systems*`, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ bundle_id: bundleId, bundle_version_id: versionId, systems: [{ system_id: systemId, hostname: "reason-fixture-host", environment: "production", applies: true, total: 1, evaluated_total: 1, pass: 1, warn: 0, fail: 0, waiver: 0, not_checked: 0, not_applicable: 0, error: 0, report_only: 0, score: 100, resolution_state: "resolved", assignment_status: "pinned", assignment_reason: "Change freeze exception", assignment_approved_by: null }], totals: { system_count: 1, fully_compliant_count: 1, pass: 1, warn: 0, fail: 0, waiver: 0, total_controls: 1, overall_score: 100 } }),
+        });
+      });
+      await page.route(`**/api/v1/compliance/bundle-versions/${versionId}/requirement-coverage`, async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ bundle_version_id: versionId, frameworks: [], total_requirements: 0, full: 0, partial: 0, unmapped: 0, rows: [] }) });
+      });
+      await page.route(`**/api/v1/compliance/bundle-versions/${versionId}/policies`, async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      });
+      await page.route("**/api/v1/policies*", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      });
+      await page.route("**/api/v1/environments*", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([{ id: environmentId, name: "production", description: null, color_hex: "#3b82f6", is_active: true, system_count: 0 }]) });
+      });
+      await page.route(`**/api/v1/environments/${environmentId}/compliance-assignments`, async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ assignments: reason === null && versionNumber === 1 ? [] : [assignment()] }) });
+      });
+      await page.route("**/api/v1/compliance/assignments/preview", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ policies: [], warnings: [], effective_set_digest: "fixture-digest" }) });
+      });
+      await page.route("**/api/v1/compliance/assignments", async (route) => {
+        if (route.request().method() === "POST") {
+          reason = (await route.request().postDataJSON()).reason || null;
+          versionNumber = 1;
+          await route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify(assignment()) });
+        } else {
+          await route.continue();
+        }
+      });
+      await page.route(`**/api/v1/compliance/assignments/${assignmentId}`, async (route) => {
+        if (route.request().method() === "PUT") {
+          const payload = await route.request().postDataJSON();
+          if (Object.prototype.hasOwnProperty.call(payload, "reason")) reason = payload.reason;
+          versionNumber += 1;
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(assignment()) });
+        } else {
+          await route.continue();
+        }
+      });
+      await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+      await page.getByText("Assignment reason fixture", { exact: true }).first().click();
+      const assignmentChip = page.getByTestId(`system-assignment-status-${systemId}`);
+      await assertVisible(assignmentChip, "Pinned SystemsMatrix assignment status should render");
+      if (await assignmentChip.getAttribute("title") !== "Change freeze exception") {
+        throw new Error("Pinned SystemsMatrix assignment reason should be available as the assignment chip title");
+      }
+      await page.getByRole("button", { name: /Assign bundle/i }).click();
+      const createReason = page.getByPlaceholder(/Enter reason for this assignment/i);
+      await createReason.fill("Reason A");
+      await page.locator("select").nth(2).selectOption(environmentId);
+      await page.getByRole("button", { name: /Preview effective set/i }).click();
+      await page.getByRole("button", { name: /Create assignment/i }).click();
+      await page.getByRole("button", { name: "Edit mode", exact: true }).click();
+      const editReason = page.getByPlaceholder("reason (leave empty to preserve)");
+      await assertValue(editReason, "Reason A", "Created assignment reason should be authoritative on reopen");
+
+      await page.locator("select").filter({ has: page.locator("option", { hasText: "Report only" }) }).first().selectOption("report_only");
+      await page.getByRole("button", { name: "Save", exact: true }).click();
+      await page.getByRole("button", { name: "Edit mode", exact: true }).click();
+      await assertValue(page.getByPlaceholder("reason (leave empty to preserve)"), "Reason A", "Unrelated edit must preserve reason A");
+
+      await page.getByPlaceholder("reason (leave empty to preserve)").fill("Reason B");
+      await page.getByRole("button", { name: "Save", exact: true }).click();
+      await page.getByRole("button", { name: "Edit mode", exact: true }).click();
+      await assertValue(page.getByPlaceholder("reason (leave empty to preserve)"), "Reason B", "Changed assignment reason should read back as B");
+
+      await page.getByPlaceholder("reason (leave empty to preserve)").fill("");
+      await page.getByRole("button", { name: "Save", exact: true }).click();
+      await page.getByRole("button", { name: "Edit mode", exact: true }).click();
+      await assertValue(page.getByPlaceholder("reason (leave empty to preserve)"), "", "Cleared assignment reason should be absent");
+      if (reason !== null) throw new Error(`Expected explicit clear to send null/absent reason, got ${reason}`);
     },
   },
   // ── End TASK-334 ─────────────────────────────────────────────────────────────
@@ -8781,6 +9898,370 @@ const steps = [
         if (!(await transientOnly.isChecked())) throw new Error("Failed save should retain transient-only draft");
       } finally {
         await page.unroute("**/api/v1/admin/automatic-retry-policy*");
+      }
+    },
+  },
+  {
+    name: "30d-evidence-lifecycle",
+    description: "Evidence editor lifecycle: create → add → save → reopen → edit → add more → save → clear",
+    action: async (page) => {
+      // STEP 1: Create a policy with initial evidence
+      await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+      await collapseOnboardingCoach(page);
+      await page.getByRole("button", { name: /New custom policy/i }).first().click();
+      
+      // Wait for create modal to open and fill basic details
+      await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: LOAD_TIMEOUT });
+      await page.getByLabel("Name", { exact: true }).waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await page.getByLabel("Name", { exact: true }).fill("Evidence Test Policy");
+      
+      // Navigate to Evidence tab
+      const evidenceTab = page.getByTestId("policy-editor-tab-evidence");
+      await evidenceTab.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await evidenceTab.click();
+      
+      // Verify empty state
+      await assertVisible(
+        page.getByText("No evidence defined", { exact: false }),
+        "Expected empty evidence state before adding",
+      );
+      
+      // Add Command evidence
+      const evidenceTypeSelect = page.locator("select").last();
+      await evidenceTypeSelect.selectOption("command");
+      
+      // Fill command evidence fields
+      const cmdInput = page.getByTestId("policy-evidence-command-cmd-0");
+      await cmdInput.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await cmdInput.fill("systemctl status ssh");
+      
+      const expectOutput = page.getByTestId("policy-evidence-command-expect-0");
+      await expectOutput.fill("active");
+      
+      // Save policy with first evidence
+      await page.getByRole("button", { name: /Create policy/i }).click();
+      await assertVisible(
+        page.getByText("Evidence Test Policy"),
+        "Expected policy created with evidence",
+      );
+      await page.waitForTimeout(500);
+      
+      // STEP 2: Reload and open policy drawer -> editor
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      
+      // Find the policy card and click on it (opens drawer)
+      const policyCard = page.getByText("Evidence Test Policy").first();
+      await policyCard.click();
+      
+      // Wait for drawer to appear and click Edit button
+      const editBtn = page.getByRole("button", { name: /Edit/i }).first();
+      await editBtn.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await editBtn.click();
+      
+      // Wait for editor modal to open
+      const editorModal = page.getByTestId("policy-editor-modal");
+      await editorModal.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      
+      // Navigate to Evidence tab in editor
+      const evidenceTabEditor = page.getByTestId("policy-editor-tab-evidence");
+      await evidenceTabEditor.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await evidenceTabEditor.click();
+      
+      // Verify existing evidence is loaded
+      await assertVisible(
+        page.getByText("systemctl status ssh", { exact: false }),
+        "Expected existing Command evidence loaded in editor",
+      );
+      
+      // STEP 3: Add additional File evidence in edit mode
+      const evidenceTypeSelectEdit = page.locator("select").last();
+      await evidenceTypeSelectEdit.selectOption("file");
+      
+      const filePathInput = page.getByTestId("policy-evidence-file-path-1");
+      await filePathInput.fill("/etc/ssh/sshd_config");
+      
+      // Save updated policy with two evidence specs
+      await page.getByRole("button", { name: /Update|Save/i }).click();
+      await assertVisible(
+        page.getByText(/saved|updated/i),
+        "Expected evidence update saved",
+      );
+      await page.waitForTimeout(500);
+      
+      // STEP 4: Reload and verify both evidence specs persisted
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      
+      const policyCardAfter = page.getByText("Evidence Test Policy").first();
+      await policyCardAfter.click();
+      
+      const editBtnAfter = page.getByRole("button", { name: /Edit/i }).first();
+      await editBtnAfter.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await editBtnAfter.click();
+      
+      const editorModalAfter = page.getByTestId("policy-editor-modal");
+      await editorModalAfter.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      
+      const evidenceTabEditorAfter = page.getByTestId("policy-editor-tab-evidence");
+      await evidenceTabEditorAfter.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await evidenceTabEditorAfter.click();
+      
+      // Verify both evidence specs are present
+      await assertVisible(
+        page.getByText("systemctl status ssh"),
+        "Expected Command evidence persisted across reopen",
+      );
+      await assertVisible(
+        page.getByText("/etc/ssh/sshd_config"),
+        "Expected File evidence persisted across reopen",
+      );
+      
+      // STEP 5: Clear all evidence and verify
+      const clearAllBtn = page.getByRole("button", { name: /Clear all|Delete all/i });
+      await clearAllBtn.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await clearAllBtn.click();
+      
+      // Save with cleared evidence
+      await page.getByRole("button", { name: /Update|Save/i }).click();
+      await assertVisible(
+        page.getByText(/saved|updated/i),
+        "Expected clear-all save succeeded",
+      );
+      await page.waitForTimeout(500);
+      
+      // STEP 6: Reload and verify evidence cleared
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      const finalCard = page.getByText("Evidence Test Policy").first();
+      await finalCard.click();
+      
+      const editBtnFinal = page.getByRole("button", { name: /Edit/i }).first();
+      await editBtnFinal.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await editBtnFinal.click();
+      
+      const editorModalFinal = page.getByTestId("policy-editor-modal");
+      await editorModalFinal.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      
+      const evidenceTabFinal = page.getByTestId("policy-editor-tab-evidence");
+      await evidenceTabFinal.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await evidenceTabFinal.click();
+      
+      await assertVisible(
+        page.getByText("No evidence defined", { exact: false }),
+        "Expected evidence cleared and persisted after reload",
+      );
+    },
+  },
+  {
+    name: "30e-policy-card-direct-edit-preserves-evidence",
+    description:
+      "Direct card Edit (never opening the drawer) shows existing evidence and adding more extends rather than replaces it",
+    action: async (page) => {
+      const POLICY = "Direct Card Edit Evidence Policy";
+      const CMD = "systemctl is-active nginx";
+      const FILE_PATH = "/etc/nginx/nginx.conf";
+
+      // Scope strictly to this policy's card, then use the card's own Edit
+      // control. The card root has an onclick that opens the drawer, so the
+      // Edit button (which stops propagation) is the only way to reach the
+      // editor without going through the drawer.
+      const cardEditButton = () =>
+        page
+          .locator(`[data-policy-card][data-policy-name="${POLICY}"]`)
+          .getByTestId("policy-card-edit");
+
+      const openEvidenceTab = async () => {
+        const modal = page.getByTestId("policy-editor-modal");
+        await modal.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+        const tab = page.getByTestId("policy-editor-tab-evidence");
+        await tab.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+        await tab.click();
+      };
+
+      // Guard: this regression is only meaningful if the drawer never opened.
+      const assertDrawerNeverOpened = async (context) => {
+        const drawerCount = await page.locator(".policy-drawer-body").count();
+        if (drawerCount > 0) {
+          throw new Error(
+            `${context}: policy drawer was open — this test must exercise the direct card Edit path only`,
+          );
+        }
+      };
+
+      // ── STEP 1: create a policy carrying evidence A ────────────────────
+      // Seed the collapsed flag before the first load so the coach drawer
+      // never covers the policy cards or the editor on any later reload.
+      await suppressOnboardingCoach(page);
+      await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+      await collapseOnboardingCoach(page);
+      await page.getByRole("button", { name: /New custom policy/i }).first().click();
+      await page
+        .getByRole("heading", { name: "New custom policy" })
+        .waitFor({ timeout: LOAD_TIMEOUT });
+      await page.getByLabel("Name", { exact: true }).waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await page.getByLabel("Name", { exact: true }).fill(POLICY);
+
+      // The editor seeds two UI-only pipeline gates that are not persisted and
+      // block save. Remove them and add one backend-supported assertion.
+      // Rules live on the Enforcement tab.
+      const enforcementTab = page.getByTestId("policy-editor-tab-enforcement");
+      await enforcementTab.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await enforcementTab.click();
+      await removeAllPolicyRules(page);
+      await page.getByTestId("policy-editor-add-rule").selectOption("custom_eval");
+      const createExpr = page.getByTestId("policy-rule-custom-eval-expr-0");
+      await createExpr.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await createExpr.fill("config.services.nginx.enable");
+
+      const createEvidenceTab = page.getByTestId("policy-editor-tab-evidence");
+      await createEvidenceTab.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await createEvidenceTab.click();
+      await page.getByTestId("policy-editor-add-evidence").selectOption("command");
+
+      const createCmd = page.getByTestId("policy-evidence-command-cmd-0");
+      await createCmd.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await createCmd.fill(CMD);
+      await page.getByTestId("policy-evidence-command-expect-0").fill("active");
+
+      const [createResponse] = await Promise.all([
+        page.waitForResponse(
+          (response) =>
+            response.request().method() === "POST" &&
+            response.url().includes("/api/v1/deployment-policies"),
+          { timeout: LOAD_TIMEOUT },
+        ),
+        page.getByRole("button", { name: /Create policy/i }).click(),
+      ]);
+      if (!createResponse.ok()) {
+        throw new Error(
+          `Policy create request failed: HTTP ${createResponse.status()} ${await createResponse.text()}`,
+        );
+      }
+      await page.getByTestId("policy-editor-modal").waitFor({ state: "detached", timeout: LOAD_TIMEOUT });
+      // Surface any in-modal validation/save error instead of failing later
+      // with an opaque "element not found".
+      const createError = page.locator(".cf-policy-modal-error");
+      if ((await createError.count()) > 0) {
+        const messages = await createError.allInnerTexts();
+        throw new Error(`Policy create was rejected: ${messages.join(" | ")}`);
+      }
+      {
+        const modalStillOpen = (await page.getByTestId("policy-editor-modal").count()) > 0;
+        const probe = await page.evaluate(async (policyName) => {
+          const res = await fetch("/api/v1/deployment-policies?limit=1000&offset=0", {
+            credentials: "include",
+          });
+          const body = await res.text();
+          let found = null;
+          let policy = null;
+          try {
+            policy = JSON.parse(body).policies.find(
+              (p) => (p.name ?? p.policy?.name) === policyName,
+            );
+            found = Boolean(policy);
+          } catch (e) {
+            found = `parse-error: ${body.slice(0, 200)}`;
+          }
+          return { status: res.status, found, policy };
+        }, POLICY);
+        if (probe.found !== true) {
+          throw new Error(
+            `Policy create did not persist. modalStillOpen=${modalStillOpen} ` +
+              `apiStatus=${probe.status} found=${JSON.stringify(probe.found)}`,
+          );
+        }
+        const policyRecord = probe.policy?.policy ?? probe.policy;
+        const currentVersion = policyRecord?.versions?.find(
+          (version) => version.id === policyRecord.current_version_id,
+        );
+        if (
+          !currentVersion?.evidence_specs?.some(
+            (spec) => (spec.cmd ?? spec.details?.cmd) === CMD,
+          )
+        ) {
+          throw new Error(
+            `Created policy did not persist evidence A in its current version: ` +
+              JSON.stringify({
+                currentVersionId: policyRecord?.current_version_id,
+                versions: policyRecord?.versions,
+              }),
+          );
+        }
+      }
+      await page.waitForTimeout(500);
+
+      // ── STEP 2: return to the catalog with a full reload ───────────────
+      // Reload guarantees the editor baseline comes from the catalog fetch
+      // rather than any in-memory state left over from the create flow.
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await collapseOnboardingCoach(page);
+      await filterPolicyCatalog(page, POLICY);
+      await assertDrawerNeverOpened("after reload, before first direct edit");
+
+      // ── STEP 3: direct card Edit ───────────────────────────────────────
+      await cardEditButton().click();
+      await assertDrawerNeverOpened("after clicking the card Edit button");
+      await openEvidenceTab();
+
+      // ── STEP 4: evidence A must already be present ─────────────────────
+      // This is the assertion that fails when the catalog conversion leaves
+      // `evidence_specs` as None: the editor opens with an empty baseline.
+      const existingCommand = page.getByTestId("policy-evidence-command-cmd-0");
+      await existingCommand.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      const existingCommandValue = await existingCommand.inputValue();
+      if (existingCommandValue !== CMD) {
+        throw new Error(
+          `Expected existing evidence A in the direct-card editor; got ${JSON.stringify(existingCommandValue)}`,
+        );
+      }
+
+      // ── STEP 5: add evidence B ─────────────────────────────────────────
+      await page.getByTestId("policy-editor-add-evidence").selectOption("file");
+      const filePath = page.getByTestId("policy-evidence-file-path-1");
+      await filePath.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await filePath.fill(FILE_PATH);
+
+      // ── STEP 6: save ───────────────────────────────────────────────────
+      await page.getByRole("button", { name: /Update|Save/i }).click();
+      try {
+        await page
+          .getByTestId("policy-editor-modal")
+          .waitFor({ state: "hidden", timeout: LOAD_TIMEOUT });
+      } catch (err) {
+        const messages = await page.locator(".cf-policy-modal-error").allInnerTexts();
+        throw new Error(
+          `Direct-card evidence update did not close after save: ${messages.join(" | ") || err.message}`,
+        );
+      }
+      await page.waitForTimeout(500);
+
+      // ── STEP 7: reload to read persisted server state ──────────────────
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await collapseOnboardingCoach(page);
+      await filterPolicyCatalog(page, POLICY);
+      await assertDrawerNeverOpened("after reload, before second direct edit");
+
+      // ── STEP 8: direct card Edit again ─────────────────────────────────
+      await cardEditButton().click();
+      await assertDrawerNeverOpened("after second card Edit click");
+      await openEvidenceTab();
+
+      // ── STEP 9: BOTH A and B must survive ──────────────────────────────
+      // Against the buggy build, step 5 issued Some([B]) because the baseline
+      // was empty, so evidence A was destroyed and this assertion fails.
+      const persistedCommand = page.getByTestId("policy-evidence-command-cmd-0");
+      await persistedCommand.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      const persistedCommandValue = await persistedCommand.inputValue();
+      if (persistedCommandValue !== CMD) {
+        throw new Error(
+          `Expected evidence A to survive the direct-card edit; got ${JSON.stringify(persistedCommandValue)}`,
+        );
+      }
+      const persistedFile = page.getByTestId("policy-evidence-file-path-1");
+      await persistedFile.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      const persistedFileValue = await persistedFile.inputValue();
+      if (persistedFileValue !== FILE_PATH) {
+        throw new Error(
+          `Expected evidence B after the direct-card edit; got ${JSON.stringify(persistedFileValue)}`,
+        );
       }
     },
   },

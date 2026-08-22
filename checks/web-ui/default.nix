@@ -21,7 +21,7 @@
 , pkgs
 , inputs
 , testProfile ? "ci_fast"
-, testSteps ? null
+, testSteps ? builtins.getEnv "CF_UI_TEST_STEPS"
 , runExportValidation ? true
 , playwrightResultTimeout ? 1800
 , ...
@@ -365,6 +365,13 @@ in pkgs.testers.runNixOSTest {
       SELECT id, '1', 'web-ui-mapping-roundtrip-v1', 'web-ui-mapping-roundtrip-digest'
       FROM compliance_frameworks WHERE canonical_source_key = 'web-ui-mapping-roundtrip'
       ON CONFLICT (framework_id, canonical_release_key) DO NOTHING;
+      -- Second release: the bundle baseline step proves that switching
+      -- framework releases clears release-specific requirement IDs, so the
+      -- framework needs two releases with distinct requirement identifiers.
+      INSERT INTO compliance_framework_versions (framework_id, version, canonical_release_key, semantic_digest)
+      SELECT id, '2', 'web-ui-mapping-roundtrip-v2', 'web-ui-mapping-roundtrip-digest-v2'
+      FROM compliance_frameworks WHERE canonical_source_key = 'web-ui-mapping-roundtrip'
+      ON CONFLICT (framework_id, canonical_release_key) DO NOTHING;
       INSERT INTO compliance_requirements (framework_id, canonical_requirement_key)
       SELECT id, 'MAP-1' FROM compliance_frameworks WHERE canonical_source_key = 'web-ui-mapping-roundtrip'
       ON CONFLICT (framework_id, canonical_requirement_key) DO NOTHING;
@@ -376,12 +383,21 @@ in pkgs.testers.runNixOSTest {
       FROM compliance_requirements r JOIN compliance_frameworks f ON f.id = r.framework_id
       JOIN compliance_framework_versions v ON v.framework_id = f.id
       WHERE f.canonical_source_key = 'web-ui-mapping-roundtrip' AND r.canonical_requirement_key = 'MAP-1'
+        AND v.canonical_release_key = 'web-ui-mapping-roundtrip-v1'
+      ON CONFLICT (requirement_id, framework_version_id) DO NOTHING;
+      INSERT INTO compliance_requirement_versions (requirement_id, framework_version_id, external_id, title, kind, semantic_digest)
+      SELECT r.id, v.id, 'MAP-1-V2', 'Mapping round-trip requirement one (release 2)', 'control', 'web-ui-map-1-v2'
+      FROM compliance_requirements r JOIN compliance_frameworks f ON f.id = r.framework_id
+      JOIN compliance_framework_versions v ON v.framework_id = f.id
+      WHERE f.canonical_source_key = 'web-ui-mapping-roundtrip' AND r.canonical_requirement_key = 'MAP-1'
+        AND v.canonical_release_key = 'web-ui-mapping-roundtrip-v2'
       ON CONFLICT (requirement_id, framework_version_id) DO NOTHING;
       INSERT INTO compliance_requirement_versions (requirement_id, framework_version_id, external_id, title, kind, semantic_digest)
       SELECT r.id, v.id, 'MAP-2', 'Mapping round-trip requirement two', 'control', 'web-ui-map-2'
       FROM compliance_requirements r JOIN compliance_frameworks f ON f.id = r.framework_id
       JOIN compliance_framework_versions v ON v.framework_id = f.id
       WHERE f.canonical_source_key = 'web-ui-mapping-roundtrip' AND r.canonical_requirement_key = 'MAP-2'
+        AND v.canonical_release_key = 'web-ui-mapping-roundtrip-v1'
       ON CONFLICT (requirement_id, framework_version_id) DO NOTHING;
     """
     encoded_mapping_fixture_sql = base64.b64encode(
@@ -514,6 +530,20 @@ in pkgs.testers.runNixOSTest {
     test_steps_env = f" CF_UI_TEST_STEPS={test_steps}" if test_steps else ""
     result_timeout = ${toString playwrightResultTimeout}
 
+    # Deployment-policy fixture state. Browser steps that read the policy
+    # catalog depend on it, so record the shape of the seeded data to tell
+    # fixture drift apart from a server-side catalog failure.
+    print("=== Deployment policy fixture state ===")
+    print(
+        machine.succeed(
+            "sudo -u postgres psql -d crystal_forge -A -t -c "
+            "\"SELECT (SELECT COUNT(*) FROM deployment_policies) AS policies, "
+            "(SELECT COUNT(*) FROM deployment_policy_versions) AS versions, "
+            "(SELECT COUNT(*) FROM deployment_policy_versions "
+            "WHERE compliance_metadata ? 'evidence_specs') AS with_evidence\" || true"
+        )
+    )
+
     # Run the integration test script
     machine.succeed("rm -f /tmp/web-ui-tests/integration.exit /tmp/screenshots/results.json /tmp/screenshots/fatal.json")
     machine.succeed(
@@ -535,6 +565,12 @@ in pkgs.testers.runNixOSTest {
 
     if machine.execute("test -f /tmp/screenshots/results.json")[0] != 0:
         exit_code = machine.succeed("cat /tmp/web-ui-tests/integration.exit").strip()
+        print("=== Crystal Forge server journal after integration failure ===")
+        print(
+            machine.succeed(
+                "journalctl -u crystal-forge-server.service --no-pager -n 300 || true"
+            )
+        )
         raise Exception(
             "integration process exited before producing results.json "
             f"(exit code {exit_code})"
@@ -543,6 +579,14 @@ in pkgs.testers.runNixOSTest {
     # Read results
     results_json = machine.succeed("cat /tmp/screenshots/results.json")
     results = json.loads(results_json)
+
+    if any(not result.get("ok") for result in results):
+        print("=== Crystal Forge server journal after failed browser step ===")
+        print(
+            machine.succeed(
+                "journalctl -u crystal-forge-server.service --no-pager -n 300 || true"
+            )
+        )
 
     # Copy screenshots + visual reports out
     for r in results:
@@ -629,6 +673,7 @@ in pkgs.testers.runNixOSTest {
       "30a-admin-automatic-retries-defaults-reset",
       "30b-admin-automatic-retries-save-reload",
       "30c-admin-automatic-retries-failed-save-retains-draft",
+      "30e-policy-card-direct-edit-preserves-evidence",
     ]
     failed_critical = [r['name'] for r in results if r['name'] in critical_tests and not r.get('ok')]
     if failed_critical:

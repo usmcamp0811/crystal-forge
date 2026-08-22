@@ -116,11 +116,12 @@ async fn list_active_environment_assignments(
         String,
         chrono::DateTime<chrono::Utc>,
         chrono::DateTime<chrono::Utc>,
+        Option<String>,
     )> = sqlx::query_as(
         r#"
         SELECT a.id, a.current_version_id, a.bundle_id, av.bundle_version_id,
                a.environment_id, av.enforcement_mode, av.assignment_overlay_digest,
-               a.created_at, a.updated_at
+               a.created_at, a.updated_at, av.reason
         FROM compliance_bundle_assignments a
         JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
         WHERE a.active
@@ -198,6 +199,7 @@ async fn list_active_environment_assignments(
         assignment_overlay_digest,
         created_at,
         updated_at,
+        reason,
     ) in assignments
     {
         result
@@ -222,6 +224,7 @@ async fn list_active_environment_assignments(
                     .unwrap_or_default(),
                 assignment_overlay_digest,
                 active: true,
+                reason,
                 created_at,
                 updated_at,
             });
@@ -737,9 +740,24 @@ pub async fn list_deployment_policies(pool: &PgPool) -> Result<Vec<DeploymentPol
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|r| DeploymentPolicySummary {
+    // Mapped-requirement and bundle-usage counts come from the same batched,
+    // version-scoped helper the deployment-policy catalog uses, so both
+    // surfaces report identical numbers and this path stays free of N+1
+    // queries. Policies without a current version keep zero counts rather than
+    // disappearing from the catalog.
+    let version_ids: Vec<Uuid> = rows.iter().filter_map(|r| r.version_id).collect();
+    let usage_counts =
+        crate::queries::deployment_policies::load_policy_version_usage_counts(pool, &version_ids)
+            .await?;
+
+    let mut summaries = Vec::new();
+    for r in rows {
+        let (mapped_requirement_count, bundle_usage_count) = r
+            .version_id
+            .and_then(|version_id| usage_counts.get(&version_id).copied())
+            .unwrap_or((0, 0));
+
+        summaries.push(DeploymentPolicySummary {
             id: r.id,
             version_id: r.version_id,
             name: r.name,
@@ -756,8 +774,13 @@ pub async fn list_deployment_policies(pool: &PgPool) -> Result<Vec<DeploymentPol
             cmmc_level: None,
             cis_section: None,
             rationale: None,
-        })
-        .collect())
+            mapped_requirement_count,
+            bundle_usage_count,
+            evidence_specs: Vec::new(),
+        });
+    }
+
+    Ok(summaries)
 }
 
 /// Get required policy IDs for an environment (the baseline).
@@ -1311,6 +1334,36 @@ mod tests {
             )
             .await
             .expect("environment should be created")
+        }
+
+        /// `GET /api/v1/policies` reads this catalog. It regressed to HTTP 500
+        /// because the per-policy count query filtered on a `trusted` column
+        /// that does not exist (`policy_requirement_mappings.trust_state`
+        /// holds `'trusted'`). Exercise the real query against the real schema
+        /// and prove unversioned policies still appear with zero counts.
+        #[sqlx::test]
+        #[ignore = "requires live database connection"]
+        async fn list_deployment_policies_reports_counts_against_real_schema(pool: PgPool) {
+            let policy_name = format!("catalog-regression-{}", Uuid::new_v4().simple());
+            sqlx::query(
+                "INSERT INTO deployment_policies (name, description, policy_type, config, enabled) \
+                 VALUES ($1, NULL, 'cve_threshold', '{}'::jsonb, true)",
+            )
+            .bind(&policy_name)
+            .execute(&pool)
+            .await
+            .expect("insert deployment policy");
+
+            let policies = list_deployment_policies(&pool)
+                .await
+                .expect("policy catalog must load against the real schema");
+
+            let listed = policies
+                .iter()
+                .find(|policy| policy.name == policy_name)
+                .expect("a policy without a current version must remain in the catalog");
+            assert_eq!(listed.mapped_requirement_count, 0);
+            assert_eq!(listed.bundle_usage_count, 0);
         }
 
         #[sqlx::test]
