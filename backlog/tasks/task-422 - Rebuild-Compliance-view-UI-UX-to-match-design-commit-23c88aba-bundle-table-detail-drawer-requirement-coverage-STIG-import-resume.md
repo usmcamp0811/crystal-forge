@@ -7,7 +7,7 @@ status: Review
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-21 19:05'
+updated_date: '2026-08-22 15:30'
 labels: []
 milestone: m-22
 dependencies:
@@ -440,5 +440,11 @@ author: agent
 created: 2026-08-21 16:07
 ---
 Verification at the current working state: `CF_UI_TEST_STEPS='20ab-compliance-bundle-requirement-baseline-roundtrip' nix build --impure .#checks.x86_64-linux.web-ui --no-link -L` passed (exit 0), with `[OK] 20ab-compliance-bundle-requirement-baseline-roundtrip`, `Screenshots: 1/1 captured`, and all five authenticated `/api/v1/policies` preflight requests returning `HTTP 200 policies=8` (they returned `HTTP 500 Failed to load policies` before the query fix). Also passed: `nix develop -c env SQLX_OFFLINE=true cargo check --manifest-path packages/default/Cargo.toml -p cf-server --offline`, `cargo fmt --all -- --check`, `node --check checks/web-ui/tests/integration-test.js`, `git diff --check`. Still outstanding before Review: an independent `30d-evidence-lifecycle` run at this head, the ignored live-DB regression `list_deployment_policies_reports_counts_against_real_schema` against an isolated local database, and the remaining MR !316 verification. These changes are uncommitted.
+---
+
+author: OpenAI
+created: 2026-08-22 15:30
+---
+Deadline/POA&M acceptance discrepancy resolved during final MR !316 audit: TASK-422's accepted criteria do not require assignment deadline or POA&M persistence, and spec §7 permits only two additive backend changes (bundle aggregate fields and coverage mapping policy_id). The production immutable assignment snapshot models reason, actor/audit identity, enforcement mode, and overlays; no deadline or POA&M storage/mutation contract exists. The design fixture's deadline/poam values are therefore illustrative mock-only data under the spec's source-precedence rule. MR !316 had introduced optional response fields that always serialized null plus unreachable conditional UI. Those pseudo-fields are being removed rather than inventing persistence. Real assignment reason and approver remain sourced from the current immutable assignment version/audit identity. A server serialization regression proves reason/approver remain while deadline/poam keys are absent. Adding deadline/POA&M later requires a separately accepted domain task defining immutable snapshot columns, validation, create/update semantics, authorization/audit behavior, and API/UI contracts.
 ---
 <!-- COMMENTS:END -->
