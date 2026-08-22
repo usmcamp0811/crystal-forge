@@ -3,11 +3,11 @@ id: TASK-422
 title: >-
   Rebuild Compliance view UI/UX to match design commit 23c88aba (bundle table,
   detail drawer, requirement coverage, STIG import resume)
-status: Review
+status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-22 15:30'
+updated_date: '2026-08-22 16:02'
 labels: []
 milestone: m-22
 dependencies:
@@ -206,6 +206,8 @@ The same real mapping flow exposed the lazy exact-version API mismatch in accept
 2. Replace fragile evidence selectors, execute evidence lifecycle/browser and live DB integrity regressions.
 3. Add/execute real assignment-reason browser lifecycle and SystemsMatrix pinned/reason parity coverage; correct coverage header hierarchy.
 4. Run focused DB, browser, Rust, Nix, flake, source-sanity, final diff/CI checks; update MR verification only with exact final SHA.
+
+Current continuation from dirty worktree at 41265f81: first format and compile the in-progress CVE evidence parity, assignment-lineage migration, STIG metadata fallback, and direct-card evidence fixes. Then run focused live-DB/unit/browser regressions, resolve remaining review findings within TASK-422 scope, and only update the MR after exact-head verification. Preserve unrelated dirty files in the dev integration worktree.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
