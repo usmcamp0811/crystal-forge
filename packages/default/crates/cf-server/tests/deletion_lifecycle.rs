@@ -49,6 +49,85 @@ async fn draft_bundle(pool: &PgPool) -> (Uuid, Uuid) {
     (bundle_id, version_id)
 }
 
+/// Create the complete normalized requirement lineage needed by a policy
+/// mapping. This test used to select an arbitrary pre-seeded requirement,
+/// which made it pass only against long-lived developer databases and fail in
+/// the fresh PostgreSQL instance used by the merge gate.
+async fn test_requirement_version(pool: &PgPool) -> Uuid {
+    let suffix = Uuid::new_v4();
+    let framework_id = Uuid::new_v4();
+    let framework_version_id = Uuid::new_v4();
+    let requirement_id = Uuid::new_v4();
+    let requirement_version_id = Uuid::new_v4();
+
+    sqlx::query(
+        "INSERT INTO compliance_frameworks (id, name, canonical_source_key) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(framework_id)
+    .bind(format!("Deletion test framework {suffix}"))
+    .bind(format!("deletion-test-{suffix}"))
+    .execute(pool)
+    .await
+    .expect("insert test framework");
+
+    sqlx::query(
+        "INSERT INTO compliance_framework_versions \
+         (id, framework_id, version, canonical_release_key, title) \
+         VALUES ($1, $2, '1.0', $3, $4)",
+    )
+    .bind(framework_version_id)
+    .bind(framework_id)
+    .bind(format!("deletion-test-release-{suffix}"))
+    .bind(format!("Deletion test framework {suffix} v1"))
+    .execute(pool)
+    .await
+    .expect("insert test framework version");
+
+    sqlx::query(
+        "INSERT INTO compliance_requirements \
+         (id, framework_id, canonical_requirement_key) VALUES ($1, $2, $3)",
+    )
+    .bind(requirement_id)
+    .bind(framework_id)
+    .bind(format!("deletion-test-requirement-{suffix}"))
+    .execute(pool)
+    .await
+    .expect("insert test requirement");
+
+    sqlx::query(
+        "INSERT INTO compliance_requirement_versions \
+         (id, requirement_id, framework_version_id, external_id, title, kind) \
+         VALUES ($1, $2, $3, $4, $5, 'control')",
+    )
+    .bind(requirement_version_id)
+    .bind(requirement_id)
+    .bind(framework_version_id)
+    .bind(format!("DEL-{suffix}"))
+    .bind("Deletion lifecycle requirement")
+    .execute(pool)
+    .await
+    .expect("insert test requirement version");
+
+    requirement_version_id
+}
+
+async fn test_actor(pool: &PgPool) -> Uuid {
+    let actor_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users \
+         (id, username, email, first_name, last_name, user_type, is_active) \
+         VALUES ($1, $2, $3, 'Deletion', 'Tester', 'human', true)",
+    )
+    .bind(actor_id)
+    .bind(format!("deletion-test-{actor_id}"))
+    .bind(format!("deletion-test-{actor_id}@example.invalid"))
+    .execute(pool)
+    .await
+    .expect("insert test actor");
+    actor_id
+}
+
 async fn accept_policy(pool: &PgPool, policy_id: Uuid, version_id: Uuid) {
     let mut tx = pool.begin().await.expect("begin policy publication");
     sqlx::query("UPDATE deployment_policies SET current_draft_version_id = NULL WHERE id = $1")
@@ -424,15 +503,8 @@ async fn deletion_lifecycle_database_matrix() {
 async fn draft_policy_with_requirement_mapping_is_deletable() {
     let pool = pool().await;
     let (policy_id, policy_version_id) = draft_policy(&pool).await;
-    let requirement_version_id: Uuid =
-        sqlx::query_scalar("SELECT id FROM compliance_requirement_versions LIMIT 1")
-            .fetch_one(&pool)
-            .await
-            .expect("disposable test database must contain a requirement version");
-    let actor_id: Uuid = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
-        .fetch_one(&pool)
-        .await
-        .expect("disposable test database must contain a user");
+    let requirement_version_id = test_requirement_version(&pool).await;
+    let actor_id = test_actor(&pool).await;
     let artifact_content = Uuid::new_v4().as_bytes().to_vec();
     sqlx::query(
         "INSERT INTO policy_requirement_mappings \

@@ -1732,12 +1732,6 @@ pub struct ComplianceSystemRollup {
     /// User who approved the assignment.
     #[serde(default)]
     pub assignment_approved_by: Option<String>,
-    /// Deadline for completing the migration to current revision.
-    #[serde(default)]
-    pub assignment_deadline: Option<String>,
-    /// Plan of Action and Milestones reference.
-    #[serde(default)]
-    pub assignment_poam: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2915,6 +2909,58 @@ pub struct ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TASK-422's design fixture included deadline/POA&M strings on mock
+    /// assignments, but the production immutable assignment snapshot has no
+    /// such fields. The API must expose only metadata backed by that domain
+    /// model rather than advertising keys that always serialize as `null`.
+    ///
+    /// This fails against the previous MR shape, which emitted
+    /// `assignment_deadline: null` and `assignment_poam: null` on every row.
+    #[test]
+    fn compliance_rollup_serializes_only_backed_assignment_metadata() {
+        let rollup = ComplianceSystemRollup {
+            system_id: uuid::Uuid::new_v4(),
+            hostname: "pinned-host".to_string(),
+            environment: Some("production".to_string()),
+            applies: true,
+            total: 1,
+            evaluated_total: 1,
+            pass: 1,
+            warn: 0,
+            fail: 0,
+            waiver: 0,
+            not_checked: 0,
+            not_applicable: 0,
+            error: 0,
+            report_only: 0,
+            score: 100,
+            resolution_state: Some("resolved".to_string()),
+            assignment_status: Some("pinned".to_string()),
+            assignment_reason: Some("Change freeze exception".to_string()),
+            assignment_approved_by: Some("admin".to_string()),
+        };
+
+        let json = serde_json::to_value(rollup).expect("serialize compliance rollup");
+        assert_eq!(
+            json.get("assignment_reason")
+                .and_then(|value| value.as_str()),
+            Some("Change freeze exception")
+        );
+        assert_eq!(
+            json.get("assignment_approved_by")
+                .and_then(|value| value.as_str()),
+            Some("admin")
+        );
+        assert!(
+            json.get("assignment_deadline").is_none(),
+            "do not advertise deadline until it has an immutable assignment field and mutation contract"
+        );
+        assert!(
+            json.get("assignment_poam").is_none(),
+            "do not advertise POA&M until it has an immutable assignment field and mutation contract"
+        );
+    }
 
     #[test]
     fn update_system_request_omitted_fqdn_is_unset() {

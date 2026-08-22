@@ -1776,22 +1776,9 @@ pub async fn insert_bundle_version_requirement(
 
 /// Insert a policy-requirement mapping within an open transaction.
 ///
-/// Uses ON CONFLICT DO NOTHING so re-importing does not fail on existing mappings.
-///
-/// # ON CONFLICT semantics (TASK-418 review)
-///
-/// The unique target is `(policy_version_id, requirement_version_id)`. In the
-/// current commit path (`commit_foreign_import`) every mapping target is a
-/// freshly created policy version or a freshly derived mutable draft, so the
-/// conflict cannot fire within a single import: each rule appears once per
-/// import and each draft UUID is unique to its transaction. Across imports the
-/// draft is always newly derived, so no existing pair is ever revisited either.
-/// DO NOTHING is therefore inert today; it is kept as a defensive guard for
-/// future paths that might map onto stable version IDs.  Mappings on an
-/// accepted/deprecated policy version are additionally write-protected by the
-/// `guard_policy_mapping_immutability` trigger, so a DO UPDATE counterpart
-/// would fail loudly there instead of silently overwriting authoritative
-/// semantics.
+/// Exact replays are idempotent so trusted imports can be retried. A duplicate
+/// pair with different mapping semantics is rejected rather than silently
+/// retaining the first row while making the caller believe its values won.
 pub async fn insert_policy_mapping_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     policy_version_id: Uuid,
@@ -1803,8 +1790,65 @@ pub async fn insert_policy_mapping_in_tx(
     source_artifact_id: Option<Uuid>,
     created_by: Uuid,
 ) -> Result<()> {
+    insert_policy_mapping_internal(
+        tx,
+        policy_version_id,
+        requirement_version_id,
+        relationship,
+        coverage,
+        rationale,
+        provenance,
+        source_artifact_id,
+        created_by,
+        false,
+    )
+    .await
+}
+
+/// Insert an import mapping while allowing an exact semantic replay of an
+/// existing non-trusted row. The import's exact-pair cardinality gate remains
+/// responsible for rejecting that row before the transaction can commit.
+pub async fn insert_import_policy_mapping_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    policy_version_id: Uuid,
+    requirement_version_id: Uuid,
+    relationship: &str,
+    coverage: &str,
+    rationale: Option<&str>,
+    provenance: &str,
+    source_artifact_id: Option<Uuid>,
+    created_by: Uuid,
+) -> Result<()> {
+    insert_policy_mapping_internal(
+        tx,
+        policy_version_id,
+        requirement_version_id,
+        relationship,
+        coverage,
+        rationale,
+        provenance,
+        source_artifact_id,
+        created_by,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_policy_mapping_internal(
+    tx: &mut Transaction<'_, Postgres>,
+    policy_version_id: Uuid,
+    requirement_version_id: Uuid,
+    relationship: &str,
+    coverage: &str,
+    rationale: Option<&str>,
+    provenance: &str,
+    source_artifact_id: Option<Uuid>,
+    created_by: Uuid,
+    allow_nontrusted_exact_replay: bool,
+) -> Result<()> {
     require_framework_requirement_usable(tx, requirement_version_id).await?;
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         INSERT INTO policy_requirement_mappings
             (policy_version_id, requirement_version_id, relationship, coverage,
@@ -1824,6 +1868,34 @@ pub async fn insert_policy_mapping_in_tx(
     .execute(&mut **tx)
     .await
     .context("failed to insert policy requirement mapping in transaction")?;
+
+    if result.rows_affected() == 0 {
+        let existing =
+            sqlx::query_as::<_, (String, String, Option<String>, String, String, Option<Uuid>)>(
+                r#"
+            SELECT relationship, coverage, rationale, provenance, trust_state, source_artifact_id
+            FROM policy_requirement_mappings
+            WHERE policy_version_id = $1 AND requirement_version_id = $2
+            "#,
+            )
+            .bind(policy_version_id)
+            .bind(requirement_version_id)
+            .fetch_one(&mut **tx)
+            .await
+            .context("failed to inspect existing policy requirement mapping")?;
+
+        let is_exact_replay = existing.0 == relationship
+            && existing.1 == coverage
+            && existing.2.as_deref() == rationale
+            && existing.3 == provenance
+            && (existing.4 == "trusted" || allow_nontrusted_exact_replay)
+            && existing.5 == source_artifact_id;
+        if !is_exact_replay {
+            bail!(
+                "policy requirement mapping already exists with different semantics for policy version {policy_version_id} and requirement version {requirement_version_id}"
+            );
+        }
+    }
 
     refresh_policy_mapping_digest(tx, policy_version_id).await?;
 

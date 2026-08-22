@@ -612,11 +612,27 @@ pub async fn create_deployment_policy(
     create_deployment_policy_with_mappings(pool, request, None).await
 }
 
+fn duplicate_requirement_mapping_id(request: &CreateDeploymentPolicyRequest) -> Option<Uuid> {
+    let mut requirement_ids = std::collections::HashSet::new();
+    request
+        .requirement_mappings
+        .iter()
+        .map(|mapping| mapping.requirement_version_id)
+        .find(|requirement_version_id| !requirement_ids.insert(*requirement_version_id))
+}
+
 pub async fn create_deployment_policy_with_mappings(
     pool: &PgPool,
     request: &CreateDeploymentPolicyRequest,
     actor_id: Option<Uuid>,
 ) -> Result<DeploymentPolicyRecord> {
+    if let Some(requirement_version_id) = duplicate_requirement_mapping_id(request) {
+        anyhow::bail!(
+            "Duplicate requirement mapping {} in policy request",
+            requirement_version_id
+        );
+    }
+
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
     let policy = sqlx::query_as::<_, DeploymentPolicyRecord>(
@@ -1275,6 +1291,34 @@ mod tests {
     fn test_query_compilation() {
         // This test ensures the SQL queries compile correctly
         // Actual database tests would require sqlx test fixtures
+    }
+
+    #[test]
+    fn duplicate_requirement_mapping_requests_are_rejected() {
+        let requirement_version_id = Uuid::new_v4();
+        let mapping = CreatePolicyRequirementMapping {
+            requirement_version_id,
+            relationship: "supports".to_string(),
+            coverage: "partial".to_string(),
+            rationale: Some("first semantics".to_string()),
+            provenance: "manual".to_string(),
+        };
+        let mut request = CreateDeploymentPolicyRequest::default();
+        request.requirement_mappings = vec![
+            mapping,
+            CreatePolicyRequirementMapping {
+                requirement_version_id,
+                relationship: "implements".to_string(),
+                coverage: "full".to_string(),
+                rationale: Some("conflicting semantics".to_string()),
+                provenance: "imported".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            duplicate_requirement_mapping_id(&request),
+            Some(requirement_version_id)
+        );
     }
 
     // ── DB-level tests for list_policy_rows_by_configuration_for_flake ────

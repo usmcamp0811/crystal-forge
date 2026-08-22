@@ -62,9 +62,9 @@ use crate::compliance::xccdf::reconciliation::{
 use crate::queries::compliance::{PolicyDraftIntent, ensure_policy_draft};
 use crate::queries::framework_requirements::{
     insert_bundle_version_requirement, insert_framework_version,
-    insert_framework_version_with_requirement_digests_and_hierarchy, insert_policy_mapping_in_tx,
-    insert_requirement_version, insert_requirement_version_pending, upsert_framework_lineage,
-    upsert_requirement_lineage,
+    insert_framework_version_with_requirement_digests_and_hierarchy,
+    insert_import_policy_mapping_in_tx, insert_policy_mapping_in_tx, insert_requirement_version,
+    insert_requirement_version_pending, upsert_framework_lineage, upsert_requirement_lineage,
 };
 
 async fn revalidate_reviewed_related_candidate(
@@ -1323,7 +1323,7 @@ pub async fn commit_foreign_import(
                     (relationship, coverage, rationale, provenance)
                 };
 
-            insert_policy_mapping_in_tx(
+            insert_import_policy_mapping_in_tx(
                 &mut tx,
                 policy_version_id,
                 requirement.requirement_version_id,
@@ -4266,6 +4266,7 @@ mod tests {
             Some(ImportedMappingSemantics {
                 relationship: Some("supports".into()),
                 coverage: Some("partial".into()),
+                rationale: Some("independent reviewed rationale".into()),
                 ..Default::default()
             }),
         );

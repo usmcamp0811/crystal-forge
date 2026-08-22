@@ -485,6 +485,11 @@ pub enum BundleValidationError {
     EmptyBaseline,
     DuplicateRequirement(Uuid),
     RequirementNotFound(Uuid),
+    RequirementFrameworkMismatch {
+        requirement_version_id: Uuid,
+        expected_framework_version_id: Uuid,
+        actual_framework_version_id: Uuid,
+    },
 }
 
 impl std::fmt::Display for BundleValidationError {
@@ -497,6 +502,16 @@ impl std::fmt::Display for BundleValidationError {
                 write!(f, "Duplicate requirement version {id} in request")
             }
             Self::RequirementNotFound(id) => write!(f, "Requirement version {id} was not found"),
+            Self::RequirementFrameworkMismatch {
+                requirement_version_id,
+                expected_framework_version_id,
+                actual_framework_version_id,
+            } => write!(
+                f,
+                "Requirement version {requirement_version_id} belongs to framework version \
+                 {actual_framework_version_id}, but this bundle revision is sourced from \
+                 framework version {expected_framework_version_id}"
+            ),
         }
     }
 }
@@ -560,6 +575,52 @@ async fn validate_requirement_versions(
             }
         }
     }
+    Ok(())
+}
+
+async fn validate_requirement_framework_version(
+    tx: &mut Transaction<'_, Postgres>,
+    bundle_version_id: Uuid,
+    requirement_version_ids: &[Uuid],
+) -> Result<()> {
+    if requirement_version_ids.is_empty() {
+        return Ok(());
+    }
+
+    let source_framework_version_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT framework_version_id FROM compliance_bundle_versions WHERE id = $1",
+    )
+    .bind(bundle_version_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let Some(expected_framework_version_id) = source_framework_version_id else {
+        return Ok(());
+    };
+
+    let mismatch: Option<(Uuid, Uuid)> = sqlx::query_as(
+        r#"
+        SELECT requested.id, rv.framework_version_id
+        FROM unnest($1::uuid[]) WITH ORDINALITY AS requested(id, request_order)
+        JOIN compliance_requirement_versions rv ON rv.id = requested.id
+        WHERE rv.framework_version_id <> $2
+        ORDER BY requested.request_order
+        LIMIT 1
+        "#,
+    )
+    .bind(requirement_version_ids)
+    .bind(expected_framework_version_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    if let Some((requirement_version_id, actual_framework_version_id)) = mismatch {
+        return Err(BundleValidationError::RequirementFrameworkMismatch {
+            requirement_version_id,
+            expected_framework_version_id,
+            actual_framework_version_id,
+        }
+        .into());
+    }
+
     Ok(())
 }
 
@@ -1507,6 +1568,12 @@ pub async fn update_bundle(
     )
     .await?;
     validate_requirement_versions(&mut tx, &request.requirement_version_ids).await?;
+    validate_requirement_framework_version(
+        &mut tx,
+        draft_version_id,
+        &request.requirement_version_ids,
+    )
+    .await?;
 
     // Load layer and owner from the current draft version (not from constants).
     let (stored_layer, stored_owner): (String, String) =
@@ -2116,6 +2183,15 @@ pub async fn list_bundle_systems_for_version(
         )
     };
 
+    // CVE controls must use the same latest-completed-scan semantics as the
+    // catalog aggregate path. Batch once for every deployed derivation rather
+    // than issuing one query per policy/system while assembling rows.
+    let derivation_ids: Vec<i32> = contexts
+        .values()
+        .map(|context| context.derivation_id)
+        .collect();
+    let cve_scans = latest_completed_cve_scans(pool, &derivation_ids).await?;
+
     let mut rollups = Vec::with_capacity(systems.len());
     for system in systems {
         // Retrieve pre-loaded assignment metadata
@@ -2134,11 +2210,19 @@ pub async fn list_bundle_systems_for_version(
 
                 let mut statuses = Vec::with_capacity(system_policies.len());
                 let context = contexts.get(&system.id).cloned();
+                let cve_scan = context
+                    .as_ref()
+                    .and_then(|context| cve_scans.get(&context.derivation_id));
 
                 for policy in system_policies {
                     statuses.push(
-                        resolve_control_evidence_with_context(context.clone(), &system, policy)
-                            .status,
+                        resolve_control_evidence_with_context(
+                            context.clone(),
+                            cve_scan,
+                            &system,
+                            policy,
+                        )
+                        .status,
                     );
                 }
 
@@ -2549,10 +2633,19 @@ pub async fn get_system_evidence(
     } else if bundle_version_id.is_some() {
         resolution_state = Some("conflict".to_string());
     }
+    let context = assessment_context(pool, system.id).await?;
+    let cve_scan = match context.as_ref() {
+        Some(context) => latest_completed_cve_scan(pool, context.derivation_id).await?,
+        None => None,
+    };
     let mut controls = Vec::with_capacity(policies.len());
     for policy in policies {
-        let evidence = resolve_control_evidence(pool, &system, policy).await?;
-        controls.push(evidence);
+        controls.push(resolve_control_evidence_with_context(
+            context.clone(),
+            cve_scan.as_ref(),
+            &system,
+            policy,
+        ));
     }
 
     Ok(Some(ComplianceEvidenceResponse {
@@ -3203,11 +3296,6 @@ fn rollup_from_statuses_with_metadata(
             .as_ref()
             .map(|m| m.approved_by.clone())
             .flatten(),
-        // Not modeled: assignment_deadline and assignment_poam are conditionally shown in
-        // the design mock but are not domain requirements. Implement only if explicitly
-        // required by a separate task.
-        assignment_deadline: None,
-        assignment_poam: None,
     }
 }
 
@@ -3261,8 +3349,6 @@ fn unresolved_system_rollup_with_metadata(
             .as_ref()
             .map(|m| m.approved_by.clone())
             .flatten(),
-        assignment_deadline: None,
-        assignment_poam: None,
     }
 }
 
@@ -3381,8 +3467,6 @@ pub(crate) fn effective_policy_rollup(
         assignment_status,
         assignment_reason: None,
         assignment_approved_by: None,
-        assignment_deadline: None,
-        assignment_poam: None,
     }
 }
 
@@ -3429,11 +3513,22 @@ pub(crate) async fn effective_policy_rollup_with_evidence_and_metadata(
 
     // Batch-load assessment context for this system (not per-policy)
     let context = assessment_context(pool, system.id).await?;
+    let cve_scan = match context.as_ref() {
+        Some(context) => latest_completed_cve_scan(pool, context.derivation_id).await?,
+        None => None,
+    };
 
     let mut statuses = Vec::with_capacity(policies.len());
     for policy in policies {
-        statuses
-            .push(resolve_control_evidence_with_context(context.clone(), system, policy).status);
+        statuses.push(
+            resolve_control_evidence_with_context(
+                context.clone(),
+                cve_scan.as_ref(),
+                system,
+                policy,
+            )
+            .status,
+        );
     }
     Ok(rollup_from_statuses_with_metadata(
         system.clone(),
@@ -3515,20 +3610,7 @@ async fn effective_policy_rollups_with_evidence_batch(
         .values()
         .map(|context| context.derivation_id)
         .collect();
-    let scans: std::collections::HashMap<i32, (Uuid, i32, i32)> = sqlx::query_as(
-        r#"
-        SELECT DISTINCT ON (derivation_id) id, derivation_id, critical_count, high_count
-        FROM cve_scans
-        WHERE derivation_id = ANY($1) AND status = 'completed'
-        ORDER BY derivation_id, completed_at DESC NULLS LAST, id DESC
-        "#,
-    )
-    .bind(&derivation_ids)
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .map(|(id, derivation_id, critical, high)| (derivation_id, (id, critical, high)))
-    .collect();
+    let scans = latest_completed_cve_scans(pool, &derivation_ids).await?;
 
     // Collect all (bundle_id, system_id) pairs for batch assignment loading
     let assignment_pairs: Vec<(Uuid, Uuid)> = work
@@ -3583,6 +3665,41 @@ async fn effective_policy_rollups_with_evidence_batch(
         ));
     }
     Ok(result)
+}
+
+type CompletedCveScan = (Uuid, i32, i32);
+
+async fn latest_completed_cve_scans(
+    pool: &PgPool,
+    derivation_ids: &[i32],
+) -> Result<std::collections::HashMap<i32, CompletedCveScan>> {
+    if derivation_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    Ok(sqlx::query_as(
+        r#"
+        SELECT DISTINCT ON (derivation_id) id, derivation_id, critical_count, high_count
+        FROM cve_scans
+        WHERE derivation_id = ANY($1) AND status = 'completed'
+        ORDER BY derivation_id, completed_at DESC NULLS LAST, id DESC
+        "#,
+    )
+    .bind(&derivation_ids)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|(id, derivation_id, critical, high)| (derivation_id, (id, critical, high)))
+    .collect())
+}
+
+async fn latest_completed_cve_scan(
+    pool: &PgPool,
+    derivation_id: i32,
+) -> Result<Option<CompletedCveScan>> {
+    Ok(latest_completed_cve_scans(pool, &[derivation_id])
+        .await?
+        .remove(&derivation_id))
 }
 
 fn batch_evidence_status(
@@ -3839,6 +3956,7 @@ fn nix_policy_result(
 
 fn resolve_control_evidence_with_context(
     context: Option<AssessmentContext>,
+    cve_scan: Option<&CompletedCveScan>,
     system: &SystemRow,
     policy: PolicyRow,
 ) -> ComplianceControlEvidence {
@@ -3929,18 +4047,43 @@ fn resolve_control_evidence_with_context(
                     .and_then(Value::as_i64)
                     .unwrap_or(i64::MAX);
                 let max_high = policy.config.get("max_high").and_then(Value::as_i64);
-                let summary = format!(
-                    "Derivation {} has no completed CVE scan for '{}'.",
-                    context.derivation_id, policy.name
-                );
-                let body = format!("derivation_id={}", context.derivation_id);
-                (
-                    ComplianceControlStatus::NotChecked,
-                    summary,
-                    body,
-                    "cve_scan",
-                    "No applicable CVE scan",
-                )
+                match cve_scan {
+                    None => (
+                        ComplianceControlStatus::NotChecked,
+                        format!(
+                            "Derivation {} has no completed CVE scan for '{}'.",
+                            context.derivation_id, policy.name
+                        ),
+                        format!("derivation_id={}", context.derivation_id),
+                        "cve_scan",
+                        "No applicable CVE scan",
+                    ),
+                    Some((scan_id, critical_count, high_count)) => {
+                        let passed = i64::from(*critical_count) <= max_critical
+                            && max_high.is_none_or(|max| i64::from(*high_count) <= max);
+                        (
+                            if passed {
+                                ComplianceControlStatus::Pass
+                            } else {
+                                ComplianceControlStatus::Fail
+                            },
+                            format!(
+                                "Completed CVE scan for '{}' found {} critical and {} high findings.",
+                                policy.name, critical_count, high_count
+                            ),
+                            format!(
+                                "scan_id={scan_id}; derivation_id={}; critical={critical_count}; high={high_count}; max_critical={max_critical}; max_high={}",
+                                context.derivation_id,
+                                max_high.map_or_else(
+                                    || "unbounded".to_string(),
+                                    |value| value.to_string()
+                                )
+                            ),
+                            "cve_scan",
+                            "Completed CVE scan",
+                        )
+                    }
+                }
             }
         },
         _ => (
@@ -3971,8 +4114,15 @@ async fn resolve_control_evidence(
     policy: PolicyRow,
 ) -> Result<ComplianceControlEvidence> {
     let context = assessment_context(pool, system.id).await?;
+    let cve_scan = match context.as_ref() {
+        Some(context) => latest_completed_cve_scan(pool, context.derivation_id).await?,
+        None => None,
+    };
     Ok(resolve_control_evidence_with_context(
-        context, system, policy,
+        context,
+        cve_scan.as_ref(),
+        system,
+        policy,
     ))
 }
 
@@ -4251,6 +4401,14 @@ mod tests {
         .await
         .unwrap();
         let draft_id = created.current_draft_version_id.unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundle_versions SET framework_version_id = $1 WHERE id = $2",
+        )
+        .bind(framework_version_id)
+        .bind(draft_id)
+        .execute(&pool)
+        .await
+        .unwrap();
         let members = list_bundle_version_requirement_membership(&pool, draft_id)
             .await
             .unwrap()
@@ -4365,6 +4523,74 @@ mod tests {
 
         let published_summary = find_bundle(&pool, created.id).await.unwrap().unwrap();
         assert_eq!(published_summary.requirement_count, 2);
+
+        let other_framework_version_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_framework_versions \
+             (framework_id, version, canonical_release_key) \
+             VALUES ($1, '2', $2) RETURNING id",
+        )
+        .bind(framework_id)
+        .bind(format!("release-2-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let other_requirement_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_requirements \
+             (framework_id, canonical_requirement_key) VALUES ($1, $2) RETURNING id",
+        )
+        .bind(framework_id)
+        .bind(format!("REQ-OTHER-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let other_requirement_version_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_requirement_versions \
+             (requirement_id, framework_version_id, external_id, kind) \
+             VALUES ($1, $2, 'REQ-OTHER', 'rule') RETURNING id",
+        )
+        .bind(other_requirement_id)
+        .bind(other_framework_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let cross_release = update_bundle(
+            &pool,
+            created.id,
+            UpdateComplianceBundleRequest {
+                name: created.name.clone(),
+                framework: created.framework.clone(),
+                version: Some(created.version.clone()),
+                description: created.description.clone(),
+                required_envs: vec![],
+                policy_ids: vec![],
+                requirement_version_ids: vec![other_requirement_version_id],
+            },
+            None,
+        )
+        .await
+        .expect_err("requirements from another source release must be rejected");
+        assert!(matches!(
+            cross_release.downcast_ref::<BundleValidationError>(),
+            Some(BundleValidationError::RequirementFrameworkMismatch {
+                requirement_version_id,
+                expected_framework_version_id,
+                actual_framework_version_id,
+            }) if *requirement_version_id == other_requirement_version_id
+                && *expected_framework_version_id == framework_version_id
+                && *actual_framework_version_id == other_framework_version_id
+        ));
+        let current_draft_after_rejection: Option<Uuid> = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1",
+        )
+        .bind(created.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            current_draft_after_rejection, None,
+            "rejected cross-release update must roll back its derived draft"
+        );
 
         let derived = update_bundle(
             &pool,
@@ -4788,6 +5014,47 @@ mod tests {
             critical_cve_count: 0,
             high_cve_count: 0,
         }
+    }
+
+    /// Regression for catalog/detail parity: the aggregate path has always
+    /// evaluated completed CVE scans, while the drawer/evidence path used to
+    /// ignore the same scan and return NotChecked unconditionally.
+    #[test]
+    fn detailed_cve_evidence_uses_completed_scan_thresholds() {
+        let context = AssessmentContext {
+            derivation_id: 42,
+            policy_results: Value::Null,
+        };
+        let cve_policy = policy(
+            "require_cve_check",
+            serde_json::json!({"max_critical": 0, "max_high": 0}),
+            true,
+        );
+
+        let passing_scan = (Uuid::new_v4(), 0, 0);
+        let passing = resolve_control_evidence_with_context(
+            Some(context.clone()),
+            Some(&passing_scan),
+            &system("healthy", 0, 0),
+            cve_policy.clone(),
+        );
+        assert!(matches!(passing.status, ComplianceControlStatus::Pass));
+        let passing_artifact = passing.evidence_items[0]
+            .artifact
+            .as_ref()
+            .expect("completed scan evidence must include an artifact");
+        assert_eq!(passing_artifact.artifact_type, "cve_scan");
+        assert!(passing_artifact.body.contains("critical=0"));
+
+        let failing_scan = (Uuid::new_v4(), 1, 0);
+        let failing = resolve_control_evidence_with_context(
+            Some(context),
+            Some(&failing_scan),
+            &system("healthy", 1, 0),
+            cve_policy,
+        );
+        assert!(matches!(failing.status, ComplianceControlStatus::Fail));
+        assert!(failing.evidence_items[0].body.contains("critical=1"));
     }
 
     #[test]

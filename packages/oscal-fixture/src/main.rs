@@ -82,10 +82,6 @@ struct ComplianceSystemRollup {
     assignment_reason: Option<String>,
     #[serde(default)]
     assignment_approved_by: Option<String>,
-    #[serde(default)]
-    assignment_deadline: Option<String>,
-    #[serde(default)]
-    assignment_poam: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -608,8 +604,6 @@ fn build_fixture() -> String {
             assignment_status: None,
             assignment_reason: None,
             assignment_approved_by: None,
-            assignment_deadline: None,
-            assignment_poam: None,
         },
         ComplianceSystemRollup {
             system_id: sys2_id,
@@ -624,8 +618,6 @@ fn build_fixture() -> String {
             assignment_status: None,
             assignment_reason: None,
             assignment_approved_by: None,
-            assignment_deadline: None,
-            assignment_poam: None,
         },
     ];
 

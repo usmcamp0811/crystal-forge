@@ -2025,6 +2025,20 @@
       "baseline": "advisory"
     },
     {
+      "name": "30e-policy-card-direct-edit-preserves-evidence",
+      "description": "Direct card Edit (never opening the drawer) shows existing evidence and adding more extends rather than replaces it",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
       "name": "31-not-found",
       "description": "Catch-all 404 page renders for unknown routes inside the app shell",
       "route": "/:..route",

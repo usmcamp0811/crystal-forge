@@ -267,20 +267,128 @@ async function fillDioxusInput(locator, value) {
   }, value);
 }
 
-async function collapseOnboardingCoach(page) {
-  const coachPanel = page.locator("[data-testid='onboarding-coach-panel']").first();
-  if (await coachPanel.isVisible().catch(() => false)) {
-    const tagName = await coachPanel.evaluate((element) => element.tagName).catch(() => "");
-    if (tagName === "BUTTON") {
-      await coachPanel.evaluate((el) => el.click());
-      await page.waitForTimeout(250);
+/**
+ * Remove every rule currently listed in the policy editor.
+ *
+ * A new policy is seeded with two UI-only pipeline gates ("Eval must pass",
+ * "Build must succeed") that the backend does not persist. `save_blocker`
+ * refuses to save while any non-persisted rule is present, so tests that
+ * create a policy must clear these first and then add a supported assertion.
+ *
+ * Always removes index 0 because the list re-indexes after each removal.
+ */
+async function removeAllPolicyRules(page) {
+  for (let guard = 0; guard < 20; guard += 1) {
+    const remove = page.getByTestId("policy-rule-remove-0");
+    if ((await remove.count()) === 0) {
+      return;
+    }
+    await remove.click();
+  }
+  throw new Error("removeAllPolicyRules: rule list did not drain after 20 removals");
+}
+
+/**
+ * Persist the onboarding coach in its collapsed state.
+ *
+ * The coach reads `cf.coach.collapsed` from localStorage on mount, so seeding
+ * the key before the app boots keeps the drawer collapsed across every
+ * subsequent navigation and reload in the session. Clicking "Minimize" after
+ * the fact races the drawer's async mount: the expanded <aside> covers the
+ * content column and swallows pointer events, producing click timeouts that
+ * look like missing elements.
+ */
+/**
+ * Filter the policy catalog down to a single policy by name.
+ *
+ * The seeded catalog holds >100 policies spread across collapsible category
+ * groups, so a freshly created policy is frequently not rendered/visible.
+ * Searching guarantees its card is on screen before interacting with it.
+ */
+async function filterPolicyCatalog(page, name) {
+  const search = page.getByPlaceholder("Search policies…");
+  await search.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+  await search.fill(name);
+  const card = page.locator(`[data-policy-card][data-policy-name="${name}"]`);
+
+  // The catalog splits policies into Platform and Security domains. New
+  // custom-check policies default to Security, while the page opens on
+  // Platform. Search only filters the active domain, so try Security before
+  // concluding that the policy failed to load.
+  if ((await card.count()) === 0) {
+    const securityTab = page.getByRole("tab", { name: /Security controls/i });
+    if ((await securityTab.count()) > 0) {
+      await securityTab.click();
     }
   }
-  const coachCollapse = page.locator("[data-testid='onboarding-coach-collapse']").first();
-  if (await coachCollapse.isVisible().catch(() => false)) {
-    await coachCollapse.evaluate((el) => el.click());
-    await page.waitForTimeout(250);
+  try {
+    await card.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+  } catch (err) {
+    const diag = await page.evaluate((wanted) => {
+      const cards = Array.from(document.querySelectorAll("[data-policy-card]"));
+      return {
+        totalCards: cards.length,
+        names: cards.slice(0, 15).map((c) => c.getAttribute("data-policy-name")),
+        wantedInDom: cards.some((c) => c.getAttribute("data-policy-name") === wanted),
+        bodyHasName: document.body.innerText.includes(wanted),
+        loadError: Array.from(document.querySelectorAll("*"))
+          .find((element) => element.textContent?.startsWith("Failed to load policies:"))
+          ?.textContent ?? null,
+        bodyText: document.body.innerText.slice(0, 2000),
+      };
+    }, name);
+    throw new Error(
+      `filterPolicyCatalog("${name}") failed: ${err.message}\nDIAG=${JSON.stringify(diag)}`,
+    );
   }
+}
+
+async function suppressOnboardingCoach(page) {
+  await page.addInitScript(() => {
+    try {
+      window.localStorage.setItem("cf.coach.collapsed", "true");
+      window.localStorage.setItem("cf.coach.force_show", "false");
+    } catch (_) {
+      /* storage unavailable; the runtime fallback below still applies */
+    }
+  });
+}
+
+async function collapseOnboardingCoach(page) {
+  // Best-effort runtime collapse for pages already loaded. Prefer
+  // suppressOnboardingCoach() before the first navigation.
+  const expandedDrawer = () => page.locator("aside[data-testid='onboarding-coach-panel']");
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if ((await expandedDrawer().count()) === 0) {
+      await page.waitForTimeout(200);
+      if ((await expandedDrawer().count()) === 0) {
+        return;
+      }
+    }
+
+    const coachCollapse = page.locator("[data-testid='onboarding-coach-collapse']").first();
+    if ((await coachCollapse.count()) > 0) {
+      // Use a DOM click: the drawer itself intercepts synthetic pointer events.
+      await coachCollapse.evaluate((el) => el.click()).catch(() => {});
+    }
+
+    await page
+      .waitForFunction(
+        () => !document.querySelector("aside[data-testid='onboarding-coach-panel']"),
+        undefined,
+        { timeout: 2000 },
+      )
+      .catch(() => {});
+
+    if ((await expandedDrawer().count()) === 0) {
+      return;
+    }
+  }
+
+  throw new Error(
+    "collapseOnboardingCoach: onboarding coach drawer stayed open and will intercept pointer events",
+  );
 }
 
 async function waitForAssertionCardCount(page, expected, message) {
@@ -9549,7 +9657,7 @@ security.audit.enable = true;</fixtext>
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify({ bundle_id: bundleId, bundle_version_id: versionId, systems: [{ system_id: systemId, hostname: "reason-fixture-host", environment: "production", applies: true, total: 1, evaluated_total: 1, pass: 1, warn: 0, fail: 0, waiver: 0, not_checked: 0, not_applicable: 0, error: 0, report_only: 0, score: 100, resolution_state: "resolved", assignment_status: "pinned", assignment_reason: "Change freeze exception", assignment_approved_by: null, assignment_deadline: null, assignment_poam: null }], totals: { system_count: 1, fully_compliant_count: 1, pass: 1, warn: 0, fail: 0, waiver: 0, total_controls: 1, overall_score: 100 } }),
+          body: JSON.stringify({ bundle_id: bundleId, bundle_version_id: versionId, systems: [{ system_id: systemId, hostname: "reason-fixture-host", environment: "production", applies: true, total: 1, evaluated_total: 1, pass: 1, warn: 0, fail: 0, waiver: 0, not_checked: 0, not_applicable: 0, error: 0, report_only: 0, score: 100, resolution_state: "resolved", assignment_status: "pinned", assignment_reason: "Change freeze exception", assignment_approved_by: null }], totals: { system_count: 1, fully_compliant_count: 1, pass: 1, warn: 0, fail: 0, waiver: 0, total_controls: 1, overall_score: 100 } }),
         });
       });
       await page.route(`**/api/v1/compliance/bundle-versions/${versionId}/requirement-coverage`, async (route) => {
@@ -9921,6 +10029,221 @@ security.audit.enable = true;</fixtext>
         page.getByText("No evidence defined", { exact: false }),
         "Expected evidence cleared and persisted after reload",
       );
+    },
+  },
+  {
+    name: "30e-policy-card-direct-edit-preserves-evidence",
+    description:
+      "Direct card Edit (never opening the drawer) shows existing evidence and adding more extends rather than replaces it",
+    action: async (page) => {
+      const POLICY = "Direct Card Edit Evidence Policy";
+      const CMD = "systemctl is-active nginx";
+      const FILE_PATH = "/etc/nginx/nginx.conf";
+
+      // Scope strictly to this policy's card, then use the card's own Edit
+      // control. The card root has an onclick that opens the drawer, so the
+      // Edit button (which stops propagation) is the only way to reach the
+      // editor without going through the drawer.
+      const cardEditButton = () =>
+        page
+          .locator(`[data-policy-card][data-policy-name="${POLICY}"]`)
+          .getByTestId("policy-card-edit");
+
+      const openEvidenceTab = async () => {
+        const modal = page.getByTestId("policy-editor-modal");
+        await modal.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+        const tab = page.getByTestId("policy-editor-tab-evidence");
+        await tab.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+        await tab.click();
+      };
+
+      // Guard: this regression is only meaningful if the drawer never opened.
+      const assertDrawerNeverOpened = async (context) => {
+        const drawerCount = await page.locator(".policy-drawer-body").count();
+        if (drawerCount > 0) {
+          throw new Error(
+            `${context}: policy drawer was open — this test must exercise the direct card Edit path only`,
+          );
+        }
+      };
+
+      // ── STEP 1: create a policy carrying evidence A ────────────────────
+      // Seed the collapsed flag before the first load so the coach drawer
+      // never covers the policy cards or the editor on any later reload.
+      await suppressOnboardingCoach(page);
+      await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+      await collapseOnboardingCoach(page);
+      await page.getByRole("button", { name: /New custom policy/i }).first().click();
+      await page
+        .getByRole("heading", { name: "New custom policy" })
+        .waitFor({ timeout: LOAD_TIMEOUT });
+      await page.getByLabel("Name", { exact: true }).waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await page.getByLabel("Name", { exact: true }).fill(POLICY);
+
+      // The editor seeds two UI-only pipeline gates that are not persisted and
+      // block save. Remove them and add one backend-supported assertion.
+      // Rules live on the Enforcement tab.
+      const enforcementTab = page.getByTestId("policy-editor-tab-enforcement");
+      await enforcementTab.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await enforcementTab.click();
+      await removeAllPolicyRules(page);
+      await page.getByTestId("policy-editor-add-rule").selectOption("custom_eval");
+      const createExpr = page.getByTestId("policy-rule-custom-eval-expr-0");
+      await createExpr.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await createExpr.fill("config.services.nginx.enable");
+
+      const createEvidenceTab = page.getByTestId("policy-editor-tab-evidence");
+      await createEvidenceTab.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await createEvidenceTab.click();
+      await page.getByTestId("policy-editor-add-evidence").selectOption("command");
+
+      const createCmd = page.getByTestId("policy-evidence-command-cmd-0");
+      await createCmd.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await createCmd.fill(CMD);
+      await page.getByTestId("policy-evidence-command-expect-0").fill("active");
+
+      const [createResponse] = await Promise.all([
+        page.waitForResponse(
+          (response) =>
+            response.request().method() === "POST" &&
+            response.url().includes("/api/v1/deployment-policies"),
+          { timeout: LOAD_TIMEOUT },
+        ),
+        page.getByRole("button", { name: /Create policy/i }).click(),
+      ]);
+      if (!createResponse.ok()) {
+        throw new Error(
+          `Policy create request failed: HTTP ${createResponse.status()} ${await createResponse.text()}`,
+        );
+      }
+      await page.getByTestId("policy-editor-modal").waitFor({ state: "detached", timeout: LOAD_TIMEOUT });
+      // Surface any in-modal validation/save error instead of failing later
+      // with an opaque "element not found".
+      const createError = page.locator(".cf-policy-modal-error");
+      if ((await createError.count()) > 0) {
+        const messages = await createError.allInnerTexts();
+        throw new Error(`Policy create was rejected: ${messages.join(" | ")}`);
+      }
+      {
+        const modalStillOpen = (await page.getByTestId("policy-editor-modal").count()) > 0;
+        const probe = await page.evaluate(async (policyName) => {
+          const res = await fetch("/api/v1/deployment-policies?limit=1000&offset=0", {
+            credentials: "include",
+          });
+          const body = await res.text();
+          let found = null;
+          let policy = null;
+          try {
+            policy = JSON.parse(body).policies.find(
+              (p) => (p.name ?? p.policy?.name) === policyName,
+            );
+            found = Boolean(policy);
+          } catch (e) {
+            found = `parse-error: ${body.slice(0, 200)}`;
+          }
+          return { status: res.status, found, policy };
+        }, POLICY);
+        if (probe.found !== true) {
+          throw new Error(
+            `Policy create did not persist. modalStillOpen=${modalStillOpen} ` +
+              `apiStatus=${probe.status} found=${JSON.stringify(probe.found)}`,
+          );
+        }
+        const policyRecord = probe.policy?.policy ?? probe.policy;
+        const currentVersion = policyRecord?.versions?.find(
+          (version) => version.id === policyRecord.current_version_id,
+        );
+        if (
+          !currentVersion?.evidence_specs?.some(
+            (spec) => (spec.cmd ?? spec.details?.cmd) === CMD,
+          )
+        ) {
+          throw new Error(
+            `Created policy did not persist evidence A in its current version: ` +
+              JSON.stringify({
+                currentVersionId: policyRecord?.current_version_id,
+                versions: policyRecord?.versions,
+              }),
+          );
+        }
+      }
+      await page.waitForTimeout(500);
+
+      // ── STEP 2: return to the catalog with a full reload ───────────────
+      // Reload guarantees the editor baseline comes from the catalog fetch
+      // rather than any in-memory state left over from the create flow.
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await collapseOnboardingCoach(page);
+      await filterPolicyCatalog(page, POLICY);
+      await assertDrawerNeverOpened("after reload, before first direct edit");
+
+      // ── STEP 3: direct card Edit ───────────────────────────────────────
+      await cardEditButton().click();
+      await assertDrawerNeverOpened("after clicking the card Edit button");
+      await openEvidenceTab();
+
+      // ── STEP 4: evidence A must already be present ─────────────────────
+      // This is the assertion that fails when the catalog conversion leaves
+      // `evidence_specs` as None: the editor opens with an empty baseline.
+      const existingCommand = page.getByTestId("policy-evidence-command-cmd-0");
+      await existingCommand.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      const existingCommandValue = await existingCommand.inputValue();
+      if (existingCommandValue !== CMD) {
+        throw new Error(
+          `Expected existing evidence A in the direct-card editor; got ${JSON.stringify(existingCommandValue)}`,
+        );
+      }
+
+      // ── STEP 5: add evidence B ─────────────────────────────────────────
+      await page.getByTestId("policy-editor-add-evidence").selectOption("file");
+      const filePath = page.getByTestId("policy-evidence-file-path-1");
+      await filePath.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await filePath.fill(FILE_PATH);
+
+      // ── STEP 6: save ───────────────────────────────────────────────────
+      await page.getByRole("button", { name: /Update|Save/i }).click();
+      try {
+        await page
+          .getByTestId("policy-editor-modal")
+          .waitFor({ state: "hidden", timeout: LOAD_TIMEOUT });
+      } catch (err) {
+        const messages = await page.locator(".cf-policy-modal-error").allInnerTexts();
+        throw new Error(
+          `Direct-card evidence update did not close after save: ${messages.join(" | ") || err.message}`,
+        );
+      }
+      await page.waitForTimeout(500);
+
+      // ── STEP 7: reload to read persisted server state ──────────────────
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await collapseOnboardingCoach(page);
+      await filterPolicyCatalog(page, POLICY);
+      await assertDrawerNeverOpened("after reload, before second direct edit");
+
+      // ── STEP 8: direct card Edit again ─────────────────────────────────
+      await cardEditButton().click();
+      await assertDrawerNeverOpened("after second card Edit click");
+      await openEvidenceTab();
+
+      // ── STEP 9: BOTH A and B must survive ──────────────────────────────
+      // Against the buggy build, step 5 issued Some([B]) because the baseline
+      // was empty, so evidence A was destroyed and this assertion fails.
+      const persistedCommand = page.getByTestId("policy-evidence-command-cmd-0");
+      await persistedCommand.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      const persistedCommandValue = await persistedCommand.inputValue();
+      if (persistedCommandValue !== CMD) {
+        throw new Error(
+          `Expected evidence A to survive the direct-card edit; got ${JSON.stringify(persistedCommandValue)}`,
+        );
+      }
+      const persistedFile = page.getByTestId("policy-evidence-file-path-1");
+      await persistedFile.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      const persistedFileValue = await persistedFile.inputValue();
+      if (persistedFileValue !== FILE_PATH) {
+        throw new Error(
+          `Expected evidence B after the direct-card edit; got ${JSON.stringify(persistedFileValue)}`,
+        );
+      }
     },
   },
   {

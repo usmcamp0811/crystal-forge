@@ -1169,10 +1169,6 @@ pub struct ComplianceSystemRollup {
     pub assignment_reason: Option<String>,
     #[serde(default)]
     pub assignment_approved_by: Option<String>,
-    #[serde(default)]
-    pub assignment_deadline: Option<String>,
-    #[serde(default)]
-    pub assignment_poam: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

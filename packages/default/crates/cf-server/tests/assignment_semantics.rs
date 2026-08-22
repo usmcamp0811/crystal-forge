@@ -277,6 +277,97 @@ async fn append_assignment_version(
     version_id
 }
 
+/// Assignment version pointers are composite lineage references, not arbitrary
+/// UUID references. This fails against migration 0204's single-column FKs,
+/// which allowed assignment A to expose assignment B's immutable snapshot and
+/// allowed previous_version_id to splice histories together.
+#[sqlx::test]
+async fn assignment_snapshot_pointers_cannot_cross_lineages(pool: PgPool) {
+    let bundle_id = create_bundle(&pool, "assignment-lineage-integrity", "test").await;
+    let bundle_version_id =
+        create_bundle_version(&pool, bundle_id, "1.0", "accepted", "lineage integrity").await;
+    let system_a = create_system(&pool, "lineage-a", None).await;
+    let system_b = create_system(&pool, "lineage-b", None).await;
+    let (assignment_a, version_a) = create_system_assignment_with_reason(
+        &pool,
+        bundle_id,
+        bundle_version_id,
+        system_a,
+        Some("A"),
+    )
+    .await;
+    let (_assignment_b, version_b) = create_system_assignment_with_reason(
+        &pool,
+        bundle_id,
+        bundle_version_id,
+        system_b,
+        Some("B"),
+    )
+    .await;
+
+    let mut pointer_tx = pool
+        .begin()
+        .await
+        .expect("begin cross-lineage pointer test");
+    sqlx::query("UPDATE compliance_bundle_assignments SET current_version_id = $1 WHERE id = $2")
+        .bind(version_b)
+        .bind(assignment_a)
+        .execute(&mut *pointer_tx)
+        .await
+        .expect("deferred constraint permits statement until commit");
+    let pointer_error = pointer_tx
+        .commit()
+        .await
+        .expect_err("assignment must not point at another lineage's snapshot");
+    assert_eq!(
+        pointer_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23503")
+    );
+
+    let mut history_tx = pool
+        .begin()
+        .await
+        .expect("begin cross-lineage history test");
+    sqlx::query(
+        "INSERT INTO compliance_bundle_assignment_versions \
+         (assignment_id, previous_version_id, version_number, bundle_version_id, \
+          enforcement_mode, assignment_overlay_digest) \
+         VALUES ($1, $2, 2, $3, 'enforce', 'cross-lineage-test')",
+    )
+    .bind(assignment_a)
+    .bind(version_b)
+    .bind(bundle_version_id)
+    .execute(&mut *history_tx)
+    .await
+    .expect("deferred constraint permits statement until commit");
+    let history_error = history_tx
+        .commit()
+        .await
+        .expect_err("assignment history must not reference another lineage");
+    assert_eq!(
+        history_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23503")
+    );
+
+    let current: Uuid = sqlx::query_scalar(
+        "SELECT current_version_id FROM compliance_bundle_assignments WHERE id = $1",
+    )
+    .bind(assignment_a)
+    .fetch_one(&pool)
+    .await
+    .expect("load original current version");
+    assert_eq!(
+        current, version_a,
+        "failed writes must leave lineage A unchanged"
+    );
+}
+
 #[sqlx::test]
 async fn test_assignment_reason_lifecycle_and_snapshot_authority(pool: PgPool) {
     let bundle_id = create_bundle(&pool, "assignment-reason-lifecycle", "NIST CSF").await;

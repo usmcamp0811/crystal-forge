@@ -251,29 +251,15 @@ pub fn ScoreStrip(props: ScoreStripProps) -> Element {
     };
 
     rsx! {
-        div { class: "stat-strip",
-            // Overall score — wider stat with meta line
+        div { class: "stat-strip stat-strip-flush",
             div { class: "stat",
-                span { class: "stat-accent", style: "--stat-color:{score_color};" }
                 div { class: "stat-label", "Overall score" }
                 div { class: "stat-value", style: "color:{score_color};", "{score}%" }
-                div { class: "stat-meta",
-                    "{props.totals.fully_compliant_count} of {props.totals.system_count} hosts fully compliant"
-                }
             }
             ScoreStat { label: "Pass",          value: props.totals.pass,          color: "#34d399" }
             ScoreStat { label: "Warn",          value: props.totals.warn,          color: "#fbbf24" }
             ScoreStat { label: "Fail",          value: props.totals.fail,          color: "#f87171" }
             ScoreStat { label: "Waiver",        value: props.totals.waiver,        color: "#a78bfa" }
-            if props.totals.not_checked > 0 {
-                ScoreStat { label: "Not checked",   value: props.totals.not_checked,   color: "#94a3b8" }
-            }
-            if props.totals.not_applicable > 0 {
-                ScoreStat { label: "N/A",           value: props.totals.not_applicable, color: "#64748b" }
-            }
-            if props.totals.error > 0 {
-                ScoreStat { label: "Error",         value: props.totals.error,          color: "#f43f5e" }
-            }
         }
     }
 }
@@ -289,7 +275,6 @@ struct ScoreStatProps {
 fn ScoreStat(props: ScoreStatProps) -> Element {
     rsx! {
         div { class: "stat",
-            span { class: "stat-accent", style: "--stat-color:{props.color};" }
             div { class: "stat-label", "{props.label}" }
             div { class: "stat-value", style: "color:{props.color};", "{props.value}" }
         }
@@ -849,12 +834,6 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                                                 div { style: "margin-top:4px;display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--cf-text-muted);",
                                                     if let Some(approved_by) = system_ref.assignment_approved_by.as_deref() {
                                                         span { "Approved by ", span { class: "mono", "{approved_by}" } }
-                                                    }
-                                                    if let Some(deadline) = system_ref.assignment_deadline.as_deref() {
-                                                        span { "Migration deadline ", span { class: "mono", "{deadline}" } }
-                                                    }
-                                                    if let Some(poam) = system_ref.assignment_poam.as_deref() {
-                                                        span { "POA&M ", span { class: "mono", "{poam}" } }
                                                     }
                                                 }
                                             }

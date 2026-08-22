@@ -19,21 +19,22 @@ use crate::api::models::{
     ImportedPolicyCustomization, PolicyValueOverride, PublishBundleVersionRequest,
     RequirementCoverage, RequirementVersionSummary, SortOrder, SystemSummary, SystemsListParams,
     TrustBundleVersionRequest, UpdateAssignmentRequest, UpdateComplianceBundleRequest,
-    XccdfImportPlan, XccdfImportResponse, XccdfPreviewResponse, XccdfRuleImportAction,
+    XccdfDiagnostic, XccdfImportPlan, XccdfImportResponse, XccdfPreviewResponse,
+    XccdfRuleImportAction,
 };
 use crate::components::compliance::{
-    BundleCatalog, BundleHeader, ComparisonOperator, EvidenceDrawer, ImportReview,
-    PolicyAssertionDraft, RefinePolicyStep, RefinedPolicyDraft, RefinedRuleAction, RefinedStigRule,
-    ScoreStrip, SourceCheck, SourceCheckBodyPart, SourceStigRule, SystemsMatrix, TypedPolicyValue,
-    action_to_import, mapping_semantics_for,
+    action_to_import, mapping_semantics_for, BundleCatalog, BundleHeader, ComparisonOperator,
+    EvidenceDrawer, ImportReview, PolicyAssertionDraft, RefinePolicyStep, RefinedPolicyDraft,
+    RefinedRuleAction, RefinedStigRule, ScoreStrip, SourceCheck, SourceCheckBodyPart,
+    SourceStigRule, SystemsMatrix, TypedPolicyValue,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::components::io_menu::{IOMenu, IOMenuItem};
 use crate::components::loading::DashboardLoadingSpinner;
 use crate::components::policy::{PolicyDefinition, PolicyFormat};
 use crate::export::{
-    ExportPayload, build_cf_json, build_csv, build_oscal, build_sarif, download_print_html,
-    trigger_download,
+    build_cf_json, build_csv, build_oscal, build_sarif, download_print_html, trigger_download,
+    ExportPayload,
 };
 use crate::state::{app_state::AppState, auth};
 
@@ -252,11 +253,18 @@ pub fn ComplianceView() -> Element {
                 })
             })
         };
-        selected_bundle_version_id.set(next);
+        if current != next {
+            selected_bundle_version_id.set(next);
+            if let Some(bundle_id) = bundle_id {
+                start_systems_fetch(bundle_id, next);
+            }
+        }
     });
 
     use_effect(move || {
         let Some(version_id) = *selected_bundle_version_id.read() else {
+            let generation = *coverage_gen.peek() + 1;
+            coverage_gen.set(generation);
             coverage_requested_version.set(None);
             coverage_report.set(None);
             coverage_error.set(None);
@@ -352,6 +360,13 @@ pub fn ComplianceView() -> Element {
                 .await
             {
                 Ok(policy) => {
+                    let mut cached = policy_library.read().clone();
+                    if let Some(position) = cached.iter().position(|item| item.id == policy.id) {
+                        cached[position] = policy.clone();
+                    } else {
+                        cached.push(policy.clone());
+                    }
+                    policy_library.set(cached);
                     policy_drawer.set(Some(policy));
                     policy_loading.set(false);
                 }
@@ -364,7 +379,7 @@ pub fn ComplianceView() -> Element {
     };
 
     rsx! {
-        div { style: "display:flex;flex-direction:column;gap:16px;",
+        div { class: "cf-compliance-view", style: "display:flex;flex-direction:column;gap:16px;",
             // ── Page head ──────────────────────────────────────────────────
             div { class: "page-head",
                 div {
@@ -684,9 +699,16 @@ pub fn ComplianceView() -> Element {
                                             version_action_error.set(None);
                                             spawn(async move {
                                                 match create_bundle_draft(&bundle_id, &CreateBundleDraftRequest { new_version: None }).await {
-                                                    Ok(draft) => {
-                                                        selected_bundle_version_id.set(Some(draft.version_id));
-                                                        version_action_busy.set(false);
+                                                     Ok(draft) => {
+                                                         selected_bundle_version_id.set(Some(draft.version_id));
+                                                         // Selecting the newly derived draft must
+                                                         // re-scope Systems/stat totals immediately.
+                                                         // Otherwise coverage/evidence follow the
+                                                         // new shared version signal while the drawer
+                                                         // continues displaying the prior revision's
+                                                         // systems and score.
+                                                         start_systems_fetch(bundle_id, Some(draft.version_id));
+                                                         version_action_busy.set(false);
                                                         if let Ok(items) = fetch_compliance_bundles().await { bundles.set(items); }
                                                     }
                                                     Err(error) => {
@@ -802,6 +824,7 @@ pub fn ComplianceView() -> Element {
                     next.push(bundle);
                     bundles.set(next);
                     selected_bundle_id.set(Some(id));
+                    selected_bundle_version_id.set(version_id);
                     evidence.set(None);
                     evidence_error.set(None);
                     let eg = *evidence_gen.read() + 1;
@@ -825,12 +848,17 @@ pub fn ComplianceView() -> Element {
                     on_close: move |_| show_edit_bundle.set(false),
                     on_saved: move |updated: ComplianceBundleSummary| {
                         let id = updated.id;
-                        let version_id = updated.current_published_version_id.or(updated.current_draft_version_id);
+                        let current_version_id = *selected_bundle_version_id.read();
+                        let version_id = current_version_id
+                            .filter(|selected| updated.versions.iter().any(|version| version.id == *selected))
+                            .or(updated.current_published_version_id)
+                            .or(updated.current_draft_version_id);
                         let mut next = bundles.read().clone();
                         if let Some(pos) = next.iter().position(|b| b.id == id) {
                             next[pos] = updated;
                         }
                         bundles.set(next);
+                        selected_bundle_version_id.set(version_id);
                         show_edit_bundle.set(false);
                         start_systems_fetch(id, version_id);
                     },
@@ -870,9 +898,14 @@ pub fn ComplianceView() -> Element {
                     spawn(async move {
                         if let Ok(items) = fetch_compliance_bundles().await {
                             let first_id = items.first().map(|b| b.id);
+                            let first_version_id = items.first().and_then(|bundle| {
+                                bundle.current_published_version_id.or(bundle.current_draft_version_id)
+                            });
                             bundles.set(items);
                             if let Some(id) = first_id {
                                 selected_bundle_id.set(Some(id));
+                                selected_bundle_version_id.set(first_version_id);
+                                start_systems_fetch(id, first_version_id);
                             }
                         }
                     });
@@ -1133,21 +1166,21 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
         .map(|version| version.publication_state.clone())
         .unwrap_or_else(|| "unknown".to_string());
 
-      let request = move || {
-          let scope_id = uuid::Uuid::parse_str(scope_id.read().trim()).ok()?;
-          let reason_text = reason.read().clone();
-          let reason_value = reason_text.trim();
-          Some(CreateAssignmentRequest {
-              bundle_version_id: props.bundle_version_id,
-              scope_type: scope_type.read().clone(),
-              scope_id,
-              enforcement_mode: Some(enforcement_mode.read().clone()),
-              exclusions: (!exclusions.read().is_empty()).then_some(exclusions.read().clone()),
-              additions: (!additions.read().is_empty()).then_some(additions.read().clone()),
-              value_overrides: None,
-              reason: (!reason_value.is_empty()).then_some(reason_value.to_string()),
-          })
-      };
+    let request = move || {
+        let scope_id = uuid::Uuid::parse_str(scope_id.read().trim()).ok()?;
+        let reason_text = reason.read().clone();
+        let reason_value = reason_text.trim();
+        Some(CreateAssignmentRequest {
+            bundle_version_id: props.bundle_version_id,
+            scope_type: scope_type.read().clone(),
+            scope_id,
+            enforcement_mode: Some(enforcement_mode.read().clone()),
+            exclusions: (!exclusions.read().is_empty()).then_some(exclusions.read().clone()),
+            additions: (!additions.read().is_empty()).then_some(additions.read().clone()),
+            value_overrides: None,
+            reason: (!reason_value.is_empty()).then_some(reason_value.to_string()),
+        })
+    };
 
     let current_request = request();
     let can_preview = current_request.is_some() && !*preview_busy.read() && !*busy.read();
@@ -1647,7 +1680,7 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                                             };
                                             edit_busy.set(true);
                                             edit_error.set(None);
-                                            
+
                                              let reason_val = edit_reason.read().clone();
                                              let reason_update = if reason_val == original_reason {
                                                  crate::api::models::FieldUpdate::Unset
@@ -1837,20 +1870,48 @@ fn clear_stig_import_draft() {
 }
 
 fn save_stig_import_draft(draft: &StigImportDraftMetadata) -> Result<(), String> {
-    let raw = serde_json::to_string(draft)
-        .map_err(|error| format!("Could not serialize paused STIG import: {error}"))?;
-    if raw.len() > MAX_STIG_IMPORT_DRAFT_BYTES {
-        return Err(format!(
-            "Paused STIG import is too large to save ({:.1} MiB; limit is 2 MiB).",
-            raw.len() as f64 / (1024.0 * 1024.0)
-        ));
-    }
+    let raw = serialize_stig_import_draft(draft, MAX_STIG_IMPORT_DRAFT_BYTES)?;
     let storage = web_sys::window()
         .and_then(|window| window.local_storage().ok().flatten())
         .ok_or_else(|| "Browser local storage is unavailable.".to_string())?;
     storage
         .set_item(STIG_IMPORT_DRAFT_KEY, &raw)
         .map_err(|_| "Browser storage rejected the paused STIG import.".to_string())
+}
+
+/// Serialize a resumable draft with a deterministic metadata-only fallback.
+///
+/// The 2 MiB guard applies to the complete serialized object, not merely the
+/// cached preview. A preview can fit independently while the complete draft
+/// (including refined rule payloads) exceeds the guard. In that case preserve
+/// workflow identity/cursor/selection metadata and omit all restorable payload
+/// that can be reconstructed after the source file is reattached.
+fn serialize_stig_import_draft(
+    draft: &StigImportDraftMetadata,
+    max_bytes: usize,
+) -> Result<String, String> {
+    let raw = serde_json::to_string(draft)
+        .map_err(|error| format!("Could not serialize paused STIG import: {error}"))?;
+    if raw.len() <= max_bytes {
+        return Ok(raw);
+    }
+
+    let mut metadata_only = draft.clone();
+    metadata_only.preview_payload = None;
+    metadata_only.refined_rules.clear();
+    // Later workflow steps depend on the discarded preview/refinement payload.
+    // Resume at upload so the user must reattach and re-validate the source
+    // before any reconstructed defaults can be reviewed or committed.
+    metadata_only.step = "upload".to_string();
+    let raw = serde_json::to_string(&metadata_only)
+        .map_err(|error| format!("Could not serialize paused STIG import metadata: {error}"))?;
+    if raw.len() > max_bytes {
+        return Err(format!(
+            "Paused STIG import is too large to save ({:.1} MiB; limit is 2 MiB).",
+            raw.len() as f64 / (1024.0 * 1024.0)
+        ));
+    }
+    Ok(raw)
 }
 
 fn environment_ids_for_names(
@@ -2471,12 +2532,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                 .map(|rule| rule.source.rule_id.clone())
                 .collect(),
             refined_rules: refined_rules.read().clone(),
-            preview_payload: preview_response.read().as_ref().and_then(|preview| {
-                serde_json::to_vec(preview)
-                    .ok()
-                    .filter(|payload| payload.len() <= MAX_STIG_IMPORT_DRAFT_BYTES)
-                    .map(|_| preview.clone())
-            }),
+            preview_payload: preview_response.read().clone(),
         })
     };
     let native_plan_environments = props.environments.clone();
@@ -5242,6 +5298,63 @@ mod tests {
         assert!(!is_standard_bundle_framework("CMMC 3.0"));
     }
 
+    /// Fails against the old preview-only size check: the preview fit its own
+    /// check, but the complete draft could exceed the storage guard and pause
+    /// failed instead of writing the required metadata-only recovery state.
+    #[test]
+    fn oversized_complete_stig_draft_falls_back_to_metadata_only() {
+        let preview = XccdfPreviewResponse {
+            sha256: "a".repeat(64),
+            filename: Some("large.xml".into()),
+            document_class: Some("foreign_xccdf".into()),
+            fidelity: Some("preserved_opaque".into()),
+            fidelity_losses: vec![],
+            xccdf_version: Some("1.2".into()),
+            benchmark: None,
+            profiles: vec![],
+            rules: vec![],
+            rule_count: 0,
+            profile_count: 0,
+            errors: vec![],
+            // Inflate only the restorable preview payload. Metadata remains
+            // comfortably below the deliberately small test guard.
+            warnings: vec![XccdfDiagnostic {
+                code: "OVERSIZED_TEST_PAYLOAD".to_string(),
+                summary: "x".repeat(4096),
+                blocking: false,
+            }],
+            cf_native_reconciliation: None,
+            foreign_stig_reconciliation: None,
+        };
+        let selected = "SV-TEST-001_rule".to_string();
+        let draft = StigImportDraftMetadata {
+            version: 1,
+            step: "refine".to_string(),
+            original_filename: "large.xml".to_string(),
+            expected_sha256: Some("a".repeat(64)),
+            bundle_name: "Large STIG".to_string(),
+            environment_ids: vec![uuid::Uuid::new_v4()],
+            refine_cursor: 7,
+            selected_rule_ids: vec![selected.clone()],
+            refined_rule_ids: vec![selected.clone()],
+            refined_rules: Vec::new(),
+            preview_payload: Some(preview),
+        };
+
+        let raw = serialize_stig_import_draft(&draft, 1024)
+            .expect("oversized restorable payload must fall back to metadata");
+        assert!(raw.len() <= 1024);
+        let restored: StigImportDraftMetadata =
+            serde_json::from_str(&raw).expect("metadata-only draft must deserialize");
+        assert!(restored.preview_payload.is_none());
+        assert!(restored.refined_rules.is_empty());
+        assert_eq!(restored.step, "upload");
+        assert_eq!(restored.refine_cursor, 7);
+        assert_eq!(restored.selected_rule_ids, vec![selected.clone()]);
+        assert_eq!(restored.refined_rule_ids, vec![selected]);
+        assert_eq!(restored.environment_ids, draft.environment_ids);
+    }
+
     #[test]
     fn foreign_nix_looking_fix_defaults_to_unbound_without_assertions() {
         let preview = XccdfPreviewResponse {
@@ -5499,7 +5612,7 @@ fn RequirementCoverageCard(
                         "No normalized requirements are attached to this bundle revision. A DISA STIG import must always produce normalized requirement membership — this is a data-integrity violation, not an empty coverage state."
                     }
                 } else {
-                    div { class: "q-empty", "No normalized requirements are attached to this bundle revision." }
+                    div { class: "q-empty", "No requirement catalog modeled for {framework_label} yet." }
                 }
             } else if show_details {
                 div { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;",
@@ -5535,8 +5648,8 @@ fn RequirementCoverageCard(
                                             RequirementCoverage::RecoveryRequired => "var(--cf-error)",
                                         };
                                         let coverage_label = match row.coverage {
-                                            RequirementCoverage::Full => "Full",
-                                            RequirementCoverage::Partial => "Partial",
+                                            RequirementCoverage::Full => "Fully covered",
+                                            RequirementCoverage::Partial => "Partially covered",
                                             RequirementCoverage::Unmapped => "Unmapped",
                                             RequirementCoverage::RecoveryRequired => "Recovery required",
                                         };

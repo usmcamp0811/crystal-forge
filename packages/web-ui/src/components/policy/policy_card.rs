@@ -164,6 +164,7 @@ pub fn PolicyCard(
                     div { class: "flex items-center gap-2",
                         button {
                             class: "btn btn-subtle focus-ring xs",
+                            "data-testid": "policy-card-edit",
                             onclick: move |evt| {
                                 evt.stop_propagation();
                                 on_edit.call(policy_for_edit.clone());

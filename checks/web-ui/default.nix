@@ -673,6 +673,7 @@ in pkgs.testers.runNixOSTest {
       "30a-admin-automatic-retries-defaults-reset",
       "30b-admin-automatic-retries-save-reload",
       "30c-admin-automatic-retries-failed-save-retains-draft",
+      "30e-policy-card-direct-edit-preserves-evidence",
     ]
     failed_critical = [r['name'] for r in results if r['name'] in critical_tests and not r.get('ok')]
     if failed_critical:

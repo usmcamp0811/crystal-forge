@@ -1235,6 +1235,7 @@ pub fn PolicyEditorModal(
             onclick: move |_| on_close.call(()),
             div {
                 class: "modal cf-policy-modal-panel",
+                "data-testid": "policy-editor-modal",
                 style: "width:min(680px,96vw);max-height:92vh;",
                 onclick: |evt| evt.stop_propagation(),
 
@@ -1339,8 +1340,9 @@ pub fn PolicyEditorModal(
                         if *active_tab.read() == PolicyEditorTab::Details {
                         div { style: "display:grid;grid-template-columns:1fr;gap:14px;",
                             div { class: "field",
-                                label { "Name" }
+                                label { r#for: "policy-editor-name", "Name" }
                                 input {
+                                    id: "policy-editor-name",
                                     class: if name_missing { "input focus-ring mono cf-policy-modal-field-error" } else { "input focus-ring mono" },
                                     placeholder: "e.g. canary-25",
                                     value: "{edit_name}",
@@ -1352,8 +1354,9 @@ pub fn PolicyEditorModal(
                             }
                         }
                         div { class: "field",
-                            label { "Description" }
+                            label { r#for: "policy-editor-description", "Description" }
                             input {
+                                id: "policy-editor-description",
                                 class: "input focus-ring",
                                 placeholder: "One-line summary shown in the registry",
                                 value: "{edit_description}",
@@ -1547,6 +1550,7 @@ pub fn PolicyEditorModal(
                                         RuleEditorRow { index, rule: rule.clone(), rules }
                                         button {
                                             class: "btn-icon focus-ring",
+                                            "data-testid": "policy-rule-remove-{index}",
                                             title: "Remove rule",
                                             onclick: move |_| {
                                                 let mut next = rules.read().clone();
@@ -1563,6 +1567,7 @@ pub fn PolicyEditorModal(
                             div { style: "margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;",
                                 select {
                                     class: "input focus-ring",
+                                    "data-testid": "policy-editor-add-rule",
                                     style: "max-width:260px;font-size:12px;",
                                     value: "{add_rule_kind}",
                                     onchange: move |event| {
@@ -1639,6 +1644,7 @@ pub fn PolicyEditorModal(
                              div { style: "margin-top:8px;display:flex;gap:6px;",
                                  select {
                                      class: "input focus-ring",
+                                     "data-testid": "policy-editor-add-evidence",
                                      style: "flex:1;font-size:12px;",
                                      value: "{add_evidence_kind}",
                                      onchange: move |event| {
@@ -2042,6 +2048,7 @@ fn RuleEditorRow(index: usize, rule: PolicyRule, rules: Signal<Vec<PolicyRule>>)
                 "custom_eval" => rsx! {
                     textarea {
                         class: "input focus-ring mono code-editor",
+                        "data-testid": "policy-rule-custom-eval-expr-{index}",
                         rows: "3",
                         style: "font-size:12px;resize:vertical;",
                         placeholder: "config.networking.firewall.enable == true",

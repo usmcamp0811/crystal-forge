@@ -9,7 +9,7 @@ use std::{collections::HashMap, future::Future};
 
 use uuid::Uuid;
 
-use crate::api::client::{ApiClientError, fetch_deployment_policies, fetch_deployment_policy};
+use crate::api::client::{fetch_deployment_policies, fetch_deployment_policy, ApiClientError};
 use crate::api::models::{DeploymentPoliciesListResponse, DeploymentPolicyRecord};
 use crate::components::policy::PolicyDefinition;
 use crate::components::policy::PolicyRevisionSummary;
@@ -233,6 +233,66 @@ mod tests {
         }
     }
 
+    /// P1 regression: the catalog conversion must hydrate the current
+    /// version's evidence onto the top-level `PolicyDefinition`.
+    ///
+    /// `PolicyEditorModal` resolves the policy under edit out of
+    /// `policy_library` by id, so a `None` here produced an empty evidence
+    /// baseline on *every* edit path. The editor diffs against that baseline,
+    /// so adding one evidence source to a policy that already had evidence
+    /// emitted `Some([new])` and destroyed the existing set.
+    ///
+    /// Fails against `evidence_specs: None`.
+    #[test]
+    fn catalog_conversion_hydrates_current_version_evidence() {
+        use crate::api::models::{EvidenceKind, EvidenceSpec};
+
+        let id = Uuid::new_v4();
+        let mut record = fixture_policy(id, "evidence policy".to_string(), None);
+        let evidence_a = EvidenceSpec {
+            kind: EvidenceKind::Command {
+                cmd: "sshd -T".to_string(),
+                expect: "permitrootlogin no".to_string(),
+            },
+            required_fields: Default::default(),
+        };
+        record.versions[0].evidence_specs = vec![evidence_a.clone()];
+
+        let definition = policy_record_to_definition_with_count(record, 0);
+
+        assert_eq!(
+            definition.evidence_specs,
+            Some(vec![evidence_a]),
+            "catalog definition must carry the current version's evidence, \
+             otherwise the editor baseline is empty and a save replaces \
+             existing evidence instead of extending it"
+        );
+    }
+
+    /// A current version that genuinely has no evidence must be
+    /// distinguishable from "no resolvable current version".
+    #[test]
+    fn catalog_conversion_distinguishes_empty_evidence_from_unknown() {
+        let id = Uuid::new_v4();
+
+        // Current version resolves, and carries zero evidence.
+        let empty = fixture_policy(id, "no evidence".to_string(), None);
+        assert_eq!(
+            policy_record_to_definition_with_count(empty, 0).evidence_specs,
+            Some(Vec::new()),
+            "a resolvable current version with no evidence must be Some([])"
+        );
+
+        // No current version pointer at all -> nothing is known.
+        let mut unknown = fixture_policy(id, "unknown".to_string(), None);
+        unknown.current_version_id = None;
+        assert_eq!(
+            policy_record_to_definition_with_count(unknown, 0).evidence_specs,
+            None,
+            "an unresolvable current version must stay None, not Some([])"
+        );
+    }
+
     fn page(
         offset: i64,
         total: usize,
@@ -298,11 +358,9 @@ mod tests {
         for id in platform_ids {
             assert!(loaded.iter().any(|policy| policy.id == id));
         }
-        assert!(
-            loaded
-                .iter()
-                .any(|policy| policy.name == "zzz-platform-004")
-        );
+        assert!(loaded
+            .iter()
+            .any(|policy| policy.name == "zzz-platform-004"));
     }
 
     #[tokio::test]
@@ -530,6 +588,30 @@ fn policy_record_to_definition_with_count(
         .find(|v| Some(v.id) == current_version_id)
         .map(|v| v.semantic_digest.clone());
 
+    // Hydrate the current version's evidence set onto the catalog-level
+    // definition.
+    //
+    // `PolicyEditorModal` resolves the policy being edited by id out of
+    // `policy_library` (the catalog), regardless of which `PolicyDefinition`
+    // the caller handed to `on_edit`. Leaving this `None` therefore gave the
+    // editor an empty evidence baseline on *every* edit path, including the
+    // drawer path that carefully reconstructs the selected revision.
+    //
+    // The editor diffs the edited evidence against that baseline to decide
+    // between `None` (preserve) and `Some(..)` (replace). An empty baseline
+    // turned "not loaded" into "was empty", so adding one evidence source to a
+    // policy that already had evidence issued `Some([new])` and destroyed the
+    // existing set.
+    //
+    // The `Option` distinction is meaningful and preserved here:
+    //   `None`     -> no resolvable current version; nothing is known.
+    //   `Some([])` -> current version genuinely carries no evidence.
+    let current_evidence_specs = record
+        .versions
+        .iter()
+        .find(|v| Some(v.id) == current_version_id)
+        .map(|v| v.evidence_specs.clone());
+
     let revisions: Vec<PolicyRevisionSummary> = record
         .versions
         .into_iter()
@@ -562,34 +644,34 @@ fn policy_record_to_definition_with_count(
         })
         .collect();
 
-     PolicyDefinition {
-         id: record.id,
-         lineage_id: record.id,
-         version_id: current_version_id,
-         revision,
-         publication_state,
-         semantic_digest,
-         revisions,
-         name: record.name,
-         description: record
-             .description
-             .unwrap_or_else(|| "No description".to_string()),
-         format: PolicyFormat::Json,
-         body,
-         policy_type: Some(record.policy_type),
-         updated_at: record.updated_at.to_rfc3339(),
-         system_count,
-         srg_ids: current_srg_ids,
-         cci_ids: current_cci_ids,
-         category: current_category,
-         framework: current_framework,
-         severity: current_severity,
-         control_family: current_control_family,
-         cmmc_level: current_cmmc_level,
-         cis_section: current_cis_section,
-         rationale: current_rationale,
-         mapped_requirement_count: record.mapped_requirement_count,
-         bundle_usage_count: record.bundle_usage_count,
-         evidence_specs: None,
-     }
+    PolicyDefinition {
+        id: record.id,
+        lineage_id: record.id,
+        version_id: current_version_id,
+        revision,
+        publication_state,
+        semantic_digest,
+        revisions,
+        name: record.name,
+        description: record
+            .description
+            .unwrap_or_else(|| "No description".to_string()),
+        format: PolicyFormat::Json,
+        body,
+        policy_type: Some(record.policy_type),
+        updated_at: record.updated_at.to_rfc3339(),
+        system_count,
+        srg_ids: current_srg_ids,
+        cci_ids: current_cci_ids,
+        category: current_category,
+        framework: current_framework,
+        severity: current_severity,
+        control_family: current_control_family,
+        cmmc_level: current_cmmc_level,
+        cis_section: current_cis_section,
+        rationale: current_rationale,
+        mapped_requirement_count: record.mapped_requirement_count,
+        bundle_usage_count: record.bundle_usage_count,
+        evidence_specs: current_evidence_specs,
+    }
 }
