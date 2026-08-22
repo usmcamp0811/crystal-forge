@@ -26,6 +26,18 @@ const baseUrl = process.argv[2] || "http://127.0.0.1:3000";
 const outputDir = process.argv[3] || "/tmp/screenshots";
 const apiBaseUrl = process.env.CF_UI_API_BASE_URL || baseUrl;
 
+// ── Node.js 24 safety net ──────────────────────────────────────────────────
+// Node.js 24 treats unhandled promise rejections as fatal by default.  When a
+// Playwright waitForResponse() promise times out before the await can catch it,
+// the rejection surfaces as an uncaught exception that kills the process before
+// the step runner's try/catch can record a graceful FAIL.  Registering a
+// handler prevents the hard exit; the rejection will still propagate through
+// the await and be caught by the step runner, which records a normal FAIL.
+process.on("unhandledRejection", (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  console.error(`unhandledRejection: ${msg}`);
+});
+
 function firstExistingPath(paths) {
   return paths.find((candidate) => fs.existsSync(candidate));
 }
@@ -9552,6 +9564,10 @@ security.audit.enable = true;</fixtext>
         const createResponse = page.waitForResponse(
           (response) => response.url().endsWith("/api/v1/compliance/assignments") && response.request().method() === "POST",
         );
+        // Attach a no-op handler immediately so Node.js 24 does not treat the
+        // rejection as unhandled if the response arrives (or times out) before
+        // the `await` below can catch it.
+        createResponse.catch(() => {});
         await page.getByRole("button", { name: /Create assignment/i }).click();
         const created = await createResponse;
         if (created.status() !== 201) throw new Error(`Live assignment create returned HTTP ${created.status()}: ${await created.text()}`);
@@ -9562,6 +9578,7 @@ security.audit.enable = true;</fixtext>
         const unrelatedUpdate = page.waitForResponse(
           (response) => response.url().includes("/api/v1/compliance/assignments/") && response.request().method() === "PUT",
         );
+        unrelatedUpdate.catch(() => {});
         await page.getByRole("button", { name: "Save", exact: true }).click();
         const updated = await unrelatedUpdate;
         if (updated.status() !== 200) throw new Error(`Live unrelated assignment update returned HTTP ${updated.status()}`);
@@ -9573,6 +9590,7 @@ security.audit.enable = true;</fixtext>
         const reasonBUpdate = page.waitForResponse(
           (response) => response.url().includes("/api/v1/compliance/assignments/") && response.request().method() === "PUT",
         );
+        reasonBUpdate.catch(() => {});
         await page.getByRole("button", { name: "Save", exact: true }).click();
         const reasonBResp = await reasonBUpdate;
         if (reasonBResp.status() !== 200) throw new Error(`Live reason-B update returned HTTP ${reasonBResp.status()}`);
@@ -9584,6 +9602,7 @@ security.audit.enable = true;</fixtext>
         const clearUpdate = page.waitForResponse(
           (response) => response.url().includes("/api/v1/compliance/assignments/") && response.request().method() === "PUT",
         );
+        clearUpdate.catch(() => {});
         await page.getByRole("button", { name: "Save", exact: true }).click();
         const clearResp = await clearUpdate;
         if (clearResp.status() !== 200) throw new Error(`Live reason clear returned HTTP ${clearResp.status()}`);
