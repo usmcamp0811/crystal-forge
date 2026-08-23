@@ -656,6 +656,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/deployment-policies/:id/deletion-eligibility",
             get(deployment_policies::get_deployment_policy_deletion_eligibility),
         )
+        .route(
+            "/api/v1/deployment-policies/bulk-delete",
+            post(deployment_policies::bulk_delete_deployment_policies),
+        )
         // Deployment policy workflow endpoints (approvals, rollout status)
         .route(
             "/api/v1/deployments/commit/:commit_id/approve",

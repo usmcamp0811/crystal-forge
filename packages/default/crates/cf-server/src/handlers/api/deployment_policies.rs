@@ -16,7 +16,10 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-use crate::api::models::{DeletionEligibility, DeploymentPolicyVersionSummary};
+use crate::api::models::{
+    BulkDeletePoliciesRequest, BulkDeletePoliciesResponse, BulkDeleteSkippedPolicy,
+    DeletionEligibility, DeploymentPolicyVersionSummary,
+};
 use crate::auth::extractors::{RequireAdmin, RequireAuth, RequireOperator};
 use crate::compliance::mappings::{normalise_cci_ids, normalise_srg_ids};
 use crate::handlers::agent_request::CFState;
@@ -1135,6 +1138,71 @@ pub async fn delete_deployment_policy(
             Some(serde_json::json!({ "policy_id": policy_id, "eligibility": eligibility })),
         )),
     }
+}
+
+/// POST /api/v1/deployment-policies/bulk-delete - Delete multiple deployment
+/// policies from the catalog multi-select toolbar.
+///
+/// Available to Admin role only. Every requested id resolves into either
+/// `deleted` or `skipped` — the request never fails outright because one
+/// policy is blocked. Each policy is deleted (or preflighted) with the same
+/// server-side eligibility check the single-policy DELETE endpoint uses, so
+/// a stale client selection is always resolved authoritatively rather than
+/// trusting client-cached eligibility.
+pub async fn bulk_delete_deployment_policies(
+    RequireAdmin(_user): RequireAdmin,
+    State(state): State<CFState>,
+    Json(request): Json<BulkDeletePoliciesRequest>,
+) -> Result<Json<BulkDeletePoliciesResponse>, axum::response::Response> {
+    const MAX_BULK_DELETE: usize = 500;
+    if request.policy_ids.is_empty() {
+        return Ok(Json(BulkDeletePoliciesResponse {
+            deleted: Vec::new(),
+            skipped: Vec::new(),
+        }));
+    }
+    if request.policy_ids.len() > MAX_BULK_DELETE {
+        return Err(policy_delete_error(
+            StatusCode::BAD_REQUEST,
+            "too_many_ids",
+            &format!("A bulk delete request may include at most {MAX_BULK_DELETE} policies"),
+            None,
+        ));
+    }
+
+    // De-duplicate while preserving first-occurrence order so the response
+    // maps predictably back onto the caller's selection.
+    let mut seen = HashSet::with_capacity(request.policy_ids.len());
+    let policy_ids: Vec<Uuid> = request
+        .policy_ids
+        .into_iter()
+        .filter(|id| seen.insert(*id))
+        .collect();
+
+    let outcome = deployment_policies::bulk_delete_deployment_policies(&state.pool, &policy_ids)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to bulk delete deployment policies");
+            policy_delete_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to bulk delete deployment policies",
+                None,
+            )
+        })?;
+
+    Ok(Json(BulkDeletePoliciesResponse {
+        deleted: outcome.deleted,
+        skipped: outcome
+            .skipped
+            .into_iter()
+            .map(|(policy_id, reason, eligibility)| BulkDeleteSkippedPolicy {
+                policy_id,
+                reason: reason.to_string(),
+                eligibility,
+            })
+            .collect(),
+    }))
 }
 
 fn policy_delete_error(

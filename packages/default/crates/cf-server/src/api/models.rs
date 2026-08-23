@@ -1458,6 +1458,37 @@ pub struct DeletionEligibility {
     pub blockers: Vec<DeletionBlocker>,
 }
 
+/// Request body for bulk-deleting deployment policies from the catalog's
+/// multi-select toolbar (TASK-433 Phase 1 — policy catalog scaling).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkDeletePoliciesRequest {
+    pub policy_ids: Vec<Uuid>,
+}
+
+/// One policy that a bulk-delete request could not remove, with the same
+/// authoritative eligibility payload the single-policy delete endpoint
+/// returns on conflict.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BulkDeleteSkippedPolicy {
+    pub policy_id: Uuid,
+    /// Stable machine-readable reason: "not_found" or "deletion_blocked".
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligibility: Option<DeletionEligibility>,
+}
+
+/// Response for a bulk-delete request. Every requested id resolves into
+/// exactly one of `deleted` or `skipped` — bulk delete never partially fails
+/// a single policy's own transaction, and one policy's immutable-history
+/// blocker never blocks deletion of the other eligible policies in the same
+/// request (each policy is deleted in its own transaction, matching the
+/// single-policy delete path).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkDeletePoliciesResponse {
+    pub deleted: Vec<Uuid>,
+    pub skipped: Vec<BulkDeleteSkippedPolicy>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentPolicyVersionSummary {
     pub id: Uuid,

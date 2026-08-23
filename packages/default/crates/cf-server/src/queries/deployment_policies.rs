@@ -1136,6 +1136,47 @@ pub async fn delete_deployment_policy(
     Ok(PolicyDeleteOutcome::Deleted)
 }
 
+/// Result of a bulk-delete request (TASK-433 Phase 1 — policy catalog
+/// scaling multi-select toolbar).
+#[derive(Debug, Clone, Default)]
+pub struct BulkPolicyDeleteOutcome {
+    pub deleted: Vec<Uuid>,
+    /// `(policy_id, reason, eligibility)` — reason is "not_found" or
+    /// "deletion_blocked"; eligibility is present for the latter.
+    pub skipped: Vec<(Uuid, &'static str, Option<DeletionEligibility>)>,
+}
+
+/// Delete every eligible policy in `policy_ids`, skipping (never failing) any
+/// that are missing or blocked.
+///
+/// Each policy is deleted in its own transaction via
+/// [`delete_deployment_policy`] — one policy's immutable-history blocker
+/// never rolls back another policy's otherwise-eligible deletion, matching
+/// the eligibility semantics the single-policy delete endpoint already
+/// exposes. Server-reasoned per-item eligibility (not a purely client-side
+/// filter) is required so a stale client selection is always resolved
+/// authoritatively.
+pub async fn bulk_delete_deployment_policies(
+    pool: &PgPool,
+    policy_ids: &[Uuid],
+) -> Result<BulkPolicyDeleteOutcome> {
+    let mut outcome = BulkPolicyDeleteOutcome::default();
+    for policy_id in policy_ids {
+        match delete_deployment_policy(pool, policy_id).await? {
+            PolicyDeleteOutcome::Deleted => outcome.deleted.push(*policy_id),
+            PolicyDeleteOutcome::NotFound => {
+                outcome.skipped.push((*policy_id, "not_found", None))
+            }
+            PolicyDeleteOutcome::Blocked(eligibility) => {
+                outcome
+                    .skipped
+                    .push((*policy_id, "deletion_blocked", Some(eligibility)))
+            }
+        }
+    }
+    Ok(outcome)
+}
+
 /// Check if a policy name already exists (case-insensitive)
 /// exclude_id: Optional policy ID to exclude from the check (for updates)
 pub async fn check_policy_name_exists(
@@ -2564,6 +2605,114 @@ mod tests {
 
         drop(pool);
         drop_temp_db(&admin_pool, &db_name).await;
+    }
+
+    /// Bulk delete must resolve every requested id into either `deleted` or
+    /// `skipped` in one pass: a permanently-blocked policy (the core
+    /// `require_cf_agent` policy, seeded by migration) must not prevent the
+    /// two eligible draft policies from being deleted in the same request.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn bulk_delete_deployment_policies_partial_success() {
+        let pool = get_test_pool().await;
+
+        let deletable_a = create_deployment_policy(
+            &pool,
+            &CreateDeploymentPolicyRequest {
+                name: "Bulk Delete Eligible A".to_string(),
+                policy_type: "custom_check".to_string(),
+                config: serde_json::json!({"expression": "true", "strict": true}),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create first deletable policy")
+        .id;
+        let deletable_b = create_deployment_policy(
+            &pool,
+            &CreateDeploymentPolicyRequest {
+                name: "Bulk Delete Eligible B".to_string(),
+                policy_type: "custom_check".to_string(),
+                config: serde_json::json!({"expression": "true", "strict": true}),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create second deletable policy")
+        .id;
+        let core_policy_id: Uuid =
+            sqlx::query_scalar("SELECT id FROM deployment_policies WHERE policy_type = $1")
+                .bind("require_cf_agent")
+                .fetch_one(&pool)
+                .await
+                .expect("require_cf_agent core policy must be seeded by migrations");
+
+        let outcome = bulk_delete_deployment_policies(
+            &pool,
+            &[deletable_a, core_policy_id, deletable_b],
+        )
+        .await
+        .expect("bulk delete must not fail outright when one policy is blocked");
+
+        assert_eq!(
+            outcome
+                .deleted
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>(),
+            [deletable_a, deletable_b].into_iter().collect(),
+            "both eligible draft policies must be deleted"
+        );
+        assert_eq!(outcome.skipped.len(), 1, "only the core policy is skipped");
+        let (skipped_id, reason, eligibility) = &outcome.skipped[0];
+        assert_eq!(*skipped_id, core_policy_id);
+        assert_eq!(*reason, "deletion_blocked");
+        let eligibility = eligibility
+            .as_ref()
+            .expect("blocked skip carries eligibility");
+        assert!(!eligibility.eligible);
+        assert!(
+            eligibility.blockers.iter().any(|b| b.kind == "policy_core"),
+            "core policy blocker must be reported for the skipped policy"
+        );
+
+        // The eligible policies are actually gone; the blocked one remains.
+        assert!(
+            get_deployment_policy_by_id(&pool, &deletable_a)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            get_deployment_policy_by_id(&pool, &deletable_b)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            get_deployment_policy_by_id(&pool, &core_policy_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// An id that does not exist must be reported as skipped with reason
+    /// "not_found", never silently dropped from the response.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn bulk_delete_deployment_policies_reports_not_found() {
+        let pool = get_test_pool().await;
+        let missing_id = Uuid::new_v4();
+        let outcome = bulk_delete_deployment_policies(&pool, &[missing_id])
+            .await
+            .expect("bulk delete must not fail outright for a missing id");
+
+        assert!(outcome.deleted.is_empty());
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].0, missing_id);
+        assert_eq!(outcome.skipped[0].1, "not_found");
+        assert!(outcome.skipped[0].2.is_none());
     }
 
     #[tokio::test]

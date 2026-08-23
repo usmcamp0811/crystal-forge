@@ -20,6 +20,12 @@ pub fn PolicyCard(
     #[props(default = false)] selection_mode: bool,
     #[props(default = false)] selected: bool,
     #[props(default)] on_toggle_select: EventHandler<bool>,
+    /// Fired for a plain or Shift-modified click on the card body (outside
+    /// the checkbox/action buttons). The parent inspects
+    /// `evt.modifiers().shift()` to decide between a single toggle and a
+    /// Shift-range selection.
+    #[props(default)]
+    on_row_click: EventHandler<MouseEvent>,
     #[props(default = false)] highlighted: bool,
 ) -> Element {
     let rules = policy_rule_summaries(&policy);
@@ -51,7 +57,13 @@ pub fn PolicyCard(
     rsx! {
         div {
             class: "sys-card",
-            onclick: move |_| on_open.call(policy_for_open.clone()),
+            onclick: move |evt| {
+                if selection_mode || evt.modifiers().shift() {
+                    on_row_click.call(evt);
+                } else {
+                    on_open.call(policy_for_open.clone());
+                }
+            },
             style: if highlighted {
                 format!("--status-color: {rail_color}; opacity: {opacity}; box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--cf-brand-purple) 55%, transparent), 0 0 0 2px color-mix(in oklab, var(--cf-brand-purple) 22%, transparent); background: color-mix(in oklab, var(--cf-brand-purple) 7%, var(--cf-card-bg));")
             } else {

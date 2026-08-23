@@ -1368,6 +1368,24 @@ pub async fn fetch_policy_deletion_eligibility(
     fetch_json(&url).await
 }
 
+/// Bulk-delete multiple deployment policies (Admin only) from the catalog's
+/// multi-select toolbar. The response always resolves every requested id
+/// into either `deleted` or `skipped` — it never fails outright because one
+/// policy is blocked.
+pub async fn bulk_delete_deployment_policies(
+    policy_ids: &[Uuid],
+) -> Result<BulkDeletePoliciesResponse, ApiClientError> {
+    let url = format!("{}/deployment-policies/bulk-delete", base_url());
+    send_json_with_csrf(
+        "POST",
+        &url,
+        Some(&BulkDeletePoliciesRequest {
+            policy_ids: policy_ids.to_vec(),
+        }),
+    )
+    .await
+}
+
 /// Fetch all flakes from registry.
 pub async fn fetch_flakes() -> Result<Vec<FlakeRegistryItem>, ApiClientError> {
     let url = format!("{}/flakes", base_url());
