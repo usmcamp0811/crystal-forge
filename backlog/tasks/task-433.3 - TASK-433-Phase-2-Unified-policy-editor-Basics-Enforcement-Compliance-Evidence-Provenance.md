@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-23 14:24'
+updated_date: '2026-08-23 14:48'
 labels:
   - design-parity
   - policy
@@ -63,6 +63,8 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 
 <!-- SECTION:NOTES:BEGIN -->
 Phase 2 implementation started. Added server-side enforcement that policy requirement mapping update/delete operations only affect provenance=manual mappings; imported mappings now return HTTP 409 Conflict with a read-only error. Verified with `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all -- --check` and `nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-server`. Phase 1 GitLab CI remains pending/unverified per user authorization.
+
+Phase 2 implementation committed as 4f38564a and pushed to origin/TASK-433-policy-poam-workflows (MR !318). Unified editor now presents Basics, Compliance, Enforcement, and Evidence sections; imported mapping provenance is read-only; mapping/enforcement state is explicit; empty enforcement saves as an explicit empty custom_check rule set; existing rules remain untouched by category changes. `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml` passed; `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml` passed (201 passed, 1 ignored); targeted server test passed. The Nix web-ui package build completed; the full web-ui VM check was started but exceeded the execution timeout before completion and is unverified.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
