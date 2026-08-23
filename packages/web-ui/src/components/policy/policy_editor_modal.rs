@@ -201,10 +201,7 @@ impl PolicyRule {
 
     /// Whether this rule kind can be persisted via the existing policy API config.
     fn is_persisted(&self) -> bool {
-        matches!(
-            self.kind.as_str(),
-            "cve_block" | "packages_installed" | "nixos_option" | "custom_eval"
-        )
+        rule_kind_is_persisted(&self.kind)
     }
 }
 
@@ -393,6 +390,31 @@ const RULE_OPTIONS: [(&str, &str, bool); 9] = [
     ("approval_required", "Approval required", false),
     ("rollout_percent", "Canary rollout", false),
 ];
+
+/// Whether a rule kind can be persisted by Phase 2.
+///
+/// This is the single source of truth for persistence capability, derived from
+/// the third field of `RULE_OPTIONS`. The Add Rule control, the per-rule
+/// `is_persisted` check, and the category recommendations all read it so the
+/// three cannot drift. Unknown kinds fail closed as non-persistable.
+fn rule_kind_is_persisted(kind: &str) -> bool {
+    RULE_OPTIONS
+        .iter()
+        .find(|(id, _, _)| *id == kind)
+        .is_some_and(|(_, _, persisted)| *persisted)
+}
+
+/// Category recommendations filtered to the kinds Phase 2 can actually persist.
+///
+/// `recommended_enforcement` stays the full conceptual model; this narrows it so
+/// the editor never suggests a rule type it cannot save.
+fn actionable_recommended_enforcement(category: PolicyCategory) -> Vec<&'static str> {
+    recommended_enforcement(category)
+        .iter()
+        .copied()
+        .filter(|kind| rule_kind_is_persisted(kind))
+        .collect()
+}
 
 const EVIDENCE_OPTIONS: [(&str, &str); 6] = [
     ("command", "Command output"),
@@ -1416,7 +1438,8 @@ pub fn PolicyEditorModal(
     let is_security = selected_category == PolicyCategory::Security;
     // Guidance derived from the selected category. Recommendations and the
     // off-category notice are informational only; `rules` is never filtered.
-    let recommended_labels = recommended_enforcement(selected_category)
+    // Only kinds Phase 2 can actually persist are surfaced as suggestions.
+    let recommended_labels = actionable_recommended_enforcement(selected_category)
         .iter()
         .map(|kind| rule_label(kind))
         .collect::<Vec<_>>()
@@ -1832,8 +1855,14 @@ pub fn PolicyEditorModal(
                             }
                             div { class: "sd-callout sd-callout-info", "data-testid": "policy-enforcement-recommendations", style: "margin-bottom:8px;font-size:11px;",
                                 "Suggested for " strong { "{selected_category.label()}" } ": "
-                                span { class: "mono", "{recommended_labels}" }
-                                span { " · Suggestions follow the category; they are never restrictions." }
+                                if recommended_labels.is_empty() {
+                                    span { "data-testid": "policy-enforcement-no-recommendations",
+                                        "No rollout-specific enforcement is available in this editor yet. Existing cross-category rules are preserved."
+                                    }
+                                } else {
+                                    span { class: "mono", "{recommended_labels}" }
+                                    span { " · Suggestions follow the category; they are never restrictions." }
+                                }
                             }
                             if !off_category_labels.is_empty() {
                                 div { class: "sd-callout sd-callout-info", "data-testid": "policy-off-category-notice", style: "margin-bottom:8px;font-size:11px;",
@@ -1871,7 +1900,10 @@ pub fn PolicyEditorModal(
                                     value: "{add_rule_kind}",
                                     onchange: move |event| {
                                         let kind = event.value();
-                                        if !kind.is_empty() {
+                                        // Defense in depth: never trust a manipulated
+                                        // DOM value. Only kinds the editor can persist
+                                        // may be pushed as new rules.
+                                        if !kind.is_empty() && rule_kind_is_persisted(&kind) {
                                             let mut next = rules.read().clone();
                                             next.push(PolicyRule::new(&kind));
                                             rules.set(next);
@@ -1879,20 +1911,10 @@ pub fn PolicyEditorModal(
                                         add_rule_kind.set(String::new());
                                     },
                                     option { value: "", disabled: true, "+ Add assertion / rule…" }
-                                    optgroup { label: "NixOS config assertions",
-                                        option { value: "packages_installed", "Packages installed" }
-                                        option { value: "nixos_option", "NixOS option equals" }
-                                        option { value: "custom_eval", "Custom nix expression" }
-                                    }
-                                    optgroup { label: "Pipeline gates",
-                                        option { value: "eval_passed", "Eval must pass" }
-                                        option { value: "build_succeeded", "Build must succeed" }
-                                        option { value: "cve_block", "CVE gate" }
-                                    }
-                                    optgroup { label: "Rollout gates",
-                                        option { value: "time_window", "Time window" }
-                                        option { value: "approval_required", "Approval required" }
-                                        option { value: "rollout_percent", "Canary rollout" }
+                                    for (kind, label, persisted) in RULE_OPTIONS {
+                                        if persisted {
+                                            option { value: "{kind}", "{label}" }
+                                        }
                                     }
                                 }
                             }
@@ -2762,6 +2784,83 @@ mod tests {
             "Suggested · not authoritative"
         );
         assert_eq!(mapping_provenance_label("novel"), "novel · read-only");
+    }
+
+    #[test]
+    fn addable_rules_are_exactly_the_persistable_kinds() {
+        // The Add Rule control must only offer kinds Phase 2 can persist.
+        let addable: Vec<&str> = RULE_OPTIONS
+            .iter()
+            .filter(|(_, _, persisted)| *persisted)
+            .map(|(id, _, _)| *id)
+            .collect();
+        assert_eq!(
+            addable,
+            vec![
+                "packages_installed",
+                "nixos_option",
+                "custom_eval",
+                "cve_block"
+            ]
+        );
+        // Every addable kind must be reported persistable by the capability fn,
+        // so the two cannot drift.
+        for kind in &addable {
+            assert!(
+                rule_kind_is_persisted(kind),
+                "{kind} is offered by Add Rule but is not persistable"
+            );
+        }
+    }
+
+    #[test]
+    fn known_unsupported_rule_kinds_are_not_addable() {
+        for kind in [
+            "eval_passed",
+            "build_succeeded",
+            "time_window",
+            "approval_required",
+            "rollout_percent",
+        ] {
+            assert!(
+                !rule_kind_is_persisted(kind),
+                "{kind} must not be persistable, so Add Rule must not offer it"
+            );
+        }
+    }
+
+    #[test]
+    fn actionable_recommendations_are_all_persistable_and_rollout_is_empty() {
+        for category in POLICY_CATEGORIES {
+            let actionable = actionable_recommended_enforcement(category);
+            for kind in &actionable {
+                assert!(
+                    rule_kind_is_persisted(kind),
+                    "{kind} is recommended for {category:?} but is not persistable"
+                );
+            }
+        }
+
+        // Pipeline must recommend the CVE gate but never the UI-only pipeline gates.
+        let pipeline = actionable_recommended_enforcement(PolicyCategory::Pipeline);
+        assert!(
+            pipeline.contains(&"cve_block"),
+            "Pipeline must recommend cve_block"
+        );
+        assert!(
+            !pipeline.contains(&"eval_passed"),
+            "Pipeline must not recommend eval_passed"
+        );
+        assert!(
+            !pipeline.contains(&"build_succeeded"),
+            "Pipeline must not recommend build_succeeded"
+        );
+
+        // Rollout has no currently persistable category-specific recommendation.
+        assert!(
+            actionable_recommended_enforcement(PolicyCategory::Rollout).is_empty(),
+            "Rollout must not surface unsupported rollout gates as recommendations"
+        );
     }
 
     #[test]

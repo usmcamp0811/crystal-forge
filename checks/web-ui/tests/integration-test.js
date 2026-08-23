@@ -7371,6 +7371,31 @@ const steps = [
       await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
       await page.getByPlaceholder("e.g. canary-25").fill(policyName);
       await page.getByTestId("policy-editor-tab-enforcement").click();
+
+      // ── Add Rule must only expose kinds Phase 2 can persist ─────────
+      const addRule = page.getByTestId("policy-editor-add-rule");
+      const addRuleOptions = await addRule
+        .locator("option")
+        .evaluateAll((els) => els.map((e) => e.value));
+      const expectedAddable = ["packages_installed", "nixos_option", "custom_eval", "cve_block"];
+      for (const kind of expectedAddable) {
+        if (!addRuleOptions.includes(kind)) {
+          throw new Error(`Add Rule must offer the persistable kind ${kind}`);
+        }
+      }
+      const notAddable = [
+        "eval_passed",
+        "build_succeeded",
+        "time_window",
+        "approval_required",
+        "rollout_percent",
+      ];
+      for (const kind of notAddable) {
+        if (addRuleOptions.includes(kind)) {
+          throw new Error(`Add Rule must NOT offer the unsupported kind ${kind}`);
+        }
+      }
+
       await page.getByTestId("policy-editor-add-rule").selectOption("custom_eval");
       const expression = `config.networking.hostName == "${policyName}"`;
       const expressionField = page.getByTestId("policy-rule-custom-eval-expr-0");
@@ -7378,9 +7403,36 @@ const steps = [
       await expressionField.fill(expression);
       const recommendationsBefore = await page.getByTestId("policy-enforcement-recommendations").innerText();
 
+      // ── Pipeline recommendations are limited to persistable kinds ──────
+      await page.getByTestId("policy-editor-tab-details").click();
+      await page.getByTestId("policy-category-pipeline").click();
+      await page.getByTestId("policy-editor-tab-enforcement").click();
+      const pipelineRec = await page.getByTestId("policy-enforcement-recommendations").innerText();
+      if (!pipelineRec.includes("CVE gate")) {
+        throw new Error(`Pipeline must recommend the CVE gate, got: ${pipelineRec}`);
+      }
+      if (pipelineRec.includes("Eval must pass")) {
+        throw new Error("Pipeline must not recommend the unsupported Eval must pass kind");
+      }
+      if (pipelineRec.includes("Build must succeed")) {
+        throw new Error("Pipeline must not recommend the unsupported Build must succeed kind");
+      }
+
+      // ── Rollout has no currently persistable category-specific recs ────
       await page.getByTestId("policy-editor-tab-details").click();
       await page.getByTestId("policy-category-rollout").click();
       await page.getByTestId("policy-editor-tab-enforcement").click();
+      await assertVisible(
+        page.getByTestId("policy-enforcement-no-recommendations"),
+        "Rollout must show the no-current-recommendation notice",
+      );
+      const rolloutRec = await page.getByTestId("policy-enforcement-recommendations").innerText();
+      for (const bad of ["Time window", "Approval required", "Canary rollout"]) {
+        if (rolloutRec.includes(bad)) {
+          throw new Error(`Rollout must not recommend the unsupported kind ${bad}`);
+        }
+      }
+
       const recommendationsAfter = await page.getByTestId("policy-enforcement-recommendations").innerText();
       if (recommendationsBefore === recommendationsAfter) {
         throw new Error("Changing category must change the recommended enforcement guidance");
@@ -10432,8 +10484,10 @@ security.audit.enable = true;</fixtext>
       await page.getByLabel("Name", { exact: true }).waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
       await page.getByLabel("Name", { exact: true }).fill(POLICY);
 
-      // The editor seeds two UI-only pipeline gates that are not persisted and
-      // block save. Remove them and add one backend-supported assertion.
+      // The unified editor opens a new policy with zero rules (no seeded
+      // UI-only gates): the empty "No enforcement defined" state is valid and
+      // immediately savable. removeAllPolicyRules is a no-op drain kept as a
+      // safety net. We then add one backend-supported assertion.
       // Rules live on the Enforcement tab.
       const enforcementTab = page.getByTestId("policy-editor-tab-enforcement");
       await enforcementTab.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
