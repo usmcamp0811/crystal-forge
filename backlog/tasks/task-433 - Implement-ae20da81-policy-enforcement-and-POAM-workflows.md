@@ -1,10 +1,11 @@
 ---
 id: TASK-433
 title: Implement ae20da81 policy enforcement and POA&M workflows
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-23 01:50'
+updated_date: '2026-08-23 02:07'
 labels:
   - design-parity
   - policy
@@ -216,4 +217,7 @@ Demo-only, NOT ported (mechanism, not behavior — real equivalents built per-ph
 ## Review checkpoint
 
 Per user instruction, this plan is presented for review after Phase 0 before any Phase 1 code is written. Awaiting go-ahead to open the TASK-433.2 worktree/branch and begin Phase 1 implementation.
+
+## Worktree/MR decision (user, 2026-08-22)
+All phase subtasks (TASK-433.2 through TASK-433.9) share ONE dedicated worktree/branch/eventual MR under this parent task, rather than one worktree per subtask. Worktree: /home/mcamp/code/crystal-forge/TASK-433-policy-poam-workflows, branch: TASK-433-policy-poam-workflows, based on dev @ c60b5799. TASK-433 itself now carries the lock/In Progress status for the shared implementation effort; individual TASK-433.x subtasks are moved through In Progress/Review/Done to track granular AC completion, but all commits land on this one branch and are shipped via a single MR opened once phase work is ready for review. Composite rule-set decision (open question #1) resolved: build the composite/multi-rule-kind structure now in Phase 3/4 as originally scoped, not deferred.
 <!-- SECTION:PLAN:END -->
