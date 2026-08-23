@@ -7,7 +7,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-23 18:13'
+updated_date: '2026-08-23 19:01'
 labels:
   - design-parity
   - policy
@@ -54,10 +54,10 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 All policy origins use one editor with Basics, Enforcement, Compliance, Evidence and read-only Provenance.
-- [ ] #2 Category changes preserve every rule and change guidance only; cross-category rules remain composable.
-- [ ] #3 Zero mappings save as valid Unmapped; mapped/no-enforcement and No enforcement are distinct states.
-- [ ] #4 Manual mappings have permitted CRUD; imported mappings/provenance remain read-only and survive reload.
+- [x] #1 All policy origins use one editor with Basics, Enforcement, Compliance, Evidence and read-only Provenance.
+- [x] #2 Category changes preserve every rule and change guidance only; cross-category rules remain composable.
+- [x] #3 Zero mappings save as valid Unmapped; mapped/no-enforcement and No enforcement are distinct states.
+- [x] #4 Manual mappings have permitted CRUD; imported mappings/provenance remain read-only and survive reload.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -102,40 +102,26 @@ Started Phase 2 under explicit user override of the pending Phase-1 CI gate. Pha
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-## Phase 2 Remediation Complete — All 10 ACs Pass
+## Phase 2 follow-up remediation: Add Rule capability drift
 
-### Changes Made
+### Defect
+The Add Rule `<select>` hard-coded all nine `RULE_OPTIONS`, including UI-only kinds Phase 2 cannot persist (`eval_passed`, `build_succeeded`, `time_window`, `approval_required`, `rollout_percent`), creating controls that appeared usable but could not be saved. Category recommendations also surfaced those unsupported kinds (e.g. Rollout recommended only unsupported rollout gates).
 
-**Server (5 files):**
-- `PolicyOriginProvenance` DTO added to `api/models.rs` with all authoritative fields
-- `fetch_policy_version_provenance()` in `queries/deployment_policies.rs` — single recursive CTE, no N+1
-- `fetch_policy_version_summaries()` hydrates provenance via batched query
-- `validate_policy_config()` rejects invalid mode on empty rule sets too
-- `parse_custom_check_skips_the_explicit_no_enforcement_representation` test confirms `{"mode":"all","rules":[]}` → `None`
+### Fix (single capability source of truth)
+- Added `rule_kind_is_persisted(kind)` derived from the `RULE_OPTIONS` persisted flag (unknown kinds fail closed).
+- `PolicyRule::is_persisted()` now delegates to that helper.
+- Add Rule selector renders only `RULE_OPTIONS` entries whose persisted flag is true (Packages installed, NixOS option equals, Custom nix expression, CVE gate) and the `onchange` handler re-checks `rule_kind_is_persisted` before pushing a rule (defense in depth).
+- `actionable_recommended_enforcement(category)` filters `recommended_enforcement()` through `rule_kind_is_persisted()`; the Enforcement tab shows those labels, or — for Rollout, which has none — an honest "No rollout-specific enforcement is available in this editor yet" notice (`policy-enforcement-no-recommendations`).
+- `recommended_enforcement()` conceptual model is unchanged; only surfaced suggestions are narrowed.
 
-**Frontend (6 files):**
-- `PolicyOriginProvenance` mirror DTO in `web-ui/src/api/models.rs`
-- `PolicyDefinition` and `PolicyRevisionSummary` carry `provenance` field
-- `policy_is_imported()`, `PolicyCategory`, `recommended_enforcement()`, `off_category_rule_kinds()`, `POLICY_CATEGORIES` in `types.rs`
-- `policy_editor_modal.rs` rewritten: five tabs (Basics/Enforcement/Compliance/Evidence/Provenance), single four-value category radio, origin-aware empty states, no seeded unsavable rules, `build_persisted_payload` emits canonical `{"mode":"all","rules":[]}`
-- Mapping loading on editor open, non-manual = read-only, accurate provenance labels
-- `policy_definition_for_revision()` in `policies_api.rs` projects exact revision for editing
-- Compliance drawer opens shared `PolicyEditorModal`
-
-**DB Tests (1 file):**
-- `policy_editor_phase2.rs` — 5 tests: custom→no provenance, imported→correct provenance, derived draft→inherits provenance, manual mapping CRUD, non-manual mutation rejection
-
-**Browser Tests (1 file):**
-- `20ab-policy-editor-no-enforcement-unmapped-roundtrip` — zero enforcement persists, survives reload, stays savable
-- `20ac-policy-editor-category-and-imported-provenance` — category change preserves rules, imported provenance tab read-only
+### Regression behavior preserved
+- Previously loaded unsupported rules still display (with "UI only" badge) and still trigger the protective save blocker — never silently destroyed.
+- Category changes still never mutate rules; off-category notice stays informational.
+- No Phase-3 enforcement kinds implemented; no server/database/schema changes.
 
 ### Verification
-- `nix build .#checks.x86_64-linux.server-regressions` ✅
-- `nix build .#checks.x86_64-linux.web-ui` ✅
-- `nix build .#packages.x86_64-linux.server` ✅
-- `nix build .#packages.x86_64-linux.web-ui` ✅
-- `cargo fmt --all -- --check` ✅ (both server and web-ui)
-- `cargo check --all-targets` ✅ (both server and web-ui)
-- `cargo test` ✅ (web-ui: 207 passed, 0 failed)
-- Independent maintainer review: all 10 ACs pass, no defects found
+- `cargo fmt --check` (web-ui) ✅, `cargo test --manifest-path packages/web-ui/Cargo.toml` ✅ (210 passed, +3 new: addable kinds exact set, unsupported not addable, actionable recs persistable + Rollout empty)
+- `node --check checks/web-ui/tests/integration-test.js` ✅
+- `nix build .#packages.x86_64-linux.web-ui --no-link` ✅
+- `nix build .#checks.x86_64-linux.web-ui --no-link` ✅ (browser 20ac extended: Add Rule options present/absent, Pipeline→CVE gate only, Rollout→no-recommendation notice, stale "seeds two UI-only gates" comment corrected)
 <!-- SECTION:FINAL_SUMMARY:END -->
