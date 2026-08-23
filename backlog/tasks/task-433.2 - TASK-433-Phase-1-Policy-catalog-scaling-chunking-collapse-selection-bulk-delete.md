@@ -3,11 +3,11 @@ id: TASK-433.2
 title: >-
   TASK-433 Phase 1: Policy catalog scaling (chunking, collapse, selection, bulk
   delete)
-status: Review
+status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-23 03:33'
+updated_date: '2026-08-23 03:45'
 labels:
   - design-parity
   - policy
@@ -128,5 +128,10 @@ created: 2026-08-23 03:33
 MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/318
 
 Phase 1 verification is complete. All targeted cargo tests, isolated bulk-delete DB tests, package builds, integration/server-regressions/web-ui/reconciliation/screenshot checks, and `nix flake check --keep-going` passed. The MR is ready for review.
+---
+
+created: 2026-08-23 03:45
+---
+Returned to In Progress after review of MR !318. Required fixes: include collapsed groups in Shift-range logical order; make bulk delete atomic or return/reconcile committed outcomes on unexpected failure; add >60-policy browser coverage; preserve collapsed-group selection controls; gate bulk delete by admin; make selection mode suppress conflicting edit/delete/revision actions; add all-blocked/failure/authorization/validation coverage.
 ---
 <!-- COMMENTS:END -->
