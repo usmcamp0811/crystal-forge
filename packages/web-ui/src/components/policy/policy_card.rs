@@ -172,7 +172,7 @@ pub fn PolicyCard(
                 }
                 if is_core {
                     span { class: "text-xs text-emerald-300", "Always on" }
-                } else if is_editable {
+                } else if !selection_mode && is_editable {
                     div { class: "flex items-center gap-2",
                         button {
                             class: "btn btn-subtle focus-ring xs",
@@ -197,7 +197,7 @@ pub fn PolicyCard(
                     span { class: "chip chip-unknown", "read-only" }
                 }
             }
-            if policy.revisions.len() > 1 {
+            if !selection_mode && policy.revisions.len() > 1 {
                 button {
                     class: "policy-card-revisions focus-ring",
                     onclick: move |event| {

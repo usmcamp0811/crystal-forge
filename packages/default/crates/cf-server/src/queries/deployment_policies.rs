@@ -1064,13 +1064,26 @@ pub async fn delete_deployment_policy(
         .await
         .context("Failed to begin policy deletion")?;
 
-    let Some(eligibility) = policy_deletion_eligibility_in_transaction(&mut tx, policy_id).await?
-    else {
-        tx.rollback().await.ok();
+    let outcome = delete_deployment_policy_in_transaction(&mut tx, policy_id).await?;
+    tx.commit()
+        .await
+        .context("Failed to commit deployment policy deletion")?;
+    Ok(outcome)
+}
+
+/// Delete one policy using an existing transaction.
+///
+/// Expected outcomes (`NotFound`, `Blocked`) leave the transaction usable for
+/// the caller. Unexpected database errors are returned so the caller can roll
+/// back the whole operation.
+async fn delete_deployment_policy_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    policy_id: &Uuid,
+) -> Result<PolicyDeleteOutcome> {
+    let Some(eligibility) = policy_deletion_eligibility_in_transaction(tx, policy_id).await? else {
         return Ok(PolicyDeleteOutcome::NotFound);
     };
     if !eligibility.eligible {
-        tx.rollback().await.ok();
         return Ok(PolicyDeleteOutcome::Blocked(eligibility));
     }
 
@@ -1091,19 +1104,19 @@ pub async fn delete_deployment_policy(
          )",
     )
     .bind(policy_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .context("Failed to remove disposable policy source mappings")?;
     sqlx::query("DELETE FROM compliance_bundle_version_policies bvp USING deployment_policy_versions pv, compliance_bundle_versions bv WHERE bvp.policy_version_id = pv.id AND bvp.bundle_version_id = bv.id AND pv.policy_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim')")
-        .bind(policy_id).execute(&mut *tx).await.context("Failed to remove mutable draft bundle memberships")?;
+        .bind(policy_id).execute(&mut **tx).await.context("Failed to remove mutable draft bundle memberships")?;
     sqlx::query("DELETE FROM environment_policies WHERE policy_id = $1")
         .bind(policy_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context("Failed to remove mutable environment policy assignments")?;
     sqlx::query("DELETE FROM system_policies WHERE policy_id = $1")
         .bind(policy_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context("Failed to remove mutable system policy assignments")?;
     sqlx::query(
@@ -1114,25 +1127,20 @@ pub async fn delete_deployment_policy(
            AND pv.publication_state IN ('incomplete', 'draft', 'interim')",
     )
     .bind(policy_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .context("Failed to remove mutable policy requirement mappings")?;
 
     let deleted = sqlx::query("DELETE FROM deployment_policies WHERE id = $1")
         .bind(policy_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context("Failed to delete deployment policy")?
         .rows_affected();
 
     if deleted != 1 {
-        tx.rollback().await.ok();
         return Ok(PolicyDeleteOutcome::NotFound);
     }
-
-    tx.commit()
-        .await
-        .context("Failed to commit deployment policy deletion")?;
     Ok(PolicyDeleteOutcome::Deleted)
 }
 
@@ -1149,24 +1157,23 @@ pub struct BulkPolicyDeleteOutcome {
 /// Delete every eligible policy in `policy_ids`, skipping (never failing) any
 /// that are missing or blocked.
 ///
-/// Each policy is deleted in its own transaction via
-/// [`delete_deployment_policy`] — one policy's immutable-history blocker
-/// never rolls back another policy's otherwise-eligible deletion, matching
-/// the eligibility semantics the single-policy delete endpoint already
-/// exposes. Server-reasoned per-item eligibility (not a purely client-side
-/// filter) is required so a stale client selection is always resolved
-/// authoritatively.
+/// All eligible deletions run in one transaction. Expected immutable-history
+/// and not-found outcomes are returned as skips, while an unexpected database
+/// error rolls back every eligible deletion so the caller never receives a
+/// generic failure after hidden committed mutations.
 pub async fn bulk_delete_deployment_policies(
     pool: &PgPool,
     policy_ids: &[Uuid],
 ) -> Result<BulkPolicyDeleteOutcome> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin bulk policy deletion")?;
     let mut outcome = BulkPolicyDeleteOutcome::default();
     for policy_id in policy_ids {
-        match delete_deployment_policy(pool, policy_id).await? {
+        match delete_deployment_policy_in_transaction(&mut tx, policy_id).await? {
             PolicyDeleteOutcome::Deleted => outcome.deleted.push(*policy_id),
-            PolicyDeleteOutcome::NotFound => {
-                outcome.skipped.push((*policy_id, "not_found", None))
-            }
+            PolicyDeleteOutcome::NotFound => outcome.skipped.push((*policy_id, "not_found", None)),
             PolicyDeleteOutcome::Blocked(eligibility) => {
                 outcome
                     .skipped
@@ -1174,6 +1181,9 @@ pub async fn bulk_delete_deployment_policies(
             }
         }
     }
+    tx.commit()
+        .await
+        .context("Failed to commit bulk policy deletion")?;
     Ok(outcome)
 }
 
@@ -2647,12 +2657,10 @@ mod tests {
                 .await
                 .expect("require_cf_agent core policy must be seeded by migrations");
 
-        let outcome = bulk_delete_deployment_policies(
-            &pool,
-            &[deletable_a, core_policy_id, deletable_b],
-        )
-        .await
-        .expect("bulk delete must not fail outright when one policy is blocked");
+        let outcome =
+            bulk_delete_deployment_policies(&pool, &[deletable_a, core_policy_id, deletable_b])
+                .await
+                .expect("bulk delete must not fail outright when one policy is blocked");
 
         assert_eq!(
             outcome
@@ -2713,6 +2721,126 @@ mod tests {
         assert_eq!(outcome.skipped[0].0, missing_id);
         assert_eq!(outcome.skipped[0].1, "not_found");
         assert!(outcome.skipped[0].2.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn bulk_delete_deployment_policies_reports_all_blocked() {
+        let pool = get_test_pool().await;
+        let core_policy_id: Uuid =
+            sqlx::query_scalar("SELECT id FROM deployment_policies WHERE policy_type = $1")
+                .bind("require_cf_agent")
+                .fetch_one(&pool)
+                .await
+                .expect("require_cf_agent core policy must be seeded by migrations");
+
+        let outcome = bulk_delete_deployment_policies(&pool, &[core_policy_id])
+            .await
+            .expect("all-blocked bulk delete must return a response");
+
+        assert!(outcome.deleted.is_empty());
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].0, core_policy_id);
+        assert_eq!(outcome.skipped[0].1, "deletion_blocked");
+        assert!(
+            !outcome.skipped[0]
+                .2
+                .as_ref()
+                .expect("blocked result includes eligibility")
+                .eligible
+        );
+        assert!(
+            get_deployment_policy_by_id(&pool, &core_policy_id)
+                .await
+                .expect("core policy lookup")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn bulk_delete_rolls_back_prior_deletions_on_unexpected_error() {
+        let pool = get_test_pool().await;
+        let deletable_a = create_deployment_policy(
+            &pool,
+            &CreateDeploymentPolicyRequest {
+                name: "Bulk Delete Atomic A".to_string(),
+                policy_type: "custom_check".to_string(),
+                config: serde_json::json!({"expression": "true", "strict": true}),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create first atomic test policy")
+        .id;
+        let deletable_b = create_deployment_policy(
+            &pool,
+            &CreateDeploymentPolicyRequest {
+                name: "Bulk Delete Atomic Failure".to_string(),
+                policy_type: "custom_check".to_string(),
+                config: serde_json::json!({"expression": "true", "strict": true}),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create second atomic test policy")
+        .id;
+
+        sqlx::query(
+            r#"
+            CREATE OR REPLACE FUNCTION cf_test_bulk_delete_failure()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF OLD.name = 'Bulk Delete Atomic Failure' THEN
+                    RAISE EXCEPTION 'intentional bulk delete failure';
+                END IF;
+                RETURN OLD;
+            END;
+            $$
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("install atomic bulk-delete failure function");
+        sqlx::query(
+            "CREATE TRIGGER cf_test_bulk_delete_failure_trigger BEFORE DELETE ON deployment_policies FOR EACH ROW EXECUTE FUNCTION cf_test_bulk_delete_failure()",
+        )
+        .execute(&pool)
+        .await
+        .expect("install atomic bulk-delete failure trigger");
+
+        let result = bulk_delete_deployment_policies(&pool, &[deletable_a, deletable_b]).await;
+        assert!(
+            result.is_err(),
+            "unexpected database failure must be returned"
+        );
+        assert!(
+            get_deployment_policy_by_id(&pool, &deletable_a)
+                .await
+                .expect("first atomic test policy lookup")
+                .is_some()
+        );
+        assert!(
+            get_deployment_policy_by_id(&pool, &deletable_b)
+                .await
+                .expect("failed atomic test policy lookup")
+                .is_some()
+        );
+
+        sqlx::query("DROP TRIGGER cf_test_bulk_delete_failure_trigger ON deployment_policies")
+            .execute(&pool)
+            .await
+            .expect("remove atomic bulk-delete failure trigger");
+        sqlx::query("DROP FUNCTION cf_test_bulk_delete_failure()")
+            .execute(&pool)
+            .await
+            .expect("remove atomic bulk-delete failure function");
+        sqlx::query("DELETE FROM deployment_policies WHERE id IN ($1, $2)")
+            .bind(deletable_a)
+            .bind(deletable_b)
+            .execute(&pool)
+            .await
+            .expect("clean up atomic bulk-delete test policies");
     }
 
     #[tokio::test]

@@ -101,7 +101,7 @@ pub fn PolicyRow(
             td { class: "row-actions", onclick: move |evt| evt.stop_propagation(),
                 if is_core {
                     span { class: "chip chip-info", "protected" }
-                } else if is_editable {
+                } else if !selection_mode && is_editable {
                     button {
                         class: "btn btn-subtle focus-ring xs",
                         onclick: move |_| on_edit.call(policy_for_edit.clone()),

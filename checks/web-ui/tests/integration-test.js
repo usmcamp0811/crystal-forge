@@ -6538,6 +6538,31 @@ const steps = [
     action: async (page) => {
       const laterPagePolicies = new Map();
       await page.route("**/api/v1/deployment-policies*", async (route) => {
+        if (route.request().method() === "POST" && route.request().url().endsWith("/bulk-delete")) {
+          const requested = route.request().postDataJSON().policy_ids || [];
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              deleted: requested.slice(0, 1),
+              skipped: requested.slice(1, 2).map((policy_id) => ({
+                policy_id,
+                reason: "deletion_blocked",
+                eligibility: {
+                  eligible: false,
+                  blockers: [{
+                    kind: "policy_immutable_history",
+                    message: "This policy has accepted or deprecated history and cannot be permanently deleted.",
+                    permanent: true,
+                    count: 1,
+                    ids: [],
+                  }],
+                },
+              })),
+            }),
+          });
+          return;
+        }
         if (route.request().method() !== "GET") {
           await route.continue();
           return;
@@ -6600,12 +6625,13 @@ const steps = [
           mapped_requirement_count: 0,
           bundle_usage_count: 0,
         };
-        const makePolicy = (index, category, name) => {
+        const makePolicy = (index, category, name, controlFamily = null) => {
           const policy = structuredClone(template);
           const id = `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`;
           const versionId = `10000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`;
           policy.id = id;
           policy.name = name;
+          policy.control_family = controlFamily;
           policy.current_version_id = versionId;
           policy.versions = (policy.versions || []).slice(0, 1).map((version) => ({
             ...version,
@@ -6613,14 +6639,17 @@ const steps = [
             policy_id: id,
             name,
             category,
+            control_family: controlFamily,
             version: "1.0.0",
           }));
           laterPagePolicies.set(id, policy);
           return policy;
         };
         const policies = [
-          ...Array.from({ length: 105 }, (_, index) => makePolicy(index, "security", `Security regression ${String(index).padStart(3, "0")}`)),
-          ...Array.from({ length: 5 }, (_, index) => makePolicy(105 + index, null, `Platform regression ${String(index).padStart(3, "0")}`)),
+          makePolicy(0, "security", "Security range start", "AC"),
+          ...Array.from({ length: 205 }, (_, index) => makePolicy(index + 1, "security", `Security deep ${String(index).padStart(3, "0")}`, "IA")),
+          makePolicy(206, "security", "Security range end", "CM"),
+          ...Array.from({ length: 5 }, (_, index) => makePolicy(207 + index, null, `Platform regression ${String(index).padStart(3, "0")}`)),
         ];
         const offset = Number(url.searchParams.get("offset") || "0");
         const limit = Number(url.searchParams.get("limit") || "100");
@@ -6655,7 +6684,7 @@ const steps = [
         page.getByText(new RegExp(`^${expectedCount} policies?$`)).first(),
         `Expected Policies view to render all ${expectedCount} catalog policies`,
       );
-      if (expectedCount <= 100) throw new Error(`Pagination regression fixture requires >100 policies, got ${expectedCount}`);
+      if (expectedCount <= 150) throw new Error(`Catalog scaling fixture requires >150 policies, got ${expectedCount}`);
       const laterPage = await page.evaluate(async (url) => {
         const response = await fetch(url, { credentials: "include" });
         return { status: response.status, body: await response.json() };
@@ -6671,6 +6700,41 @@ const steps = [
       await page.getByText(laterPolicy.name, { exact: true }).click();
       await assertVisible(page.getByRole("dialog", { name: "Policy detail" }), "Expected later-page Platform policy details to open");
       await page.getByTitle("Close").click();
+
+      // Phase 1 scaling regression: the IA group is >150 and starts collapsed,
+      // while the AC/CM groups remain expanded around it.
+      await page.getByRole("button", { name: /Security controls/i }).click();
+      const iaGroup = page.locator(".pol-group").filter({ hasText: "IA" }).first();
+      await assertVisible(iaGroup.getByText(/collapsed · 205 policies/), "Expected the >150 IA group to default collapsed");
+      await assertVisible(iaGroup.getByRole("button", { name: "Select group" }), "Collapsed groups must expose group selection");
+
+      // Deep search temporarily reveals the collapsed group and clearing the
+      // search restores the prior collapsed presentation.
+      const scalingSearch = page.getByPlaceholder("Search policies…").first();
+      await scalingSearch.fill("Security deep 204");
+      await assertVisible(page.getByText("Security deep 204", { exact: true }), "Search must reveal an item beyond the first chunk in a collapsed group");
+      await scalingSearch.fill("");
+      await assertVisible(iaGroup.getByText(/collapsed · 205 policies/), "Clearing search must restore collapsed state");
+
+      // Group selection works without expanding the group and the bulk-delete
+      // result preserves an authoritative skipped blocker.
+      await iaGroup.getByRole("button", { name: "Select group" }).click();
+      await assertVisible(page.getByText("205 selected", { exact: true }), "Collapsed group selection must select every logical item");
+      await page.getByRole("button", { name: "Delete selected", exact: true }).click();
+      await page.getByRole("button", { name: "Delete eligible policies", exact: true }).click();
+      await assertVisible(page.getByText(/Bulk delete: 1 deleted, 1 skipped/), "Partial bulk delete must report deleted and skipped outcomes");
+
+      // Shift selection spans both the unrendered IA group and the chunk
+      // boundary, then remains selected across Cards/Table view changes.
+      await page.getByRole("button", { name: "Clear", exact: true }).last().click();
+      const startCard = page.locator('[data-policy-card][data-policy-name="Security range start"]');
+      const endCard = page.locator('[data-policy-card][data-policy-name="Security range end"]');
+      await startCard.click();
+      await endCard.click({ modifiers: ["Shift"] });
+      await assertVisible(page.getByText("207 selected", { exact: true }), "Shift selection must include collapsed intermediate-group policies");
+      await page.getByRole("button", { name: "Table", exact: true }).click();
+      await assertCount(page.locator('[data-policy-row] input[type="checkbox"]:checked'), 2, "Cards/Table must preserve selected endpoints");
+      await page.getByRole("button", { name: "Cards", exact: true }).click();
       await page.unroute("**/api/v1/deployment-policies*");
     },
   },

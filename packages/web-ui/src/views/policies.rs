@@ -57,6 +57,15 @@ fn flat_range<'a>(full_flat_ids: &'a [Uuid], a: usize, b: usize) -> &'a [Uuid] {
     &full_flat_ids[lo..=hi]
 }
 
+/// Build the filtered logical selection order independently of presentation
+/// state. Collapsed groups and unrendered chunks remain part of this order.
+fn logical_flat_ids(group_states: &[(PolicyGroup, bool, usize)]) -> Vec<Uuid> {
+    group_states
+        .iter()
+        .flat_map(|(group, _, _)| group.items.iter().map(|policy| policy.id))
+        .collect()
+}
+
 const POLICY_JSON_TEMPLATE: &str = r#"{
   "policy_type": "custom_check",
   "config": {
@@ -365,19 +374,12 @@ pub fn PoliciesView() -> Element {
             (group, collapsed, shown)
         })
         .collect();
-    // The full logical order across every currently expanded group, used for
-    // Shift-range and cross-chunk selection: the range spans the full group
-    // contents even where a chunk's "Show more" has not been clicked yet, so
-    // items still selected below a chunk boundary are not silently skipped.
+    // The full logical order across every filtered group, used for Shift-range
+    // and cross-chunk selection: presentation collapse and chunk limits must
+    // not remove policies from the logical selection order.
     // `Rc`-wrapped so each rendered card/row can cheaply capture its own
     // clone for its click handler.
-    let full_flat_ids: std::rc::Rc<Vec<Uuid>> = std::rc::Rc::new(
-        group_states
-            .iter()
-            .filter(|(_, collapsed, _)| !collapsed)
-            .flat_map(|(group, _, _)| group.items.iter().map(|policy| policy.id))
-            .collect(),
-    );
+    let full_flat_ids: std::rc::Rc<Vec<Uuid>> = std::rc::Rc::new(logical_flat_ids(&group_states));
     let flat_index_of: HashMap<Uuid, usize> = full_flat_ids
         .iter()
         .enumerate()
@@ -704,7 +706,7 @@ pub fn PoliciesView() -> Element {
                 if selection_mode() {
                     span { style: "margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
                         span { class: "filter-count", "{selected_policy_ids.read().len()} selected" }
-                        if !selected_policy_ids.read().is_empty() {
+                        if is_admin_user && !selected_policy_ids.read().is_empty() {
                             button {
                                 class: "btn btn-ghost focus-ring xs",
                                 style: "color:#f87171;border-color:rgba(248,113,113,0.3);",
@@ -790,10 +792,12 @@ pub fn PoliciesView() -> Element {
                                     }
                                     div { style: "min-width:0;",
                                         h2 { class: "pol-group-title", "{group.label} " span { class: "pol-group-count", "{group.items.len()}" } }
-                                        div { class: "pol-group-blurb", "{group.blurb}" }
+                                         if !collapsed {
+                                             div { class: "pol-group-blurb", "{group.blurb}" }
+                                         }
                                     }
                                 }
-                                if selection_mode() && !collapsed {
+                                if selection_mode() {
                                     button {
                                         class: "btn btn-ghost focus-ring xs",
                                         style: "flex-shrink:0;",
@@ -812,7 +816,7 @@ pub fn PoliciesView() -> Element {
 
                             if collapsed {
                                 div { class: "pol-group-hidden-note",
-                                    "{group.items.len()} polic", if group.items.len() == 1 { "y" } else { "ies" }, " hidden — collapsed"
+                                     "collapsed · {group.items.len()} polic", if group.items.len() == 1 { "y" } else { "ies" }
                                 }
                             } else if table_view() {
                                 table { class: "sys-table",
@@ -2324,8 +2328,8 @@ mod interchange_tests {
 #[cfg(test)]
 mod catalog_scaling_tests {
     use super::{
-        BIG_GROUP, CHUNK, PolicyCategory, flat_range, group_default_collapsed, group_default_shown,
-        grouped_policies,
+        BIG_GROUP, CHUNK, PolicyCategory, PolicyGroup, flat_range, group_default_collapsed,
+        group_default_shown, grouped_policies, logical_flat_ids,
     };
     use crate::components::policy::{PolicyDefinition, PolicyFormat};
     use uuid::Uuid;
@@ -2395,6 +2399,52 @@ mod catalog_scaling_tests {
         // A stale index beyond the current flat order (e.g. after a filter
         // shrank the list) must clamp rather than panic.
         assert_eq!(flat_range(&ids, 0, 99), &ids[..]);
+    }
+
+    #[test]
+    fn logical_order_includes_collapsed_intermediate_groups() {
+        let first = policy_named("first", Some("security"));
+        let middle = policy_named("middle", Some("security"));
+        let last = policy_named("last", Some("security"));
+        let states = vec![
+            (
+                PolicyGroup {
+                    key: "first".to_string(),
+                    label: "First".to_string(),
+                    blurb: String::new(),
+                    color: "#fff",
+                    items: vec![first.clone()],
+                },
+                false,
+                1,
+            ),
+            (
+                PolicyGroup {
+                    key: "middle".to_string(),
+                    label: "Middle".to_string(),
+                    blurb: String::new(),
+                    color: "#fff",
+                    items: vec![middle.clone()],
+                },
+                true,
+                1,
+            ),
+            (
+                PolicyGroup {
+                    key: "last".to_string(),
+                    label: "Last".to_string(),
+                    blurb: String::new(),
+                    color: "#fff",
+                    items: vec![last.clone()],
+                },
+                false,
+                1,
+            ),
+        ];
+
+        let logical = logical_flat_ids(&states);
+        assert_eq!(logical, vec![first.id, middle.id, last.id]);
+        assert_eq!(&logical[0..=2], flat_range(&logical, 0, 2));
     }
 
     /// Two groups with the same label under different domains/grouping
