@@ -1,9 +1,10 @@
 ---
 id: TASK-433.4
 title: 'TASK-433 Phase 3: NixOS option metadata and composite policy serializer'
-status: Backlog
+status: In Progress
 assignee: []
 created_date: '2026-08-23 01:42'
+updated_date: '2026-08-23 19:27'
 labels:
   - design-parity
   - policy
