@@ -11,6 +11,8 @@
 
 use std::collections::BTreeMap;
 
+use uuid::Uuid;
+
 use crate::extract::extract_assignments;
 use crate::model::{GeneratedPolicy, ResolvedPolicy, SkippedPolicy};
 use crate::nix::{COMPLIANCE_LIB_NIX, LIB_FILE, render_default_module, sanitize_baseline_name};
@@ -74,7 +76,7 @@ pub struct Generated {
 /// Derivation is deterministic and independent of CLI argument order:
 ///
 /// 1. an explicit `--baseline` name, when given;
-/// 2. otherwise the single contributing bundle's name;
+/// 2. otherwise the single contributing bundle's name plus immutable version ID;
 /// 3. otherwise the lexicographically first input label.
 pub fn derive_baseline(selection: &Selection, explicit: Option<&str>) -> String {
     if let Some(name) = explicit {
@@ -82,7 +84,8 @@ pub fn derive_baseline(selection: &Selection, explicit: Option<&str>) -> String 
     }
 
     if selection.bundles.len() == 1 {
-        return sanitize_baseline_name(&selection.bundles[0].name);
+        let bundle = &selection.bundles[0];
+        return sanitize_baseline_with_identity(&bundle.name, bundle.bundle_version_id);
     }
 
     let mut labels: Vec<&str> = selection
@@ -102,6 +105,22 @@ pub fn derive_baseline(selection: &Selection, explicit: Option<&str>) -> String 
         .first()
         .map(|label| sanitize_baseline_name(strip_extension(label)))
         .unwrap_or_else(|| "baseline".to_string())
+}
+
+/// Preserve the immutable bundle-version suffix even when the display name is
+/// long enough to exceed the Nix identifier limit.
+fn sanitize_baseline_with_identity(name: &str, identity: Uuid) -> String {
+    let suffix = format!("-{}", identity.simple());
+    let mut prefix = sanitize_baseline_name(name);
+    let prefix_limit = 64usize.saturating_sub(suffix.len());
+    prefix.truncate(prefix_limit);
+    while prefix.ends_with('-') {
+        prefix.pop();
+    }
+    if prefix.is_empty() {
+        prefix.push_str("baseline");
+    }
+    sanitize_baseline_name(&format!("{prefix}{suffix}"))
 }
 
 fn strip_extension(label: &str) -> &str {
@@ -217,6 +236,7 @@ fn render_manifest(
                 "policy_type": generated.policy.policy_type,
                 "implementation_state": generated.policy.implementation_state,
                 "semantic_digest": generated.policy.semantic_digest,
+                "generated_file": MANIFEST_FILE,
                 "source_inputs": generated.policy.origin.input_labels,
                 "source_export_digests": generated.policy.origin.source_sha256s,
                 "bundle_version_ids": generated
@@ -311,6 +331,7 @@ mod tests {
             policy_id: Uuid::parse_str(lineage).expect("uuid"),
             policy_version_id: Uuid::parse_str(version_id).expect("uuid"),
             version: "1".into(),
+            publication_state: "accepted".into(),
             name: name.into(),
             description: None,
             policy_type: "custom_check".into(),
@@ -339,6 +360,22 @@ mod tests {
             policies,
             bundles: Vec::new(),
             deduplicated: Vec::new(),
+        }
+    }
+
+    fn bundle(version_id: &str) -> crate::model::ResolvedBundle {
+        crate::model::ResolvedBundle {
+            bundle_id: Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").expect("uuid"),
+            bundle_version_id: Uuid::parse_str(version_id).expect("uuid"),
+            name: "same named baseline".into(),
+            version: "1".into(),
+            framework: None,
+            framework_version: None,
+            publication_state: "accepted".into(),
+            semantic_digest: None,
+            source_sha256s: vec![],
+            input_labels: vec!["bundle.xml".into()],
+            selected_policy_version_ids: vec![],
         }
     }
 
@@ -521,5 +558,25 @@ mod tests {
         let reverse = derive_baseline(&selection(vec![b, a]), None);
         assert_eq!(forward, reverse);
         assert_eq!(forward, "alpha");
+    }
+
+    #[test]
+    fn default_baselines_for_bundle_versions_cannot_collide() {
+        let first = Selection {
+            policies: vec![],
+            bundles: vec![bundle("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")],
+            deduplicated: vec![],
+        };
+        let second = Selection {
+            policies: vec![],
+            bundles: vec![bundle("cccccccc-cccc-cccc-cccc-cccccccccccc")],
+            deduplicated: vec![],
+        };
+
+        let first_name = derive_baseline(&first, None);
+        let second_name = derive_baseline(&second, None);
+        assert_ne!(first_name, second_name);
+        assert!(first_name.contains("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+        assert!(second_name.contains("cccccccccccccccccccccccccccccccc"));
     }
 }

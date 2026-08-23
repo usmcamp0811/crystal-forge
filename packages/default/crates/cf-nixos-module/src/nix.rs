@@ -31,11 +31,12 @@ pub fn render_default_module(baseline: &str, policy_count: usize, skipped_count:
 #
 #   {{
 #     imports = [ ./generated-compliance ];
-#     crystal-forge.compliance.{baseline}.enable = true;
+#     # Applied by default; disable explicitly when needed:
+#     crystal-forge.compliance.{baseline}.enable = false;
 #   }}
 #
-# Importing this directory only makes the baseline available. Nothing is
-# applied until the enable option above is set.
+# Importing this directory applies the baseline by default. Set the enable
+# option above to false to disable it explicitly.
 #
 # Policies implemented: {policy_count}
 # Policies reported as unconvertible: {skipped_count}
@@ -122,7 +123,7 @@ mod tests {
         assert!(rendered.contains("import ./lib.nix"));
         assert!(rendered.contains("builtins.fromJSON (builtins.readFile ./manifest.json)"));
         assert!(rendered.contains(r#"baseline = "production-baseline";"#));
-        assert!(rendered.contains("crystal-forge.compliance.production-baseline.enable = true;"));
+        assert!(rendered.contains("crystal-forge.compliance.production-baseline.enable = false;"));
     }
 
     #[test]

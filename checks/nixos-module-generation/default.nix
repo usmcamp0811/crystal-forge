@@ -14,17 +14,17 @@
   # produce exactly the values the exported Crystal Forge policies asserted. A
   # string comparison of the generated text would prove none of that.
   #
-  # `enable` is a parameter so the same harness proves both that an enabled
-  # baseline applies its configuration and that merely importing it does not.
+  # `enable` is a parameter so the same harness proves both that the default
+  # baseline applies and that an explicit disable prevents application.
   evalGenerated = pkgs.writeText "eval-generated.nix" ''
-    { modulePath, baseline, enable }:
+    { modulePath, baseline, enable ? null }:
     let
       evaluated = import ${pkgs.path}/nixos/lib/eval-config.nix {
         system = "${system}";
-        modules = [
-          (/. + modulePath)
-          { crystal-forge.compliance.''${baseline}.enable = enable; }
-        ];
+        modules = [ (/. + modulePath) ]
+          ++ (if enable == null then [] else [
+            { crystal-forge.compliance.''${baseline}.enable = enable; }
+          ]);
       };
       cfg = evaluated.config;
     in {
@@ -117,12 +117,11 @@ in
       exit 1
     fi
 
-    echo "── 6. Enabled: the baseline applies its configuration ──────────────────"
+    echo "── 6. Imported without enable setting: baseline applies ────────────────"
     nix-instantiate --eval --strict --json --readonly-mode \
       --argstr modulePath "$PWD/generated" \
       --argstr baseline production-baseline \
-      --arg enable true \
-      ${evalGenerated} > enabled.json
+       ${evalGenerated} > enabled.json
     jq . enabled.json
 
     test "$(jq -r '.firewall' enabled.json)"               = "true"
@@ -136,7 +135,7 @@ in
     test "$(jq -r '.summary.policyCount' enabled.json)" = "4"
     test "$(jq -r '.summary.skippedPolicyCount' enabled.json)" = "3"
 
-    echo "── 7. Imported but not enabled: nothing is applied ─────────────────────"
+    echo "── 7. Explicitly disabled: nothing is applied ─────────────────────────"
     nix-instantiate --eval --strict --json --readonly-mode \
       --argstr modulePath "$PWD/generated" \
       --argstr baseline production-baseline \
@@ -221,7 +220,7 @@ in
       exit 1
     fi
     # Exactly one enable option is declared, for the baseline itself.
-    test "$(grep -c 'mkEnableOption' generated-code.nix)" = "1"
+    test "$(grep -c 'enable = lib.mkOption' generated-code.nix)" = "1"
 
     echo "── 13. CLI modes behave as documented ──────────────────────────────────"
     cf-nixos-module --input policy-set.json --check
@@ -248,6 +247,7 @@ in
         {
           "lineage_id": "11111111-0000-0000-0000-0000000000e1",
           "version_id": "22222222-0000-0000-0000-0000000000e1",
+          "publication_state": "accepted",
           "name": "firewall-on",
           "policy_type": "custom_check",
           "implementation_state": "native",
@@ -256,6 +256,7 @@ in
         {
           "lineage_id": "11111111-0000-0000-0000-0000000000e2",
           "version_id": "22222222-0000-0000-0000-0000000000e2",
+          "publication_state": "accepted",
           "name": "firewall-off",
           "policy_type": "custom_check",
           "implementation_state": "native",
@@ -281,6 +282,7 @@ in
         {
           "lineage_id": "11111111-0000-0000-0000-0000000000f0",
           "version_id": "22222222-0000-0000-0000-0000000000f1",
+          "publication_state": "accepted",
           "name": "same-lineage",
           "policy_type": "custom_check",
           "implementation_state": "native",
@@ -295,6 +297,7 @@ in
         {
           "lineage_id": "11111111-0000-0000-0000-0000000000f0",
           "version_id": "22222222-0000-0000-0000-0000000000f2",
+          "publication_state": "accepted",
           "name": "same-lineage",
           "policy_type": "custom_check",
           "implementation_state": "native",

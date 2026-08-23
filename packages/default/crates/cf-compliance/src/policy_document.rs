@@ -31,6 +31,7 @@ pub struct NormalizedPolicyImport {
     pub lineage_id: Uuid,
     pub version_id: Uuid,
     pub version: String,
+    pub publication_state: String,
     pub name: String,
     pub description: Option<String>,
     pub policy_type: String,
@@ -213,6 +214,14 @@ pub fn normalize_policy_import(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("0.1.0")
         .to_string();
+    // Server-side policy import remains compatible with older documents that
+    // omitted lifecycle state; those documents are drafts. Offline module
+    // generation rejects that state because an export must prove immutability.
+    let publication_state = object
+        .get("publication_state")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("draft")
+        .to_string();
     let description = object
         .get("description")
         .and_then(serde_json::Value::as_str)
@@ -267,6 +276,7 @@ pub fn normalize_policy_import(
         lineage_id,
         version_id,
         version,
+        publication_state,
         name,
         description,
         policy_type,
@@ -293,6 +303,7 @@ mod tests {
                 {
                     "lineage_id": "11111111-1111-1111-1111-111111111111",
                     "version_id": "22222222-2222-2222-2222-222222222222",
+                    "publication_state": "accepted",
                     "name": "firewall-enabled",
                     "policy_type": "custom_check",
                     "config": {"expression": "config.networking.firewall.enable == true"},
@@ -319,6 +330,7 @@ mod tests {
     fn parses_bare_single_policy_object() {
         let bytes = serde_json::to_vec(&serde_json::json!({
             "name": "solo",
+            "publication_state": "accepted",
             "policy_type": "custom_check",
             "config": {"expression": "config.a.b == true"},
         }))
@@ -334,6 +346,7 @@ mod tests {
         let bytes = serde_json::to_vec(&serde_json::json!({
             "policies": [{
                 "name": "legacy",
+                "publication_state": "accepted",
                 "expression": "config.services.openssh.enable == true",
                 "strict": false,
             }],
@@ -354,6 +367,7 @@ mod tests {
         let bytes = serde_json::to_vec(&serde_json::json!({
             "policies": [{
                 "name": "tampered",
+                "publication_state": "accepted",
                 "policy_type": "custom_check",
                 "config": {"expression": "config.a.b == true"},
                 "semantic_digest": "0".repeat(64),
@@ -377,6 +391,7 @@ mod tests {
             "policies": [{
                 "lineage_id": "11111111-1111-1111-1111-111111111111",
                 "version_id": "22222222-2222-2222-2222-222222222222",
+                "publication_state": "accepted",
                 "name": "firewall-enabled",
                 "policy_type": "custom_check",
                 "config": {"expression": "config.networking.firewall.enable == true"},
@@ -392,6 +407,7 @@ mod tests {
         let bytes = serde_json::to_vec(&serde_json::json!({
             "policies": [{
                 "name": "no-ids",
+                "publication_state": "accepted",
                 "policy_type": "custom_check",
                 "config": {"expression": "config.a.b == true"},
             }],
@@ -410,8 +426,8 @@ mod tests {
         let shared = "22222222-2222-2222-2222-222222222222";
         let bytes = serde_json::to_vec(&serde_json::json!({
             "policies": [
-                {"version_id": shared, "name": "a", "policy_type": "custom_check", "config": {}},
-                {"version_id": shared, "name": "b", "policy_type": "custom_check", "config": {}},
+                {"version_id": shared, "name": "a", "publication_state": "accepted", "policy_type": "custom_check", "config": {}},
+                {"version_id": shared, "name": "b", "publication_state": "accepted", "policy_type": "custom_check", "config": {}},
             ],
         }))
         .expect("serialize");
@@ -433,6 +449,7 @@ mod tests {
         let toml_text = r#"
 [[policies]]
 name = "firewall-enabled"
+publication_state = "accepted"
 policy_type = "custom_check"
 
 [policies.config]

@@ -15072,6 +15072,7 @@ packages = ["git"]
                 enabled_by_default: Some(false),
                 semantic_digest: "abc123".into(),
                 version: "1.0".into(),
+                publication_state: "draft".into(),
             },
             NormalizedPolicyImport {
                 lineage_id: id2,
@@ -15088,6 +15089,7 @@ packages = ["git"]
                 enabled_by_default: Some(false),
                 semantic_digest: "def456".into(),
                 version: "2.0".into(),
+                publication_state: "draft".into(),
             },
         ];
 
@@ -15114,6 +15116,7 @@ packages = ["git"]
                 enabled_by_default: Some(false),
                 semantic_digest: "abc123".into(),
                 version: "1.0".into(),
+                publication_state: "draft".into(),
             },
             NormalizedPolicyImport {
                 lineage_id: Uuid::new_v4(),
@@ -15130,6 +15133,7 @@ packages = ["git"]
                 enabled_by_default: Some(false),
                 semantic_digest: "def456".into(),
                 version: "2.0".into(),
+                publication_state: "draft".into(),
             },
         ];
 

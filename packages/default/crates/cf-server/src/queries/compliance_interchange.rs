@@ -6382,6 +6382,7 @@ mod phase_22_shared_validation_unit_tests {
             implementation_state: "native".to_string(),
             policy_type: "native".to_string(), // Must be "native" for shared groups
             version: None,
+            publication_state: None,
             execution_phase: "not-applicable".to_string(),
             config: serde_json::json!({}),
             dependencies: serde_json::json!([]),

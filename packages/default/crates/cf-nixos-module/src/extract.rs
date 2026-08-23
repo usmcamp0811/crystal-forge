@@ -221,6 +221,7 @@ mod tests {
             policy_id: Uuid::nil(),
             policy_version_id: Uuid::nil(),
             version: "1".into(),
+            publication_state: "accepted".into(),
             name: "test-policy".into(),
             description: None,
             policy_type: policy_type.into(),

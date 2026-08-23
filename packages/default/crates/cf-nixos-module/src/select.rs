@@ -254,6 +254,7 @@ mod tests {
             policy_id: Uuid::parse_str(lineage_id).expect("uuid"),
             policy_version_id: Uuid::parse_str(version_id).expect("uuid"),
             version: "1".into(),
+            publication_state: "accepted".into(),
             name: name.into(),
             description: None,
             policy_type: "custom_check".into(),

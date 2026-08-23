@@ -134,15 +134,15 @@
     assert' (disabled.foo.bool == false && disabled.foo.int == 0 && disabled.foo.string == "")
     "a disabled baseline must not apply any assignment";
 
-  # Importing without setting enable must also apply nothing.
+  # Importing without setting enable applies the baseline by default.
   notEnabled = (evalWith {manifest = typedManifest;}).config;
   t8 =
-    assert' (notEnabled.foo.bool == false && notEnabled.foo.list == [])
-    "importing alone must not modify the system";
+    assert' (notEnabled.foo.bool == true && notEnabled.foo.list == ["a" "b"])
+    "importing alone must apply the baseline";
 
   t9 =
-    assert' (notEnabled.crystal-forge.compliance.test.enable == false)
-    "enable must default to false";
+    assert' (notEnabled.crystal-forge.compliance.test.enable == true)
+    "enable must default to true";
 
   # ── 3. Conflict behaviour ──────────────────────────────────────────────────
   #

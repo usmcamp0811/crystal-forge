@@ -33,10 +33,11 @@ OPTIONS:
     -h, --help             Print this help.
 
 The artifact contains default.nix, lib.nix, and manifest.json. Import it and
-enable the baseline:
+the baseline is enabled by default:
 
     imports = [ ./generated-compliance ];
-    crystal-forge.compliance.<baseline>.enable = true;
+    # Optional: importing the artifact enables the baseline by default.
+    crystal-forge.compliance.<baseline>.enable = false;
 
 The generated module depends only on standard NixOS module infrastructure and
 requires no running Crystal Forge server.
@@ -202,8 +203,8 @@ fn run(args: &Args) -> Result<ExitCode, String> {
         output.display()
     );
     println!(
-        "\nImport the artifact and enable the baseline:\n\n  \
-         imports = [ ./{} ];\n  crystal-forge.compliance.{}.enable = true;",
+        "\nImport the artifact (the baseline applies by default):\n\n  \
+         imports = [ ./{} ];\n  # To disable explicitly:\n  crystal-forge.compliance.{}.enable = false;",
         output
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())

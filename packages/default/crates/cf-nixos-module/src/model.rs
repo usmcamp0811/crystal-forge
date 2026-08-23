@@ -74,6 +74,8 @@ pub struct ResolvedPolicy {
     /// Portable version identity, unique to this exact version.
     pub policy_version_id: Uuid,
     pub version: String,
+    /// Lifecycle state proven by the export boundary.
+    pub publication_state: String,
     pub name: String,
     pub description: Option<String>,
     pub policy_type: String,
@@ -325,6 +327,7 @@ mod tests {
             policy_id: Uuid::nil(),
             policy_version_id: Uuid::nil(),
             version: "1".into(),
+            publication_state: "accepted".into(),
             name: "p".into(),
             description: None,
             policy_type: "custom_check".into(),

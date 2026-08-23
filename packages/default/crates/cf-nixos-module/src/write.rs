@@ -27,6 +27,19 @@ pub fn write_output(generated: &Generated, output: &Path) -> Result<(), String> 
     std::fs::create_dir_all(output)
         .map_err(|error| format!("could not create {}: {error}", output.display()))?;
 
+    // `policies/` was the generator-owned directory in the previous artifact
+    // layout. Reject it rather than leaving stale policy modules beside the new
+    // three-file artifact. Rejection is safer than recursively deleting a path
+    // that may have been supplied by the consumer, and symlink_metadata keeps a
+    // symlink from being followed during this check.
+    let stale_policies = output.join("policies");
+    if std::fs::symlink_metadata(&stale_policies).is_ok() {
+        return Err(format!(
+            "refusing to regenerate {}: stale generator-owned policies/ output exists; remove it or choose a clean output directory",
+            output.display()
+        ));
+    }
+
     // Open the output directory without following a final symlink. If `output`
     // itself is a symlink, this fails instead of writing through it.
     let dir = rustix::fs::open(
@@ -192,7 +205,8 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    /// `output/policies -> directory outside output` must never receive writes.
+    /// A symlink in the generator-owned previous layout is rejected before any
+    /// output file is touched.
     #[test]
     fn never_writes_into_a_directory_symlink_inside_the_output() {
         let base = scratch("symlink-dir");
@@ -203,11 +217,12 @@ mod tests {
         std::fs::write(outside_dir.join("canary"), "ORIGINAL").expect("seed canary");
         symlink(&outside_dir, output.join("policies")).expect("create dir symlink");
 
-        write_output(
+        let error = write_output(
             &artifact(vec![("default.nix", "{ }"), ("manifest.json", "{}")]),
             &output,
         )
-        .expect("flat writes succeed");
+        .expect_err("stale generator-owned symlink must be rejected");
+        assert!(error.contains("stale"), "unexpected error: {error}");
 
         // Nothing was added to or changed in the outside directory.
         assert_eq!(
@@ -258,6 +273,20 @@ mod tests {
                 "unexpected error for {bad}: {error}"
             );
         }
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn rejects_stale_previous_layout() {
+        let base = scratch("stale-layout");
+        let output = base.join("out");
+        std::fs::create_dir_all(output.join("policies")).expect("mkdir stale layout");
+        std::fs::write(output.join("policies/stale.nix"), "stale").expect("seed stale file");
+
+        let error = write_output(&artifact(vec![("default.nix", "fresh")]), &output)
+            .expect_err("stale previous layout must be rejected");
+        assert!(error.contains("stale"), "unexpected error: {error}");
+        assert!(output.join("policies/stale.nix").exists());
         std::fs::remove_dir_all(&base).ok();
     }
 }

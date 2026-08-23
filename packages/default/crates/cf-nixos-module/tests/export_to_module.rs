@@ -207,6 +207,7 @@ fn bundle_manifest_records_immutable_identities() {
     );
 
     for policy in manifest["policies"].as_array().expect("policies") {
+        assert_eq!(policy["generated_file"], "manifest.json");
         assert_eq!(
             policy["semantic_digest"].as_str().expect("digest").len(),
             64
@@ -337,6 +338,6 @@ fn baseline_defaults_to_the_bundle_name() {
     let selection = resolve(vec![bundle_input()]);
     assert_eq!(
         derive_baseline(&selection, None),
-        "crystal-forge-nixos-baseline"
+        "crystal-forge-nixos-baseline-bbbbbbbb00000000000000000000000b"
     );
 }

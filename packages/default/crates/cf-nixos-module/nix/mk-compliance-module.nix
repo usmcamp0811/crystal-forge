@@ -24,8 +24,8 @@
 #   crystal-forge.compliance.<baseline>.enable
 #   crystal-forge.compliance.<baseline>.summary   (read-only provenance)
 #
-# Importing the module makes the baseline available; it applies nothing until
-# `enable = true`.
+# Importing the module applies the baseline by default. An operator may set
+# `enable = false` to disable it explicitly.
 #
 # Deliberate non-features:
 #   * No per-policy enable switches. Enabling a baseline applies every policy
@@ -63,9 +63,11 @@
     (lib.setAttrByPath assignment.path assignment.value);
 in {
   options.crystal-forge.compliance.${baseline} = {
-    enable =
-      lib.mkEnableOption
-      "the Crystal Forge compliance baseline '${baseline}' generated from an immutable Crystal Forge export";
+    enable = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Whether to apply the Crystal Forge compliance baseline '${baseline}' generated from an immutable Crystal Forge export";
+    };
 
     summary = lib.mkOption {
       type = lib.types.attrs;
@@ -94,6 +96,7 @@ in {
     };
   };
 
-  # Ordinary definitions, applied only when the baseline is enabled.
+  # Ordinary definitions, applied unless the operator explicitly disables the
+  # baseline.
   config = lib.mkIf cfg.enable (lib.mkMerge (map toDefinition assignments));
 }

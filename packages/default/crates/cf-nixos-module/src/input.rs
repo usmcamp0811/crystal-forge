@@ -115,6 +115,17 @@ fn load_policy_document(bytes: &[u8], label: &str) -> Result<LoadedInput, InputE
     // output on every run.
     let normalized = parse_policy_document(bytes, Some(label), Some(&source_sha256))
         .map_err(|message| InputError::new(label, message))?;
+    for policy in &normalized {
+        if !matches!(policy.publication_state.as_str(), "accepted" | "deprecated") {
+            return Err(InputError::new(
+                label,
+                format!(
+                    "policy version {} has publication_state '{}'; standalone generation requires an immutable accepted or deprecated policy version",
+                    policy.version_id, policy.publication_state
+                ),
+            ));
+        }
+    }
     validate_policy_interchange_document(&normalized)
         .map_err(|message| InputError::new(label, message))?;
 
@@ -124,6 +135,7 @@ fn load_policy_document(bytes: &[u8], label: &str) -> Result<LoadedInput, InputE
             policy_id: policy.lineage_id,
             policy_version_id: policy.version_id,
             version: policy.version,
+            publication_state: policy.publication_state,
             name: policy.name,
             description: policy.description,
             policy_type: policy.policy_type,
@@ -169,15 +181,39 @@ fn load_xccdf_bundle(bytes: &[u8], label: &str) -> Result<LoadedInput, InputErro
         ));
     }
 
-    // Authoritative CF-native validation: verifies bundle and per-rule semantic
-    // digests, portable identities, digest contract, and membership ordering.
-    let (_validated, records) = validate_cf_native_document(&parsed)
-        .map_err(|error| InputError::new(label, format!("{error:?}")))?;
-
     let bundle_meta = parsed
         .cf_bundle_meta
         .as_ref()
         .ok_or_else(|| InputError::new(label, "CF-native document is missing bundle metadata"))?;
+
+    if bundle_meta.publication_state != "accepted" {
+        return Err(InputError::new(
+            label,
+            format!(
+                "bundle version {} has publication_state '{}'; standalone generation requires an accepted bundle version",
+                bundle_meta.bundle_version_id, bundle_meta.publication_state
+            ),
+        ));
+    }
+    for rule in &parsed.rules {
+        let Some(meta) = &rule.cf_policy_meta else {
+            continue;
+        };
+        if !matches!(meta.publication_state.as_str(), "accepted" | "deprecated") {
+            return Err(InputError::new(
+                label,
+                format!(
+                    "policy version {} has publication_state '{}'; standalone generation requires an immutable accepted or deprecated policy version",
+                    meta.policy_version_id, meta.publication_state
+                ),
+            ));
+        }
+    }
+
+    // Authoritative CF-native validation: verifies bundle and per-rule semantic
+    // digests, portable identities, digest contract, and membership ordering.
+    let (_validated, records) = validate_cf_native_document(&parsed)
+        .map_err(|error| InputError::new(label, format!("{error:?}")))?;
 
     // Use the exact membership this immutable bundle version froze. Ordering
     // comes from `policy_order`, never from document order or "latest".
@@ -218,6 +254,10 @@ fn load_xccdf_bundle(bytes: &[u8], label: &str) -> Result<LoadedInput, InputErro
             policy_id: record.policy_id,
             policy_version_id: record.policy_version_id,
             version: record.version.unwrap_or_else(|| "0.1.0".into()),
+            publication_state: record
+                .publication_state
+                .clone()
+                .unwrap_or_else(|| "accepted".into()),
             name: record.name,
             description: record.description,
             policy_type: record.policy_type,
@@ -315,6 +355,7 @@ mod tests {
             "policies": [{
                 "lineage_id": "11111111-1111-1111-1111-111111111111",
                 "version_id": "22222222-2222-2222-2222-222222222222",
+                "publication_state": "accepted",
                 "name": "firewall",
                 "policy_type": "custom_check",
                 "config": {"expression": "config.networking.firewall.enable == true"},
@@ -333,6 +374,7 @@ mod tests {
         let bytes = serde_json::to_vec(&serde_json::json!({
             "policies": [{
                 "name": "no-portable-ids",
+                "publication_state": "accepted",
                 "policy_type": "custom_check",
                 "config": {"expression": "config.a.b == true"},
             }],
@@ -357,6 +399,7 @@ mod tests {
         let bytes = serde_json::to_vec(&serde_json::json!({
             "policies": [{
                 "name": "tampered",
+                "publication_state": "accepted",
                 "policy_type": "custom_check",
                 "config": {"expression": "config.a.b == true"},
                 "semantic_digest": "0".repeat(64),
@@ -369,6 +412,33 @@ mod tests {
             "got: {}",
             error.message
         );
+    }
+
+    #[test]
+    fn mutable_direct_policy_export_is_rejected() {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "policies": [{
+                "name": "draft-policy",
+                "publication_state": "draft",
+                "policy_type": "custom_check",
+                "config": {"expression": "config.a.b == true"},
+            }],
+        }))
+        .expect("serialize");
+        let error = load_input(&bytes, "draft.json").expect_err("draft must be rejected");
+        assert!(error.message.contains("publication_state"), "{error}");
+        assert!(error.message.contains("draft"), "{error}");
+    }
+
+    #[test]
+    fn mutable_bundle_export_is_rejected() {
+        let xml = crate::fixture::bundle_xccdf_xml().replace(
+            "publication-state=\"accepted\"",
+            "publication-state=\"interim\"",
+        );
+        let error = load_input(xml.as_bytes(), "interim.xml").expect_err("interim must fail");
+        assert!(error.message.contains("publication_state"), "{error}");
+        assert!(error.message.contains("interim"), "{error}");
     }
 
     #[test]

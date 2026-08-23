@@ -520,6 +520,7 @@ pub struct ImportedPolicyRecord {
     /// Native policy type from the typed CF payload.
     pub policy_type: String,
     pub version: Option<String>,
+    pub publication_state: Option<String>,
     pub execution_phase: String,
     pub config: serde_json::Value,
     pub dependencies: serde_json::Value,
