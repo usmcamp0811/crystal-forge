@@ -1478,11 +1478,10 @@ pub struct BulkDeleteSkippedPolicy {
 }
 
 /// Response for a bulk-delete request. Every requested id resolves into
-/// exactly one of `deleted` or `skipped` — bulk delete never partially fails
-/// a single policy's own transaction, and one policy's immutable-history
-/// blocker never blocks deletion of the other eligible policies in the same
-/// request (each policy is deleted in its own transaction, matching the
-/// single-policy delete path).
+/// exactly one of `deleted` or `skipped`. Expected immutable-history blockers
+/// do not block other eligible policies, while an unexpected database error
+/// rolls back the complete bulk transaction rather than hiding committed
+/// partial results.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkDeletePoliciesResponse {
     pub deleted: Vec<Uuid>,

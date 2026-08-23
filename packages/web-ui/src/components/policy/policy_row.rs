@@ -60,7 +60,11 @@ pub fn PolicyRow(
             "data-policy-name": "{policy.name}",
             style: if highlighted { "box-shadow: inset 2px 0 0 var(--cf-brand-purple);" } else { "" },
             onclick: move |evt| {
-                if selection_mode || evt.modifiers().shift() {
+                if selection_mode
+                    || evt.modifiers().shift()
+                    || evt.modifiers().ctrl()
+                    || evt.modifiers().meta()
+                {
                     on_row_click.call(evt);
                 } else {
                     on_open.call(policy_for_open.clone());
@@ -113,7 +117,7 @@ pub fn PolicyRow(
                         onclick: move |_| on_delete.call(policy_id),
                         "Delete"
                     }
-                } else {
+                } else if !selection_mode {
                     span { class: "chip chip-unknown", "read-only" }
                 }
             }

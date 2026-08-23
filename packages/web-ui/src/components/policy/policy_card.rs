@@ -58,7 +58,11 @@ pub fn PolicyCard(
         div {
             class: "sys-card",
             onclick: move |evt| {
-                if selection_mode || evt.modifiers().shift() {
+                if selection_mode
+                    || evt.modifiers().shift()
+                    || evt.modifiers().ctrl()
+                    || evt.modifiers().meta()
+                {
                     on_row_click.call(evt);
                 } else {
                     on_open.call(policy_for_open.clone());
@@ -193,7 +197,7 @@ pub fn PolicyCard(
                             "Delete"
                         }
                     }
-                } else {
+                } else if !selection_mode {
                     span { class: "chip chip-unknown", "read-only" }
                 }
             }

@@ -1145,10 +1145,11 @@ pub async fn delete_deployment_policy(
 ///
 /// Available to Admin role only. Every requested id resolves into either
 /// `deleted` or `skipped` — the request never fails outright because one
-/// policy is blocked. Each policy is deleted (or preflighted) with the same
-/// server-side eligibility check the single-policy DELETE endpoint uses, so
-/// a stale client selection is always resolved authoritatively rather than
-/// trusting client-cached eligibility.
+/// policy is blocked. All eligible deletions share one transaction, so an
+/// unexpected database error rolls back the complete operation. Each policy
+/// uses the same server-side eligibility check as the single-policy DELETE
+/// endpoint, so a stale client selection is always resolved authoritatively
+/// rather than trusting cached eligibility.
 pub async fn bulk_delete_deployment_policies(
     RequireAdmin(_user): RequireAdmin,
     State(state): State<CFState>,

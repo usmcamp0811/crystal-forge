@@ -6537,16 +6537,20 @@ const steps = [
     description: "Policies view",
     action: async (page) => {
       const laterPagePolicies = new Map();
+      const deletedPolicyIds = new Set();
       await page.route("**/api/v1/deployment-policies*", async (route) => {
         if (route.request().method() === "POST" && route.request().url().endsWith("/bulk-delete")) {
           const requested = route.request().postDataJSON().policy_ids || [];
+          const skippedId = requested[0];
+          const deleted = requested.filter((policyId) => policyId !== skippedId);
+          deleted.forEach((policyId) => deletedPolicyIds.add(policyId));
           await route.fulfill({
             status: 200,
             contentType: "application/json",
             body: JSON.stringify({
-              deleted: requested.slice(0, 1),
-              skipped: requested.slice(1, 2).map((policy_id) => ({
-                policy_id,
+              deleted,
+              skipped: skippedId ? [{
+                policy_id: skippedId,
                 reason: "deletion_blocked",
                 eligibility: {
                   eligible: false,
@@ -6558,7 +6562,7 @@ const steps = [
                     ids: [],
                   }],
                 },
-              })),
+              }] : [],
             }),
           });
           return;
@@ -6651,14 +6655,15 @@ const steps = [
           makePolicy(206, "security", "Security range end", "CM"),
           ...Array.from({ length: 5 }, (_, index) => makePolicy(207 + index, null, `Platform regression ${String(index).padStart(3, "0")}`)),
         ];
+        const visiblePolicies = policies.filter((policy) => !deletedPolicyIds.has(policy.id));
         const offset = Number(url.searchParams.get("offset") || "0");
         const limit = Number(url.searchParams.get("limit") || "100");
         await route.fulfill({
           status: 200,
           contentType: "application/json",
           body: JSON.stringify({
-            policies: policies.slice(offset, offset + limit),
-            total: policies.length,
+            policies: visiblePolicies.slice(offset, offset + limit),
+            total: visiblePolicies.length,
             limit,
             offset,
             system_counts: {},
@@ -6716,16 +6721,16 @@ const steps = [
       await scalingSearch.fill("");
       await assertVisible(iaGroup.getByText(/collapsed · 205 policies/), "Clearing search must restore collapsed state");
 
-      // Group selection works without expanding the group and the bulk-delete
-      // result preserves an authoritative skipped blocker.
-      await iaGroup.getByRole("button", { name: "Select group" }).click();
-      await assertVisible(page.getByText("205 selected", { exact: true }), "Collapsed group selection must select every logical item");
-      await page.getByRole("button", { name: "Delete selected", exact: true }).click();
-      await page.getByRole("button", { name: "Delete eligible policies", exact: true }).click();
-      await assertVisible(page.getByText(/Bulk delete: 1 deleted, 1 skipped/), "Partial bulk delete must report deleted and skipped outcomes");
+      // Expand the large group and exercise both chunk controls in the browser.
+      await iaGroup.getByRole("button", { name: "Expand group" }).click();
+      await assertVisible(iaGroup.getByText("Showing 60 of 205"), "Expanded large group must start at one 60-item chunk");
+      await assertCount(iaGroup.locator('[data-policy-card]'), 60, "Expanded large group must render 60 cards initially");
+      await iaGroup.getByRole("button", { name: "Show 60 more" }).click();
+      await assertVisible(iaGroup.getByText("Showing 120 of 205"), "Show more must advance the rendered chunk");
+      await assertCount(iaGroup.locator('[data-policy-card]'), 120, "Show more must render 120 cards");
 
-      // Shift selection spans both the unrendered IA group and the chunk
-      // boundary, then remains selected across Cards/Table view changes.
+      // Shift selection spans an actual hidden chunk boundary: the endpoints
+      // are visible in adjacent groups while the last 85 IA items are not.
       await page.getByRole("button", { name: "Clear", exact: true }).last().click();
       const startCard = page.locator('[data-policy-card][data-policy-name="Security range start"]');
       const endCard = page.locator('[data-policy-card][data-policy-name="Security range end"]');
@@ -6733,8 +6738,33 @@ const steps = [
       await endCard.click({ modifiers: ["Shift"] });
       await assertVisible(page.getByText("207 selected", { exact: true }), "Shift selection must include collapsed intermediate-group policies");
       await page.getByRole("button", { name: "Table", exact: true }).click();
-      await assertCount(page.locator('[data-policy-row] input[type="checkbox"]:checked'), 2, "Cards/Table must preserve selected endpoints");
+      await assertCount(page.locator('[data-policy-row] input[type="checkbox"]:checked'), 122, "Cards/Table must preserve selected rendered policies");
       await page.getByRole("button", { name: "Cards", exact: true }).click();
+
+      await page.getByRole("button", { name: "Clear", exact: true }).last().click();
+      await iaGroup.getByRole("button", { name: "Show all" }).click();
+      await assertVisible(iaGroup.getByText("Showing 205 of 205"), "Show all must reveal every large-group policy");
+      await assertCount(iaGroup.locator('[data-policy-card]'), 205, "Show all must render all 205 policies");
+      await iaGroup.getByRole("button", { name: "Collapse group" }).click();
+      await iaGroup.getByRole("button", { name: "Expand group" }).click();
+      await assertCount(iaGroup.locator('[data-policy-card]'), 205, "Re-expanding must preserve Show all state");
+
+      // Group selection works without requiring the group to be expanded and
+      // the mock resolves every requested id into deleted or skipped.
+      await iaGroup.getByRole("button", { name: "Select group" }).click();
+      await assertVisible(page.getByText("205 selected", { exact: true }), "Collapsed group selection must select every logical item");
+      await page.getByRole("button", { name: "Delete selected", exact: true }).click();
+      await page.getByRole("button", { name: "Delete eligible policies", exact: true }).click();
+      await assertVisible(page.getByText(/Bulk delete: 204 deleted, 1 skipped/), "Partial bulk delete must report every deleted and skipped outcome");
+      await assertVisible(page.getByText("1 selected", { exact: true }), "Blocked bulk-delete policies must remain selected");
+      await assertCount(iaGroup.locator('[data-policy-card]'), 1, "Deleted policies must disappear after catalog reload");
+
+      // Ctrl-click starts selection mode and toggles without opening the
+      // policy drawer, matching the reference card/row interaction model.
+      await page.getByRole("button", { name: "Clear", exact: true }).last().click();
+      await startCard.click({ modifiers: ["Control"] });
+      await assertVisible(page.getByText("1 selected", { exact: true }), "Ctrl-click must enter selection mode");
+      await page.getByRole("button", { name: "Clear", exact: true }).last().click();
       await page.unroute("**/api/v1/deployment-policies*");
     },
   },
