@@ -24,6 +24,7 @@ documentation:
   - docs/design/CrystalForge/components/PoliciesView.jsx
   - docs/design/CrystalForge/data-policies.js
 modified_files:
+  - checks/web-ui/tests/integration-test.js
   - packages/default/crates/cf-server/src/api/models.rs
   - packages/default/crates/cf-server/src/bin/server.rs
   - packages/default/crates/cf-server/src/handlers/api/deployment_policies.rs
