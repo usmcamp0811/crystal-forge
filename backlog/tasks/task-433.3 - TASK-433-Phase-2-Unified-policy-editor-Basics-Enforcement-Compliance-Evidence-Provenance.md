@@ -3,9 +3,10 @@ id: TASK-433.3
 title: >-
   TASK-433 Phase 2: Unified policy editor
   (Basics/Enforcement/Compliance/Evidence/Provenance)
-status: Backlog
+status: In Progress
 assignee: []
 created_date: '2026-08-23 01:42'
+updated_date: '2026-08-23 14:19'
 labels:
   - design-parity
   - policy
@@ -57,3 +58,12 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 - [ ] #3 Zero mappings save as valid Unmapped; mapped/no-enforcement and No enforcement are distinct states.
 - [ ] #4 Manual mappings have permitted CRUD; imported mappings/provenance remain read-only and survive reload.
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+created: 2026-08-23 14:19
+---
+Started Phase 2 under explicit user override of the pending Phase-1 CI gate. Phase-1 head is present and working tree is clean; MR !318 pipeline remains pending/running at this time. Scope is limited to unified policy editor and mapping/provenance behavior; later phases will not be implemented.
+---
+<!-- COMMENTS:END -->
