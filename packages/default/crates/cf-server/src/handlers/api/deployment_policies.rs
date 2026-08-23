@@ -196,10 +196,15 @@ fn validate_policy_config(
                 .map(|a| !a.is_empty())
                 .unwrap_or(false);
 
-            if !has_expression && !has_rules {
+            let explicit_empty_rules = obj
+                .get("rules")
+                .and_then(|v| v.as_array())
+                .is_some_and(|rules| rules.is_empty());
+
+            if !has_expression && !has_rules && !explicit_empty_rules {
                 return Err((
                     StatusCode::BAD_REQUEST,
-                    "custom_check policy requires either non-empty config.expression or non-empty config.rules[]".to_string(),
+                    "custom_check policy requires config.expression or config.rules[]".to_string(),
                 ));
             }
 
@@ -1247,6 +1252,15 @@ mod tests {
             .expect_err("missing expression must be rejected");
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("config.expression"));
+    }
+
+    #[test]
+    fn validate_policy_config_accepts_explicitly_empty_custom_check() {
+        validate_policy_config(
+            "custom_check",
+            &serde_json::json!({"mode": "all", "rules": []}),
+        )
+        .expect("an explicit empty rule set represents no enforcement");
     }
 
     #[test]

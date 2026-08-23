@@ -6777,9 +6777,9 @@ const steps = [
       await newPolicyBtn.waitFor({ timeout: 5000 });
       await newPolicyBtn.click();
       await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
-      // Details is the default tab; the other editor groups are deliberately hidden.
+      // Basics is the default tab; the other editor groups are deliberately hidden.
       await assertHidden(page.getByRole("button", { name: "Advanced" }), "Advanced toggle should not exist in unified modal");
-      await assertAttribute(page.getByTestId("policy-editor-tab-details"), "aria-selected", "true", "Expected Details to be the default tab");
+      await assertAttribute(page.getByTestId("policy-editor-tab-details"), "aria-selected", "true", "Expected Basics to be the default tab");
       await assertVisible(page.getByText("Category", { exact: false }).first(), "Expected Category section");
       await assertVisible(page.getByText("Severity", { exact: false }).first(), "Expected Severity section");
       await assertVisible(page.getByText("Rationale", { exact: false }).first(), "Expected Rationale section");
@@ -6909,7 +6909,7 @@ const steps = [
         await page.getByRole("button", { name: /AU-8 · control · Time Stamps/i }).click();
         await page.getByRole("button", { name: "Add mapping", exact: true }).last().click();
 
-        await assertVisible(page.getByText("Mappings · 2", { exact: true }), "Expected two queued mappings in tab count");
+        await assertVisible(page.getByText("Compliance · 2", { exact: true }), "Expected two queued mappings in tab count");
         await assertVisible(page.getByText("SC-45", { exact: true }), "Expected SC-45 pending mapping");
         await assertVisible(page.getByText("AU-8", { exact: true }), "Expected AU-8 pending mapping");
         await assertVisible(page.getByText("Supports", { exact: true }), "Expected Supports relationship");
@@ -7094,7 +7094,7 @@ const steps = [
        await page.getByText("Implements", { exact: true }).last().click();
        await page.getByRole("button", { name: "Full", exact: true }).last().click();
       await page.getByRole("button", { name: "Add mapping", exact: true }).last().click();
-      await assertVisible(page.getByText("Mappings · 2", { exact: true }), "Expected two queued real mappings");
+       await assertVisible(page.getByText("Compliance · 2", { exact: true }), "Expected two queued real mappings");
 
       await assertEnabled(
         page.getByRole("button", { name: "Create policy", exact: true }),
@@ -7178,7 +7178,7 @@ const steps = [
       await card.getByRole("button", { name: "Edit", exact: true }).click();
       await page.getByRole("heading", { name: new RegExp(`Edit ${policyName}`) }).waitFor({ timeout: 5000 });
       await page.getByTestId("policy-editor-tab-mappings").click();
-      await assertVisible(page.getByText("Mappings · 2", { exact: true }), "Expected two mappings after server reload in edit modal");
+        await assertVisible(page.getByText("Compliance · 2", { exact: true }), "Expected two mappings after server reload in edit modal");
 
       await assertVisible(page.getByText(requirementA.external_id, { exact: true }), "Expected first persisted requirement");
       await assertVisible(page.getByText(requirementB.external_id, { exact: true }), "Expected second persisted requirement");
@@ -7240,12 +7240,12 @@ const steps = [
        await page.getByText("Implements", { exact: true }).last().click();
        await page.getByRole("button", { name: "Full", exact: true }).last().click();
        await page.getByRole("button", { name: "Save mapping", exact: true }).click();
-       await assertVisible(page.getByText("Mappings · 2", { exact: true }), "Expected two mappings after edit");
+        await assertVisible(page.getByText("Compliance · 2", { exact: true }), "Expected two mappings after edit");
 
        // Removing the second mapping must leave the first mapping intact.
         const secondMappingRow = page.getByTestId("policy-mapping-row").filter({ hasText: requirementB.external_id });
         await secondMappingRow.getByTitle("Remove mapping").click();
-        await assertVisible(page.getByText("Mappings · 1", { exact: true }), "Expected one mapping after removal");
+        await assertVisible(page.getByText("Compliance · 1", { exact: true }), "Expected one mapping after removal");
 
         await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
         const deleteCard = page.locator(`[data-policy-card="true"][data-policy-id="${createdPolicy.id}"]`);

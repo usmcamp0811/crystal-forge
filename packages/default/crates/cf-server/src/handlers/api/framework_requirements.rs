@@ -85,6 +85,18 @@ fn not_found(message: &str) -> axum::response::Response {
         .into_response()
 }
 
+fn conflict(message: &str) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError {
+            error: "Conflict".to_string(),
+            message: message.to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
 fn internal_error(message: &str) -> axum::response::Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -416,7 +428,9 @@ pub async fn update_policy_requirement_mapping(
             .into_response(),
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("POLICY_MAPPING_IMMUTABLE_OR_NOT_FOUND") {
+            if msg.contains("POLICY_MAPPING_IMPORTED") {
+                conflict(&msg)
+            } else if msg.contains("POLICY_MAPPING_IMMUTABLE_OR_NOT_FOUND") {
                 not_found(&msg)
             } else {
                 tracing::error!(error = %e, mapping_id = %mapping_id, "failed to update policy requirement mapping");
@@ -521,7 +535,9 @@ pub async fn delete_policy_requirement_mapping(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("POLICY_MAPPING_IMMUTABLE_OR_NOT_FOUND") {
+            if msg.contains("POLICY_MAPPING_IMPORTED") {
+                conflict(&msg)
+            } else if msg.contains("POLICY_MAPPING_IMMUTABLE_OR_NOT_FOUND") {
                 not_found(&msg)
             } else {
                 tracing::error!(error = %e, mapping_id = %mapping_id, "failed to delete policy requirement mapping");

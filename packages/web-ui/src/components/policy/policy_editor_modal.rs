@@ -427,8 +427,22 @@ fn build_persisted_payload(rules: &[PolicyRule]) -> Option<(String, serde_json::
     }
 
     let persistable: Vec<&PolicyRule> = rules.iter().filter(|r| r.is_persisted()).collect();
-    if persistable.is_empty() {
+    if persistable.is_empty() && !rules.is_empty() {
         return None;
+    }
+    if persistable.is_empty() {
+        // An explicit empty rule set is a valid policy state: it means the
+        // policy has no enforcement yet. Keep it distinguishable from an
+        // unsupported payload so mapped-but-not-enforced policies can save.
+        return Some((
+            "custom_check".to_string(),
+            serde_json::json!({
+                "mode": "all",
+                "context": "nixos-configuration-v1",
+                "binding": "cfg",
+                "rules": []
+            }),
+        ));
     }
 
     // Single CVE gate → require_cve_check
@@ -674,11 +688,19 @@ fn save_blocker(
         );
     }
 
-    if build_persisted_payload(rules).is_none() {
-        return Some("Add at least one backend-supported assertion before saving.".to_string());
-    }
-
     None
+}
+
+/// The editor keeps mapping state and enforcement state independent so that
+/// an imported mapping without local assertions is not misreported as an
+/// enforced policy.
+fn policy_editor_state(mapping_count: usize, rule_count: usize) -> &'static str {
+    match (mapping_count > 0, rule_count > 0) {
+        (false, false) => "No enforcement · Unmapped",
+        (false, true) => "Enforced · Unmapped",
+        (true, false) => "Mapped · Not enforced",
+        (true, true) => "Mapped · Enforced",
+    }
 }
 
 fn split_packages(raw: &str) -> Vec<String> {
@@ -829,6 +851,11 @@ fn PolicyMappingsTab(
 
     let rows = mappings.read().clone();
     let pending_rows = pending_mappings.read().clone();
+    let imported_rows: Vec<PolicyMappingRow> = rows
+        .iter()
+        .filter(|row| row.provenance != "manual")
+        .cloned()
+        .collect();
     let mut pending_grouped: Vec<(String, Vec<PendingPolicyMapping>)> = Vec::new();
     for row in pending_rows {
         let name = format!("{} · {}", row.framework_name, row.framework_version);
@@ -850,6 +877,19 @@ fn PolicyMappingsTab(
 
     rsx! {
         div { style: "margin-top:6px;display:flex;flex-direction:column;gap:14px;",
+            if !imported_rows.is_empty() {
+                div { class: "sd-callout sd-callout-info", style: "font-size:11px;",
+                    strong { "Provenance · read only" }
+                    p { style: "margin:4px 0 0;", "Imported compliance mappings are authoritative and cannot be edited or removed here." }
+                    for row in imported_rows.iter() {
+                        div { key: "provenance-{row.id}", style: "margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;",
+                            span { class: "chip chip-neutral", "{row.framework_name} {row.framework_version}" }
+                            span { class: "chip chip-neutral", "{row.requirement_external_id}" }
+                            span { class: "chip chip-neutral", "{row.provenance}" }
+                        }
+                    }
+                }
+            }
             div { style: "font-size:12px;color:var(--cf-text-secondary);margin-bottom:2px;line-height:1.5;",
                 "Map this policy to the compliance requirements it implements, supports, or provides evidence for. Policies can map to requirements from multiple frameworks."
             }
@@ -1227,6 +1267,8 @@ pub fn PolicyEditorModal(
     let can_save = !name_missing && current_save_blocker.is_none() && !*is_saving.read();
     let rule_count = rules.read().len();
     let evidence_count = evidence.read().len();
+    let mapping_count = mappings.read().len() + pending_mappings.read().len();
+    let policy_state = policy_editor_state(mapping_count, rule_count);
     let delete_matches = delete_typed.read().as_str() == name_value;
 
     rsx! {
@@ -1331,11 +1373,12 @@ pub fn PolicyEditorModal(
                     // ── Body ────────────────────────────────────────────────────
                     div { class: "modal-body cf-policy-modal-body", style: "overflow-y:auto;",
                         div { class: "cf-modal-tabs", role: "tablist", aria_label: "Policy editor sections",
-                            PolicyEditorTabButton { tab: PolicyEditorTab::Details, active: *active_tab.read(), label: "Details", test_id: "policy-editor-tab-details", on_select: move |_| active_tab.set(PolicyEditorTab::Details) }
-                             PolicyEditorTabButton { tab: PolicyEditorTab::Mappings, active: *active_tab.read(), label: format!("Mappings · {}", mappings.read().len() + pending_mappings.read().len()), test_id: "policy-editor-tab-mappings", on_select: move |_| active_tab.set(PolicyEditorTab::Mappings) }
+                            PolicyEditorTabButton { tab: PolicyEditorTab::Details, active: *active_tab.read(), label: "Basics", test_id: "policy-editor-tab-details", on_select: move |_| active_tab.set(PolicyEditorTab::Details) }
+                             PolicyEditorTabButton { tab: PolicyEditorTab::Mappings, active: *active_tab.read(), label: format!("Compliance · {}", mapping_count), test_id: "policy-editor-tab-mappings", on_select: move |_| active_tab.set(PolicyEditorTab::Mappings) }
                             PolicyEditorTabButton { tab: PolicyEditorTab::Enforcement, active: *active_tab.read(), label: format!("Enforcement · {rule_count}"), test_id: "policy-editor-tab-enforcement", on_select: move |_| active_tab.set(PolicyEditorTab::Enforcement) }
                             PolicyEditorTabButton { tab: PolicyEditorTab::Evidence, active: *active_tab.read(), label: format!("Evidence · {evidence_count}"), test_id: "policy-editor-tab-evidence", on_select: move |_| active_tab.set(PolicyEditorTab::Evidence) }
                         }
+                        div { class: "sd-callout sd-callout-info", style: "margin:10px 0 0;font-size:11px;", "Policy state: ", strong { "{policy_state}" }, " · Category changes update guidance only; existing enforcement rules are preserved." }
                         div { class: "cf-modal-tab-panel",
                         if *active_tab.read() == PolicyEditorTab::Details {
                         div { style: "display:grid;grid-template-columns:1fr;gap:14px;",
@@ -1526,15 +1569,15 @@ pub fn PolicyEditorModal(
                         }
                         }
 
-                          if *active_tab.read() == PolicyEditorTab::Mappings {
-                              PolicyMappingsTab {
+                           if *active_tab.read() == PolicyEditorTab::Mappings {
+                               PolicyMappingsTab {
                                   is_editing,
                                   editing_policy_version_id,
                                   mappings_editable,
                                   mappings,
-                                  pending_mappings,
-                              }
-                          }
+                                   pending_mappings,
+                               }
+                           }
                          // Assertions & gate rules builder
                         if *active_tab.read() == PolicyEditorTab::Enforcement {
                         div { style: "margin-top:6px;",
@@ -2383,6 +2426,29 @@ mod tests {
             )
             .is_some()
         );
+    }
+
+    #[test]
+    fn editor_state_distinguishes_mapping_and_enforcement() {
+        assert_eq!(policy_editor_state(0, 0), "No enforcement · Unmapped");
+        assert_eq!(policy_editor_state(0, 1), "Enforced · Unmapped");
+        assert_eq!(policy_editor_state(1, 0), "Mapped · Not enforced");
+        assert_eq!(policy_editor_state(1, 1), "Mapped · Enforced");
+    }
+
+    #[test]
+    fn empty_rules_are_a_persistable_no_enforcement_state() {
+        let (policy_type, config) = build_persisted_payload(&[]).expect("empty rules save");
+        assert_eq!(policy_type, "custom_check");
+        assert_eq!(config["rules"], serde_json::json!([]));
+        assert!(save_blocker(
+            false,
+            PolicyFormat::Json,
+            "custom_check",
+            &serde_json::Value::Null,
+            &[]
+        )
+        .is_none());
     }
 
     #[test]
