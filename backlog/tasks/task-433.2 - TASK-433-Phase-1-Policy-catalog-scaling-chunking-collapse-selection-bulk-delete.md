@@ -118,6 +118,9 @@ Working tree: shared worktree /home/mcamp/code/crystal-forge/TASK-433-policy-poa
 
 ## Review state correction
 The deferred-check note above is superseded. After the commit, all deferred checks were run successfully: `nix build .#checks.x86_64-linux.integration --no-link`, `nix build .#checks.x86_64-linux.server-regressions --no-link`, `nix build .#checks.x86_64-linux.web-ui --no-link`, `nix build .#checks.x86_64-linux.ui-screenshots --no-link`, `nix build .#checks.x86_64-linux.web-ui-reconciliation --no-link`, and `nix flake check --keep-going`. Commit `e80ebc56` is pushed and MR !318 is open.
+
+## Remediation correction
+The earlier implementation note describing per-policy transactions is superseded by commit e0d036db: bulk deletion now uses one transaction via `delete_deployment_policy_in_transaction`, commits expected blocked/not-found skips, and rolls back all eligible deletions on any unexpected error. The browser workflow is now extended in `checks/web-ui/tests/integration-test.js`; the DB coverage is 4 tests (partial, all-blocked, not-found, rollback-on-failure).
 <!-- SECTION:NOTES:END -->
 
 ## Comments
