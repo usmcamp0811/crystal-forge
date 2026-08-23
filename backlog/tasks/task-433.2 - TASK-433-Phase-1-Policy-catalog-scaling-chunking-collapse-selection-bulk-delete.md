@@ -3,11 +3,11 @@ id: TASK-433.2
 title: >-
   TASK-433 Phase 1: Policy catalog scaling (chunking, collapse, selection, bulk
   delete)
-status: Review
+status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-23 04:34'
+updated_date: '2026-08-23 13:47'
 labels:
   - design-parity
   - policy
@@ -146,5 +146,10 @@ Review remediation pushed in commit e0d036db and appended to MR !318.
 Fixed P1/P2 findings: collapsed groups now remain in logical Shift-range order; bulk deletion is atomic with rollback on unexpected DB errors; collapsed groups expose group selection; bulk delete is admin-gated; selection mode hides conflicting row actions; collapsed hierarchy is compact; and the required >150-policy browser workflow was added.
 
 New verification: isolated DB tests for partial success, all-blocked, not-found, and unexpected-failure rollback passed 4/4; web-ui tests 199 passed; server lib tests 1175 passed; web-ui Nix check passed; server/web-ui package builds passed; `nix flake check --keep-going` passed. Phase 2 remains not started.
+---
+
+created: 2026-08-23 13:47
+---
+Final Phase 1 remediation after the second review: add browser coverage for expand/chunk/show-more/show-all and realistic bulk-delete reconciliation; remove false read-only labeling during selection; add Ctrl/Cmd selection parity; correct bulk-delete transaction documentation; remove unrelated TASK-422/TASK-432 branch contamination; synchronize task/MR verification metadata. Phase 2 remains paused.
 ---
 <!-- COMMENTS:END -->
