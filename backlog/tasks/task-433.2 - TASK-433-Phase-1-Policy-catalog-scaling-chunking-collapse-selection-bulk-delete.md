@@ -3,11 +3,11 @@ id: TASK-433.2
 title: >-
   TASK-433 Phase 1: Policy catalog scaling (chunking, collapse, selection, bulk
   delete)
-status: In Progress
+status: Review
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-23 13:47'
+updated_date: '2026-08-23 14:05'
 labels:
   - design-parity
   - policy
@@ -151,5 +151,10 @@ New verification: isolated DB tests for partial success, all-blocked, not-found,
 created: 2026-08-23 13:47
 ---
 Final Phase 1 remediation after the second review: add browser coverage for expand/chunk/show-more/show-all and realistic bulk-delete reconciliation; remove false read-only labeling during selection; add Ctrl/Cmd selection parity; correct bulk-delete transaction documentation; remove unrelated TASK-422/TASK-432 branch contamination; synchronize task/MR verification metadata. Phase 2 remains paused.
+---
+
+created: 2026-08-23 14:05
+---
+Final remediation commits are pushed: b1013c25 (browser chunk/show-more/show-all coverage, realistic full response reconciliation, Ctrl/Cmd parity, selection-mode semantics, stale API docs, TASK-422/TASK-432 cleanup) and 27bcc038 (task metadata synchronization). MR !318 description now records the exact final heads and accurately defers the long-running final web-ui Nix check to GitLab CI. No Phase 2 work started.
 ---
 <!-- COMMENTS:END -->
