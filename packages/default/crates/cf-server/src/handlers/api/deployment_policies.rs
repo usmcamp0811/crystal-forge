@@ -208,6 +208,23 @@ fn validate_policy_config(
                 ));
             }
 
+            // `mode` is meaningful for both populated and explicitly empty rule
+            // sets, so it is validated before either branch. An explicit empty
+            // rule set is the canonical "no enforcement" representation; it must
+            // not be able to carry a nonsense aggregation mode.
+            if let Some(mode) = obj.get("mode") {
+                let mode_str = mode.as_str().ok_or((
+                    StatusCode::BAD_REQUEST,
+                    "config.mode must be a string (\"all\" or \"any\")".to_string(),
+                ))?;
+                if mode_str != "all" && mode_str != "any" {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "config.mode must be \"all\" or \"any\"".to_string(),
+                    ));
+                }
+            }
+
             if has_expression && !has_rules {
                 // Single-expression (legacy) path — normalize expression and validate field_name.
                 let expression = obj
@@ -309,20 +326,6 @@ fn validate_policy_config(
                                 );
                             }
                         }
-                    }
-                }
-
-                // Validate mode if present
-                if let Some(mode) = obj.get("mode") {
-                    let mode_str = mode.as_str().ok_or((
-                        StatusCode::BAD_REQUEST,
-                        "config.mode must be a string (\"all\" or \"any\")".to_string(),
-                    ))?;
-                    if mode_str != "all" && mode_str != "any" {
-                        return Err((
-                            StatusCode::BAD_REQUEST,
-                            "config.mode must be \"all\" or \"any\"".to_string(),
-                        ));
                     }
                 }
             }
@@ -1256,11 +1259,30 @@ mod tests {
 
     #[test]
     fn validate_policy_config_accepts_explicitly_empty_custom_check() {
-        validate_policy_config(
+        let validated = validate_policy_config(
             "custom_check",
             &serde_json::json!({"mode": "all", "rules": []}),
         )
         .expect("an explicit empty rule set represents no enforcement");
+
+        // The canonical no-enforcement representation must survive validation
+        // byte-for-byte; the evaluator relies on the empty array to skip it.
+        assert_eq!(
+            validated,
+            serde_json::json!({"mode": "all", "rules": []}),
+            "no-enforcement config must not be rewritten into an executable shape"
+        );
+    }
+
+    #[test]
+    fn validate_policy_config_rejects_invalid_mode_on_empty_custom_check() {
+        let err = validate_policy_config(
+            "custom_check",
+            &serde_json::json!({"mode": "some", "rules": []}),
+        )
+        .expect_err("an invalid aggregation mode must be rejected for empty rule sets too");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("config.mode"));
     }
 
     #[test]

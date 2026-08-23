@@ -23,18 +23,18 @@ use crate::api::models::{
     XccdfRuleImportAction,
 };
 use crate::components::compliance::{
-    action_to_import, mapping_semantics_for, BundleCatalog, BundleHeader, ComparisonOperator,
-    EvidenceDrawer, ImportReview, PolicyAssertionDraft, RefinePolicyStep, RefinedPolicyDraft,
-    RefinedRuleAction, RefinedStigRule, ScoreStrip, SourceCheck, SourceCheckBodyPart,
-    SourceStigRule, SystemsMatrix, TypedPolicyValue,
+    BundleCatalog, BundleHeader, ComparisonOperator, EvidenceDrawer, ImportReview,
+    PolicyAssertionDraft, RefinePolicyStep, RefinedPolicyDraft, RefinedRuleAction, RefinedStigRule,
+    ScoreStrip, SourceCheck, SourceCheckBodyPart, SourceStigRule, SystemsMatrix, TypedPolicyValue,
+    action_to_import, mapping_semantics_for,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::components::io_menu::{IOMenu, IOMenuItem};
 use crate::components::loading::DashboardLoadingSpinner;
 use crate::components::policy::{PolicyDefinition, PolicyFormat};
 use crate::export::{
-    build_cf_json, build_csv, build_oscal, build_sarif, download_print_html, trigger_download,
-    ExportPayload,
+    ExportPayload, build_cf_json, build_csv, build_oscal, build_sarif, download_print_html,
+    trigger_download,
 };
 use crate::state::{app_state::AppState, auth};
 
@@ -91,6 +91,18 @@ pub fn ComplianceView() -> Element {
     let mut policy_drawer = use_signal(|| None::<PolicyDefinition>);
     let mut policy_loading = use_signal(|| false);
     let mut policy_error = use_signal(|| None::<String>);
+
+    // Compliance opens the same unified policy editor as the policy catalog,
+    // for the exact policy version the coverage row refers to.
+    let mut policy_editor_open = use_signal(|| false);
+    let mut editing_policy: Signal<Option<PolicyDefinition>> = use_signal(|| None);
+    let mut editing_policy_id: Signal<Option<uuid::Uuid>> = use_signal(|| None);
+    let mut edit_name = use_signal(String::new);
+    let mut edit_description = use_signal(String::new);
+    let mut edit_body = use_signal(String::new);
+    let mut edit_format = use_signal(|| PolicyFormat::Json);
+    let mut edit_srg_ids = use_signal(String::new);
+    let mut edit_cci_ids = use_signal(String::new);
 
     use_effect(move || {
         stig_import_draft.set(load_stig_import_draft());
@@ -794,7 +806,36 @@ pub fn ComplianceView() -> Element {
                 initial_revisions: false,
                 on_close: move |_| policy_drawer.set(None),
                 on_export: move |_| {},
-                on_edit: move |_| {},
+                on_edit: move |policy: PolicyDefinition| {
+                    policy_drawer.set(None);
+                    editing_policy.set(Some(policy.clone()));
+                    editing_policy_id.set(Some(policy.id));
+                    edit_name.set(policy.name.clone());
+                    edit_description.set(policy.description.clone());
+                    edit_body.set(policy.body.clone());
+                    edit_format.set(policy.format);
+                    edit_srg_ids.set(policy.srg_ids.join(", "));
+                    edit_cci_ids.set(policy.cci_ids.join(", "));
+                    policy_editor_open.set(true);
+                },
+            }
+        }
+
+        if *policy_editor_open.read() {
+            crate::components::policy::PolicyEditorModal {
+                editing_policy_id,
+                edit_name,
+                edit_description,
+                edit_body,
+                edit_format,
+                edit_srg_ids,
+                edit_cci_ids,
+                policy_library,
+                editing_policy: editing_policy.read().clone(),
+                on_close: move || {
+                    editing_policy.set(None);
+                    policy_editor_open.set(false);
+                },
             }
         }
 

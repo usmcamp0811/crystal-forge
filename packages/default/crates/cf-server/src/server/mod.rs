@@ -2205,6 +2205,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_custom_check_skips_the_explicit_no_enforcement_representation() {
+        // The unified policy editor persists "no enforcement" as an explicit
+        // empty custom_check rule set. Runtime semantics must agree with that
+        // claim: the policy is skipped entirely rather than compiled into an
+        // always-true assertion that would silently report a pass.
+        let record = DeploymentPolicyRecord {
+            id: Uuid::new_v4(),
+            name: "no-enforcement".to_string(),
+            description: Some("mapped but not enforced".to_string()),
+            policy_type: "custom_check".to_string(),
+            config: json!({"mode": "all", "rules": []}),
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            mapped_requirement_count: 3,
+            bundle_usage_count: 1,
+        };
+
+        assert!(
+            parse_deployment_policy_record(&record).is_none(),
+            "an empty rule set must not produce an executable policy"
+        );
+    }
+
+    #[test]
     fn parse_require_packages_rejects_an_empty_package_list() {
         let record = DeploymentPolicyRecord {
             id: Uuid::new_v4(),

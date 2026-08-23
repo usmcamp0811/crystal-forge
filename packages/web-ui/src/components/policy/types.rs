@@ -56,6 +56,9 @@ pub struct PolicyDefinition {
     pub bundle_usage_count: i64,
     /// Evidence specs from the current version's deployment policy.
     pub evidence_specs: Option<Vec<crate::api::models::EvidenceSpec>>,
+    /// Authoritative imported-origin provenance for the current version.
+    /// Empty for policies authored in Crystal Forge. Read-only.
+    pub provenance: Vec<crate::api::models::PolicyOriginProvenance>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -97,6 +100,8 @@ pub struct PolicyRevisionSummary {
     pub created_by_display: Option<String>,
     /// Evidence collection specifications for ATO audits.
     pub evidence_specs: Vec<crate::api::models::EvidenceSpec>,
+    /// Authoritative imported-origin provenance for this exact revision.
+    pub provenance: Vec<crate::api::models::PolicyOriginProvenance>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -197,7 +202,61 @@ pub fn is_policy_version_editable(policy: &PolicyDefinition) -> bool {
         .is_none_or(|state| state.eq_ignore_ascii_case("draft"))
 }
 
+/// Whether a policy has authoritative imported origin provenance.
+///
+/// Origin is decided by persisted provenance only. It is never inferred from
+/// the policy name, description, or any other display string.
+pub fn policy_is_imported(policy: &PolicyDefinition) -> bool {
+    !policy.provenance.is_empty()
+}
+
+impl PolicyCategory {
+    /// Parse a persisted category value. Unknown/legacy values return `None` so
+    /// the caller can fall back to inference.
+    pub fn from_id(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "deployment" => Some(Self::Deployment),
+            "pipeline" => Some(Self::Pipeline),
+            "rollout" => Some(Self::Rollout),
+            "security" => Some(Self::Security),
+            _ => None,
+        }
+    }
+}
+
+/// Enforcement rule kinds recommended for a category.
+///
+/// Recommendations are guidance only: every category can hold every kind, and
+/// nothing outside this list is removed, filtered, or blocked from saving.
+pub fn recommended_enforcement(category: PolicyCategory) -> &'static [&'static str] {
+    match category {
+        PolicyCategory::Deployment => &["packages_installed", "custom_eval"],
+        PolicyCategory::Pipeline => &["cve_block", "eval_passed", "build_succeeded"],
+        PolicyCategory::Rollout => &["time_window", "approval_required", "rollout_percent"],
+        PolicyCategory::Security => &["nixos_option", "packages_installed", "custom_eval"],
+    }
+}
+
+/// Rule kinds present on the policy that are unusual for `category`.
+///
+/// Used purely for an informational notice; callers must never mutate rules
+/// based on this result.
+pub fn off_category_rule_kinds(category: PolicyCategory, rule_kinds: &[String]) -> Vec<String> {
+    let recommended = recommended_enforcement(category);
+    rule_kinds
+        .iter()
+        .filter(|kind| !recommended.contains(&kind.as_str()))
+        .cloned()
+        .collect()
+}
+
 pub fn policy_category(policy: &PolicyDefinition) -> PolicyCategory {
+    // A persisted category is authoritative. Inference exists only for legacy
+    // policies stored before classification metadata existed.
+    if let Some(category) = policy.category.as_deref().and_then(PolicyCategory::from_id) {
+        return category;
+    }
+
     let policy_type = normalized_policy_type(policy);
     let config = policy_config(policy).unwrap_or(serde_json::Value::Null);
 

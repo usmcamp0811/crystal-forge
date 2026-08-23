@@ -1546,6 +1546,52 @@ pub struct DeploymentPolicyVersionSummary {
     /// Evidence collection specifications for ATO audits
     #[serde(default)]
     pub evidence_specs: Vec<EvidenceSpec>,
+    /// Authoritative imported-origin provenance for this exact version.
+    ///
+    /// Empty for policies authored in Crystal Forge. Populated from
+    /// `compliance_source_artifacts`, `compliance_source_object_mappings`, and
+    /// `deployment_policy_versions.source_artifact_id`, including origins
+    /// inherited through `derived_from_version_id` ancestry so a refined draft
+    /// keeps the imported origin of the version it was derived from.
+    #[serde(default)]
+    pub provenance: Vec<PolicyOriginProvenance>,
+}
+
+/// One authoritative imported-origin record for a policy version.
+///
+/// Read-only by construction: provenance is recorded at import time and is
+/// never accepted on create/update requests.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PolicyOriginProvenance {
+    /// Immutable source artifact the policy originated from.
+    pub source_artifact_id: Uuid,
+    pub filename: String,
+    pub media_type: String,
+    pub sha256: String,
+    pub parser_version: String,
+    #[serde(default)]
+    pub detected_xccdf_version: Option<String>,
+    /// Source-object mapping identity, when the artifact recorded which source
+    /// object (normally an XCCDF rule) produced this policy version.
+    #[serde(default)]
+    pub object_kind: Option<String>,
+    #[serde(default)]
+    pub source_identity: Option<String>,
+    #[serde(default)]
+    pub fidelity: Option<String>,
+    #[serde(default)]
+    pub imported_by: Option<Uuid>,
+    #[serde(default)]
+    pub imported_by_display: Option<String>,
+    pub imported_at: DateTime<Utc>,
+    /// Version that carries the authoritative origin record. Equal to the
+    /// requested version for a direct import.
+    pub origin_policy_version_id: Uuid,
+    /// Derivation distance from the requested version to the origin version.
+    pub lineage_depth: i32,
+    /// True when the origin was inherited from an ancestor version rather than
+    /// recorded directly on this version.
+    pub inherited: bool,
 }
 
 /// Evidence collection specification for a control or policy.

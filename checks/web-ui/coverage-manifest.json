@@ -1576,6 +1576,34 @@
       "baseline": "advisory"
     },
     {
+      "name": "20ab-policy-editor-no-enforcement-unmapped-roundtrip",
+      "description": "A custom policy saves with zero enforcement and zero mappings, reopens unchanged, and stays savable",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "20ac-policy-editor-category-and-imported-provenance",
+      "description": "Category change preserves rules, and imported policies show read-only provenance tab",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
       "name": "20c-policies-multirule-create-roundtrip",
       "description": "API: create multi-rule custom_check (mode=any) and verify rules[] round-trips",
       "route": "/deployment-policies",

@@ -280,12 +280,25 @@ async function fillDioxusInput(locator, value) {
 }
 
 /**
+ * Show the security-controls policy group.
+ *
+ * `custom_check` policies classify as security controls, so their cards only
+ * render under that tab. Tests that locate a policy card by id must select it
+ * first.
+ */
+async function openSecurityPolicyTab(page) {
+  const tab = page.getByRole("tab", { name: /Security controls/ });
+  await tab.waitFor({ timeout: LOAD_TIMEOUT });
+  await tab.click();
+}
+
+/**
  * Remove every rule currently listed in the policy editor.
  *
- * A new policy is seeded with two UI-only pipeline gates ("Eval must pass",
- * "Build must succeed") that the backend does not persist. `save_blocker`
- * refuses to save while any non-persisted rule is present, so tests that
- * create a policy must clear these first and then add a supported assertion.
+ * A new policy now opens with no enforcement at all, so this is a no-op for
+ * freshly created policies. It remains useful when editing an existing policy
+ * that carries rules, because `save_blocker` refuses to save while a
+ * non-persisted rule kind is present.
  *
  * Always removes index 0 because the list re-indexes after each removal.
  */
@@ -6783,12 +6796,18 @@ const steps = [
       await assertVisible(page.getByText("Category", { exact: false }).first(), "Expected Category section");
       await assertVisible(page.getByText("Severity", { exact: false }).first(), "Expected Severity section");
       await assertVisible(page.getByText("Rationale", { exact: false }).first(), "Expected Rationale section");
-      // UI-only / not-persisted markers are visible for unsupported fields.
-      await assertVisible(page.getByText("UI only — not persisted yet").first(), "Expected UI-only/not-persisted markers");
+      // A new policy starts honest: no seeded UI-only rules, and the state line
+      // reports the independent enforcement/compliance/evidence dimensions.
+      await assertVisible(page.getByTestId("policy-editor-state"), "Expected the editor state summary");
+      await assertVisible(page.getByText("No enforcement defined", { exact: true }).first(), "Expected custom no-enforcement wording");
+      await assertVisible(page.getByText("Unmapped", { exact: true }).first(), "Expected Unmapped state for a new policy");
       await page.getByTestId("policy-editor-tab-enforcement").click();
       await assertVisible(page.getByText("Assertions & gate rules", { exact: false }).first(), "Expected assertions/gate rules builder in Enforcement");
+      await assertVisible(page.getByTestId("policy-enforcement-recommendations"), "Expected category-driven enforcement recommendations");
+      await assertHidden(page.getByTitle("Remove rule"), "A new policy must not be seeded with unsavable rules");
       await page.getByTestId("policy-editor-tab-evidence").click();
       await assertVisible(page.getByText("Evidence for ATO", { exact: false }).first(), "Expected evidence-for-ATO builder in Evidence");
+      await assertHidden(page.getByTestId("policy-editor-tab-provenance"), "A custom policy has no imported provenance section");
     },
   },
   {
@@ -7052,8 +7071,6 @@ const steps = [
       await page.getByRole("button", { name: /New custom policy/i }).first().click();
        await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
        await page.getByTestId("policy-editor-tab-enforcement").click();
-       await page.getByTitle("Remove rule").first().click();
-       await page.getByTitle("Remove rule").first().click();
       const addRule = page
         .locator("select")
         .filter({ hasText: "Add assertion / rule" })
@@ -7266,6 +7283,228 @@ const steps = [
         await page.reload({ waitUntil: "domcontentloaded" });
         await assertHidden(page.locator(`[data-policy-card="true"][data-policy-id="${createdPolicy.id}"]`), "Deleted policy returned after reload");
      },
+  },
+  {
+    name: "20ab-policy-editor-no-enforcement-unmapped-roundtrip",
+    description: "A custom policy saves with zero enforcement and zero mappings, reopens unchanged, and stays savable",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+      await collapseOnboardingCoach(page);
+      await openSecurityPolicyTab(page);
+      const policyName = `UI no-enforcement ${Date.now()}`;
+
+      await page.getByRole("button", { name: /New custom policy/i }).first().click();
+      await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
+      await page.getByPlaceholder("e.g. canary-25").fill(policyName);
+
+      // Zero enforcement and zero mappings must be an explicit, valid state.
+      await assertVisible(page.getByText("No enforcement defined", { exact: true }).first(), "Expected the custom no-enforcement state");
+      await assertVisible(page.getByText("Unmapped", { exact: true }).first(), "Expected the Unmapped state");
+      await assertHidden(page.getByTestId("policy-editor-mapped-not-enforced"), "An unmapped policy must not warn about mapped-without-enforcement");
+      await assertEnabled(
+        page.getByRole("button", { name: "Create policy", exact: true }),
+        "A policy with no enforcement and no mappings must be savable",
+      );
+
+      const createResponsePromise = page.waitForResponse(
+        (response) => response.url().includes("/api/v1/deployment-policies") && response.request().method() === "POST",
+      );
+      await page.getByRole("button", { name: "Create policy", exact: true }).click();
+      const createResponse = await createResponsePromise;
+      if (createResponse.status() !== 201) throw new Error(`Expected policy create 201, got ${createResponse.status()}`);
+      const created = await createResponse.json();
+      const sentConfig = JSON.parse(createResponse.request().postData() || "{}").config;
+      if (JSON.stringify(sentConfig) !== JSON.stringify({ mode: "all", rules: [] })) {
+        throw new Error(`Unexpected no-enforcement payload: ${JSON.stringify(sentConfig)}`);
+      }
+      await page.getByRole("heading", { name: "New custom policy" }).waitFor({ state: "hidden", timeout: 10000 });
+
+      // The persisted policy must agree with what the editor claimed.
+      const persisted = await page.evaluate(async ({ base, id }) => {
+        const response = await fetch(`${base}/api/v1/deployment-policies/${id}`, { credentials: "include" });
+        return { status: response.status, body: await response.json() };
+      }, { base: apiBaseUrl, id: created.id });
+      if (persisted.status !== 200) throw new Error(`Created policy not fetchable: ${persisted.status}`);
+      if (persisted.body.policy_type !== "custom_check" || JSON.stringify(persisted.body.config.rules) !== "[]") {
+        throw new Error(`Persisted no-enforcement policy has unexpected shape: ${JSON.stringify(persisted.body.config)}`);
+      }
+
+      // Full reload, then reopen without visiting Compliance first.
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await collapseOnboardingCoach(page);
+      await openSecurityPolicyTab(page);
+      const card = page.locator(`[data-policy-card="true"][data-policy-id="${created.id}"]`);
+      await card.waitFor({ timeout: 20000 });
+      await card.getByRole("button", { name: "Edit", exact: true }).click();
+      await page.getByRole("heading", { name: new RegExp(`Edit ${policyName}`) }).waitFor({ timeout: 5000 });
+      await assertVisible(page.getByText("No enforcement defined", { exact: true }).first(), "No-enforcement state must survive reload");
+      await assertVisible(page.getByText("Unmapped", { exact: true }).first(), "Unmapped state must survive reload");
+      await assertEnabled(
+        page.getByRole("button", { name: "Save changes", exact: true }),
+        "A reopened no-enforcement policy must remain savable",
+      );
+
+      const updateResponsePromise = page.waitForResponse(
+        (response) => response.url().includes(`/api/v1/deployment-policies/${created.id}`) && response.request().method() === "PUT",
+      );
+      await page.getByRole("button", { name: "Save changes", exact: true }).click();
+      const updateResponse = await updateResponsePromise;
+      if (updateResponse.status() !== 200) throw new Error(`Expected unchanged re-save 200, got ${updateResponse.status()}`);
+
+      // Clean up so the catalog stays deterministic for later steps.
+      await page.evaluate(async ({ base, id }) => {
+        await fetch(`${base}/api/v1/deployment-policies/${id}`, { method: "DELETE", credentials: "include" });
+      }, { base: apiBaseUrl, id: created.id });
+    },
+  },
+  {
+    name: "20ac-policy-editor-category-and-imported-provenance",
+    description: "Category changes preserve enforcement, and an imported policy exposes read-only provenance and mappings",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+      await collapseOnboardingCoach(page);
+      await openSecurityPolicyTab(page);
+      const policyName = `UI category guidance ${Date.now()}`;
+
+      // ── Category change must never touch enforcement ────────────────────
+      await page.getByRole("button", { name: /New custom policy/i }).first().click();
+      await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
+      await page.getByPlaceholder("e.g. canary-25").fill(policyName);
+      await page.getByTestId("policy-editor-tab-enforcement").click();
+      await page.getByTestId("policy-editor-add-rule").selectOption("custom_eval");
+      const expression = `config.networking.hostName == "${policyName}"`;
+      const expressionField = page.getByTestId("policy-rule-custom-eval-expr-0");
+      await expressionField.waitFor({ state: "visible", timeout: 5000 });
+      await expressionField.fill(expression);
+      const recommendationsBefore = await page.getByTestId("policy-enforcement-recommendations").innerText();
+
+      await page.getByTestId("policy-editor-tab-details").click();
+      await page.getByTestId("policy-category-rollout").click();
+      await page.getByTestId("policy-editor-tab-enforcement").click();
+      const recommendationsAfter = await page.getByTestId("policy-enforcement-recommendations").innerText();
+      if (recommendationsBefore === recommendationsAfter) {
+        throw new Error("Changing category must change the recommended enforcement guidance");
+      }
+      await assertVisible(page.getByTestId("policy-off-category-notice"), "Expected an off-category notice after switching category");
+      const preservedExpression = await page.getByTestId("policy-rule-custom-eval-expr-0").inputValue();
+      if (preservedExpression !== expression) {
+        throw new Error(`Category change altered the rule value: ${preservedExpression}`);
+      }
+
+      const createResponsePromise = page.waitForResponse(
+        (response) => response.url().includes("/api/v1/deployment-policies") && response.request().method() === "POST",
+      );
+      await page.getByRole("button", { name: "Create policy", exact: true }).click();
+      const createResponse = await createResponsePromise;
+      if (createResponse.status() !== 201) throw new Error(`Expected policy create 201, got ${createResponse.status()}`);
+      const created = await createResponse.json();
+      const sentBody = JSON.parse(createResponse.request().postData() || "{}");
+      if (sentBody.category !== "rollout") throw new Error(`Expected the selected category to persist, got ${sentBody.category}`);
+      if (!JSON.stringify(sentBody.config).includes(expression)) {
+        throw new Error(`Category change lost the enforcement rule: ${JSON.stringify(sentBody.config)}`);
+      }
+
+      // The policy now classifies as a rollout policy, so it renders in the
+      // platform group rather than under security controls.
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await collapseOnboardingCoach(page);
+      const createdCard = page.locator(`[data-policy-card="true"][data-policy-id="${created.id}"]`);
+      await createdCard.waitFor({ timeout: 20000 });
+      await createdCard.getByRole("button", { name: "Edit", exact: true }).click();
+      await page.getByRole("heading", { name: new RegExp(`Edit ${policyName}`) }).waitFor({ timeout: 5000 });
+      await page.getByTestId("policy-editor-tab-enforcement").click();
+      const reloadedExpression = await page.getByTestId("policy-rule-custom-eval-expr-0").inputValue();
+      if (reloadedExpression !== expression) {
+        throw new Error(`Enforcement did not survive the category change and reload: ${reloadedExpression}`);
+      }
+      await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
+      await page.evaluate(async ({ base, id }) => {
+        await fetch(`${base}/api/v1/deployment-policies/${id}`, { method: "DELETE", credentials: "include" });
+      }, { base: apiBaseUrl, id: created.id });
+
+      // ── Imported policy: provenance and mappings are read-only ──────────
+      const imported = await page.evaluate(async (base) => {
+        const response = await fetch(`${base}/api/v1/deployment-policies?limit=100&offset=0`, { credentials: "include" });
+        const body = await response.json();
+        return body.policies.find((policy) => policy.name === "Imported provenance control") || null;
+      }, apiBaseUrl);
+      if (!imported) throw new Error("Imported provenance fixture policy is missing");
+
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await collapseOnboardingCoach(page);
+      await openSecurityPolicyTab(page);
+      const importedCard = page.locator(`[data-policy-card="true"][data-policy-id="${imported.id}"]`);
+      await importedCard.waitFor({ timeout: 20000 });
+      await importedCard.getByRole("button", { name: "Edit", exact: true }).click();
+      await page.getByRole("heading", { name: /Edit Imported provenance control/ }).waitFor({ timeout: 5000 });
+
+      // Imported + no refined assertion is its own state, not "No enforcement defined".
+      await assertVisible(page.getByText("Enforcement needs refinement", { exact: true }).first(), "Expected the imported refinement state");
+      await assertHidden(page.getByText("No enforcement defined", { exact: true }), "An imported control must not report the custom empty state");
+      await assertVisible(page.getByTestId("policy-editor-mapped-not-enforced"), "Expected the mapped-but-not-enforced warning");
+
+      // Read-only provenance from authoritative persisted data.
+      await page.getByTestId("policy-editor-tab-provenance").click();
+      const provenance = page.getByTestId("policy-editor-provenance");
+      await assertVisible(provenance, "Expected the read-only Provenance section");
+      await assertVisible(provenance.getByText("U_WEBUI_PROVENANCE_STIG.xml", { exact: true }), "Expected the source artifact filename");
+      await assertVisible(provenance.getByText("SV-WEBUI-1_rule", { exact: true }), "Expected the source rule identity");
+      await assertVisible(provenance.getByText("read-only", { exact: true }), "Expected provenance to be marked read-only");
+      if (await provenance.getByRole("button").count() !== 0) {
+        throw new Error("Provenance must not expose mutation controls");
+      }
+
+      // Imported mappings are authoritative: labelled accurately, never editable.
+      await page.getByTestId("policy-editor-tab-mappings").click();
+      const importedRow = page.getByTestId("policy-mapping-row").first();
+      await importedRow.waitFor({ timeout: 5000 });
+      await assertVisible(importedRow.getByText("Imported from benchmark", { exact: true }), "Expected an accurate imported provenance label");
+      await assertHidden(importedRow.getByRole("button", { name: "Edit", exact: true }), "Imported mappings must not expose Edit");
+      await assertHidden(importedRow.getByTitle("Remove mapping"), "Imported mappings must not expose Remove");
+      await assertVisible(importedRow.getByText("Read-only", { exact: true }), "Expected the read-only mapping marker");
+
+      // The server rejects the mutation the UI refuses to offer.
+      const rejection = await page.evaluate(async ({ base, versionId }) => {
+        const list = await fetch(`${base}/api/v1/policy-versions/${versionId}/requirement-mappings`, { credentials: "include" });
+        const rows = await list.json();
+        const target = rows.find((row) => row.provenance !== "manual");
+        if (!target) return { missing: true };
+        const update = await fetch(`${base}/api/v1/policy-versions/${versionId}/requirement-mappings/${target.id}`, {
+          method: "PUT",
+          credentials: "include",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ relationship: "supports", coverage: "partial", rationale: "tampered" }),
+        });
+        const remove = await fetch(`${base}/api/v1/policy-versions/${versionId}/requirement-mappings/${target.id}`, {
+          method: "DELETE",
+          credentials: "include",
+        });
+        const after = await (await fetch(`${base}/api/v1/policy-versions/${versionId}/requirement-mappings`, { credentials: "include" })).json();
+        return { updateStatus: update.status, deleteStatus: remove.status, before: target, after: after.find((row) => row.id === target.id) };
+      }, { base: apiBaseUrl, versionId: imported.current_version_id });
+      if (rejection.missing) throw new Error("Imported mapping fixture missing from the API");
+      if (rejection.updateStatus !== 409 || rejection.deleteStatus !== 409) {
+        throw new Error(`Expected 409 for non-manual mapping mutations, got ${rejection.updateStatus}/${rejection.deleteStatus}`);
+      }
+      if (JSON.stringify(rejection.before) !== JSON.stringify(rejection.after)) {
+        throw new Error("A rejected mutation changed the imported mapping row");
+      }
+
+      // Provenance survives a reload of the same editor.
+      await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await collapseOnboardingCoach(page);
+      await openSecurityPolicyTab(page);
+      const reopened = page.locator(`[data-policy-card="true"][data-policy-id="${imported.id}"]`);
+      await reopened.waitFor({ timeout: 20000 });
+      await reopened.getByRole("button", { name: "Edit", exact: true }).click();
+      await page.getByTestId("policy-editor-tab-provenance").click();
+      await assertVisible(
+        page.getByTestId("policy-editor-provenance").getByText("U_WEBUI_PROVENANCE_STIG.xml", { exact: true }),
+        "Imported provenance must survive reload",
+      );
+      await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
+    },
   },
   {
      name: "20ad-stig-nixos-assertion-roundtrip",

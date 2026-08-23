@@ -103,6 +103,9 @@ pub fn PoliciesView() -> Element {
     });
 
     let mut editing_policy_id: Signal<Option<Uuid>> = use_signal(|| None);
+    // The exact version handed to the editor, so every origin edits one
+    // coherent revision instead of a lineage-current lookup.
+    let mut editing_policy: Signal<Option<PolicyDefinition>> = use_signal(|| None);
     let mut edit_name = use_signal(String::new);
     let mut edit_description = use_signal(String::new);
     let mut edit_body = use_signal(String::new);
@@ -536,6 +539,7 @@ pub fn PoliciesView() -> Element {
                         class: "btn btn-primary focus-ring",
                         onclick: move |_| {
                             editing_policy_id.set(None);
+                            editing_policy.set(None);
                             edit_name.set(String::new());
                             edit_description.set(String::new());
                             edit_body.set(POLICY_JSON_TEMPLATE.to_string());
@@ -849,6 +853,7 @@ pub fn PoliciesView() -> Element {
                                                         highlighted: focused_policy_name.read().as_ref() == Some(&policy.name),
                                                         on_edit: move |p: PolicyDefinition| {
                                                             editing_policy_id.set(Some(p.id));
+                                                            editing_policy.set(Some(p.clone()));
                                                             edit_name.set(p.name.clone());
                                                             edit_description.set(p.description.clone());
                                                             edit_body.set(p.body.clone());
@@ -931,6 +936,7 @@ pub fn PoliciesView() -> Element {
                                                     highlighted: focused_policy_name.read().as_ref() == Some(&policy.name),
                                                     on_edit: move |p: PolicyDefinition| {
                                                         editing_policy_id.set(Some(p.id));
+                                                        editing_policy.set(Some(p.clone()));
                                                         edit_name.set(p.name.clone());
                                                         edit_description.set(p.description.clone());
                                                         edit_body.set(p.body.clone());
@@ -1093,7 +1099,11 @@ pub fn PoliciesView() -> Element {
                     edit_srg_ids: edit_srg_ids.clone(),
                     edit_cci_ids: edit_cci_ids.clone(),
                     policy_library: policy_library.clone(),
-                    on_close: move || show_editor.set(false),
+                    editing_policy: editing_policy.read().clone(),
+                    on_close: move || {
+                        editing_policy.set(None);
+                        show_editor.set(false);
+                    },
                 }
             }
 
@@ -1138,6 +1148,9 @@ pub fn PoliciesView() -> Element {
                     on_export: export_single_policy,
                     on_edit: move |policy: PolicyDefinition| {
                         drawer_policy.set(None);
+                        // The drawer may have a historical/derived revision
+                        // selected; hand the editor that exact version.
+                        editing_policy.set(Some(policy.clone()));
                         editing_policy_id.set(Some(policy.id));
                         edit_name.set(policy.name.clone());
                         edit_description.set(policy.description.clone());
@@ -1222,51 +1235,12 @@ pub fn PolicyDrawer(
 
     let selected_revision = selected_version_id()
         .and_then(|id| policy.revisions.iter().find(|revision| revision.id == id));
-    let displayed_policy = selected_revision.map_or_else(
-        || policy.clone(),
-        |revision| {
-            let body = serde_json::to_string_pretty(&serde_json::json!({
-                "policy_type": revision.policy_type,
-                "enabled": revision.enabled,
-                "config": revision.config,
-            }))
-            .unwrap_or_else(|_| "{}".to_string());
-             PolicyDefinition {
-                 id: policy.id,
-                 lineage_id: policy.lineage_id,
-                 version_id: Some(revision.id),
-                 revision: Some(revision.version.clone()),
-                 publication_state: Some(revision.publication_state.clone()),
-                 semantic_digest: Some(revision.semantic_digest.clone()),
-                 revisions: policy.revisions.clone(),
-                 name: revision.name.clone(),
-                 description: revision
-                     .description
-                     .clone()
-                     .unwrap_or_else(|| "No description".to_string()),
-                 format: policy.format,
-                 body,
-                 policy_type: Some(revision.policy_type.clone()),
-                 updated_at: policy.updated_at.clone(),
-                 system_count: policy.system_count,
-                 // Use the selected revision's exact mappings (not the lineage current).
-                 srg_ids: revision.srg_ids.clone(),
-                 cci_ids: revision.cci_ids.clone(),
-                 category: revision.category.clone(),
-                 framework: revision.framework.clone(),
-                 severity: revision.severity.clone(),
-                 control_family: revision.control_family.clone(),
-                 cmmc_level: revision.cmmc_level,
-                 cis_section: revision.cis_section.clone(),
-                 rationale: revision.rationale.clone(),
-                 // Draft policies inherit counts from their parent version at fetch time.
-                 // When creating a new draft, use 0 as placeholder; real counts come from server.
-                 mapped_requirement_count: 0,
-                 bundle_usage_count: 0,
-                 evidence_specs: Some(revision.evidence_specs.clone()),
-             }
-        },
-    );
+    // One shared exact-version projection, so the drawer, the catalog, and the
+    // compliance entry point all hand the editor the same coherent revision
+    // (classification, config, evidence, and imported provenance together).
+    let displayed_policy = selected_version_id()
+        .and_then(|id| policies_api::policy_definition_for_revision(&policy, id))
+        .unwrap_or_else(|| policy.clone());
     let category = policy_category(&displayed_policy);
     let rules = crate::components::policy::policy_rule_summaries(&displayed_policy);
     let is_core = is_core_policy(&displayed_policy);
@@ -2229,34 +2203,35 @@ mod interchange_tests {
     use uuid::Uuid;
 
     fn security_policy() -> PolicyDefinition {
-         PolicyDefinition {
-             id: Uuid::new_v4(),
-             lineage_id: Uuid::new_v4(),
-             version_id: None,
-             revision: None,
-             publication_state: None,
-             semantic_digest: None,
-             revisions: Vec::new(),
-             name: "SSH hardening".to_string(),
-             description: "Require a secure SSH configuration".to_string(),
-             format: PolicyFormat::Json,
-             body: "{}".to_string(),
-             policy_type: Some("custom_check".to_string()),
-             updated_at: String::new(),
-             system_count: 0,
-             srg_ids: vec!["SRG-OS-000001".to_string()],
-             cci_ids: vec!["CCI-000001".to_string()],
-             category: Some("security".to_string()),
-             framework: Some("NIST 800-53".to_string()),
-             severity: Some("high".to_string()),
-             control_family: Some("AC".to_string()),
-             cmmc_level: None,
-             cis_section: Some("5.2".to_string()),
-             rationale: None,
-             mapped_requirement_count: 0,
-             bundle_usage_count: 0,
-             evidence_specs: None,
-         }
+        PolicyDefinition {
+            id: Uuid::new_v4(),
+            lineage_id: Uuid::new_v4(),
+            version_id: None,
+            revision: None,
+            publication_state: None,
+            semantic_digest: None,
+            revisions: Vec::new(),
+            name: "SSH hardening".to_string(),
+            description: "Require a secure SSH configuration".to_string(),
+            format: PolicyFormat::Json,
+            body: "{}".to_string(),
+            policy_type: Some("custom_check".to_string()),
+            updated_at: String::new(),
+            system_count: 0,
+            srg_ids: vec!["SRG-OS-000001".to_string()],
+            cci_ids: vec!["CCI-000001".to_string()],
+            category: Some("security".to_string()),
+            framework: Some("NIST 800-53".to_string()),
+            severity: Some("high".to_string()),
+            control_family: Some("AC".to_string()),
+            cmmc_level: None,
+            cis_section: Some("5.2".to_string()),
+            rationale: None,
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
+            evidence_specs: None,
+            provenance: Vec::new(),
+        }
     }
 
     #[test]
@@ -2362,6 +2337,7 @@ mod catalog_scaling_tests {
             mapped_requirement_count: 0,
             bundle_usage_count: 0,
             evidence_specs: None,
+            provenance: Vec::new(),
         }
     }
 

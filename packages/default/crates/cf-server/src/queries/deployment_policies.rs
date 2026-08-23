@@ -5,7 +5,9 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::api::models::{DeletionEligibility, DeploymentPolicyVersionSummary};
+use crate::api::models::{
+    DeletionEligibility, DeploymentPolicyVersionSummary, PolicyOriginProvenance,
+};
 use crate::compliance::digest::{PolicyVersionCanonical, write_policy_version_digest};
 use crate::compliance::mappings::{
     decode_evidence_specs_strict, extract_cci_ids, extract_classification, extract_srg_ids,
@@ -474,6 +476,156 @@ pub async fn load_policy_version_usage_counts(
         .collect())
 }
 
+/// Load authoritative imported-origin provenance for a batch of policy version ids.
+///
+/// One query for the whole batch (no per-version or per-revision query). The
+/// recursive term walks `derived_from_version_id` inside the same policy
+/// lineage so a mutable draft derived from an imported version keeps the
+/// imported origin; it is cycle-safe through the visited-path guard.
+///
+/// Two authoritative origin shapes are returned:
+/// - source-object mappings, which carry the exact source object identity
+///   (normally the XCCDF rule id) and import fidelity;
+/// - the direct `deployment_policy_versions.source_artifact_id` link, emitted
+///   only when no source-object mapping already covers that artifact.
+///
+/// Artifact bytes are never selected.
+pub async fn fetch_policy_version_provenance(
+    pool: &PgPool,
+    policy_version_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<PolicyOriginProvenance>>> {
+    if policy_version_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct ProvenanceRow {
+        requested_version_id: Uuid,
+        origin_policy_version_id: Uuid,
+        lineage_depth: i32,
+        source_artifact_id: Uuid,
+        filename: String,
+        media_type: String,
+        sha256: String,
+        parser_version: String,
+        detected_xccdf_version: Option<String>,
+        object_kind: Option<String>,
+        source_identity: Option<String>,
+        fidelity: Option<String>,
+        imported_by: Option<Uuid>,
+        imported_by_display: Option<String>,
+        imported_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    let rows = sqlx::query_as::<_, ProvenanceRow>(
+        r#"
+        WITH RECURSIVE lineage AS (
+            SELECT v.id AS requested_version_id,
+                   v.id AS origin_version_id,
+                   v.policy_id,
+                   v.derived_from_version_id,
+                   0 AS depth,
+                   ARRAY[v.id] AS visited
+              FROM deployment_policy_versions v
+             WHERE v.id = ANY($1)
+            UNION ALL
+            SELECT l.requested_version_id,
+                   parent.id,
+                   parent.policy_id,
+                   parent.derived_from_version_id,
+                   l.depth + 1,
+                   l.visited || parent.id
+              FROM lineage l
+              JOIN deployment_policy_versions parent
+                ON parent.id = l.derived_from_version_id
+               AND parent.policy_id = l.policy_id
+             WHERE NOT parent.id = ANY(l.visited)
+               AND l.depth < 64
+        ),
+        origins AS (
+            SELECT l.requested_version_id,
+                   l.origin_version_id AS origin_policy_version_id,
+                   l.depth AS lineage_depth,
+                   m.source_artifact_id,
+                   m.object_kind,
+                   m.source_identity,
+                   m.fidelity
+              FROM lineage l
+              JOIN compliance_source_object_mappings m
+                ON m.policy_version_id = l.origin_version_id
+            UNION ALL
+            SELECT l.requested_version_id,
+                   l.origin_version_id,
+                   l.depth,
+                   v.source_artifact_id,
+                   NULL::text,
+                   NULL::text,
+                   NULL::text
+              FROM lineage l
+              JOIN deployment_policy_versions v
+                ON v.id = l.origin_version_id
+             WHERE v.source_artifact_id IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM compliance_source_object_mappings m2
+                    WHERE m2.policy_version_id = v.id
+                      AND m2.source_artifact_id = v.source_artifact_id
+               )
+        )
+        SELECT o.requested_version_id,
+               o.origin_policy_version_id,
+               o.lineage_depth,
+               o.source_artifact_id,
+               a.filename,
+               a.media_type,
+               a.sha256,
+               a.parser_version,
+               a.detected_xccdf_version,
+               o.object_kind,
+               o.source_identity,
+               o.fidelity,
+               a.imported_by,
+               COALESCE(u.username, u.email) AS imported_by_display,
+               a.imported_at
+          FROM origins o
+          JOIN compliance_source_artifacts a ON a.id = o.source_artifact_id
+          LEFT JOIN users u ON u.id = a.imported_by
+         ORDER BY o.requested_version_id, o.lineage_depth,
+                  a.filename, o.object_kind NULLS FIRST, o.source_identity NULLS FIRST
+        "#,
+    )
+    .bind(policy_version_ids)
+    .fetch_all(pool)
+    .await
+    .context("Failed to load policy version provenance")?;
+
+    let mut by_version: HashMap<Uuid, Vec<PolicyOriginProvenance>> = HashMap::new();
+    for row in rows {
+        by_version
+            .entry(row.requested_version_id)
+            .or_default()
+            .push(PolicyOriginProvenance {
+                source_artifact_id: row.source_artifact_id,
+                filename: row.filename,
+                media_type: row.media_type,
+                sha256: row.sha256,
+                parser_version: row.parser_version,
+                detected_xccdf_version: row.detected_xccdf_version,
+                object_kind: row.object_kind,
+                source_identity: row.source_identity,
+                fidelity: row.fidelity,
+                imported_by: row.imported_by,
+                imported_by_display: row.imported_by_display,
+                imported_at: row.imported_at,
+                origin_policy_version_id: row.origin_policy_version_id,
+                lineage_depth: row.lineage_depth,
+                inherited: row.lineage_depth > 0,
+            });
+    }
+
+    Ok(by_version)
+}
+
 /// Fetch full version summaries for a batch of policy lineage IDs.
 ///
 /// This is the production path used by the deployment-policies list handler:
@@ -544,6 +696,10 @@ pub async fn fetch_policy_version_summaries(
     .map(|(id, published, draft)| (id, (published, draft)))
     .collect();
 
+    // One batched provenance query for every hydrated version id.
+    let version_ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+    let mut provenance_by_version = fetch_policy_version_provenance(pool, &version_ids).await?;
+
     let mut by_policy: HashMap<Uuid, Vec<DeploymentPolicyVersionSummary>> = HashMap::new();
     for row in rows {
         let pointers = pointer_rows
@@ -589,6 +745,7 @@ pub async fn fetch_policy_version_summaries(
                     row.id
                 )
             })?,
+            provenance: provenance_by_version.remove(&row.id).unwrap_or_default(),
         };
         by_policy
             .entry(summary.policy_id)

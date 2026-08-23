@@ -63,6 +63,7 @@ pkgs.rustPlatform.buildRustPackage {
       --test evidence_for_ato \
       --test framework_version_id_lifecycle \
       --test policy_counts_defect \
+      --test policy_editor_phase2 \
       --test time_window_policy_test \
       -- --test-threads=1
 

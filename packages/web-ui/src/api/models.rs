@@ -1518,6 +1518,42 @@ pub struct DeploymentPolicyVersionSummary {
     /// Evidence collection specifications for ATO audits
     #[serde(default)]
     pub evidence_specs: Vec<EvidenceSpec>,
+    /// Authoritative imported-origin provenance recorded at import time.
+    /// Empty for policies authored in Crystal Forge. Read-only: the editor
+    /// renders it and never submits it.
+    #[serde(default)]
+    pub provenance: Vec<PolicyOriginProvenance>,
+}
+
+/// One authoritative imported-origin record for a policy version, mirroring the
+/// server DTO. Populated from the immutable source artifact and its recorded
+/// source-object mapping, including origins inherited from the version a draft
+/// was derived from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyOriginProvenance {
+    pub source_artifact_id: Uuid,
+    pub filename: String,
+    pub media_type: String,
+    pub sha256: String,
+    pub parser_version: String,
+    #[serde(default)]
+    pub detected_xccdf_version: Option<String>,
+    #[serde(default)]
+    pub object_kind: Option<String>,
+    #[serde(default)]
+    pub source_identity: Option<String>,
+    #[serde(default)]
+    pub fidelity: Option<String>,
+    #[serde(default)]
+    pub imported_by: Option<Uuid>,
+    #[serde(default)]
+    pub imported_by_display: Option<String>,
+    pub imported_at: DateTime<Utc>,
+    pub origin_policy_version_id: Uuid,
+    #[serde(default)]
+    pub lineage_depth: i32,
+    #[serde(default)]
+    pub inherited: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

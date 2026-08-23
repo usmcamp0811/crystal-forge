@@ -20,12 +20,15 @@ use crate::api::client::{
 };
 use crate::api::models::{
     ComplianceFrameworkSummary, ComplianceFrameworkVersionSummary, CreateDeploymentPolicyRequest,
-    CreatePolicyMappingRequest, EvidenceKind, EvidenceSpec, PolicyMappingRow, RequirementVersionSummary,
-    UpdateDeploymentPolicyRequest, UpdatePolicyMappingRequest,
+    CreatePolicyMappingRequest, EvidenceKind, EvidenceSpec, PolicyMappingRow,
+    RequirementVersionSummary, UpdateDeploymentPolicyRequest, UpdatePolicyMappingRequest,
 };
 use crate::views::policies_api;
 
-use super::types::{PolicyCategory, PolicyDefinition, PolicyFormat, is_policy_version_editable};
+use super::types::{
+    POLICY_CATEGORIES, PolicyCategory, PolicyDefinition, PolicyFormat, is_policy_version_editable,
+    off_category_rule_kinds, recommended_enforcement,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 struct PendingPolicyMapping {
@@ -352,7 +355,11 @@ impl PolicyEvidence {
             },
             "file" => EvidenceKind::File {
                 path: self.path.clone(),
-                note: if self.note.is_empty() { None } else { Some(self.note.clone()) },
+                note: if self.note.is_empty() {
+                    None
+                } else {
+                    Some(self.note.clone())
+                },
             },
             "unit_state" => EvidenceKind::UnitState {
                 unit: self.unit.clone(),
@@ -402,6 +409,9 @@ enum PolicyEditorTab {
     Mappings,
     Enforcement,
     Evidence,
+    /// Read-only imported origin. Only rendered when the policy has
+    /// authoritative provenance recorded at import time.
+    Provenance,
 }
 
 fn rule_label(kind: &str) -> &'static str {
@@ -431,17 +441,17 @@ fn build_persisted_payload(rules: &[PolicyRule]) -> Option<(String, serde_json::
         return None;
     }
     if persistable.is_empty() {
-        // An explicit empty rule set is a valid policy state: it means the
-        // policy has no enforcement yet. Keep it distinguishable from an
-        // unsupported payload so mapped-but-not-enforced policies can save.
+        // "No enforcement" is a valid, persistable policy state.
+        //
+        // The canonical representation is an explicit empty `custom_check` rule
+        // set. The server validator accepts exactly this shape, and the
+        // evaluator's record parser skips it, so a policy that claims no
+        // enforcement really does assert nothing at runtime — it never becomes
+        // an always-pass check. Only fields this editor can round-trip are
+        // emitted, so the policy can be reopened and saved again unchanged.
         return Some((
             "custom_check".to_string(),
-            serde_json::json!({
-                "mode": "all",
-                "context": "nixos-configuration-v1",
-                "binding": "cfg",
-                "rules": []
-            }),
+            serde_json::json!({ "mode": "all", "rules": [] }),
         ));
     }
 
@@ -691,15 +701,86 @@ fn save_blocker(
     None
 }
 
-/// The editor keeps mapping state and enforcement state independent so that
-/// an imported mapping without local assertions is not misreported as an
-/// enforced policy.
-fn policy_editor_state(mapping_count: usize, rule_count: usize) -> &'static str {
-    match (mapping_count > 0, rule_count > 0) {
-        (false, false) => "No enforcement · Unmapped",
-        (false, true) => "Enforced · Unmapped",
-        (true, false) => "Mapped · Not enforced",
-        (true, true) => "Mapped · Enforced",
+/// How compliance mappings are currently known.
+///
+/// A failed request must never be presented as an authoritative "no mappings"
+/// answer, so loading and error are first-class states alongside `Loaded`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MappingLoadState {
+    Loading,
+    Failed,
+    Loaded,
+}
+
+/// Independent editor state dimensions.
+///
+/// Enforcement, compliance, and evidence are separate concepts, and the
+/// enforcement wording additionally depends on the policy's origin: an imported
+/// control with no assertion needs refinement, while a custom policy simply has
+/// no enforcement defined yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PolicyEditorState {
+    enforcement: &'static str,
+    compliance: &'static str,
+    evidence: &'static str,
+    /// True when the policy claims compliance requirements while asserting
+    /// nothing, which cannot pass or fail and warrants an explicit warning.
+    mapped_not_enforced: bool,
+}
+
+fn policy_editor_state(
+    is_imported: bool,
+    mapping_state: MappingLoadState,
+    mapping_count: usize,
+    rule_count: usize,
+    evidence_count: usize,
+) -> PolicyEditorState {
+    let enforcement = match (rule_count > 0, is_imported) {
+        (true, _) => "Enforced",
+        (false, true) => "Enforcement needs refinement",
+        (false, false) => "No enforcement defined",
+    };
+
+    let compliance = match mapping_state {
+        MappingLoadState::Loading => "Compliance mappings loading",
+        MappingLoadState::Failed => "Compliance mappings unavailable",
+        MappingLoadState::Loaded if mapping_count > 0 => "Mapped",
+        MappingLoadState::Loaded => "Unmapped",
+    };
+
+    PolicyEditorState {
+        enforcement,
+        compliance,
+        evidence: if evidence_count > 0 {
+            "Evidence collected"
+        } else {
+            "No evidence"
+        },
+        mapped_not_enforced: mapping_state == MappingLoadState::Loaded
+            && mapping_count > 0
+            && rule_count == 0,
+    }
+}
+
+/// A requirement mapping may only be edited or removed when the server will
+/// accept the mutation: the version must be mutable and the mapping's
+/// provenance must be exactly `manual`. Every other provenance the schema
+/// allows (`imported`, `inherited`, `inferred`, `suggested`) is authoritative
+/// and read-only.
+fn mapping_row_is_editable(version_editable: bool, provenance: &str) -> bool {
+    version_editable && provenance == "manual"
+}
+
+/// Human-readable label for a mapping's recorded provenance. Unknown values are
+/// rendered verbatim rather than being relabelled as manual.
+fn mapping_provenance_label(provenance: &str) -> String {
+    match provenance {
+        "manual" => "Manual mapping".to_string(),
+        "imported" => "Imported from benchmark".to_string(),
+        "inherited" => "Inherited from source version".to_string(),
+        "inferred" => "Inferred at import".to_string(),
+        "suggested" => "Suggested · not authoritative".to_string(),
+        other => format!("{other} · read-only"),
     }
 }
 
@@ -813,6 +894,10 @@ fn PolicyMappingsTab(
     mappings_editable: bool,
     mut mappings: Signal<Vec<PolicyMappingRow>>,
     mut pending_mappings: Signal<Vec<PendingPolicyMapping>>,
+    /// Owned by the modal so mappings are loaded when the editor opens, not
+    /// when this tab is first shown.
+    mut mapping_load_state: Signal<MappingLoadState>,
+    mut mapping_load_error: Signal<Option<String>>,
 ) -> Element {
     let mapping_target =
         mapping_editor_target(is_editing, editing_policy_version_id, mappings_editable);
@@ -840,22 +925,12 @@ fn PolicyMappingsTab(
                 Ok(value) => frameworks.set(value),
                 Err(e) => error.set(Some(format!("Failed to load frameworks: {e}"))),
             }
-            if let Some(id) = editing_policy_version_id {
-                match fetch_policy_requirement_mappings(&id).await {
-                    Ok(value) => mappings.set(value),
-                    Err(e) => error.set(Some(format!("Failed to load mappings: {e}"))),
-                }
-            }
         });
     }
 
+    let mapping_state = *mapping_load_state.read();
     let rows = mappings.read().clone();
     let pending_rows = pending_mappings.read().clone();
-    let imported_rows: Vec<PolicyMappingRow> = rows
-        .iter()
-        .filter(|row| row.provenance != "manual")
-        .cloned()
-        .collect();
     let mut pending_grouped: Vec<(String, Vec<PendingPolicyMapping>)> = Vec::new();
     for row in pending_rows {
         let name = format!("{} · {}", row.framework_name, row.framework_version);
@@ -877,24 +952,46 @@ fn PolicyMappingsTab(
 
     rsx! {
         div { style: "margin-top:6px;display:flex;flex-direction:column;gap:14px;",
-            if !imported_rows.is_empty() {
-                div { class: "sd-callout sd-callout-info", style: "font-size:11px;",
-                    strong { "Provenance · read only" }
-                    p { style: "margin:4px 0 0;", "Imported compliance mappings are authoritative and cannot be edited or removed here." }
-                    for row in imported_rows.iter() {
-                        div { key: "provenance-{row.id}", style: "margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;",
-                            span { class: "chip chip-neutral", "{row.framework_name} {row.framework_version}" }
-                            span { class: "chip chip-neutral", "{row.requirement_external_id}" }
-                            span { class: "chip chip-neutral", "{row.provenance}" }
-                        }
-                    }
-                }
-            }
             div { style: "font-size:12px;color:var(--cf-text-secondary);margin-bottom:2px;line-height:1.5;",
                 "Map this policy to the compliance requirements it implements, supports, or provides evidence for. Policies can map to requirements from multiple frameworks."
             }
-            if grouped.is_empty() && pending_grouped.is_empty() {
-                div { class: "sd-callout sd-callout-info", style: "margin-bottom:10px;",
+            if mapping_state == MappingLoadState::Loading {
+                div { class: "sd-callout sd-callout-info", "data-testid": "policy-mappings-loading",
+                    div { style: "font-size:12px;", "Loading compliance mappings…" }
+                }
+            } else if mapping_state == MappingLoadState::Failed {
+                div { class: "sd-callout sd-callout-warn", "data-testid": "policy-mappings-error",
+                    div { style: "font-size:12px;",
+                        strong { "Compliance mappings unavailable." }
+                        span { " " }
+                        {mapping_load_error.read().clone().unwrap_or_else(|| "The mapping request failed.".to_string())}
+                        span { " This policy is not necessarily unmapped." }
+                    }
+                    if let Some(policy_version_id) = editing_policy_version_id {
+                        button {
+                            class: "btn btn-ghost xs focus-ring",
+                            "data-testid": "policy-mappings-retry",
+                            style: "margin-top:6px;",
+                            onclick: move |_| {
+                                mapping_load_error.set(None);
+                                mapping_load_state.set(MappingLoadState::Loading);
+                                spawn(async move {
+                                    match fetch_policy_requirement_mappings(&policy_version_id).await {
+                                        Ok(value) => { mappings.set(value); mapping_load_state.set(MappingLoadState::Loaded); }
+                                        Err(e) => {
+                                            mapping_load_error.set(Some(format!("Failed to load compliance mappings: {e}")));
+                                            mapping_load_state.set(MappingLoadState::Failed);
+                                        }
+                                    }
+                                });
+                            },
+                            "Retry"
+                        }
+                    }
+                }
+            } else if grouped.is_empty() && pending_grouped.is_empty() {
+                div { class: "sd-callout sd-callout-info", "data-testid": "policy-mappings-unmapped", style: "margin-bottom:10px;",
+                    div { style: "font-size:12.5px;font-weight:700;margin-bottom:2px;", "Unmapped" }
                     div { style: "font-size:12px;",
                         {match mapping_target {
                             MappingEditorTarget::Pending => "No compliance mappings yet. This policy can still be used as an operational/custom policy with zero mappings. Add mappings below; they will be saved when this policy is created.",
@@ -931,7 +1028,10 @@ fn PolicyMappingsTab(
                             div { style: "font-size:11.5px;font-weight:700;color:var(--cf-text-primary);margin-bottom:6px;", "{name}" }
                              for row in group {
                                  {
-                                     let row_read_only = !mappings_editable || row.provenance == "imported" || row.trust_state == "suggested";
+                                     // Editability uses the same rule the server enforces:
+                                     // a mutable version plus provenance == "manual".
+                                     let row_read_only = !mapping_row_is_editable(mappings_editable, &row.provenance);
+                                     let provenance_label = mapping_provenance_label(&row.provenance);
                                      let edit_row = row.clone();
                                      rsx! { div { key: "{row.id}", "data-testid": "policy-mapping-row", style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:start;padding:9px 11px;background:var(--cf-subtle-bg);border:1px solid var(--cf-divider);border-radius:8px;font-size:12px;margin-bottom:6px;",
                                     div { style: "display:flex;flex-direction:column;gap:2px;",
@@ -940,7 +1040,7 @@ fn PolicyMappingsTab(
                                         div { style: "display:flex;gap:6px;margin-top:2px;",
                                             span { class: "chip chip-neutral", style: "font-size:10px;", {match row.relationship.as_str() { "implements" => "Implements", "supports" => "Supports", _ => "Evidence for" }} }
                                             span { class: if row.coverage == "full" { "chip chip-success" } else { "chip chip-warn" }, style: "font-size:10px;", {if row.coverage == "full" { "Full" } else { "Partial" }} }
-                                            span { style: "font-size:10px;color:var(--cf-text-muted);", {if row.provenance == "imported" { "Imported from benchmark" } else { "Manual mapping" }} }
+                                            span { "data-testid": "policy-mapping-provenance", style: "font-size:10px;color:var(--cf-text-muted);", "{provenance_label}" }
                                         }
                                         if let Some(text) = &row.rationale { if !text.is_empty() { div { style: "color:var(--cf-text-muted);font-size:11px;margin-top:2px;", "{text}" } } }
                                     }
@@ -1107,6 +1207,15 @@ pub fn PolicyEditorModal(
     /// PERSISTED to compliance_metadata via the server API.
     edit_cci_ids: Signal<String>,
     policy_library: Signal<Vec<PolicyDefinition>>,
+    /// The exact policy version being edited.
+    ///
+    /// Every origin (catalog card/row, policy drawer revision, compliance
+    /// drawer) hands the editor one coherent version so classification,
+    /// enforcement, evidence, and imported provenance always describe the same
+    /// revision. Falling back to a catalog lookup would mix a selected revision
+    /// with the lineage-current one.
+    #[props(default)]
+    editing_policy: Option<PolicyDefinition>,
     on_close: EventHandler<()>,
 ) -> Element {
     let is_editing = editing_policy_id.read().is_some();
@@ -1130,20 +1239,22 @@ pub fn PolicyEditorModal(
     // Seed builder state from any existing payload.
     let (existing_type, existing_config) =
         parse_existing(&edit_body.read().clone(), *edit_format.read());
+    // A new policy starts with no enforcement. Seeding UI-only rule kinds that
+    // cannot be persisted forced the user to delete them before the very first
+    // save, and contradicted "No enforcement defined" being a valid state.
     let seed_rules = if is_editing {
         rules_from_policy(&existing_type, &existing_config)
     } else {
-        vec![
-            PolicyRule::new("eval_passed"),
-            PolicyRule::new("build_succeeded"),
-        ]
+        Vec::new()
     };
-    let existing_policy = editing_policy_id.read().and_then(|id| {
-        policy_library
-            .read()
-            .iter()
-            .find(|policy| policy.id == id)
-            .cloned()
+    let existing_policy = editing_policy.clone().or_else(|| {
+        editing_policy_id.read().and_then(|id| {
+            policy_library
+                .read()
+                .iter()
+                .find(|policy| policy.id == id)
+                .cloned()
+        })
     });
     let seed_category = existing_policy
         .as_ref()
@@ -1154,17 +1265,13 @@ pub fn PolicyEditorModal(
             _ => "deployment",
         });
 
-    let mut domain = use_signal(|| {
-        if seed_category.eq_ignore_ascii_case("security") {
-            "security".to_string()
-        } else {
-            "platform".to_string()
-        }
-    });
-    let mut platform_category = use_signal(|| match seed_category {
-        "pipeline" => "pipeline".to_string(),
-        "rollout" => "rollout".to_string(),
-        _ => "deployment".to_string(),
+    // One four-value category, exactly as the design models it. Security is a
+    // peer category, not a separate "domain".
+    let mut category = use_signal(|| {
+        PolicyCategory::from_id(seed_category)
+            .unwrap_or(PolicyCategory::Deployment)
+            .id()
+            .to_string()
     });
     let seed_framework = existing_policy
         .as_ref()
@@ -1218,25 +1325,25 @@ pub fn PolicyEditorModal(
     });
     let framework_options = custom_frameworks(&policy_library.read());
     let mut rules = use_signal(|| seed_rules);
-     // Initialize evidence from existing policy specs, or empty if creating new
-     let initial_evidence: Vec<PolicyEvidence> = existing_policy
-         .as_ref()
-         .and_then(|p| p.evidence_specs.as_ref())
-         .map(|specs| {
-             specs
-                 .iter()
-                 .map(PolicyEvidence::from_evidence_spec)
-                 .collect()
-         })
-         .unwrap_or_default();
-     let initial_evidence_count = initial_evidence.len();
-     let mut evidence: Signal<Vec<PolicyEvidence>> = use_signal({
-         let ev = initial_evidence.clone();
-         move || ev.clone()
-     });
-     let mut add_rule_kind = use_signal(String::new);
-     let mut add_evidence_kind = use_signal(String::new);
-     let mut active_tab = use_signal(|| PolicyEditorTab::Details);
+    // Initialize evidence from existing policy specs, or empty if creating new
+    let initial_evidence: Vec<PolicyEvidence> = existing_policy
+        .as_ref()
+        .and_then(|p| p.evidence_specs.as_ref())
+        .map(|specs| {
+            specs
+                .iter()
+                .map(PolicyEvidence::from_evidence_spec)
+                .collect()
+        })
+        .unwrap_or_default();
+    let initial_evidence_count = initial_evidence.len();
+    let mut evidence: Signal<Vec<PolicyEvidence>> = use_signal({
+        let ev = initial_evidence.clone();
+        move || ev.clone()
+    });
+    let mut add_rule_kind = use_signal(String::new);
+    let mut add_evidence_kind = use_signal(String::new);
+    let mut active_tab = use_signal(|| PolicyEditorTab::Details);
 
     // ── Mappings tab state ────────────────────────────────────────────────────
     let mut mappings: Signal<Vec<PolicyMappingRow>> = use_signal(Vec::new);
@@ -1248,6 +1355,43 @@ pub fn PolicyEditorModal(
     let mappings_editable = existing_policy
         .as_ref()
         .is_some_and(is_policy_version_editable);
+
+    // Mappings load when the editor opens, not when the Compliance section is
+    // first shown: otherwise a mapped policy briefly claims to be Unmapped.
+    let mut mapping_load_state = use_signal(|| {
+        if editing_policy_version_id.is_some() {
+            MappingLoadState::Loading
+        } else {
+            MappingLoadState::Loaded
+        }
+    });
+    let mut mapping_load_error: Signal<Option<String>> = use_signal(|| None);
+    let mut mappings_requested = use_signal(|| false);
+    if !*mappings_requested.read() {
+        mappings_requested.set(true);
+        if let Some(version_id) = editing_policy_version_id {
+            spawn(async move {
+                match fetch_policy_requirement_mappings(&version_id).await {
+                    Ok(value) => {
+                        mappings.set(value);
+                        mapping_load_state.set(MappingLoadState::Loaded);
+                    }
+                    Err(error) => {
+                        mapping_load_error
+                            .set(Some(format!("Failed to load compliance mappings: {error}")));
+                        mapping_load_state.set(MappingLoadState::Failed);
+                    }
+                }
+            });
+        }
+    }
+
+    // Authoritative imported origin for the exact version being edited.
+    let provenance = existing_policy
+        .as_ref()
+        .map(|policy| policy.provenance.clone())
+        .unwrap_or_default();
+    let is_imported = !provenance.is_empty();
 
     let mut save_error = use_signal(String::new);
     let mut is_saving = use_signal(|| false);
@@ -1267,8 +1411,35 @@ pub fn PolicyEditorModal(
     let can_save = !name_missing && current_save_blocker.is_none() && !*is_saving.read();
     let rule_count = rules.read().len();
     let evidence_count = evidence.read().len();
+    let selected_category =
+        PolicyCategory::from_id(category.read().as_str()).unwrap_or(PolicyCategory::Deployment);
+    let is_security = selected_category == PolicyCategory::Security;
+    // Guidance derived from the selected category. Recommendations and the
+    // off-category notice are informational only; `rules` is never filtered.
+    let recommended_labels = recommended_enforcement(selected_category)
+        .iter()
+        .map(|kind| rule_label(kind))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let current_rule_kinds: Vec<String> =
+        current_rules.iter().map(|rule| rule.kind.clone()).collect();
+    let off_category_kinds = off_category_rule_kinds(selected_category, &current_rule_kinds);
+    let off_category_rule_count = off_category_kinds.len();
+    let off_category_labels = off_category_kinds
+        .iter()
+        .map(|kind| rule_label(kind))
+        .collect::<Vec<_>>()
+        .join(", ");
+
     let mapping_count = mappings.read().len() + pending_mappings.read().len();
-    let policy_state = policy_editor_state(mapping_count, rule_count);
+    let mapping_state = *mapping_load_state.read();
+    let policy_state = policy_editor_state(
+        is_imported,
+        mapping_state,
+        mapping_count,
+        rule_count,
+        evidence_count,
+    );
     let delete_matches = delete_typed.read().as_str() == name_value;
 
     rsx! {
@@ -1372,13 +1543,35 @@ pub fn PolicyEditorModal(
 
                     // ── Body ────────────────────────────────────────────────────
                     div { class: "modal-body cf-policy-modal-body", style: "overflow-y:auto;",
+                        // Section order follows the design: Basics, Enforcement,
+                        // Compliance, Evidence, then read-only Provenance.
                         div { class: "cf-modal-tabs", role: "tablist", aria_label: "Policy editor sections",
                             PolicyEditorTabButton { tab: PolicyEditorTab::Details, active: *active_tab.read(), label: "Basics", test_id: "policy-editor-tab-details", on_select: move |_| active_tab.set(PolicyEditorTab::Details) }
-                             PolicyEditorTabButton { tab: PolicyEditorTab::Mappings, active: *active_tab.read(), label: format!("Compliance · {}", mapping_count), test_id: "policy-editor-tab-mappings", on_select: move |_| active_tab.set(PolicyEditorTab::Mappings) }
-                            PolicyEditorTabButton { tab: PolicyEditorTab::Enforcement, active: *active_tab.read(), label: format!("Enforcement · {rule_count}"), test_id: "policy-editor-tab-enforcement", on_select: move |_| active_tab.set(PolicyEditorTab::Enforcement) }
+                            PolicyEditorTabButton { tab: PolicyEditorTab::Enforcement, active: *active_tab.read(), label: if rule_count > 0 { format!("Enforcement · {rule_count}") } else if is_imported { "Enforcement · Needs refinement".to_string() } else { "Enforcement · None".to_string() }, test_id: "policy-editor-tab-enforcement", on_select: move |_| active_tab.set(PolicyEditorTab::Enforcement) }
+                            PolicyEditorTabButton { tab: PolicyEditorTab::Mappings, active: *active_tab.read(), label: match mapping_state { MappingLoadState::Loading => "Compliance · …".to_string(), MappingLoadState::Failed => "Compliance · unavailable".to_string(), MappingLoadState::Loaded if mapping_count > 0 => format!("Compliance · {mapping_count}"), MappingLoadState::Loaded => "Compliance · Unmapped".to_string() }, test_id: "policy-editor-tab-mappings", on_select: move |_| active_tab.set(PolicyEditorTab::Mappings) }
                             PolicyEditorTabButton { tab: PolicyEditorTab::Evidence, active: *active_tab.read(), label: format!("Evidence · {evidence_count}"), test_id: "policy-editor-tab-evidence", on_select: move |_| active_tab.set(PolicyEditorTab::Evidence) }
+                            if is_imported {
+                                PolicyEditorTabButton { tab: PolicyEditorTab::Provenance, active: *active_tab.read(), label: "Provenance".to_string(), test_id: "policy-editor-tab-provenance", on_select: move |_| active_tab.set(PolicyEditorTab::Provenance) }
+                            }
                         }
-                        div { class: "sd-callout sd-callout-info", style: "margin:10px 0 0;font-size:11px;", "Policy state: ", strong { "{policy_state}" }, " · Category changes update guidance only; existing enforcement rules are preserved." }
+                        div { class: "sd-callout sd-callout-info", "data-testid": "policy-editor-state", style: "margin:10px 0 0;font-size:11px;",
+                            "Policy state: "
+                            strong { "{policy_state.enforcement}" }
+                            " · "
+                            strong { "{policy_state.compliance}" }
+                            " · "
+                            span { "{policy_state.evidence}" }
+                            if is_imported {
+                                span { " · " }
+                                span { class: "chip chip-info", style: "font-size:10px;", "Imported" }
+                            }
+                        }
+                        if policy_state.mapped_not_enforced {
+                            div { class: "sd-callout sd-callout-warn", "data-testid": "policy-editor-mapped-not-enforced", style: "margin:8px 0 0;font-size:11.5px;",
+                                strong { "Mapped, not enforced." }
+                                span { " This policy claims {mapping_count} compliance requirement(s) but asserts nothing yet, so it cannot pass or fail. Add enforcement to make it real." }
+                            }
+                        }
                         div { class: "cf-modal-tab-panel",
                         if *active_tab.read() == PolicyEditorTab::Details {
                         div { style: "display:grid;grid-template-columns:1fr;gap:14px;",
@@ -1408,25 +1601,9 @@ pub fn PolicyEditorModal(
                         }
 
                         div { class: "field",
-                            label { "Domain" }
-                            div { class: "seg", role: "radiogroup", style: "width:fit-content;",
-                                for (value, label) in [("platform", "Platform"), ("security", "Security controls")] {
-                                    button {
-                                        key: "domain-{value}", r#type: "button", role: "radio",
-                                        aria_checked: if domain.read().as_str() == value { "true" } else { "false" },
-                                        class: if domain.read().as_str() == value { "active" } else { "" },
-                                        onclick: move |_| domain.set(value.to_string()),
-                                        "{label}"
-                                    }
-                                }
-                            }
-                        }
-
-                        if domain.read().as_str() == "platform" {
-                        div { class: "field",
                             label { "Category" }
                             div { role: "radiogroup", style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;",
-                                for policy_category in [PolicyCategory::Deployment, PolicyCategory::Pipeline, PolicyCategory::Rollout] {
+                                for policy_category in POLICY_CATEGORIES {
                                     {
                                         let id = policy_category.id();
                                         let label = policy_category.label();
@@ -1438,10 +1615,13 @@ pub fn PolicyEditorModal(
                                         key: "{id}",
                                         r#type: "button",
                                         role: "radio",
-                                        aria_checked: if platform_category.read().as_str() == id { "true" } else { "false" },
-                                        class: if platform_category.read().as_str() == id { "cf-policy-category-card cf-policy-category-card-active focus-ring" } else { "cf-policy-category-card focus-ring" },
+                                        "data-testid": "policy-category-{id}",
+                                        aria_checked: if category.read().as_str() == id { "true" } else { "false" },
+                                        class: if category.read().as_str() == id { "cf-policy-category-card cf-policy-category-card-active focus-ring" } else { "cf-policy-category-card focus-ring" },
                                         style: "--cf-policy-category-color:{color};",
-                                        onclick: move |_| platform_category.set(id.to_string()),
+                                        // Category is guidance only: selecting a
+                                        // different one never touches `rules`.
+                                        onclick: move |_| category.set(id.to_string()),
                                         span { style: "flex-shrink:0;width:24px;height:24px;border-radius:6px;display:grid;place-items:center;background:color-mix(in oklab, {color} 16%, transparent);color:{color};",
                                             svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
                                                 if icon == "deploy" {
@@ -1459,7 +1639,7 @@ pub fn PolicyEditorModal(
                                             }
                                         }
                                         span { style: "min-width:0;",
-                                            span { style: if platform_category.read().as_str() == id { "display:block;font-size:12px;font-weight:600;color:{color};" } else { "display:block;font-size:12px;font-weight:600;color:var(--cf-text-primary);" }, "{label}" }
+                                            span { style: if category.read().as_str() == id { "display:block;font-size:12px;font-weight:600;color:{color};" } else { "display:block;font-size:12px;font-weight:600;color:var(--cf-text-primary);" }, "{label}" }
                                             span { style: "display:block;font-size:10.5px;color:var(--cf-text-muted);line-height:1.35;margin-top:2px;", "{blurb}" }
                                         }
                                     }
@@ -1467,10 +1647,22 @@ pub fn PolicyEditorModal(
                                     }
                                 }
                             }
-                        }
+                            div { class: "help", "Category guides which enforcement mechanisms are suggested. It never restricts them, and changing it never edits existing rules." }
                         }
 
-                        if domain.read().as_str() == "security" {
+                        if !off_category_labels.is_empty() {
+                            div { class: "sd-callout sd-callout-info", "data-testid": "policy-basics-off-category", style: "margin:2px 0 14px;font-size:11.5px;",
+                                "{off_category_rule_count} existing "
+                                {if off_category_rule_count == 1 { "requirement" } else { "requirements" }}
+                                " ({off_category_labels}) "
+                                {if off_category_rule_count == 1 { "is" } else { "are" }}
+                                " unusual for "
+                                strong { "{selected_category.label()}" }
+                                ". Nothing was changed or removed."
+                            }
+                        }
+
+                        if is_security {
                         div { class: "field",
                             label { "Framework" }
                             select {
@@ -1576,14 +1768,78 @@ pub fn PolicyEditorModal(
                                   mappings_editable,
                                   mappings,
                                    pending_mappings,
+                                   mapping_load_state,
+                                   mapping_load_error,
                                }
                            }
+
+                        // Read-only imported origin, recorded at import time.
+                        if *active_tab.read() == PolicyEditorTab::Provenance {
+                            div { "data-testid": "policy-editor-provenance", style: "margin-top:6px;display:flex;flex-direction:column;gap:10px;",
+                                div { style: "display:flex;align-items:baseline;gap:8px;",
+                                    label { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);", "Provenance" }
+                                    span { class: "chip chip-neutral", style: "font-size:10px;", "read-only" }
+                                }
+                                div { style: "font-size:11.5px;color:var(--cf-text-secondary);line-height:1.5;",
+                                    "Recorded when this control was imported. Editing where information came from would rewrite history, so it cannot be changed here. Compliance relationships live in Compliance."
+                                }
+                                for origin in provenance.iter() {
+                                    div { key: "{origin.source_artifact_id}-{origin.origin_policy_version_id}-{origin.source_identity.clone().unwrap_or_default()}",
+                                        style: "display:flex;flex-direction:column;gap:3px;padding:9px 11px;background:var(--cf-subtle-bg);border:1px solid var(--cf-divider);border-radius:8px;font-size:11.5px;",
+                                        div { style: "display:flex;gap:6px;flex-wrap:wrap;align-items:center;",
+                                            span { class: "chip chip-info", style: "font-size:10px;", "Imported" }
+                                            if origin.inherited {
+                                                span { class: "chip chip-neutral", "data-testid": "policy-provenance-inherited", style: "font-size:10px;", "Inherited from source version" }
+                                            }
+                                            if let Some(fidelity) = origin.fidelity.as_ref() {
+                                                span { class: "chip chip-neutral", style: "font-size:10px;", "{fidelity}" }
+                                            }
+                                        }
+                                        div { style: "display:flex;justify-content:space-between;gap:10px;", span { "Artifact" }, span { class: "mono", "{origin.filename}" } }
+                                        div { style: "display:flex;justify-content:space-between;gap:10px;", span { "Source type" }, span { class: "mono", "{origin.media_type}" } }
+                                        div { style: "display:flex;justify-content:space-between;gap:10px;", span { "SHA-256" }, span { class: "mono", style: "overflow-wrap:anywhere;", "{origin.sha256}" } }
+                                        if let Some(identity) = origin.source_identity.as_ref() {
+                                            div { style: "display:flex;justify-content:space-between;gap:10px;", span { {origin.object_kind.clone().map(|kind| format!("Source {kind} ID")).unwrap_or_else(|| "Source ID".to_string())} }, span { class: "mono", "{identity}" } }
+                                        }
+                                        if let Some(xccdf) = origin.detected_xccdf_version.as_ref() {
+                                            div { style: "display:flex;justify-content:space-between;gap:10px;", span { "XCCDF version" }, span { class: "mono", "{xccdf}" } }
+                                        }
+                                        div { style: "display:flex;justify-content:space-between;gap:10px;", span { "Parser" }, span { class: "mono", "{origin.parser_version}" } }
+                                        div { style: "display:flex;justify-content:space-between;gap:10px;",
+                                            span { "Imported" }
+                                            span { class: "mono", {match origin.imported_by_display.as_ref() { Some(user) => format!("{} · {}", origin.imported_at.to_rfc3339(), user), None => origin.imported_at.to_rfc3339() }} }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                          // Assertions & gate rules builder
                         if *active_tab.read() == PolicyEditorTab::Enforcement {
                         div { style: "margin-top:6px;",
                             div { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;",
                                 label { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);", "Assertions & gate rules ({rule_count})" }
                                 span { style: "font-size:11px;color:var(--cf-text-muted);", "All must hold — each compiles to a policy check." }
+                            }
+                            if rule_count == 0 {
+                                div { class: if is_imported { "sd-callout sd-callout-warn" } else { "sd-callout sd-callout-info" }, "data-testid": "policy-enforcement-empty", style: "margin-bottom:8px;font-size:12px;",
+                                    if is_imported {
+                                        span { strong { "Enforcement needs refinement." } " This control was imported with its compliance mappings and provenance, but no assertion was inferred. Until one exists it asserts nothing." }
+                                    } else {
+                                        span { strong { "No enforcement defined." } " Add at least one requirement for this policy to have an effect. Saving with none is valid; the policy simply asserts nothing." }
+                                    }
+                                }
+                            }
+                            div { class: "sd-callout sd-callout-info", "data-testid": "policy-enforcement-recommendations", style: "margin-bottom:8px;font-size:11px;",
+                                "Suggested for " strong { "{selected_category.label()}" } ": "
+                                span { class: "mono", "{recommended_labels}" }
+                                span { " · Suggestions follow the category; they are never restrictions." }
+                            }
+                            if !off_category_labels.is_empty() {
+                                div { class: "sd-callout sd-callout-info", "data-testid": "policy-off-category-notice", style: "margin-bottom:8px;font-size:11px;",
+                                    "{off_category_labels} " span { {if off_category_rule_count == 1 { "is" } else { "are" }} }
+                                    " unusual for " strong { "{selected_category.label()}" } ". Nothing was changed or removed."
+                                }
                             }
                             div { style: "display:flex;flex-direction:column;gap:6px;",
                                 for (index, rule) in rules.read().iter().cloned().enumerate() {
@@ -1797,18 +2053,13 @@ pub fn PolicyEditorModal(
                                     .map(|s| s.trim().to_string())
                                     .filter(|s| !s.is_empty())
                                     .collect();
-                                let is_security = domain.read().as_str() == "security";
                                 let selected_framework = if framework.read().as_str() == "__custom__" {
                                     non_empty(custom_framework.read().clone())
                                 } else {
                                     non_empty(framework.read().clone())
                                 };
-                                let selected_cmmc_level = cmmc_level.read().trim().parse::<i32>().ok();
-                                let selected_category = if is_security {
-                                    Some("security".to_string())
-                                } else {
-                                    Some(platform_category.read().clone())
-                                };
+                                let selected_cmmc_level = if is_security { cmmc_level.read().trim().parse::<i32>().ok() } else { None };
+                                let selected_category = Some(category.read().clone());
                                 let selected_severity = if is_security { non_empty(severity.read().clone()) } else { None };
                                 let selected_control_family = if is_security && selected_framework.as_deref() == Some("NIST 800-53") { non_empty(control_family.read().clone()) } else { None };
                                 let selected_cis_section = if is_security && selected_framework.as_deref() == Some("CIS Benchmark") { non_empty(cis_section.read().clone()) } else { None };
@@ -1827,7 +2078,7 @@ pub fn PolicyEditorModal(
                                              ev.validate().map(|err| format!("Evidence row {}: {}", idx + 1, err))
                                          })
                                          .collect();
-                                     
+
                                      if !validation_errors.is_empty() {
                                          save_error.set(validation_errors.join("; "));
                                          is_saving.set(false);
@@ -1847,7 +2098,7 @@ pub fn PolicyEditorModal(
                                               let current_evidence = evidence.read();
                                               let current_count = current_evidence.len();
                                               let initial_count = initial_evidence_clone.len();
-                                              
+
                                               // No change = preserve
                                               if current_count == initial_count && current_evidence.clone() == initial_evidence_clone {
                                                   None
@@ -1996,6 +2247,7 @@ fn PolicyEditorTabButton(
         PolicyEditorTab::Mappings => "mappings",
         PolicyEditorTab::Enforcement => "enforcement",
         PolicyEditorTab::Evidence => "evidence",
+        PolicyEditorTab::Provenance => "provenance",
     };
     rsx! { button { class: if selected { format!("cf-modal-tab cf-modal-tab--active cf-modal-tab--{class}") } else { format!("cf-modal-tab cf-modal-tab--{class}") }, role: "tab", aria_selected: if selected { "true" } else { "false" }, "data-testid": "{test_id}", onclick: move |_| on_select.call(()), "{label}" } }
 }
@@ -2429,26 +2681,238 @@ mod tests {
     }
 
     #[test]
-    fn editor_state_distinguishes_mapping_and_enforcement() {
-        assert_eq!(policy_editor_state(0, 0), "No enforcement · Unmapped");
-        assert_eq!(policy_editor_state(0, 1), "Enforced · Unmapped");
-        assert_eq!(policy_editor_state(1, 0), "Mapped · Not enforced");
-        assert_eq!(policy_editor_state(1, 1), "Mapped · Enforced");
+    fn editor_state_keeps_origin_enforcement_and_mapping_independent() {
+        let loaded = MappingLoadState::Loaded;
+
+        // custom + rules > 0 + mappings == 0 => Unmapped
+        let custom_enforced = policy_editor_state(false, loaded, 0, 1, 0);
+        assert_eq!(custom_enforced.enforcement, "Enforced");
+        assert_eq!(custom_enforced.compliance, "Unmapped");
+        assert!(!custom_enforced.mapped_not_enforced);
+
+        // custom + rules == 0 + mappings == 0 => No enforcement defined + Unmapped
+        let custom_empty = policy_editor_state(false, loaded, 0, 0, 0);
+        assert_eq!(custom_empty.enforcement, "No enforcement defined");
+        assert_eq!(custom_empty.compliance, "Unmapped");
+        assert!(!custom_empty.mapped_not_enforced);
+
+        // custom + rules == 0 + mappings > 0 => Mapped but no enforcement
+        let custom_mapped = policy_editor_state(false, loaded, 2, 0, 0);
+        assert_eq!(custom_mapped.enforcement, "No enforcement defined");
+        assert_eq!(custom_mapped.compliance, "Mapped");
+        assert!(custom_mapped.mapped_not_enforced);
+
+        // imported + rules == 0 + mappings == 0 => needs refinement + Unmapped
+        let imported_empty = policy_editor_state(true, loaded, 0, 0, 0);
+        assert_eq!(imported_empty.enforcement, "Enforcement needs refinement");
+        assert_eq!(imported_empty.compliance, "Unmapped");
+        assert!(!imported_empty.mapped_not_enforced);
+
+        // imported + rules == 0 + mappings > 0 => needs refinement + warning
+        let imported_mapped = policy_editor_state(true, loaded, 4, 0, 1);
+        assert_eq!(imported_mapped.enforcement, "Enforcement needs refinement");
+        assert_eq!(imported_mapped.compliance, "Mapped");
+        assert!(imported_mapped.mapped_not_enforced);
+        assert_eq!(imported_mapped.evidence, "Evidence collected");
+    }
+
+    #[test]
+    fn mapping_load_failure_is_never_reported_as_unmapped() {
+        let loading = policy_editor_state(false, MappingLoadState::Loading, 0, 1, 0);
+        assert_eq!(loading.compliance, "Compliance mappings loading");
+        assert!(!loading.mapped_not_enforced);
+
+        let failed = policy_editor_state(true, MappingLoadState::Failed, 0, 0, 0);
+        assert_eq!(failed.compliance, "Compliance mappings unavailable");
+        assert!(
+            !failed.mapped_not_enforced,
+            "an unknown mapping set must not raise the mapped-not-enforced warning"
+        );
+    }
+
+    #[test]
+    fn only_manual_mappings_are_editable() {
+        assert!(mapping_row_is_editable(true, "manual"));
+        for provenance in ["imported", "inherited", "inferred", "suggested", "other"] {
+            assert!(
+                !mapping_row_is_editable(true, provenance),
+                "{provenance} mappings are authoritative and must stay read-only"
+            );
+        }
+        assert!(
+            !mapping_row_is_editable(false, "manual"),
+            "an immutable version cannot expose mapping mutations"
+        );
+    }
+
+    #[test]
+    fn mapping_provenance_labels_are_accurate() {
+        assert_eq!(mapping_provenance_label("manual"), "Manual mapping");
+        assert_eq!(
+            mapping_provenance_label("imported"),
+            "Imported from benchmark"
+        );
+        assert_eq!(
+            mapping_provenance_label("inherited"),
+            "Inherited from source version"
+        );
+        assert_eq!(mapping_provenance_label("inferred"), "Inferred at import");
+        assert_eq!(
+            mapping_provenance_label("suggested"),
+            "Suggested · not authoritative"
+        );
+        assert_eq!(mapping_provenance_label("novel"), "novel · read-only");
+    }
+
+    #[test]
+    fn category_change_preserves_every_rule_and_only_changes_guidance() {
+        // A deliberately mixed rule set: a rollout gate, a security assertion,
+        // and a package assertion.
+        let mut time_window = PolicyRule::new("time_window");
+        time_window.from = "22:00".to_string();
+        let mut custom = PolicyRule::new("custom_eval");
+        custom.expr = "config.networking.firewall.enable == true".to_string();
+        let mut packages = PolicyRule::new("packages_installed");
+        packages.packages = "auditd".to_string();
+        let rules = vec![time_window, custom, packages];
+        let before = rules.clone();
+
+        let kinds: Vec<String> = rules.iter().map(|rule| rule.kind.clone()).collect();
+
+        // Guidance changes with the category...
+        assert_ne!(
+            recommended_enforcement(PolicyCategory::Rollout),
+            recommended_enforcement(PolicyCategory::Security)
+        );
+        let rollout_off = off_category_rule_kinds(PolicyCategory::Rollout, &kinds);
+        let security_off = off_category_rule_kinds(PolicyCategory::Security, &kinds);
+        assert_ne!(rollout_off, security_off);
+        assert!(rollout_off.contains(&"custom_eval".to_string()));
+        assert!(security_off.contains(&"time_window".to_string()));
+
+        // ...while the rule data itself is untouched: count, order, kinds, values.
+        assert_eq!(rules, before);
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[0].kind, "time_window");
+        assert_eq!(rules[0].from, "22:00");
+        assert_eq!(rules[1].kind, "custom_eval");
+        assert_eq!(
+            rules[1].expr,
+            "config.networking.firewall.enable == true".to_string()
+        );
+        assert_eq!(rules[2].kind, "packages_installed");
+        assert_eq!(rules[2].packages, "auditd".to_string());
+
+        // Saving is only ever blocked by genuinely unpersistable rule kinds,
+        // never by a rule being off-category.
+        let representable = serde_json::json!({"mode": "all", "rules": []});
+        assert!(
+            save_blocker(
+                true,
+                PolicyFormat::Json,
+                "custom_check",
+                &representable,
+                &rules
+            )
+            .is_some_and(|blocker| blocker.contains("UI-only")),
+            "the only blocker here must be the UI-only time-window rule"
+        );
+
+        let on_category_only = vec![PolicyRule::new("custom_eval")];
+        for category in POLICY_CATEGORIES {
+            let _ = category;
+            assert!(
+                save_blocker(
+                    true,
+                    PolicyFormat::Json,
+                    "custom_check",
+                    &representable,
+                    &on_category_only
+                )
+                .is_none(),
+                "a persistable rule must save regardless of the selected category"
+            );
+        }
+    }
+
+    #[test]
+    fn new_policy_editor_does_not_seed_unsavable_rules() {
+        // A newly opened editor must be immediately persistable: no seeded
+        // UI-only rules that the user has to discover and delete first.
+        let seed: Vec<PolicyRule> = Vec::new();
+        assert!(
+            save_blocker(
+                false,
+                PolicyFormat::Json,
+                "custom_check",
+                &serde_json::Value::Null,
+                &seed
+            )
+            .is_none()
+        );
+        let (policy_type, config) =
+            build_persisted_payload(&seed).expect("an empty editor must be savable");
+        assert_eq!(policy_type, "custom_check");
+        assert_eq!(config, serde_json::json!({"mode": "all", "rules": []}));
     }
 
     #[test]
     fn empty_rules_are_a_persistable_no_enforcement_state() {
         let (policy_type, config) = build_persisted_payload(&[]).expect("empty rules save");
         assert_eq!(policy_type, "custom_check");
-        assert_eq!(config["rules"], serde_json::json!([]));
-        assert!(save_blocker(
-            false,
-            PolicyFormat::Json,
-            "custom_check",
-            &serde_json::Value::Null,
-            &[]
-        )
-        .is_none());
+        assert_eq!(
+            config,
+            serde_json::json!({"mode": "all", "rules": []}),
+            "only fields this editor can round-trip may be persisted"
+        );
+        assert!(
+            save_blocker(
+                false,
+                PolicyFormat::Json,
+                "custom_check",
+                &serde_json::Value::Null,
+                &[]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn saved_no_enforcement_policy_can_be_reopened_and_saved_again() {
+        // Regression: the previous payload carried `context`/`binding`, which
+        // this editor's own representability guard rejects, so a saved
+        // no-enforcement policy could never be saved again after reload.
+        let (policy_type, config) =
+            build_persisted_payload(&[]).expect("no-enforcement policy must serialize");
+
+        assert!(
+            custom_check_config_is_representable(&config),
+            "the editor must be able to represent the config it just wrote"
+        );
+
+        let reopened_rules = rules_from_policy(&policy_type, &config);
+        assert!(
+            reopened_rules.is_empty(),
+            "reopening a no-enforcement policy must show zero rules"
+        );
+
+        assert!(
+            save_blocker(
+                true,
+                PolicyFormat::Json,
+                &policy_type,
+                &config,
+                &reopened_rules
+            )
+            .is_none(),
+            "an unchanged no-enforcement policy must remain savable after reload"
+        );
+
+        assert_eq!(
+            build_persisted_payload(&reopened_rules).expect("re-serialize"),
+            (policy_type, config),
+            "round-tripping must be stable"
+        );
     }
 
     #[test]
@@ -2537,34 +3001,35 @@ mod tests {
 
     #[test]
     fn custom_frameworks_excludes_standard_and_empty_values() {
-         let policy = |framework: Option<&str>| PolicyDefinition {
-             id: Uuid::new_v4(),
-             lineage_id: Uuid::new_v4(),
-             version_id: None,
-             revision: None,
-             publication_state: None,
-             semantic_digest: None,
-             revisions: Vec::new(),
-             name: "test".to_string(),
-             description: String::new(),
-             format: PolicyFormat::Json,
-             body: "{}".to_string(),
-             policy_type: None,
-             updated_at: String::new(),
-             system_count: 0,
-             srg_ids: Vec::new(),
-             cci_ids: Vec::new(),
-             category: Some("security".to_string()),
-             framework: framework.map(str::to_string),
-             severity: None,
-             control_family: None,
-             cmmc_level: None,
-             cis_section: None,
-             rationale: None,
-             mapped_requirement_count: 0,
-             bundle_usage_count: 0,
-             evidence_specs: None,
-         };
+        let policy = |framework: Option<&str>| PolicyDefinition {
+            id: Uuid::new_v4(),
+            lineage_id: Uuid::new_v4(),
+            version_id: None,
+            revision: None,
+            publication_state: None,
+            semantic_digest: None,
+            revisions: Vec::new(),
+            name: "test".to_string(),
+            description: String::new(),
+            format: PolicyFormat::Json,
+            body: "{}".to_string(),
+            policy_type: None,
+            updated_at: String::new(),
+            system_count: 0,
+            srg_ids: Vec::new(),
+            cci_ids: Vec::new(),
+            category: Some("security".to_string()),
+            framework: framework.map(str::to_string),
+            severity: None,
+            control_family: None,
+            cmmc_level: None,
+            cis_section: None,
+            rationale: None,
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
+            evidence_specs: None,
+            provenance: Vec::new(),
+        };
 
         let frameworks = custom_frameworks(&[
             policy(Some("DISA STIG")),
@@ -2596,19 +3061,24 @@ mod tests {
 
         // Round-trip: EvidenceSpec -> PolicyEvidence -> EvidenceSpec
         let evidence = PolicyEvidence::from_evidence_spec(&original_spec);
-        assert_eq!(evidence.required_fields, required_fields, "from_evidence_spec should preserve required_fields");
+        assert_eq!(
+            evidence.required_fields, required_fields,
+            "from_evidence_spec should preserve required_fields"
+        );
 
         let round_tripped_spec = evidence.to_evidence_spec();
-        
+
         // Assert the required_fields map survived intact
         assert_eq!(
             round_tripped_spec.required_fields, original_spec.required_fields,
             "required_fields must be exactly equal after round-trip"
         );
-        
+
         // Assert the metadata is not empty (regression guard)
-        assert!(!round_tripped_spec.required_fields.is_empty(),
-            "required_fields must not be destroyed to empty HashMap");
+        assert!(
+            !round_tripped_spec.required_fields.is_empty(),
+            "required_fields must not be destroyed to empty HashMap"
+        );
     }
 
     #[test]

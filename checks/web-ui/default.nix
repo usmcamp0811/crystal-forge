@@ -424,6 +424,54 @@ in pkgs.testers.runNixOSTest {
       WHERE f.canonical_source_key = 'web-ui-mapping-roundtrip' AND r.canonical_requirement_key = 'MAP-2'
         AND v.canonical_release_key = 'web-ui-mapping-roundtrip-v1'
       ON CONFLICT (requirement_id, framework_version_id) DO NOTHING;
+
+      -- TASK-433 Phase 2: an imported policy with authoritative origin
+      -- provenance, written through the real schema (immutable source artifact,
+      -- source-object mapping, and an imported requirement mapping) so the
+      -- unified editor's read-only Provenance section and read-only mapping
+      -- behavior are exercised against persisted server state.
+      INSERT INTO compliance_source_artifacts
+          (content, filename, media_type, sha256, parser_version, detected_xccdf_version)
+      SELECT '<Benchmark id="web-ui-provenance"/>'::bytea,
+             'U_WEBUI_PROVENANCE_STIG.xml',
+             'application/xml',
+             encode(digest('<Benchmark id="web-ui-provenance"/>'::bytea, 'sha256'), 'hex'),
+             'xccdf-1.2',
+             '1.2'
+      WHERE NOT EXISTS (
+          SELECT 1 FROM compliance_source_artifacts
+           WHERE filename = 'U_WEBUI_PROVENANCE_STIG.xml'
+      );
+      INSERT INTO deployment_policies (name, policy_type, config, enabled)
+      SELECT 'Imported provenance control', 'custom_check', '{"mode":"all","rules":[]}'::jsonb, false
+      WHERE NOT EXISTS (
+          SELECT 1 FROM deployment_policies WHERE name = 'Imported provenance control'
+      );
+      UPDATE deployment_policy_versions v
+         SET source_artifact_id = a.id
+        FROM deployment_policies p, compliance_source_artifacts a
+       WHERE p.name = 'Imported provenance control'
+         AND v.id = p.current_draft_version_id
+         AND a.filename = 'U_WEBUI_PROVENANCE_STIG.xml'
+         AND v.source_artifact_id IS NULL;
+      INSERT INTO compliance_source_object_mappings
+          (source_artifact_id, object_kind, source_identity, policy_version_id, fidelity)
+      SELECT a.id, 'rule', 'SV-WEBUI-1_rule', p.current_draft_version_id, 'preserved_opaque'
+        FROM deployment_policies p, compliance_source_artifacts a
+       WHERE p.name = 'Imported provenance control'
+         AND a.filename = 'U_WEBUI_PROVENANCE_STIG.xml'
+      ON CONFLICT (source_artifact_id, object_kind, source_identity) DO NOTHING;
+      INSERT INTO policy_requirement_mappings
+          (policy_version_id, requirement_version_id, relationship, coverage,
+           rationale, provenance, source_artifact_id, trust_state)
+      SELECT p.current_draft_version_id, rv.id, 'implements', 'full',
+             'Recorded by the source benchmark import.', 'imported', a.id, 'trusted'
+        FROM deployment_policies p, compliance_source_artifacts a,
+             compliance_requirement_versions rv
+       WHERE p.name = 'Imported provenance control'
+         AND a.filename = 'U_WEBUI_PROVENANCE_STIG.xml'
+         AND rv.external_id = 'MAP-2'
+      ON CONFLICT (policy_version_id, requirement_version_id) DO NOTHING;
     """
     encoded_mapping_fixture_sql = base64.b64encode(
       mapping_fixture_sql.encode("utf-8")
