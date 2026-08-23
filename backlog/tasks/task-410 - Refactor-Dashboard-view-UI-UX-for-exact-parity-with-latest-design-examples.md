@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-agent
 created_date: '2026-05-31 15:14'
-updated_date: '2026-08-23 19:54'
+updated_date: '2026-08-23 19:59'
 labels:
   - ui
   - dashboard
@@ -112,4 +112,6 @@ This task is intentionally strict and objective. Parity decisions must defer to 
 LOCK: opencode-agent on reckless in /home/mcamp/code/crystal-forge/TASK-410-dashboard-parity
 
 Preflight: branch `TASK-410-dashboard-parity` at committed `dev` HEAD `24835e6c`; dedicated worktree verified clean. The `main` integration worktree is clean. Per user authorization, the three unrelated untracked files in the `dev` integration worktree are left untouched. Authoritative design source for this execution is the repository copy under `docs/design/CrystalForge`, per user direction. Intended scope is dashboard view/components/styles and authoritative web-ui assertions/screenshots only. Planned verification follows task AC: WASM cargo check and `checks.x86_64-linux.web-ui`, with targeted formatting/tests as applicable.
+
+Research completed against `docs/design/CrystalForge`. TASK-342.2 already matches the authoritative 3/2/1-column grid, base card styling, page heading, customization shell, and Fleet Health. Remaining source drift is substantial: the design defaults 15 widgets while current product defaults 8–10; Build Queue, CVE Summary, Flake Git Graph, Deployment Timeline, and spinner internals differ; mobile and deterministic loading→loaded evidence are missing. Exact source widgets Attestation Trust, Deploy Approvals, POA&M Summary/Watchlist, and exploited-CVE metrics lack existing frontend contracts/data. Adding fabricated data would violate prior no-mock behavior; adding backend contracts would conflict with this task's frontend scope/AC #8 unless separately tracked. The source dashboard has no page loading/error branch; only generic `Spinner.jsx` defines exact spinner geometry/accessibility. Awaiting user scope decision before recording the implementation plan or writing application code.
 <!-- SECTION:NOTES:END -->
