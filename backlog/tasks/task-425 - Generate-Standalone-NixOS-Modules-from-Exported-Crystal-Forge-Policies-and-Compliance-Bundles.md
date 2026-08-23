@@ -3,11 +3,11 @@ id: TASK-425
 title: >-
   Generate Standalone NixOS Modules from Exported Crystal Forge Policies and
   Compliance Bundles
-status: Review
+status: To Do
 assignee:
   - '@claude-opus-5'
 created_date: '2026-08-16 15:17'
-updated_date: '2026-08-17 03:59'
+updated_date: '2026-08-23 20:26'
 labels:
   - cli
   - nixos
@@ -330,6 +330,16 @@ New `checks/compliance-module` runs 22 pure-evaluation assertions. `checks/nixos
 
 **Flagged for the user:** the real `policies.json` export asserts `services.sshd.enable`, which is not a real NixOS option (`services.openssh.enable` is). Under the new architecture this now fails NixOS evaluation with a clear error rather than generating a module that silently does nothing.
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: OpenAI
+created: 2026-08-23 20:26
+---
+User authorized implementation of MR review fixes: default-apply module behavior, reject mutable policy/bundle publication states, add manifest generated_file, make output regeneration history-independent, namespace default baselines with immutable bundle/version identity, rebase on latest origin/dev, and add discriminating regressions plus required verification.
+---
+<!-- COMMENTS:END -->
 
 ## Final Summary
 
