@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-agent
 created_date: '2026-05-31 15:14'
-updated_date: '2026-08-23 19:59'
+updated_date: '2026-08-23 20:33'
 labels:
   - ui
   - dashboard
@@ -13,9 +13,12 @@ labels:
   - strict-parity
   - loading-state
 milestone: m-16
-dependencies: []
+dependencies:
+  - TASK-410.1
 references:
   - /home/mcamp/code/crystal-forge/CrystalForgelatest
+  - TASK-415
+  - TASK-433.8
 modified_files:
   - packages/web-ui/src/views/
   - packages/web-ui/src/components/
@@ -105,6 +108,35 @@ This task is intentionally strict and objective. Parity decisions must defer to 
 - [ ] #1 Attach dashboard loading-state and loaded-state screenshot evidence from web-ui checks to MR.
 - [ ] #2 Document any unavoidable visual deltas with rationale and explicit sign-off request (if exact parity cannot be achieved due to technical constraints).
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Approved execution breakdown
+
+User-approved boundaries:
+- TASK-410 owns shared dashboard/frontend parity, non-POA&M widgets, source-matched loading behavior, responsive behavior, and authoritative browser evidence.
+- TASK-410.1 owns the missing real-data dashboard aggregate APIs (build/eval/activity/graph/cache) required by AC #8; no fabricated values.
+- The active deployment-approvals/running-state-attestations task commonly referenced as TASK-415 exclusively owns Deploy Approvals and Attestation Trust server semantics and dashboard integration; TASK-410 will consume/validate the merged result rather than duplicate it. Its malformed backlog metadata prevents adding it as a formal dependency, so the boundary is recorded here and in References.
+- TASK-433.8 exclusively owns POA&M Summary and Watchlist. TASK-410 will not add POA&M registry IDs, DTOs, widgets, API calls, mocks, tests, or layout migration.
+- TASK-412 retains scanning/XCCDF/compliance/policy ownership; TASK-410 does not modify those surfaces.
+
+## Implementation sequence
+
+1. Replace the dashboard heartbeat-style spinner with the exact generic source spinner geometry, timing, accessibility semantics, and reduced-motion behavior. Gate initial dashboard rendering behind one primary page-loading state and preserve non-fabricated error behavior.
+2. Align registry/default ordering and widget metadata for non-POA&M widgets that have real data on current `dev`, preserving saved layouts via additive versioned migration without inserting duplicates. Do not add approval/attestation widgets until their owning task's interfaces merge.
+3. Implement current-API-backed widgets and pure adapters: CVE Summary from fleet stats (including exploited/fixable), Heartbeats from effective intervals, Top CVE-affected Systems with current authorization limits, Recent Commits from real timelines, Environments from real environment summaries, and Quick Actions. Keep data mapping outside presentational components.
+4. Align customization interactions with source behavior: drag-end cleanup, exact control titles/icons/action labels, add/remove/reset/persistence behavior, and mobile usability.
+5. Update authoritative web-ui coverage for deterministic source-matched loading, loading→loaded transition, populated desktop, responsive/mobile, customization interactions, error/no-fabricated-data, and every interaction changed in this phase. Update coverage metadata alongside step names.
+6. Run targeted formatting/tests, required WASM cargo check, and `nix build .#checks.x86_64-linux.web-ui`; record exact outcomes and screenshot paths.
+7. After TASK-410.1 and the approval/attestation owner merge, rebase and integrate/validate the remaining real-data widgets, then repeat full TASK-410 verification. POA&M remains excluded for TASK-433.8.
+
+## Checkpoints and risks
+
+- Current implementation can deliver steps 1–6 for current-API-backed widgets, but TASK-410 cannot satisfy complete authoritative widget content until TASK-410.1 and the approval/attestation work merge.
+- Role-scoped product authorization takes precedence over the role-agnostic mock design and will be asserted explicitly.
+- Source code (`DashboardView.jsx`, `data-dashboard.js`, `styles.css`, `Spinner.jsx`) is authoritative over stale checked-in screenshots.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
