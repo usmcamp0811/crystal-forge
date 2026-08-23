@@ -3,9 +3,11 @@ id: TASK-433.1
 title: >-
   TASK-433 Phase 0: Baseline design-diff inventory and phase plan for
   policy/POA&M work
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - claude-agent
 created_date: '2026-08-23 01:42'
+updated_date: '2026-08-23 01:44'
 labels:
   - design-parity
   - policy
@@ -63,3 +65,9 @@ Documentation/plan review only; no automated verification commands apply to this
 - [ ] #5 A detailed phase-by-phase implementation plan for TASK-433 Phases 1-8 (mapped to subtasks TASK-433.2 through TASK-433.9) is recorded in the parent TASK-433 task record and presented for review before any subtask begins implementation.
 - [ ] #6 No production/test files are modified by this subtask.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Confirmed c2f5db08 and ae20da816edb1cb14275db9cd646010e69d88cd8 are commits within this repo's own history (dev branch), not an external repo. `git diff --stat c2f5db08..ae20da81 -- docs/design/CrystalForge` gives the exact 21-file delta: .thumbnail, app.jsx, components/ComplianceView.jsx, components/DashboardView.jsx, components/PoamViews.jsx (new, 693 lines), components/PoliciesView.jsx (rewritten, 752 lines), components/PolicyEditor.jsx (new, 633 lines), components/SetupCoach.jsx, components/Shell.jsx, components/SystemDetail.jsx, crystal-forge.html, data-compliance.js, data-dashboard.js, data-enforcement.js (new, 115 lines), data-mappings.js, data-poam.js (new, 368 lines), data-policies.js, data.js, fixtures/*.js/.json, styles.css. Starting file-by-file review and current-implementation audit next.
+<!-- SECTION:NOTES:END -->
