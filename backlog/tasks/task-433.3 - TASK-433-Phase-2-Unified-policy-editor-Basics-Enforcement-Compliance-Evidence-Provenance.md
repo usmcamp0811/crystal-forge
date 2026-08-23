@@ -4,9 +4,10 @@ title: >-
   TASK-433 Phase 2: Unified policy editor
   (Basics/Enforcement/Compliance/Evidence/Provenance)
 status: In Progress
-assignee: []
+assignee:
+  - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-23 14:48'
+updated_date: '2026-08-23 16:20'
 labels:
   - design-parity
   - policy
@@ -58,6 +59,21 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 - [ ] #3 Zero mappings save as valid Unmapped; mapped/no-enforcement and No enforcement are distinct states.
 - [ ] #4 Manual mappings have permitted CRUD; imported mappings/provenance remain read-only and survive reload.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Phase 2 remediation plan
+
+1. Add authoritative policy-origin provenance to deployment-policy version summaries using one batched recursive query over all hydrated version IDs. Resolve direct source artifacts/source-object mappings and same-lineage `derived_from_version_id` ancestry without loading artifact bytes. Add additive server/web DTOs and exact-version frontend projection.
+2. Preserve imported provenance into derived drafts through ancestry resolution, not copied mutable metadata. Add DB-backed query tests for custom/no provenance, imported provenance, derived-draft reload, and unchanged immutable source/artifact.
+3. Restore honest no-enforcement semantics: use the existing minimal `custom_check { mode: all, rules: [] }` sentinel for custom no-enforcement, keep imported unbound/not-applicable semantics, remove extra fields the editor cannot round-trip, and add validator/evaluator/persistence regressions proving runtime skips rather than passes. Remove unsavable default UI-only rules.
+4. Refactor the common PolicyEditorModal semantics only: semantic order Basics, Enforcement, Compliance, Evidence, Provenance; single four-value PolicyCategory; category-specific recommendations/off-category notices without rule mutation; independent origin/enforcement/mapping states; visible loading/error/empty states; exact policy version initialization.
+5. Align mapping editability with the server whitelist (`provenance == manual`), render actual provenance labels, keep all non-manual rows read-only, and add DB mutation regressions for manual update/delete plus non-manual rejection/unchanged row/digest.
+6. Preserve existing safe serializer blockers and Evidence persistence/validation/required_fields behavior; do not add Phase 3 rule kinds or execution.
+7. Extend repository-backed browser workflows for custom Unmapped reload, category preservation, manual mapping CRUD reload, imported provenance/draft lineage, non-manual read-only mappings, imported needs-refinement, and mapped-without-enforcement.
+8. Run required formatting, web/server/unit/DB/evaluator/browser/Nix checks. Perform independent requirements/backend/performance/UI/error-state/E2E review, update MR metadata and task evidence, then move TASK-433.3 to Review only if every AC and required check is proven.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
