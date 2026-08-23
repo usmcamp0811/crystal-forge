@@ -4,6 +4,7 @@ title: Implement ae20da81 policy enforcement and POA&M workflows
 status: To Do
 assignee: []
 created_date: '2026-08-23 01:35'
+updated_date: '2026-08-23 01:50'
 labels:
   - design-parity
   - policy
@@ -171,3 +172,48 @@ All criteria checked with exact SHA; only intended production/test files changed
 - [ ] #39 POAM server tests cover real finding creation, multi-finding links, invalid links, active invariant, milestones, activity, transitions, overdue, closure rejection/acceptance, verification storage, reopen, filters, auth and concurrency.
 - [ ] #40 Visual review records differences and artifacts for every affected production surface and the changed-design-file omission classification.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Breakdown (agreed with user 2026-08-22)
+
+TASK-433 is an umbrella. Real implementation happens in 9 subtasks, dot-suffixed, one dedicated worktree/branch each (per repo convention: parent stays organizational, only leaf subtasks get worktrees):
+
+- TASK-433.1 Phase 0: baseline inventory (this plan) — spike, no code, done in dev worktree directly (backlog-only writes).
+- TASK-433.2 Phase 1: policy catalog scaling (collapse/chunk/select/bulk-delete) — depends on .1
+- TASK-433.3 Phase 2: unified policy editor (Basics/Enforcement/Compliance/Evidence/Provenance) — depends on .2
+- TASK-433.4 Phase 3: NixOS option metadata + composite policy serializer — depends on .3
+- TASK-433.5 Phase 4: composite heterogeneous enforcement execution — depends on .4
+- TASK-433.6 Phase 5: POA&M DB schema/API/auth/audit/server tests — depends on .5
+- TASK-433.7 Phase 6: POA&M integration in evidence/finding/system/bundle/assignment UI — depends on .6
+- TASK-433.8 Phase 7: dashboard/notifications/setup-coach POA&M integration — depends on .7
+- TASK-433.9 Phase 8: regression/browser E2E/visual parity/final verification — depends on .8
+
+Dependency chain is strict (0->1->2->...->8) per TASK-433's own "Implementation phases in dependency order" section. AC #1-40 are distributed across subtasks with zero overlap (recorded on each subtask). Non-code discoveries or scope questions go back to this parent plan before a subtask proceeds.
+
+## Baseline confirmed (TASK-433.1 findings, full detail on that subtask)
+
+- `c2f5db08` and `ae20da816edb1cb14275db9cd646010e69d88cd8` are commits in THIS repo's own `dev` history (not an external repo). Exact diff: `git diff c2f5db08..ae20da81 -- docs/design/CrystalForge`. 21 files changed, +2582/-534.
+- **Zero POA&M code exists anywhere** in cf-server or web-ui (only 4 hits, all doc-comments/a test in `api/models.rs` explicitly deferring `assignment_poam` serialization "until a real backing domain model exists" — POA&M was deliberately deferred once already).
+- Current `DeploymentPolicy` enum (models/deployment_policies.rs) has 8 flat kind variants, evaluated independently per `AssignedPolicy`; no cross-kind composite aggregation unit exists today (only same-kind `PolicyRule`+`RuleMode` inside `CustomCheck`).
+- Evidence is 100% computed-on-read (`resolve_control_evidence_with_context`, compliance.rs ~L3957); no findings/evidence persistence table exists.
+- Next migration number: **0233**. Audit pattern: raw `INSERT INTO admin_audit_events (actor_user_id, action, target, metadata)` inside the owning transaction (see handlers/api/compliance.rs ~L3080). Notification pattern: extend `user_notifications`/`user_notification_preferences` CHECK-constrained category columns (0226/0227). Coach: `web-ui/src/components/onboarding/coach_panel.rs`, driven by `fetch_setup_wizard_progress()` deriving from entity counts (exact server-side source not yet traced — Phase 7 to confirm before adding steps).
+
+## File classification (design delta, contributes to parent AC #30 — finalized in TASK-433.9)
+
+Product behavior (covered by an AC, phase noted): app.jsx (finding cross-nav state, Phase 6) · ComplianceView.jsx (POAM filters/column/view-mode/FindingPoamBar, Phase 6) · DashboardView.jsx (poamSummary/poamWatchlist, Phase 7) · PoamViews.jsx (entire POA&M UI surface, Phase 6+7) · PoliciesView.jsx (catalog scaling Phase 1; editor invocation Phase 2) · PolicyEditor.jsx (editor shell Phase 2; NixOS typing Phase 3; enforcement kinds Phase 4) · SetupCoach.jsx (3 new steps, Phase 7) · Shell.jsx (POAM notifications, Phase 7) · SystemDetail.jsx (SystemPoamSection, Phase 6) · data-dashboard.js (widget registry, Phase 7) · data-enforcement.js (rule vocabulary Phase 4; NixOS option metadata Phase 3) · data-poam.js (POA&M domain model/lifecycle semantics — real impl in Phase 5) · data-policies.js CONTROL_FAMILIES expansion (Phase 1) · styles.css (new class categories, implemented per-phase, not ported verbatim).
+
+Demo-only, NOT ported (mechanism, not behavior — real equivalents built per-phase): `.thumbnail` (binary preview) · `crystal-forge.html` (cache-busting/script loader) · `fixtures/crystal-forge.fixtures.{js,json}` · `data.js` fixture ID edit · `data-compliance.js` `POAM_FINDING_STATUS_OVERRIDE` fixture hack · `data-policies.js` `POLICY_STIG_BULK` (715-entry synthetic stress dataset — Phase 1/8 build our own real test data instead) and `POLICY_EDITOR_DEMO` (4 showcase policies — Phase 8 browser workflows construct equivalent real scenarios, not copy fixture data) · `CustomEvent("cf-poam-open"/"cf-poam-change")` pub/sub bus (real state via Dioxus signals + server refetch) · `window.__cfCoach` global escape hatch (real coach completion via proper state channel, Phase 7) · in-memory mutable arrays as "database" (real persistence, Phase 5) · `setTimeout(...,60)` sequencing hacks (Dioxus routing handles this natively) · `localStorage` POA&M/dashboard state.
+
+## Open architecture decisions flagged for the owning phase (raise for review before implementing)
+
+1. **Phase 3/4 — composite rule-set structure.** Design's PolicyEditor lets ONE policy hold multiple heterogeneous enforcement rules (e.g. a Nix option rule + a CVE-block rule together) aggregated with `all` semantics and per-rule outcomes. Today, one DB policy row = exactly one `DeploymentPolicy` kind; heterogeneous composition today only happens across separate `AssignedPolicy` rows evaluated independently. TASK-433's own architecture section calls for "the smallest repository-consistent versioned composite rule-set" — this is the single largest structural decision in the task and must be scoped/reviewed before Phase 3 implementation starts, not assumed.
+2. **Phase 4 — CVE kind mapping.** Design has one `cve_block {severity, maxAllowed}` kind; server has two existing kinds (`RequireCveCheck`, `CveThreshold`). Recommend reusing `CveThreshold` (closest superset) rather than adding a third CVE variant, but confirm before implementing.
+3. **Phase 4 — new kinds needed.** `nixos_option` (typed option assertion, distinct from `CustomCheck`'s raw expression), `packages_absent` (new or `RequirePackages` + prohibited flag), `eval_passed`, `pin_required` do not exist as enum variants today and need additions to `DeploymentPolicy` plus `is_nix_evaluated()` phase wiring.
+4. **Phase 7 — coach backing.** Confirm exact server source behind `fetch_setup_wizard_progress()` before adding policy/bundle/poam steps, since no dedicated coach-state table was found in this audit.
+
+## Review checkpoint
+
+Per user instruction, this plan is presented for review after Phase 0 before any Phase 1 code is written. Awaiting go-ahead to open the TASK-433.2 worktree/branch and begin Phase 1 implementation.
+<!-- SECTION:PLAN:END -->
