@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-23 14:19'
+updated_date: '2026-08-23 14:24'
 labels:
   - design-parity
   - policy
@@ -58,6 +58,12 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 - [ ] #3 Zero mappings save as valid Unmapped; mapped/no-enforcement and No enforcement are distinct states.
 - [ ] #4 Manual mappings have permitted CRUD; imported mappings/provenance remain read-only and survive reload.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Phase 2 implementation started. Added server-side enforcement that policy requirement mapping update/delete operations only affect provenance=manual mappings; imported mappings now return HTTP 409 Conflict with a read-only error. Verified with `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all -- --check` and `nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-server`. Phase 1 GitLab CI remains pending/unverified per user authorization.
+<!-- SECTION:NOTES:END -->
 
 ## Comments
 
