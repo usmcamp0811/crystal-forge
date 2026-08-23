@@ -3,11 +3,11 @@ id: TASK-425
 title: >-
   Generate Standalone NixOS Modules from Exported Crystal Forge Policies and
   Compliance Bundles
-status: To Do
+status: In Progress
 assignee:
   - '@claude-opus-5'
 created_date: '2026-08-16 15:17'
-updated_date: '2026-08-23 20:26'
+updated_date: '2026-08-23 20:27'
 labels:
   - cli
   - nixos
@@ -338,6 +338,12 @@ author: OpenAI
 created: 2026-08-23 20:26
 ---
 User authorized implementation of MR review fixes: default-apply module behavior, reject mutable policy/bundle publication states, add manifest generated_file, make output regeneration history-independent, namespace default baselines with immutable bundle/version identity, rebase on latest origin/dev, and add discriminating regressions plus required verification.
+---
+
+author: OpenAI
+created: 2026-08-23 20:27
+---
+Implementation preflight authorized: dedicated worktree TASK-425-cf-nixos-module, branch TASK-425-cf-nixos-module; scope is the five MR review findings and required regressions/verification. Rebase onto latest origin/dev before code changes.
 ---
 <!-- COMMENTS:END -->
 
