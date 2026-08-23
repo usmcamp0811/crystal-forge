@@ -3,9 +3,11 @@ id: TASK-433.2
 title: >-
   TASK-433 Phase 1: Policy catalog scaling (chunking, collapse, selection, bulk
   delete)
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - claude-agent
 created_date: '2026-08-23 01:42'
+updated_date: '2026-08-23 02:07'
 labels:
   - design-parity
   - policy
@@ -68,3 +70,9 @@ Add/extend a browser workflow proving deep search, collapse/expand, cards/table,
 - [ ] #6 Bulk delete uses server eligibility, reports deleted/skipped/reasons, handles partial/all-blocked/failure, and preserves immutable blockers.
 - [ ] #7 Existing catalog API pagination is preserved; chunking remains client rendering only.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implementing in shared worktree /home/mcamp/code/crystal-forge/TASK-433-policy-poam-workflows on branch TASK-433-policy-poam-workflows (based on dev @ c60b5799), per user decision to use one worktree/branch/MR for all TASK-433 phase subtasks rather than per-subtask worktrees.
+<!-- SECTION:NOTES:END -->
