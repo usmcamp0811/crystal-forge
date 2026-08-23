@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude-opus-5'
 created_date: '2026-08-16 15:17'
-updated_date: '2026-08-23 20:27'
+updated_date: '2026-08-23 21:29'
 labels:
   - cli
   - nixos
@@ -329,6 +329,8 @@ New `checks/compliance-module` runs 22 pure-evaluation assertions. `checks/nixos
 **Known local issue:** `nix flake check --no-build` fails evaluating the `runNixOSTest` checks with `error: path '...' is not valid`. This reproduces identically on base `dev`, so it is a pre-existing local store/GC problem, not a regression. Individual non-VM checks were built directly instead.
 
 **Flagged for the user:** the real `policies.json` export asserts `services.sshd.enable`, which is not a real NixOS option (`services.openssh.enable` is). Under the new architecture this now fails NixOS evaluation with a clear error rather than generating a module that silently does nothing.
+
+Post-push status (commit 696707c8): MR !317 pipeline is running. Current jobs include running integration and oidc-auth, with web-ui, server-regressions, state-machine, cve-processing, coverage, screenshots, and complexity jobs pending/created. Local targeted checks remain green: fmt, SQLX offline cargo check, cf-compliance/cf-nixos-module tests, compliance-module and nixos-module-generation checks, and cf-nixos-module build. Full cf-server --lib completed with 886 passes and 3 PoolTimedOut DB-dependent failures because the test database was unavailable. web-ui and nix flake check --keep-going exceeded the local timeout during VM checks. Keep TASK-425 In Progress until the pipeline and required verification are green.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
