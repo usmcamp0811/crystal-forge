@@ -115,6 +115,9 @@ Implementing in shared worktree /home/mcamp/code/crystal-forge/TASK-433-policy-p
 **Not yet run (deferred — time-boxed this session):** `nix build .#checks.x86_64-linux.integration`, `.#checks.x86_64-linux.server-regressions`, `.#checks.x86_64-linux.web-ui`, `.#checks.x86_64-linux.ui-screenshots`, `.#checks.x86_64-linux.web-ui-reconciliation`, `nix flake check --keep-going`. No MR opened yet. Per the recorded TASK-433 plan, the full >60-policy browser workflow proof (parent AC #32) is explicitly finalized in TASK-433.9 (Phase 8), not this subtask, but the heavier nix checks above should still be run before this subtask is considered Review-ready.
 
 Working tree: shared worktree /home/mcamp/code/crystal-forge/TASK-433-policy-poam-workflows, branch TASK-433-policy-poam-workflows. Nothing committed yet.
+
+## Review state correction
+The deferred-check note above is superseded. After the commit, all deferred checks were run successfully: `nix build .#checks.x86_64-linux.integration --no-link`, `nix build .#checks.x86_64-linux.server-regressions --no-link`, `nix build .#checks.x86_64-linux.web-ui --no-link`, `nix build .#checks.x86_64-linux.ui-screenshots --no-link`, `nix build .#checks.x86_64-linux.web-ui-reconciliation --no-link`, and `nix flake check --keep-going`. Commit `e80ebc56` is pushed and MR !318 is open.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
