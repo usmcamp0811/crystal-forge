@@ -25,6 +25,18 @@ const COACH_STEPS = [
     short:"Connect the host",
     blurb:"Install the Crystal Forge agent on the host. It reports in over a signed heartbeat — this step completes on its own once the agent checks in.",
     action:null },
+  { key:"policy", n:7, title:"Create policy", view:"policies", icon:"file", target:"policy",
+    short:"Define a compliance rule",
+    blurb:"Write a policy — a NixOS option value or enforcement rule Crystal Forge checks systems against. Import STIG controls or write your own.",
+    action:"New custom policy" },
+  { key:"compliance", n:8, title:"Build compliance bundle", view:"compliance", icon:"shield", target:"bundle",
+    short:"Group policies into an audit bundle",
+    blurb:"Bundle policies into a compliance framework like a STIG or NIST baseline, then see pass/fail evidence per system.",
+    action:"New bundle" },
+  { key:"poam", n:9, title:"Track a POA&M", view:"compliance", icon:"activity", target:null,
+    short:"Plan remediation for a failing finding",
+    blurb:"When a control fails, open its evidence and create a POA&M — a remediation plan with an owner, target date, and milestones. This step completes on its own once one exists.",
+    action:null },
 ];
 window.COACH_STEPS = COACH_STEPS;
 

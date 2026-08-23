@@ -248,7 +248,10 @@ function evidenceForControl(bundle, policyId, sys) {
   const seed = (sys.id + policyId).split("").reduce((a,c) => a + c.charCodeAt(0), 0);
   const rand = (k) => ((seed * (k+1) * 9301) % 233280) / 233280;
   const r = rand(0);
-  const status = r < 0.72 ? "pass" : r < 0.84 ? "warn" : r < 0.93 ? "fail" : "waiver";
+  let status = r < 0.72 ? "pass" : r < 0.84 ? "warn" : r < 0.93 ? "fail" : "waiver";
+  // Demo fixture: the seeded POA&M walkthrough pins the status of the findings it references.
+  const _pinned = (typeof POAM_FINDING_STATUS_OVERRIDE !== "undefined") && POAM_FINDING_STATUS_OVERRIDE[sys.id + "::" + policyId];
+  if (_pinned) status = _pinned;
 
   // Curated evidence list per control
   const items = [];

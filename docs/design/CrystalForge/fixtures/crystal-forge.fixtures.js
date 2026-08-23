@@ -1816,7 +1816,7 @@ window.__CF_FIXTURES = {
             "reason": "Legacy Oracle-compatible kernel module is incompatible with the v1r2 FIPS crypto requirement.",
             "approvedBy": "AO — J. Alvarez",
             "deadline": "2026-10-01",
-            "poam": "POAM-2026-014"
+            "poam": "POAM-0123"
           }
         ]
       }

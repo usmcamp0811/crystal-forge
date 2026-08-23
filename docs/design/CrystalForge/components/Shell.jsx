@@ -551,6 +551,19 @@ function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult })
           at: timeAgoShort(r.lastObserved), route:"systems", unread:true });
       });
     }
+    if (typeof POAMS !== "undefined") {
+      POAMS.forEach(p => {
+        if (typeof poamIsOverdue === "function" && poamIsOverdue(p)) {
+          items.push({ id:`poam-overdue-${p.id}`, icon:"activity", color:"#f87171",
+            title:`${p.id} overdue: ${p.title}`, sub:`${p.owner} · was due ${p.due}`,
+            at:"—", route:"compliance", poamId:p.id, unread:true });
+        } else if (p.status === "awaiting_verification") {
+          items.push({ id:`poam-verify-${p.id}`, icon:"activity", color:"#a78bfa",
+            title:`${p.id} awaiting verification: ${p.title}`, sub:`${p.owner} · re-evaluate to confirm the fix`,
+            at:"—", route:"compliance", poamId:p.id, unread:true });
+        }
+      });
+    }
     items.push(
       { id:"b1", icon:"build",  color:"#f87171", title:"Build failed: openssl-3.3.2", sub:"hydra-02 · attempt 3", at:"12m ago", route:"builds", unread:true },
       { id:"c1", icon:"shield", color:"#f87171", title:"New critical CVE: CVE-2026-31822", sub:"affects 6 systems · openssl", at:"38m ago", route:"cves", unread:true },
@@ -559,7 +572,9 @@ function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult })
     );
     return items;
   }, []);
-  const unread = NOTIFS.filter(n => n.unread).length;
+  const [dismissedIds, setDismissedIds] = React.useState(() => new Set());
+  const visibleNotifs = NOTIFS.filter(n => !dismissedIds.has(n.id));
+  const unread = visibleNotifs.filter(n => n.unread).length;
 
   return (
     <div className="topbar">
@@ -588,9 +603,12 @@ function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult })
               <button className="btn-icon focus-ring" title="Mark all read" style={{ padding:4 }}><Icon name="check" size={13}/></button>
             </div>
             <div className="notif-list">
-              {NOTIFS.map(n => (
+              {visibleNotifs.length === 0 && (
+                <div style={{ padding:"24px 14px", textAlign:"center", fontSize:12, color:"var(--cf-text-muted)" }}>You're all caught up</div>
+              )}
+              {visibleNotifs.map(n => (
                 <button key={n.id} className={`notif-item focus-ring${n.unread ? " unread" : ""}`}
-                  onClick={() => { setNotifOpen(false); onNavigate?.(n.route); }}>
+                  onClick={() => { setNotifOpen(false); onNavigate?.(n.route); if (n.poamId && typeof openPoamDetail === "function") setTimeout(() => openPoamDetail(n.poamId), 60); }}>
                   <span className="notif-icon" style={{ color:n.color, background:`color-mix(in oklab, ${n.color} 16%, transparent)` }}>
                     <Icon name={n.icon} size={13}/>
                   </span>
@@ -602,7 +620,9 @@ function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult })
                 </button>
               ))}
             </div>
-            <div className="notif-foot">
+            <div className="notif-foot" style={{ justifyContent:"space-between" }}>
+              <button className="btn btn-ghost focus-ring xs" disabled={visibleNotifs.length===0}
+                onClick={() => setDismissedIds(new Set(NOTIFS.map(n => n.id)))}>Dismiss all</button>
               <button className="btn btn-ghost focus-ring xs" onClick={() => { setNotifOpen(false); onNavigate?.("profile"); }}>Notification settings</button>
             </div>
           </div>

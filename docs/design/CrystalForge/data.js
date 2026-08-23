@@ -89,7 +89,7 @@ const COMPLIANCE_ASSIGNMENT_OVERRIDES = {
   "orion-db-02": [{
     lineageId: "disa-nixos-stig", bundleId: "disa-rhel9-stig-r1", targetBundleId: "disa-rhel9-stig",
     status: "exception", reason: "Legacy Oracle-compatible kernel module is incompatible with the v1r2 FIPS crypto requirement.",
-    approvedBy: "AO — J. Alvarez", deadline: "2026-10-01", poam: "POAM-2026-014",
+    approvedBy: "AO — J. Alvarez", deadline: "2026-10-01", poam: "POAM-0123",
   }],
   "hydra-03": [{
     lineageId: "disa-nixos-stig", bundleId: "disa-rhel9-stig-r4", targetBundleId: "disa-rhel9-stig",

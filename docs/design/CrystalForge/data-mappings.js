@@ -207,6 +207,14 @@ function mapId() { return `map-${_mapSeq++}`; }
 
 // Policy <-> Requirement mappings. provenance: "manual" | "imported" | "suggested".
 const POLICY_REQUIREMENT_MAPPINGS = [
+  // Editor demo: imported controls arrive with their compliance mappings already populated —
+  // stig-fips-mode-unimplemented is mapped but has no enforcement yet (mapped ≠ enforced).
+  { id:mapId(), policyId:"stig-consent-banner-exact", requirementId:"stig-V-268082", relationship:"implements", coverage:"full", provenance:"imported", importedFrom:"DISA XCCDF" },
+  { id:mapId(), policyId:"stig-consent-banner-exact", requirementId:"nist-AC-8", relationship:"implements", coverage:"full", provenance:"imported", importedFrom:"DISA XCCDF" },
+  { id:mapId(), policyId:"stig-fips-mode-unimplemented", requirementId:"stig-V-268168", relationship:"implements", coverage:"full", provenance:"imported", importedFrom:"DISA XCCDF" },
+  { id:mapId(), policyId:"stig-fips-mode-unimplemented", requirementId:"nist-SC-13", relationship:"implements", coverage:"partial", provenance:"imported", importedFrom:"DISA XCCDF" },
+  { id:mapId(), policyId:"critical-vuln-protection", requirementId:"nist-SC-7", relationship:"supports", coverage:"partial", provenance:"manual",
+    rationale:"Blocking critical CVEs at the gate reduces exposure at the boundary, but is not the whole control." },
   // stig-ssh-hardening
   { id:mapId(), policyId:"stig-sshd", requirementId:"stig-V-268137", relationship:"implements", coverage:"full", provenance:"imported", importedFrom:"DISA XCCDF" },
   { id:mapId(), policyId:"stig-sshd", requirementId:"stig-V-268142", relationship:"implements", coverage:"full", provenance:"imported", importedFrom:"DISA XCCDF" },

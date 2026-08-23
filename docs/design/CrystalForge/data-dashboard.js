@@ -115,6 +115,22 @@ const DASHBOARD_WIDGETS = {
     defaultCols: 1,
     minCols: 1,
   },
+  poamSummary: {
+    id: "poamSummary",
+    title: "POA&M Summary",
+    description: "Open remediation plans, overdue and awaiting verification",
+    icon: "activity",
+    defaultCols: 1,
+    minCols: 1,
+  },
+  poamWatchlist: {
+    id: "poamWatchlist",
+    title: "POA&M Watchlist",
+    description: "Overdue and awaiting-verification remediation plans needing attention",
+    icon: "activity",
+    defaultCols: 2,
+    minCols: 1,
+  },
 };
 
 const DEFAULT_DASHBOARD_LAYOUT = [
@@ -126,6 +142,7 @@ const DEFAULT_DASHBOARD_LAYOUT = [
   { id: "evalQueue",       cols: 1 },
   { id: "heartbeatStatus", cols: 1 },
   { id: "topAffected",     cols: 2 },
+  { id: "poamWatchlist",   cols: 2 },
   { id: "deploymentTimeline", cols: 2, rows: 2 },
   { id: "gitGraph",        cols: 3, rows: 3 },
   { id: "recentCommits",   cols: 2 },

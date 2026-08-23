@@ -1,7 +1,9 @@
 // Compliance view — bundle catalog + per-system control evidence + export
 
-function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selectedBundleView, onClearBundle, onClearBundleView }) {
+function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selectedBundleView, onClearBundle, onClearBundleView, selectedFinding, onClearFinding }) {
+  usePoamStore();
   const [bundleId, setBundleId] = React.useState(null);
+  const [focusPolicy, setFocusPolicy] = React.useState(null);
   const [drawerOpen, setDrawerOpen] = React.useState(false);
   const [drawerView, setDrawerView] = React.useState("overview");
   const [policyDrawerId, setPolicyDrawerId] = React.useState(null);
@@ -11,6 +13,14 @@ function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selected
   }, [selectedBundleId]);
   const [selectedSysId, setSelectedSysId] = React.useState(null);
   const [query, setQuery] = React.useState("");
+  // Arriving from a POA&M: open the bundle, the host's evidence drawer, and that control.
+  React.useEffect(() => {
+    if (!selectedFinding) return;
+    const b = COMPLIANCE_BUNDLES.find(x => x.id === selectedFinding.bundleId)
+      || COMPLIANCE_BUNDLES.find(x => (x.policyIds || []).includes(selectedFinding.policyId));
+    if (b) { setBundleId(b.id); setDrawerOpen(true); setDrawerView("overview"); setSelectedSysId(selectedFinding.sysId); setFocusPolicy(selectedFinding.policyId); }
+    onClearFinding?.();
+  }, [selectedFinding]);
   const [activeFw, setActiveFw] = React.useState("all");
   const [exportOpen, setExportOpen] = React.useState(false);
   const [newBundleOpen, setNewBundleOpen] = React.useState(false);
@@ -47,11 +57,15 @@ function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selected
     };
   }, [bundle, applicableSystems]);
 
-  const filteredSystems = applicableSystems.filter(({ rollup }) => {
+  const filteredSystems = applicableSystems.filter(({ sys, rollup }) => {
     if (filter === "all") return true;
     if (filter === "fail") return rollup.fail > 0;
     if (filter === "warn") return rollup.warn > 0 && rollup.fail === 0;
     if (filter === "clean") return rollup.fail === 0 && rollup.warn === 0;
+    const ps = bundle ? systemBundlePoams(bundle, sys.id).filter(p => p.status !== "completed") : [];
+    if (filter === "poam") return ps.length > 0;
+    if (filter === "nopoam") return rollup.fail > 0 && ps.length === 0;
+    if (filter === "overdue") return ps.some(poamIsOverdue);
     return true;
   });
 
@@ -75,7 +89,7 @@ function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selected
             { label:"Export this bundle (XCCDF .xml)", icon:"download", onClick:() => bundle && exportBundle(bundle) },
             { label:"Export evidence report…", icon:"download", onClick:() => setExportOpen(true) },
           ]}/>
-          <button className="btn btn-primary focus-ring" onClick={() => setNewBundleOpen(true)}>
+          <button className="btn btn-primary focus-ring" data-coach-target="bundle" onClick={() => setNewBundleOpen(true)}>
             <Icon name="plus" size={14}/> New bundle
           </button>
         </div>
@@ -120,7 +134,8 @@ function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selected
         <ControlsEvidenceDrawer
           bundle={bundle}
           sys={drillSys}
-          onClose={() => setSelectedSysId(null)}
+          focusPolicyId={focusPolicy}
+          onClose={() => { setSelectedSysId(null); setFocusPolicy(null); }}
           onOpenSystem={onOpenSystem}
         />
       )}
@@ -300,6 +315,14 @@ function BundleDetailDrawer({ bundle, stats, filter, setFilter, applicableSystem
                 <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>{bundle.name}</div>
               </div>
             </div>
+          ) : view === "poam" ? (
+            <div style={{ display:"flex", alignItems:"center", gap:10, minWidth:0, flex:1 }}>
+              <button className="btn-icon focus-ring" onClick={()=>setView("overview")}><Icon name="arrow-left" size={16}/></button>
+              <div style={{ minWidth:0 }}>
+                <span style={{ fontWeight:700, fontSize:15 }}>POA&amp;M items</span>
+                <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>{bundle.name}</div>
+              </div>
+            </div>
           ) : (
             <div style={{ display:"flex", alignItems:"center", gap:12, minWidth:0, flex:1 }}>
               <Icon name="shield" size={18} style={{ color:"var(--cf-brand-purple)", flexShrink:0 }}/>
@@ -314,6 +337,8 @@ function BundleDetailDrawer({ bundle, stats, filter, setFilter, applicableSystem
 
         {view === "coverage" ? (
           <RequirementCoverageBody coverage={coverage} onOpenPolicy={onOpenPolicy}/>
+        ) : view === "poam" ? (
+          <BundlePoamBody bundle={bundle}/>
         ) : (
         <div style={{ overflow:"auto", flex:1 }}>
           <div style={{ padding:"14px 18px" }}>
@@ -375,6 +400,10 @@ function BundleDetailDrawer({ bundle, stats, filter, setFilter, applicableSystem
 
           <div style={{ borderTop:"1px solid var(--cf-divider)" }}>
             <RequirementCoverageCard coverage={coverage} onOpenCoverage={()=>setView("coverage")}/>
+          </div>
+
+          <div style={{ borderTop:"1px solid var(--cf-divider)" }}>
+            <BundlePoamRollup bundle={bundle} failCount={stats.fail} onOpenList={()=>setView("poam")}/>
           </div>
 
           <div style={{ borderTop:"1px solid var(--cf-divider)" }}>
@@ -532,6 +561,9 @@ function BundleHeader({ bundle, stats, onEdit }) {
 
 /* ── Controls list + systems matrix ── */
 function BundleDrilldown({ bundle, filter, setFilter, applicableSystems, onOpenSystem }) {
+  const [envFilter, setEnvFilter] = React.useState("all");
+  const envs = React.useMemo(() => [...new Set(applicableSystems.map(({ sys }) => sys.environment))].sort(), [applicableSystems]);
+  const envScoped = envFilter === "all" ? applicableSystems : applicableSystems.filter(({ sys }) => sys.environment === envFilter);
   return (
     <div>
       <div style={{ padding:"12px 16px", borderBottom:"1px solid var(--cf-divider)", display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
@@ -542,26 +574,35 @@ function BundleDrilldown({ bundle, filter, setFilter, applicableSystems, onOpenS
             { v:"clean", l:"Clean" },
             { v:"warn",  l:"Warning" },
             { v:"fail",  l:"Failing" },
+            { v:"poam",  l:"On POA&M" },
+            { v:"nopoam", l:"No POA&M" },
+            { v:"overdue", l:"Overdue" },
           ].map(o => (
             <button key={o.v} className={filter === o.v ? "active" : ""} onClick={() => setFilter(o.v)}>{o.l}</button>
           ))}
         </div>
-        <span className="filter-count">{applicableSystems.length} hosts</span>
+        <span className="filter-count">{envScoped.length} host{envScoped.length===1?"":"s"}</span>
+        {envs.length > 1 && (
+          <select className="input focus-ring" value={envFilter} onChange={e=>setEnvFilter(e.target.value)} style={{ marginLeft:"auto", width:"auto", fontSize:12, padding:"5px 8px" }}>
+            <option value="all">All environments</option>
+            {envs.map(e => <option key={e} value={e}>{e}</option>)}
+          </select>
+        )}
       </div>
       <div className="sd-callout sd-callout-info" style={{ margin:"12px 16px 0" }}>
         <Icon name="shield" size={13}/>
         <div style={{ fontSize:12 }}>Select a host to step through its <strong>per-control evidence</strong> — the proof Crystal Forge collected that each control is satisfied.</div>
       </div>
-      {bundle.publicationState !== "current" && applicableSystems.length > 0 && (
+      {bundle.publicationState !== "current" && envScoped.length > 0 && (
         <div className="sd-callout sd-callout-warn" style={{ margin:"10px 16px 0" }}>
           <Icon name="warn" size={13}/>
-          <div style={{ fontSize:12 }}>These {applicableSystems.length} host{applicableSystems.length===1?"":"s"} are explicitly pinned to this <strong>{bundle.publicationState}</strong> revision rather than tracking current — see each host's assignment reason below.</div>
+          <div style={{ fontSize:12 }}>These {envScoped.length} host{envScoped.length===1?"":"s"} are explicitly pinned to this <strong>{bundle.publicationState}</strong> revision rather than tracking current — see each host's assignment reason below.</div>
         </div>
       )}
       <table className="sys-table compact sys-table-dense">
         <colgroup>
-          <col style={{ width:"22%" }}/><col style={{ width:90 }}/><col style={{ width:120 }}/><col style={{ width:110 }}/>
-          <col style={{ width:60 }}/><col style={{ width:70 }}/><col style={{ width:60 }}/><col style={{ width:76 }}/><col style={{ width:52 }}/>
+          <col style={{ width:"20%" }}/><col style={{ width:82 }}/><col style={{ width:110 }}/><col style={{ width:104 }}/>
+          <col style={{ width:54 }}/><col style={{ width:58 }}/><col style={{ width:54 }}/><col style={{ width:64 }}/><col style={{ width:132 }}/><col style={{ width:44 }}/>
         </colgroup>
         <thead>
           <tr>
@@ -573,11 +614,12 @@ function BundleDrilldown({ bundle, filter, setFilter, applicableSystems, onOpenS
             <th style={{ textAlign:"right" }}>Warn</th>
             <th style={{ textAlign:"right" }}>Fail</th>
             <th style={{ textAlign:"right" }}>Waiver</th>
+            <th>POA&M</th>
             <th style={{ textAlign:"right" }}> </th>
           </tr>
         </thead>
         <tbody>
-          {applicableSystems.map(({ sys, rollup }) => (
+          {envScoped.map(({ sys, rollup }) => (
             <tr key={sys.id} style={{ cursor:"pointer" }} onClick={() => onOpenSystem(sys)}>
               <td>
                 <div style={{ display:"flex", alignItems:"center", gap:8 }}>
@@ -605,6 +647,25 @@ function BundleDrilldown({ bundle, filter, setFilter, applicableSystems, onOpenS
               <td className="mono" style={{ textAlign:"right", color: rollup.warn > 0 ? "#fbbf24" : "var(--cf-text-muted)", fontWeight: rollup.warn > 0 ? 600 : 400 }}>{rollup.warn}</td>
               <td className="mono" style={{ textAlign:"right", color: rollup.fail > 0 ? "#f87171" : "var(--cf-text-muted)", fontWeight: rollup.fail > 0 ? 700 : 400 }}>{rollup.fail}</td>
               <td className="mono" style={{ textAlign:"right", color: rollup.waiver > 0 ? "#a78bfa" : "var(--cf-text-muted)" }}>{rollup.waiver}</td>
+              <td onClick={e=>e.stopPropagation()}>
+                {(() => {
+                  const ps = systemBundlePoams(bundle, sys.id).filter(p => p.status !== "completed");
+                  if (ps.length === 0) {
+                    if (rollup.fail === 0) return <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>—</span>;
+                    return (
+                      <button className="poam-tag none focus-ring" style={{ cursor:"pointer" }} title="Open this host's evidence and create a POA&M from the failing control"
+                        onClick={() => onOpenSystem(sys)}>+ POA&M</button>
+                    );
+                  }
+                  const overdue = ps.some(poamIsOverdue);
+                  return (
+                    <button className={`poam-tag${overdue ? " overdue" : ""} focus-ring`} style={{ cursor:"pointer" }} onClick={() => openPoamDetail(ps[0].id)}
+                      title={ps.map(p => `${p.id} · ${POAM_STATUS[p.status].label}`).join("\n")}>
+                      {ps[0].id}{ps.length > 1 ? ` +${ps.length - 1}` : ""}{overdue ? " ⚠" : ""}
+                    </button>
+                  );
+                })()}
+              </td>
               <td onClick={e=>e.stopPropagation()} style={{ textAlign:"right" }}>
                 <button className="btn-icon focus-ring" title="View evidence" onClick={() => onOpenSystem(sys)}>
                   <Icon name="arrow-right" size={14}/>
@@ -619,7 +680,8 @@ function BundleDrilldown({ bundle, filter, setFilter, applicableSystems, onOpenS
 }
 
 /* ── Drawer: walk through controls for a host ── */
-function ControlsEvidenceDrawer({ bundle, sys, onClose, onOpenSystem, showSystemLink, onOpenBundle }) {
+function ControlsEvidenceDrawer({ bundle, sys, onClose, onOpenSystem, showSystemLink, onOpenBundle, focusPolicyId }) {
+  usePoamStore();
   const [activeIdx, setActiveIdx] = React.useState(0);
   const assignment = resolveComplianceAssignment(sys, bundle.lineageId || bundle.id);
   const evidenceList = bundle.policyIds.map(pid => evidenceForControl(bundle, pid, sys));
@@ -671,6 +733,12 @@ function ControlsEvidenceDrawer({ bundle, sys, onClose, onOpenSystem, showSystem
       return ev.policyName.toLowerCase().includes(navQ) || ev.status.toLowerCase().includes(navQ);
     }),
   })).filter(g => g.indices.length > 0) : navGroups;
+
+  React.useEffect(() => {
+    if (!focusPolicyId) return;
+    const i = bundle.policyIds.indexOf(focusPolicyId);
+    if (i >= 0) setActiveIdx(i);
+  }, [focusPolicyId, bundle.id]);
 
   React.useEffect(() => {
     const onKey = (e) => {
@@ -757,7 +825,10 @@ function ControlsEvidenceDrawer({ bundle, sys, onClose, onOpenSystem, showSystem
                       }}>
                       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:8 }}>
                         <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{String(n).padStart(2,"0")}</span>
-                        <span style={{ width:8, height:8, borderRadius:"50%", background:color }}/>
+                        <span style={{ display:"flex", alignItems:"center", gap:5 }}>
+                          {(() => { const p = poamForFinding(sys.id, ev.policyId); return p ? <span className={`poam-tag${poamIsOverdue(p) ? " overdue" : ""}`} style={{ fontSize:9 }}>POA&M</span> : null; })()}
+                          <span style={{ width:8, height:8, borderRadius:"50%", background:color }}/>
+                        </span>
                       </div>
                       <div style={{ fontSize:12, color:"var(--cf-text-primary)", marginTop:4, fontWeight: isSel ? 600 : 400, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
                         {ev.policyName}
@@ -783,13 +854,13 @@ function ControlsEvidenceDrawer({ bundle, sys, onClose, onOpenSystem, showSystem
                     <div style={{ marginTop:4, display:"flex", gap:12, flexWrap:"wrap", fontSize:11, color:"var(--cf-text-muted)" }}>
                       <span>Approved by <span className="mono">{assignment.approvedBy}</span></span>
                       {assignment.deadline && <span>Migration deadline <span className="mono">{assignment.deadline}</span></span>}
-                      {assignment.poam && <span>POA&M <span className="mono">{assignment.poam}</span></span>}
+                      {assignment.poam && <span>POA&M <button className="poam-ref poam-ref-quiet focus-ring" onClick={()=>openPoamDetail(assignment.poam)}><span className="mono">{assignment.poam}</span><Icon name="chevron-right" size={10}/></button></span>}
                     </div>
                   </div>
                 </div>
               );
             })()}
-            <ControlEvidenceCard evidence={active} controlIdx={activeIdx} total={bundle.policyIds.length}/>
+            <ControlEvidenceCard evidence={active} controlIdx={activeIdx} total={bundle.policyIds.length} sys={sys} bundle={bundle}/>
           </div>
         </div>
       </aside>
@@ -797,7 +868,7 @@ function ControlsEvidenceDrawer({ bundle, sys, onClose, onOpenSystem, showSystem
   );
 }
 
-function ControlEvidenceCard({ evidence, controlIdx, total }) {
+function ControlEvidenceCard({ evidence, controlIdx, total, sys, bundle }) {
   const sc = { pass:"#34d399", warn:"#fbbf24", fail:"#f87171", waiver:"#a78bfa" }[evidence.status];
   const sevColor = { high:"#f87171", medium:"#fbbf24", low:"#60a5fa" }[evidence.severity];
 
@@ -831,6 +902,11 @@ function ControlEvidenceCard({ evidence, controlIdx, total }) {
           <Icon name="file" size={13} style={{ color:"#a78bfa" }}/>
           <div style={{ fontSize:12 }}><strong>Waiver in effect.</strong> Risk accepted with compensating control. See evidence below.</div>
         </div>
+      )}
+
+      {/* Remediation — the POA&M lives with the finding. It never changes the result above. */}
+      {sys && bundle && (
+        <FindingPoamBar sysId={sys.id} policyId={evidence.policyId} bundleId={bundle.id} evalStatus={evidence.status}/>
       )}
 
       {/* Evidence items */}
@@ -1184,6 +1260,8 @@ function NewBundleModal({ onClose, bundle: editBundle, onDelete }) {
         description: form.description, requiredEnvs: form.requiredEnvs, policyIds: form.policyIds,
         lastReview: "just now",
       });
+    } else {
+      window.__cfCoach?.complete("compliance");
     }
     onClose();
   };

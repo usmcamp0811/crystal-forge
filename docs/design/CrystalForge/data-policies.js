@@ -39,6 +39,15 @@ const CONTROL_FAMILIES = {
   SC: { id:"SC", label:"System & Communications Protection", blurb:"Protecting data in transit and isolating system boundaries." },
   SI: { id:"SI", label:"System & Information Integrity", blurb:"Detecting and correcting flaws, malicious code, and unauthorized change." },
   MP: { id:"MP", label:"Media Protection", blurb:"Controlling access to and sanitization of removable/physical media." },
+  CP: { id:"CP", label:"Contingency Planning", blurb:"Backup, restore, and continuity of operations after a failure." },
+  IR: { id:"IR", label:"Incident Response", blurb:"Detecting, reporting, and handling security incidents." },
+  MA: { id:"MA", label:"Maintenance", blurb:"Controlled local and nonlocal system maintenance and diagnostics." },
+  PE: { id:"PE", label:"Physical & Environmental Protection", blurb:"Physical access, boot integrity, and environmental safeguards." },
+  PL: { id:"PL", label:"Planning", blurb:"Security plans, architecture records, and rules of behavior." },
+  PS: { id:"PS", label:"Personnel Security", blurb:"Role assignment, least privilege, and access on personnel change." },
+  RA: { id:"RA", label:"Risk Assessment", blurb:"Vulnerability scanning cadence and risk categorization." },
+  SA: { id:"SA", label:"System & Services Acquisition", blurb:"Supply-chain provenance, SBOMs, and developer requirements." },
+  SR: { id:"SR", label:"Supply Chain Risk Management", blurb:"Provenance, tamper detection, and component traceability." },
 };
 
 // Predefined grouping schemes for the Security controls domain — a pivot over tags
@@ -151,7 +160,7 @@ const POLICY_BUILTIN = [
     category: "deployment",
     description: "Auto-deploy the newest passing commit on the assigned flake/branch.",
     type: "builtin",
-    rules: [{ kind:"eval_passed" }, { kind:"build_succeeded" }],
+    rules: [{ kind:"eval_passed" }],
     rationale: "Best for dev and edge nodes that should always track HEAD.",
   },
   {
@@ -181,7 +190,6 @@ const POLICY_CUSTOM = [
       { kind:"cve_block", severity:"critical", maxAllowed:0 },
       { kind:"cve_block", severity:"high",     maxAllowed:2 },
       { kind:"eval_passed" },
-      { kind:"build_succeeded" },
     ],
     rationale: "Catches regressions surfaced by vulnix during eval. Critical = hard block.",
     createdBy: "mreyes",
@@ -202,7 +210,6 @@ const POLICY_CUSTOM = [
     rules: [
       { kind:"time_window", days:["mon","tue","wed","thu","fri"], from:"09:00", to:"17:00", tz:"America/New_York" },
       { kind:"eval_passed" },
-      { kind:"build_succeeded" },
     ],
     rationale: "Operator-coverage window. Outside hours, defer to manual.",
     createdBy: "jpark",
@@ -223,7 +230,6 @@ const POLICY_CUSTOM = [
     rules: [
       { kind:"approval_required", count:2, role:"admin" },
       { kind:"eval_passed" },
-      { kind:"build_succeeded" },
     ],
     rationale: "For tier-0 systems (auth providers, secrets brokers). 4-eyes principle.",
     createdBy: "security-team",
@@ -244,7 +250,6 @@ const POLICY_CUSTOM = [
     rules: [
       { kind:"rollout_percent", percent:25, observeMin:30 },
       { kind:"eval_passed" },
-      { kind:"build_succeeded" },
     ],
     rationale: "Staged rollout for the web tier. Disabled — pending observability integration.",
     createdBy: "dchen",
@@ -350,6 +355,7 @@ const POLICY_CUSTOM = [
     srgIds: ["SRG-OS-000478","SRG-OS-000185"],
     cciIds: ["CCI-002450","CCI-001199"],
     name: "stig-fips-crypto",
+    vulnId: "V-268144",
     category: "security",
     controlFamily: "SC",
     description: "Anduril NixOS STIG: FIPS-validated cryptography enabled and data-at-rest encrypted.",
@@ -686,7 +692,103 @@ const POLICY_STIG_MOCK = [
   { id:"stig-mock-home-directory-perms-102", name:"stig-home-directory-perms", category:"security", description:"Anduril NixOS STIG: User home directories default to owner-only permissions.", type:"custom", severity:"high", enabled:true, rules:[{ kind:"nixos_option", path:"services.home_directory_perms.enable", op:"==", value:"true" }], rationale:"SRG-OS-680102 — User home directories default to owner-only permissions.", evidence:[{ kind:"command", cmd:"systemctl show home_directory_perms 2>/dev/null || nixos-option services.home_directory_perms.enable", expect:"true" }], createdBy:"security-team", createdAt:"10w ago", lastModified:"3w ago", lineageId:"stig-mock-home-directory-perms-102", revision:1, publicationState:"current", publishedDate:"2026-04-12", srgIds:["SRG-OS-680102"], cciIds:["CCI-900102"], controlFamily:"MP", framework:"DISA STIG" },
 ];
 
-const POLICIES = (typeof __fx === "function" && __fx("policies")) || [...POLICY_BUILTIN, ...POLICY_CUSTOM, ...POLICY_STIG_MOCK];
+// Scale set — a full DISA STIG bundle as deployed sites actually receive it (~715 controls),
+// so the grouped-list navigation can be exercised at real size: CAT I 45 / CAT II 500 / CAT III 170,
+// spread across 18 NIST families. Deterministic (no Math.random) so ids stay stable across reloads.
+const POLICY_STIG_BULK = (() => {
+  const subjects = [
+    ["SSH daemon","AC","sshd"],["account lockout","AC","pam_faillock"],["session timeout","AC","logind"],
+    ["audit rule set","AU","auditd"],["audit log retention","AU","auditd"],["log forwarding","AU","rsyslog"],
+    ["configuration baseline","CM","nix-module"],["package allow-list","CM","nixpkgs"],
+    ["contingency snapshot","CP","zfs"],["authenticator strength","IA","pam"],["certificate trust store","IA","p11-kit"],
+    ["incident alerting","IR","alertmanager"],["maintenance session control","MA","cockpit"],
+    ["removable media control","MP","usbguard"],["boot integrity","PE","tpm2"],["baseline planning record","PL","docs"],
+    ["least-privilege role","PS","sudoers"],["risk scan cadence","RA","openscap"],
+    ["acquisition provenance","SA","sbom"],["transport encryption","SC","openssl"],["kernel hardening","SC","sysctl"],
+    ["file integrity monitoring","SI","aide"],["malicious code protection","SI","clamav"],["telemetry redaction","SR","otel"],
+  ];
+  const verbs = ["must be configured to","must enforce","must be capable of","must not permit","must automatically","must continuously"];
+  const objects = [
+    "reject connections that fail the approved policy check","record the outcome of each attempt for audit review",
+    "terminate the session after the organization-defined period of inactivity","apply the approved cryptographic module",
+    "prevent unauthorized modification of the enforcing configuration","alert designated personnel on enforcement failure",
+    "restrict the action to accounts holding an explicit authorization","retain the resulting record for the required period",
+  ];
+  const sev = [...Array(45).fill("high"), ...Array(500).fill("medium"), ...Array(170).fill("low")];
+  return sev.map((severity, i) => {
+    const [subject, family, module] = subjects[i % subjects.length];
+    const verb = verbs[(i * 7) % verbs.length];
+    const object = objects[(i * 5) % objects.length];
+    const vid = `V-2${70000 + i * 3}`;
+    const slug = subject.replace(/[^a-z]+/gi, "-").toLowerCase();
+    const cat = severity === "high" ? "CAT I" : severity === "medium" ? "CAT II" : "CAT III";
+    return {
+      id:`stig-bulk-${i}`, lineageId:`stig-bulk-${i}`, revision:1, publicationState:"current",
+      publishedDate:`2026-0${(i % 9) + 1}-${String((i % 27) + 1).padStart(2,"0")}`,
+      srgIds:[`SRG-OS-${String(100000 + i * 37).slice(0,6)}`], cciIds:[`CCI-00${String(1000 + (i * 13) % 8999).slice(0,4)}`],
+      name:`NixOS ${subject} ${verb} ${object}.`,
+      category:"security", controlFamily:family, framework:"DISA STIG", type:"custom", severity,
+      description:`${cat} finding ${vid}. The ${subject} configuration is evaluated at build time against the ${module} module; a deviation fails the eval before the image is signed, so the control cannot drift into a deployed system.`,
+      enabled: i % 11 !== 0,
+      rules:[{ kind:"custom_eval", expr:`config.${module.replace(/-/g,"_")}.${slug.replace(/-/g,"_")}.compliant == true`, message:`${subject} must satisfy ${vid}` }],
+      rationale:`${vid} (${subject}). Mapped to the ${family} family.`,
+      evidence:[{ kind:"command", cmd:`check-${slug} --verify`, expect:"pass" }],
+      createdBy:"security-team", createdAt:"3w ago", lastModified:`${(i % 28) + 1}d ago`,
+    };
+  });
+})();
+
+// Editor showcase policies — the states the policy editor has to handle cleanly:
+// unmapped-but-enforced, mixed enforcement, imported-and-mapped-but-not-yet-enforced,
+// and both ends of the NixOS value spectrum (a boolean and an exact multiline banner).
+const POLICY_EDITOR_DEMO = [
+  {
+    id:"required-applications", lineageId:"required-applications", revision:1, publicationState:"current", publishedDate:"2026-06-02",
+    name:"Required applications", category:"deployment", type:"custom", severity:"low", enabled:true,
+    description:"Every machine in the fleet must have the in-house toolchain installed. No framework involved — this is a house rule.",
+    rules:[{ kind:"packages_installed", packages:["homelab-agent","tailscale","restic"] }],
+    evidence:[], rationale:"Operational baseline so remote support and backups always work.",
+    createdBy:"you", createdAt:"2mo ago", lastModified:"3w ago",
+  },
+  {
+    id:"critical-vuln-protection", lineageId:"critical-vuln-protection", revision:1, publicationState:"current", publishedDate:"2026-05-20",
+    name:"Critical vulnerability protection", category:"security", framework:"NIST 800-53", controlFamily:"RA", type:"custom", severity:"high", enabled:true,
+    description:"No critical CVEs may reach production, and the known-vulnerable log4j-shim package must never be in the closure.",
+    rules:[
+      { kind:"cve_block", severity:"critical", maxAllowed:0 },
+      { kind:"packages_absent", packages:["log4j-shim","openssl-1.0"] },
+    ],
+    evidence:[{ kind:"eval_attr", attr:"config.environment.systemPackages" }],
+    rationale:"Two different enforcement mechanisms, one policy: scan results and closure contents.",
+    createdBy:"security-team", createdAt:"3mo ago", lastModified:"1w ago",
+  },
+  {
+    id:"stig-consent-banner-exact", lineageId:"stig-consent-banner-exact", revision:1, publicationState:"current", publishedDate:"2026-04-11",
+    name:"DoD consent banner text", category:"security", framework:"DISA STIG", controlFamily:"AC", type:"custom", severity:"medium", enabled:true,
+    description:"/etc/issue must contain the DoD Notice and Consent banner verbatim, and sshd must be the daemon that displays it.",
+    srgIds:["SRG-OS-000023-GPOS-00006"], cciIds:["CCI-000048"],
+    rules:[
+      { kind:"nixos_option", path:"services.openssh.enable", op:"==", value:true },
+      { kind:"nixos_option", path:"environment.etc.\"issue\".text", op:"==", value: DOD_CONSENT_BANNER },
+    ],
+    evidence:[{ kind:"file", path:"/etc/issue", note:"Byte-for-byte match against the published banner text" }],
+    rationale:"V-268082 requires the exact approved wording — a paraphrase is a finding.",
+    source:{ kind:"XCCDF import", framework:"DISA STIG", artifact:"U_NixOS_V1R2_STIG.zip", ruleId:"SV-268082r1_rule", groupId:"V-268082", version:"1", release:"2", published:"2026-03-14", importedAt:"2026-04-11", importedBy:"security-team" },
+    createdBy:"security-team", createdAt:"4mo ago", lastModified:"2w ago",
+  },
+  {
+    id:"stig-fips-mode-unimplemented", lineageId:"stig-fips-mode-unimplemented", revision:1, publicationState:"draft", publishedDate:"2026-06-18",
+    name:"FIPS 140-3 module must be the only crypto provider", category:"security", framework:"DISA STIG", controlFamily:"SC", type:"custom", severity:"high", enabled:false,
+    description:"Imported from the benchmark with its compliance mappings intact. Nobody has written the enforcement yet, so it asserts nothing today.",
+    srgIds:["SRG-OS-000033-GPOS-00014"], cciIds:["CCI-002450"],
+    rules:[], evidence:[],
+    rationale:"Held as a draft until the crypto-policy module lands in the fleet flake.",
+    source:{ kind:"XCCDF import", framework:"DISA STIG", artifact:"U_NixOS_V1R2_STIG.zip", ruleId:"SV-268168r1_rule", groupId:"V-268168", version:"1", release:"2", published:"2026-03-14", importedAt:"2026-06-18", importedBy:"security-team" },
+    createdBy:"security-team", createdAt:"2mo ago", lastModified:"2mo ago",
+  },
+];
+
+const POLICIES = (typeof __fx === "function" && __fx("policies")) || [...POLICY_BUILTIN, ...POLICY_CUSTOM, ...POLICY_EDITOR_DEMO, ...POLICY_STIG_MOCK, ...POLICY_STIG_BULK];
 
 // Per-policy usage rollup
 function policyUsage(policyId) {

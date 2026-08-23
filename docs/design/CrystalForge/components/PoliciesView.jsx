@@ -15,6 +15,15 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus, backTo, onBack, onCle
   const [selectMode, setSelectMode] = React.useState(false);
   const [selectedIds, setSelectedIds] = React.useState(() => new Set());
   const toggleSelected = (id) => setSelectedIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const [bulkDeleteOpen, setBulkDeleteOpen] = React.useState(false);
+  const [viewMode, setViewMode] = React.useState("cards");
+  const [lastSelectedIdx, setLastSelectedIdx] = React.useState(null);
+  // Group collapse: two explicit override sets over a default rule (groups past
+  // BIG_GROUP start collapsed), so a 500-policy group never buries the ones after it.
+  const [collapsedKeys, setCollapsedKeys] = React.useState(() => new Set());
+  const [expandedKeys, setExpandedKeys] = React.useState(() => new Set());
+  const [shownCounts, setShownCounts] = React.useState(() => ({}));
+  const sectionRefs = React.useRef({});
   React.useEffect(() => {
     if (!focus) return;
     const p = POLICIES.find(x => x.id === focus || x.name === focus);
@@ -62,8 +71,13 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus, backTo, onBack, onCle
     groups = order.map(fid => {
       const fam = CONTROL_FAMILIES[fid];
       return { key:fid, label: fam ? `${fam.id} — ${fam.label}` : "Ungrouped", icon:"shield", color:"#f87171",
-        blurb: fam ? fam.blurb : "Controls with no NIST family tag set yet.",
-        items: groupListFramework.filter(g => (g.current.controlFamily || "ungrouped") === fid) };
+        blurb: fam ? fam.blurb : "Controls with no recognized NIST family tag set yet.",
+        // The ungrouped bucket catches anything whose family isn't a defined key, so a
+        // policy can never fall out of the render (and out of search) entirely.
+        items: groupListFramework.filter(g => {
+          const f = g.current.controlFamily;
+          return fid === "ungrouped" ? !f || !CONTROL_FAMILIES[f] : f === fid;
+        }) };
     }).filter(g => g.items.length > 0);
   } else if (activeScheme.id === "severity") {
     const order = [["high","CAT I — High","#f87171","Findings that could result in loss of confidentiality, availability, or integrity — highest priority to remediate."],
@@ -110,6 +124,44 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus, backTo, onBack, onCle
     if (ungrouped.length) groups.push({ key:"ungrouped", label:"Ungrouped", icon:"shield", color:"#6b7280", blurb:"Controls that don't match any group's rule in this scheme.", items: ungrouped });
   }
 
+  const BIG_GROUP = 150, CHUNK = 60;
+  const gkey = (g) => `${domain}|${domain === "platform" ? "category" : activeScheme.id}|${g.key}`;
+  // While a search is active collapse is suspended outright — a match can never hide
+  // inside a collapsed group — and the user's collapse set is left untouched, so
+  // clearing the search restores exactly the shape they had.
+  const searching = !!query;
+  const isCollapsed = (g) => {
+    if (searching) return false;
+    const k = gkey(g);
+    if (collapsedKeys.has(k)) return true;
+    if (expandedKeys.has(k)) return false;
+    return g.items.length > BIG_GROUP;
+  };
+  const setCollapsed = (g, next) => {
+    const k = gkey(g);
+    setCollapsedKeys(prev => { const n = new Set(prev); next ? n.add(k) : n.delete(k); return n; });
+    setExpandedKeys(prev => { const n = new Set(prev); next ? n.delete(k) : n.add(k); return n; });
+  };
+  const setAllCollapsed = (next) => {
+    const keys = groups.map(gkey);
+    setCollapsedKeys(next ? new Set(keys) : new Set());
+    setExpandedKeys(next ? new Set() : new Set(keys));
+  };
+  const shownFor = (g) => shownCounts[gkey(g)] ?? CHUNK;
+  const revealMore = (g, all) => setShownCounts(prev => ({ ...prev, [gkey(g)]: all ? g.items.length : shownFor(g) + CHUNK }));
+  const anyCollapsed = groups.some(g => isCollapsed(g));
+
+  const flatIds = groups.flatMap(g => g.items.map(grp => grp.current.id));
+  const handleSelectClick = (p, e) => {
+    const idx = flatIds.indexOf(p.id);
+    if (e?.shiftKey && lastSelectedIdx != null) {
+      const [a, b] = [lastSelectedIdx, idx].sort((x, y) => x - y);
+      setSelectedIds(prev => { const n = new Set(prev); for (let i = a; i <= b; i++) n.add(flatIds[i]); return n; });
+    } else {
+      toggleSelected(p.id);
+    }
+    setLastSelectedIdx(idx);
+  };
   const catCount = (id) => lineages.filter(g => (g.current.category || "deployment") === id).length;
   const domainCount = (id) => lineages.filter(g => (typeof policyDomain === "function" ? policyDomain(g.current) : "platform") === id).length;
   const currentPolicies = lineages.map(g => g.current);
@@ -122,10 +174,14 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus, backTo, onBack, onCle
         <div style={{ display:"flex", gap:8 }}>
           {selectMode ? (
             <>
-              <span style={{ fontSize:12, color:"var(--cf-text-muted)", alignSelf:"center" }}>{selectedIds.size} selected</span>
+              <span style={{ fontSize:12, color:"var(--cf-text-muted)", alignSelf:"center" }}>{selectedIds.size} selected <span style={{ color:"var(--cf-text-muted)", opacity:0.7 }}>· shift-click for a range</span></span>
               <button className="btn btn-primary focus-ring" disabled={selectedIds.size===0}
                 onClick={() => { exportPolicies(POLICIES.filter(p => selectedIds.has(p.id))); setSelectMode(false); setSelectedIds(new Set()); }}>
                 <Icon name="download" size={14}/> Export selected
+              </button>
+              <button className="btn focus-ring" disabled={selectedIds.size===0} onClick={()=>setBulkDeleteOpen(true)}
+                style={{ background: selectedIds.size ? "color-mix(in oklab, #f87171 14%, transparent)" : "var(--cf-subtle-bg)", color: selectedIds.size ? "#f87171" : "var(--cf-text-muted)" }}>
+                <Icon name="x" size={13}/> Delete selected
               </button>
               <button className="btn btn-ghost focus-ring" onClick={() => { setSelectMode(false); setSelectedIds(new Set()); }}>Cancel</button>
             </>
@@ -133,10 +189,10 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus, backTo, onBack, onCle
             <>
               <IOMenu items={[
                 { label:"Import policies…", icon:"upload", onClick:() => setImportOpen(true) },
-                { label:"Select policies to export…", icon:"download", onClick:() => { setSelectMode(true); setSelectedIds(new Set()); } },
+                { label:"Select multiple…", icon:"check", onClick:() => { setSelectMode(true); setSelectedIds(new Set()); } },
                 { label:"Export all custom policies", icon:"download", onClick:() => exportPolicies(POLICY_CUSTOM) },
               ]}/>
-              <button className="btn btn-primary focus-ring" onClick={() => setAddOpen(true)}>
+              <button className="btn btn-primary focus-ring" data-coach-target="policy" onClick={() => setAddOpen(true)}>
                 <Icon name="plus" size={14}/> New custom policy
               </button>
             </>
@@ -192,7 +248,10 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus, backTo, onBack, onCle
             </select>
           </>
         )}
-        <button className="btn btn-ghost focus-ring xs" style={{ marginLeft:"auto", visibility: domain === "security" ? "visible" : "hidden" }} onClick={()=>setAdminOpen(true)}>
+        <button className="btn btn-ghost focus-ring xs" style={{ marginLeft:"auto" }} onClick={()=>setAllCollapsed(!anyCollapsed)}>
+          <Icon name={anyCollapsed ? "chevron-down" : "chevron-right"} size={12}/> {anyCollapsed ? "Expand all" : "Collapse all"}
+        </button>
+        <button className="btn btn-ghost focus-ring xs" style={{ visibility: domain === "security" ? "visible" : "hidden" }} onClick={()=>setAdminOpen(true)}>
           <Icon name="gear" size={12}/> Manage groupings
         </button>
       </div>
@@ -208,41 +267,122 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus, backTo, onBack, onCle
             <Icon name="x" size={11}/> Clear
           </button>
         )}
-        <span className="filter-count">{(() => {
+        <span className="filter-count" style={{ marginLeft:"auto" }}>{(() => {
           const shown = groups.reduce((a,g) => a + g.items.length, 0);
           return shown < groupList.length
             ? `Showing ${shown} of ${groupList.length} ${groupList.length === 1 ? "policy" : "policies"}`
             : `${groupList.length} ${groupList.length === 1 ? "policy" : "policies"}`;
-        })()}</span>      </div>
+        })()}</span>
+        <div className="seg" role="tablist" aria-label="View mode">
+          <button className={viewMode==="cards"?"active":""} onClick={()=>setViewMode("cards")}><Icon name="grid" size={12}/> Cards</button>
+          <button className={viewMode==="table"?"active":""} onClick={()=>setViewMode("table")}><Icon name="rows" size={12}/> Table</button>
+        </div>
+      </div>
 
       {groups.length === 0 ? (
         <div className="card" style={{ padding:"40px 20px", textAlign:"center", color:"var(--cf-text-muted)" }}>
           <Icon name="search" size={20} style={{ opacity:0.5 }}/>
           <div style={{ marginTop:8, fontSize:13 }}>No policies match these filters.</div>
         </div>
-      ) : groups.map((g) => (
-        <section key={g.key} className="pol-group">
-          <div className="pol-group-head">
+      ) : groups.map((g) => {
+        const collapsed = isCollapsed(g);
+        const shown = collapsed ? 0 : Math.min(shownFor(g), g.items.length);
+        const visible = g.items.slice(0, shown);
+        return (
+        <section key={g.key} className="pol-group" ref={el => { sectionRefs.current[gkey(g)] = el; }}>
+          <div className={`pol-group-head${collapsed ? " is-collapsed" : ""}`}>
+            <button className="pol-group-toggle focus-ring" aria-expanded={!collapsed} onClick={()=>setCollapsed(g, !collapsed)}
+              title={collapsed ? "Expand group" : "Collapse group"}>
+              <Icon name="chevron-right" size={12} style={{ transform: collapsed ? "none" : "rotate(90deg)", transition:"transform .12s ease" }}/>
+            </button>
             <span className="pol-group-icon" style={{ background:`color-mix(in oklab, ${g.color} 16%, transparent)`, color:g.color }}>
               <Icon name={g.icon} size={13}/>
             </span>
-            <div style={{ minWidth:0 }}>
-              <h2 className="pol-group-title">{g.label} <span className="pol-group-count">{g.items.length}</span></h2>
-              {g.blurb && <div className="pol-group-blurb">{g.blurb}</div>}
+            <div style={{ minWidth:0, cursor:"pointer" }} onClick={()=>setCollapsed(g, !collapsed)}>
+              <h2 className="pol-group-title">{g.label} <span className="pol-group-count">{g.items.length}</span>{collapsed && <span className="pol-group-hidden-note">collapsed</span>}</h2>
+              {g.blurb && !collapsed && <div className="pol-group-blurb">{g.blurb}</div>}
             </div>
+            {selectMode && (() => {
+              const groupIds = g.items.map(grp => grp.current.id);
+              const allSelected = groupIds.every(id => selectedIds.has(id));
+              return (
+                <button className="btn btn-subtle focus-ring" style={{ marginLeft:"auto", padding:"4px 10px", fontSize:11.5, flexShrink:0 }}
+                  onClick={() => setSelectedIds(prev => {
+                    const n = new Set(prev);
+                    allSelected ? groupIds.forEach(id => n.delete(id)) : groupIds.forEach(id => n.add(id));
+                    return n;
+                  })}>
+                  <Icon name={allSelected ? "x" : "check"} size={11}/> {allSelected ? "Deselect group" : "Select group"}
+                </button>
+              );
+            })()}
           </div>
+          {collapsed ? null : viewMode === "cards" ? (
           <div className="cards-grid">
-            {g.items.map(grp => (
+            {visible.map(grp => (
               <PolicyCard key={grp.lineageId} group={grp}
-                onOpen={(p, tab) => selectMode ? toggleSelected(p.id) : (setDrawerPolicy(p), setDrawerTab(tab || null), onClearBack?.())}
+                onOpen={(p, tab, e) => (selectMode || e?.shiftKey || e?.ctrlKey || e?.metaKey) ? (setSelectMode(true), handleSelectClick(p, e)) : (setDrawerPolicy(p), setDrawerTab(tab || null), onClearBack?.())}
                 onEdit={!selectMode ? (p) => setEditPolicy(p) : null}
                 selectMode={selectMode}
                 selected={selectedIds}
               />
             ))}
           </div>
+          ) : (
+          <div className="card" style={{ overflow:"hidden" }}>
+            <table className="sys-table compact" style={{ tableLayout:"fixed" }}>
+              <colgroup>
+                {selectMode && <col style={{ width:36 }}/>}
+                <col/>
+                <col style={{ width:90 }}/>
+                <col style={{ width:80 }}/>
+                <col style={{ width:70 }}/>
+                <col style={{ width:70 }}/>
+                <col style={{ width:90 }}/>
+              </colgroup>
+              <thead>
+                <tr>
+                  {selectMode && <th style={{ width:32 }}> </th>}
+                  <th style={{ width:"34%" }}>Policy</th>
+                  <th>Type</th>
+                  <th>Severity</th>
+                  <th>Mapped reqs</th>
+                  <th>Systems</th>
+                  <th style={{ textAlign:"right" }}> </th>
+                </tr>
+              </thead>
+              <tbody>
+                {visible.map(grp => (
+                  <PolicyRow key={grp.lineageId} group={grp}
+                    onOpen={(p, tab, e) => (selectMode || e?.shiftKey || e?.ctrlKey || e?.metaKey) ? (setSelectMode(true), handleSelectClick(p, e)) : (setDrawerPolicy(p), setDrawerTab(tab || null), onClearBack?.())}
+                    onEdit={!selectMode ? (p) => setEditPolicy(p) : null}
+                    selectMode={selectMode}
+                    selected={selectedIds}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+          )}
+          {!collapsed && shown < g.items.length && (
+            <div className="pol-group-more">
+              <span>Showing {shown} of {g.items.length}</span>
+              <button className="btn btn-subtle focus-ring xs" onClick={()=>revealMore(g)}>Show {Math.min(CHUNK, g.items.length - shown)} more</button>
+              <button className="btn btn-ghost focus-ring xs" onClick={()=>revealMore(g, true)}>Show all</button>
+            </div>
+          )}
         </section>
-      ))}
+        );
+      })}
+      {bulkDeleteOpen && (
+        <div className="modal-overlay" onClick={()=>setBulkDeleteOpen(false)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(520px,96vw)" }}>
+            <BulkDeletePoliciesConfirm ids={selectedIds}
+              onCancel={()=>setBulkDeleteOpen(false)}
+              onConfirm={(remaining) => { setSelectedIds(remaining); setBulkDeleteOpen(false); if (remaining.size===0) setSelectMode(false); }}/>
+          </div>
+        </div>
+      )}
 
       {drawerPolicy && (
         <PolicyDrawer
@@ -257,7 +397,7 @@ function PoliciesView({ onOpenSystem, focus, onClearFocus, backTo, onBack, onCle
         />
       )}
       {(editPolicy || addOpen) && (
-        <PolicyFormModal
+        <PolicyEditor
           mode={addOpen ? "add" : "edit"}
           policy={editPolicy}
           onClose={() => { setEditPolicy(null); setAddOpen(false); }}
@@ -721,7 +861,7 @@ function PolicyCard({ group, onOpen, onEdit, selectMode, selected }) {
   const railColor = disabled ? "#6b7280" : cat.color;
 
   return (
-    <div className="sys-card" onClick={() => onOpen(policy)} style={{ cursor:"pointer", opacity: disabled ? 0.72 : 1, outline: isSelected ? "2px solid var(--cf-brand-purple)" : "none", outlineOffset: -1 }}>
+    <div className="sys-card" onClick={(e) => onOpen(policy, null, e)} style={{ cursor:"pointer", opacity: disabled ? 0.72 : 1, outline: isSelected ? "2px solid var(--cf-brand-purple)" : "none", outlineOffset: -1 }}>
       <div className="status-rail" style={{ "--status-color": railColor }}/>
       {selectMode && (
         <span className={`pol-select-box${isSelected?" checked":""}`}>
@@ -797,6 +937,93 @@ function PolicyCard({ group, onOpen, onEdit, selectMode, selected }) {
   );
 }
 
+function PolicyRow({ group, onOpen, onEdit, selectMode, selected }) {
+  const policy = group.current;
+  const isSelected = selectMode && selected.has(policy.id);
+  const usage = policyUsage(policy.id);
+  const disabled = policy.type === "custom" && policy.enabled === false;
+  const sevColor = policy.severity === "high" ? "#f87171" : policy.severity === "medium" ? "#fbbf24" : policy.severity === "low" ? "#60a5fa" : null;
+  const mapped = typeof mappingsForPolicy === "function" ? mappingsForPolicy(policy.id).length : 0;
+  return (
+    <tr onClick={(e) => onOpen(policy, null, e)} style={{ cursor:"pointer", opacity: disabled ? 0.6 : 1, background: isSelected ? "color-mix(in oklab, var(--cf-brand-purple) 8%, transparent)" : undefined }}>
+      {selectMode && (
+        <td className="pol-select-cell" onClick={e=>{ e.stopPropagation(); onOpen(policy, null, e); }}>
+          <span className={`pol-select-box${isSelected?" checked":""}`} style={{ position:"static" }}>
+            {isSelected && <Icon name="check" size={11} style={{ color:"#fff" }}/>}
+          </span>
+        </td>
+      )}
+      <td>
+        <div style={{ fontWeight:600, fontSize:12.5, display:"flex", alignItems:"center", gap:6 }}>
+          <Icon name="file" size={12} style={{ flexShrink:0, color:"var(--cf-text-muted)" }}/>
+          <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={policy.name}>{policy.name}</span>
+        </div>
+        <div style={{ fontSize:11, color:"var(--cf-text-secondary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={policy.description}>{policy.description}</div>
+      </td>
+      <td>{policy.type === "builtin" ? <span className="chip chip-info">built-in</span> : <span className="chip chip-healthy">custom</span>}</td>
+      <td>{sevColor ? <span className="chip" style={{ fontSize:9.5, color:sevColor, background:`color-mix(in oklab, ${sevColor} 14%, transparent)` }}>{policy.severity === "high" ? "CAT I" : policy.severity === "medium" ? "CAT II" : "CAT III"}</span> : <span style={{ color:"var(--cf-text-muted)" }}>—</span>}</td>
+      <td className="mono">{mapped || "—"}</td>
+      <td className="mono">{usage.count}</td>
+      <td style={{ textAlign:"right" }}>
+        {onEdit && policy.type === "custom" && (
+          <button className="btn btn-subtle focus-ring" style={{ padding:"4px 10px", fontSize:11.5 }} onClick={e=>{ e.stopPropagation(); onEdit(policy); }}>
+            <Icon name="gear" size={11}/> Edit
+          </button>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+function BulkDeletePoliciesConfirm({ ids, onCancel, onConfirm }) {
+  const targets = POLICIES.filter(p => ids.has(p.id));
+  const blocked = targets.filter(p => policyUsage(p.id).count > 0);
+  const deletable = targets.filter(p => policyUsage(p.id).count === 0);
+  const doConfirm = () => {
+    deletable.forEach(p => { const idx = POLICIES.findIndex(x => x.id === p.id); if (idx >= 0) POLICIES.splice(idx, 1); });
+    onConfirm(new Set(blocked.map(p => p.id)));
+  };
+  return (
+    <>
+      <div className="modal-head" style={{ background:"rgba(248,113,113,0.06)" }}>
+        <h2 style={{ color:"#fecaca", display:"flex", alignItems:"center", gap:8 }}>
+          <Icon name="warn" size={16} style={{ color:"#f87171" }}/>
+          Delete {targets.length} polic{targets.length===1?"y":"ies"}
+        </h2>
+      </div>
+      <div className="modal-body">
+        {blocked.length > 0 && (
+          <div className="sd-callout sd-callout-danger" style={{ marginBottom:12 }}>
+            <Icon name="warn" size={14}/>
+            <div style={{ fontSize:12, color:"#fecaca" }}>
+              <strong>{blocked.length} of these are still in use</strong> and will be skipped — reassign their systems first.
+            </div>
+          </div>
+        )}
+        <div style={{ display:"flex", flexDirection:"column", gap:4, maxHeight:220, overflowY:"auto" }}>
+          {targets.map(p => {
+            const inUse = policyUsage(p.id).count > 0;
+            return (
+              <div key={p.id} style={{ display:"flex", alignItems:"center", gap:8, fontSize:12.5, padding:"5px 0", opacity: inUse ? 0.55 : 1 }}>
+                <Icon name={inUse ? "warn" : "file"} size={12} style={{ color: inUse ? "#f87171" : "var(--cf-text-muted)", flexShrink:0 }}/>
+                <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.name}</span>
+                {inUse && <span style={{ marginLeft:"auto", fontSize:10.5, color:"#f87171", flexShrink:0 }}>in use</span>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <div className="modal-foot">
+        <button className="btn btn-ghost focus-ring" onClick={onCancel}>Cancel</button>
+        <button className="btn focus-ring" disabled={deletable.length===0} onClick={doConfirm}
+          style={{ background: deletable.length ? "#dc2626" : "var(--cf-subtle-bg)", color: deletable.length ? "white" : "var(--cf-text-muted)" }}>
+          <Icon name="x" size={13}/> Delete {deletable.length || ""} polic{deletable.length===1?"y":"ies"}
+        </button>
+      </div>
+    </>
+  );
+}
+
 /* Drawer/modal for browsing many revisions at once — used when a lineage has more than a few. */
 function RevisionPickerModal({ title, revisions, currentId, selectedId, onSelect, onClose }) {
   const [query, setQuery] = React.useState("");
@@ -861,7 +1088,12 @@ function ruleDescription(r) {
     case "approval_required": return `${r.count} approver${r.count === 1 ? "" : "s"} required (${r.role})`;
     case "rollout_percent":   return `Canary: ${r.percent}% at a time, observe ${r.observeMin}min`;
     case "packages_installed":return `Packages present: ${(r.packages||[]).join(", ")}`;
-    case "nixos_option":      return `config.${r.path} ${r.op} ${r.value}`;
+    case "packages_absent":   return `Packages prohibited: ${(r.packages||[]).join(", ")}`;
+    case "nixos_option":      {
+      const t = typeof nixosOptionMeta === "function" ? nixosOptionMeta(r.path).type : "unknown";
+      const v = typeof semanticValue === "function" ? semanticValue(r.value, t) : r.value;
+      return `config.${r.path} ${r.op} ${typeof valueSummary === "function" ? valueSummary(v, t, 34) : v}`;
+    }
     case "custom_eval":       return r.message || "Custom nix assertion";
     default: return r.kind;
   }
@@ -1113,484 +1345,6 @@ function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem, onSwitchPolicy, i
         )}
       </aside>
     </>
-  );
-}
-
-function PolicyFormModal({ mode, policy, onClose }) {
-  const isEdit = mode === "edit";
-  const knownSrgIds = React.useMemo(()=>[...new Set(POLICIES.flatMap(p=>p.srgIds||[]))].sort(), []);
-  const knownCciIds = React.useMemo(()=>[...new Set(POLICIES.flatMap(p=>p.cciIds||[]))].sort(), []);
-  const [form, setForm] = React.useState(() => isEdit && policy ? {
-    name: policy.name,
-    description: policy.description,
-    category: policy.category || "deployment",
-    controlFamily: policy.controlFamily || "",
-    cmmcLevel: policy.cmmcLevel || "",
-    framework: policy.framework || "",
-    cisSection: policy.cisSection || "",
-    rationale: policy.rationale || "",
-    severity: policy.severity || "medium",
-    srgIds: (policy.srgIds || []).join(", "),
-    cciIds: (policy.cciIds || []).join(", "),
-    enabled: policy.enabled !== false,
-    rules: [...policy.rules],
-    evidence: policy.evidence ? policy.evidence.map(e => ({ ...e })) : [],
-    mappings: (typeof mappingsForPolicy === "function" ? mappingsForPolicy(policy.id) : []).map(m => ({ ...m })),
-  } : {
-    name: "",
-    description: "",
-    category: "deployment",
-    controlFamily: "",
-    cmmcLevel: "",
-    framework: "",
-    cisSection: "",
-    rationale: "",
-    severity: "medium",
-    srgIds: "",
-    cciIds: "",
-    enabled: true,
-    rules: [{ kind:"eval_passed" }, { kind:"build_succeeded" }],
-    evidence: [],
-    mappings: [],
-  });
-  const [confirmDelete, setConfirmDelete] = React.useState(false);
-  const [tab, setTab] = React.useState("details");
-  const [mappingEditor, setMappingEditor] = React.useState(null); // { mapping } | { } for new
-  const set = (k,v) => setForm(p => ({ ...p, [k]: v }));
-  const saveMapping = (m) => set("mappings", form.mappings.some(x=>x.id===m.id) ? form.mappings.map(x=>x.id===m.id?m:x) : [...form.mappings, m]);
-  const removeMapping = (id) => set("mappings", form.mappings.filter(x=>x.id!==id));
-
-  const addRule = (kind) => {
-    const defaults = {
-      eval_passed: {},
-      build_succeeded: {},
-      cve_block: { severity:"critical", maxAllowed:0 },
-      time_window: { days:["mon","tue","wed","thu","fri"], from:"09:00", to:"17:00", tz:"America/New_York" },
-      approval_required: { count:2, role:"admin" },
-      rollout_percent: { percent:25, observeMin:30 },
-      packages_installed: { packages:["openssh","auditd"] },
-      nixos_option: { path:"services.openssh.settings.PermitRootLogin", op:"==", value:"\"no\"" },
-      custom_eval: { expr:"config.services.openssh.enable == true", message:"SSH must be enabled" },
-    };
-    set("rules", [...form.rules, { kind, ...defaults[kind] }]);
-  };
-  const removeRule = (idx) => set("rules", form.rules.filter((_, i) => i !== idx));
-  const updateRule = (idx, patch) => set("rules", form.rules.map((r, i) => i === idx ? { ...r, ...patch } : r));
-
-  const addEvidence = (kind) => {
-    const defaults = {
-      command:    { kind:"command",    cmd:"sshd -T | grep permitrootlogin", expect:"permitrootlogin no" },
-      log:        { kind:"log",        source:"journald", unit:"auditd.service", match:"audit: rules loaded" },
-      file:       { kind:"file",       path:"/etc/issue", note:"Must contain USG banner text" },
-      unit_state: { kind:"unit_state", unit:"auditd.service", state:"active" },
-      eval_attr:  { kind:"eval_attr",  attr:"config.services.openssh.settings.PermitRootLogin" },
-      attestation:{ kind:"attestation",note:"Ed25519-signed agent fingerprint snapshot at deploy time" },
-    };
-    set("evidence", [...form.evidence, defaults[kind]]);
-  };
-  const removeEvidence = (idx) => set("evidence", form.evidence.filter((_, i) => i !== idx));
-  const updateEvidence = (idx, patch) => set("evidence", form.evidence.map((e, i) => i === idx ? { ...e, ...patch } : e));
-
-  const parseIdList = (s) => s.split(",").map(x => x.trim()).filter(Boolean);
-
-  const doSave = () => {
-    const srgIds = parseIdList(form.srgIds);
-    const cciIds = parseIdList(form.cciIds);
-    const policyId = isEdit ? policy.id : `custom-${slugify(form.name) || Date.now()}`;
-    if (isEdit) {
-      Object.assign(policy, {
-        name: form.name, description: form.description, category: form.category,
-        controlFamily: form.category === "security" ? (form.controlFamily || null) : undefined,
-        cmmcLevel: form.category === "security" ? (form.cmmcLevel || null) : undefined,
-        framework: form.category === "security" ? (form.framework || null) : undefined,
-        cisSection: form.category === "security" ? (form.cisSection || null) : undefined,
-        rationale: form.rationale, severity: form.severity, srgIds, cciIds,
-        enabled: form.enabled, rules: form.rules, evidence: form.evidence,
-        lastModified: "just now",
-      });
-    } else {
-      POLICIES.push({
-        id: policyId, lineageId: policyId, revision: 1, publicationState: "current", publishedDate: new Date().toISOString().slice(0,10),
-        name: form.name, description: form.description, category: form.category,
-        controlFamily: form.category === "security" ? (form.controlFamily || null) : null,
-        cmmcLevel: form.category === "security" ? (form.cmmcLevel || null) : null,
-        framework: form.category === "security" ? (form.framework || null) : null,
-        cisSection: form.category === "security" ? (form.cisSection || null) : null,
-        rationale: form.rationale, severity: form.severity, srgIds, cciIds,
-        type: "custom", enabled: form.enabled, rules: form.rules, evidence: form.evidence,
-        createdBy: "you", createdAt: "just now", lastModified: "just now",
-      });
-    }
-    if (typeof POLICY_REQUIREMENT_MAPPINGS !== "undefined") {
-      for (let i = POLICY_REQUIREMENT_MAPPINGS.length - 1; i >= 0; i--) { if (POLICY_REQUIREMENT_MAPPINGS[i].policyId === policyId) POLICY_REQUIREMENT_MAPPINGS.splice(i,1); }
-      form.mappings.forEach(m => POLICY_REQUIREMENT_MAPPINGS.push({ ...m, policyId }));
-    }
-  };
-  const doDelete = () => {
-    const idx = POLICIES.findIndex(p => p.id === policy.id);
-    if (idx >= 0) POLICIES.splice(idx, 1);
-    onClose();
-  };
-
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(680px,96vw)", maxHeight:"92vh" }}>
-        {confirmDelete ? (
-          <DeletePolicyConfirm policy={policy} onCancel={()=>setConfirmDelete(false)} onConfirm={doDelete}/>
-        ) : (
-          <>
-            <div className="modal-head">
-              <h2><Icon name={isEdit ? "gear" : "plus"} size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/>
-                {isEdit ? `Edit ${policy.name}` : "New custom policy"}
-              </h2>
-              <p>{isEdit ? "Update the rules and rationale." : "Compose a policy from gate rules. Systems can be assigned this policy from their edit dialog."}</p>
-            </div>
-            <div className="modal-body" style={{ overflowY:"auto", display:"flex", flexDirection:"column" }}>
-              <div style={{ border:"1px solid var(--cf-divider)", borderRadius:10, overflow:"hidden", flexShrink:0 }}>
-                <div style={{ display:"flex", borderBottom:"1px solid var(--cf-divider)", background:"var(--cf-subtle-bg)" }}>
-                  {[
-                    { id:"details",    label:"Details", color:"var(--cf-text-primary)" },
-                    { id:"mappings",   label:`Mappings · ${form.mappings.length}`, color:"#34d399" },
-                    { id:"rule",       label:`Enforcement · ${form.rules.length}`, color:"var(--cf-brand-purple)" },
-                    { id:"evidence",   label:`Evidence · ${form.evidence.length}`, color:"#60a5fa" },
-                  ].map(t => (
-                    <button key={t.id} type="button" onClick={()=>setTab(t.id)} className="focus-ring"
-                      style={{ all:"unset", cursor:"pointer", flex:1, textAlign:"center", padding:"10px 8px", fontSize:12, fontWeight:600,
-                        color: tab===t.id ? t.color : "var(--cf-text-muted)",
-                        background: tab===t.id ? "var(--cf-card-bg)" : "transparent",
-                        borderBottom: tab===t.id ? `2px solid ${t.color}` : "2px solid transparent",
-                        marginBottom:-1 }}>
-                      {t.label}
-                    </button>
-                  ))}
-                </div>
-                <div style={{ padding:16 }}>
-
-              {tab === "details" && (
-              <>
-              <div style={{ display:"grid", gridTemplateColumns:"1fr", gap:14 }}>
-                <div className="field">
-                  <label>Name</label>
-                  <input className="input focus-ring mono" value={form.name} onChange={e=>set("name",e.target.value)} placeholder="e.g. canary-25"/>
-                </div>
-              </div>
-              <div className="field">
-                <label>Description</label>
-                <input className="input focus-ring" value={form.description} onChange={e=>set("description",e.target.value)} placeholder="One-line summary shown in the registry"/>
-              </div>
-              <div className="field">
-                <label>Domain</label>
-                <div className="seg" style={{ width:"fit-content" }}>
-                  {POLICY_DOMAINS.map(dom => {
-                    const active = (policyCategoryMeta(form.category).domain || "platform") === dom.id;
-                    return (
-                      <button key={dom.id} type="button" className={active ? "active" : ""}
-                        onClick={()=>{ if (dom.id === "security") set("category", "security"); else if (form.category === "security") set("category", "deployment"); }}
-                        style={active ? { color: dom.color } : undefined}>
-                        <span style={{ display:"inline-flex", alignItems:"center", gap:6 }}>
-                          <Icon name={dom.icon} size={12}/> {dom.label}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="help">{POLICY_DOMAINS.find(d=>d.id===(policyCategoryMeta(form.category).domain||"platform"))?.blurb}</div>
-              </div>
-              {policyCategoryMeta(form.category).domain !== "security" && (
-                <div className="field">
-                  <label>Category</label>
-                  <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(150px, 1fr))", gap:8 }}>
-                    {POLICY_CATEGORIES.filter(c => c.domain === "platform").map(c => {
-                      const active = form.category === c.id;
-                      return (
-                        <button key={c.id} type="button" onClick={()=>set("category", c.id)}
-                          className="focus-ring"
-                          style={{
-                            display:"flex", alignItems:"flex-start", gap:9, textAlign:"left",
-                            padding:"9px 11px", borderRadius:9, cursor:"pointer",
-                            background: active ? `color-mix(in oklab, ${c.color} 12%, transparent)` : "var(--cf-subtle-bg)",
-                            border: `1px solid ${active ? `color-mix(in oklab, ${c.color} 55%, transparent)` : "var(--cf-divider)"}`,
-                          }}>
-                          <span style={{ flexShrink:0, width:24, height:24, borderRadius:6, display:"grid", placeItems:"center",
-                            background:`color-mix(in oklab, ${c.color} 16%, transparent)`, color:c.color }}>
-                            <Icon name={c.icon} size={13}/>
-                          </span>
-                          <span style={{ minWidth:0 }}>
-                            <span style={{ display:"block", fontSize:12, fontWeight:600, color: active ? c.color : "var(--cf-text-primary)" }}>{c.label}</span>
-                            <span style={{ display:"block", fontSize:10.5, color:"var(--cf-text-muted)", lineHeight:1.35, marginTop:2 }}>{c.blurb}</span>
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-              {form.category === "security" && (
-                <details className="pol-adv-meta" style={{ margin:"4px 0 10px" }}>
-                  <summary style={{ cursor:"pointer", fontSize:11, fontWeight:600, color:"var(--cf-text-muted)", textTransform:"uppercase", letterSpacing:"0.06em" }}>Source metadata (advanced)</summary>
-                  <div style={{ fontSize:11.5, color:"var(--cf-text-muted)", margin:"8px 0 12px", lineHeight:1.5 }}>
-                    Retained for import fidelity and legacy grouping views — this policy's compliance meaning now lives in <strong>Mappings</strong>, not this framework/family tagging.
-                  </div>
-                <div className="field">
-                  <label>Framework</label>
-                  <select className="input focus-ring" value={form.framework||""} onChange={e=>set("framework", e.target.value)}>
-                    <option value="">Choose a framework…</option>
-                    <optgroup label="Standard">
-                      {BUILTIN_FRAMEWORKS.map(f => <option key={f}>{f}</option>)}
-                    </optgroup>
-                    {loadCustomFrameworks().length > 0 && (
-                      <optgroup label="Custom">
-                        {loadCustomFrameworks().map(f => <option key={f.name}>{f.name}</option>)}
-                      </optgroup>
-                    )}
-                  </select>
-                  <div className="help">Determines which grouping field applies below — e.g. NIST 800-53 asks for a control family, CMMC asks for a level.</div>
-                </div>
-              {form.framework === "NIST 800-53" && (
-                <div className="field">
-                  <label>NIST 800-53 control family <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· drives the "Group by → NIST family" view</span></label>
-                  <select className="input focus-ring" value={form.controlFamily} onChange={e=>set("controlFamily", e.target.value)}>
-                    <option value="">Unassigned (shows as "Ungrouped")</option>
-                    {Object.values(CONTROL_FAMILIES).map(f => <option key={f.id} value={f.id}>{f.id} — {f.label}</option>)}
-                  </select>
-                  <div className="help">At scale, most bulk-imported controls won't have this set — an admin can also route them into a group with a text-match rule from Security controls → Manage groupings, without editing each one.</div>
-                </div>
-              )}
-              {form.category === "security" && form.framework === "CMMC 2.0" && (
-                <div className="field">
-                  <label>CMMC 2.0 level <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· drives the "Group by → CMMC level" view</span></label>
-                  <select className="input focus-ring" value={form.cmmcLevel||""} onChange={e=>set("cmmcLevel", e.target.value ? parseInt(e.target.value,10) : "")}>
-                    <option value="">Derive from severity (default)</option>
-                    <option value={1}>Level 1 — Foundational</option>
-                    <option value={2}>Level 2 — Advanced</option>
-                    <option value={3}>Level 3 — Expert</option>
-                  </select>
-                  <div className="help">Left unset, the level is inferred from STIG severity. Set it explicitly if this control maps to a different CMMC practice than its severity implies.</div>
-                </div>
-              )}
-              {form.category === "security" && form.framework === "CIS Benchmark" && (
-                <div className="field">
-                  <label>CIS section <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· drives the "Group by → CIS Benchmark section" view</span></label>
-                  <input className="input focus-ring mono" value={form.cisSection||""} onChange={e=>set("cisSection", e.target.value)} placeholder="e.g. 5.2.3"/>
-                  <div className="help">CIS Benchmark section number this control maps to. SRG/CCI don't apply to CIS — those are DISA-specific identifiers.</div>
-                </div>
-              )}
-              {form.category === "security" && form.framework === "DISA STIG" && (
-              <>
-              <div className="field">
-                <label>SRG IDs</label>
-                <IdChipPicker value={form.srgIds} onChange={v=>set("srgIds",v)}
-                  allKnownIds={knownSrgIds}
-                  placeholder="Type to search or add an SRG id…"/>
-                <div className="help">Security Requirements Guide IDs this control satisfies — searchable from the policy list.</div>
-              </div>
-              <div className="field">
-                <label>CCI IDs</label>
-                <IdChipPicker value={form.cciIds} onChange={v=>set("cciIds",v)}
-                  allKnownIds={knownCciIds}
-                  placeholder="Type to search or add a CCI id…"/>
-                <div className="help">CCI mappings, if applicable.</div>
-              </div>
-              </>
-              )}
-              </details>
-              )}
-              <div className="field">
-                <label>Severity</label>
-                <div className="seg seg-sev" style={{ width:"fit-content" }}>
-                  {[
-                    { v:"high",   l:"High (CAT I)",    c:"#f87171" },
-                    { v:"medium", l:"Medium (CAT II)", c:"#fbbf24" },
-                    { v:"low",    l:"Low (CAT III)",   c:"#60a5fa" },
-                  ].map(o => (
-                    <button key={o.v}
-                      className={form.severity === o.v ? "active" : ""}
-                      onClick={()=>set("severity", o.v)}
-                      style={form.severity === o.v ? {
-                        color: o.c,
-                        background: `color-mix(in oklab, ${o.c} 16%, transparent)`,
-                        boxShadow: `inset 0 0 0 1px color-mix(in oklab, ${o.c} 45%, transparent)`,
-                      } : { color: "var(--cf-text-secondary)" }}>
-                      <span style={{ display:"inline-flex", alignItems:"center", gap:6 }}>
-                        <span style={{ width:7, height:7, borderRadius:"50%", background:o.c }}/>
-                        {o.l}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-                <div className="help">Drives how failures of this control are weighted in compliance scoring and evidence reports.</div>
-              </div>
-              <div className="field">
-                <label>Rationale</label>
-                <textarea className="input focus-ring" rows={2} value={form.rationale} onChange={e=>set("rationale",e.target.value)}
-                  placeholder="Why this policy exists — shown in detail view" style={{ resize:"vertical" }}/>
-              </div>
-              </>
-              )}
-
-              {tab === "mappings" && (
-              <>
-              <div style={{ fontSize:12, color:"var(--cf-text-secondary)", marginBottom:10, lineHeight:1.5 }}>
-                Map this policy to the compliance requirements it implements, supports, or provides evidence for. Policies can map to requirements from multiple frameworks.
-              </div>
-              {form.mappings.length === 0 ? (
-                <div className="sd-callout sd-callout-info" style={{ marginBottom:10 }}>
-                  <Icon name="check" size={13}/>
-                  <div style={{ fontSize:12 }}>No compliance mappings yet. This policy can still be used as an operational/custom policy with zero mappings.</div>
-                </div>
-              ) : (
-                <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom:10 }}>
-                  {form.mappings.map(m => { const req = reqById(m.requirementId); const fw = frameworkById(req?.frameworkId); const readOnly = m.provenance === "imported"; return (
-                    <div key={m.id} style={{ padding:"9px 11px", background:"var(--cf-subtle-bg)", borderRadius:8, border:"1px solid var(--cf-divider)" }}>
-                      <div style={{ display:"flex", justifyContent:"space-between", gap:8, alignItems:"flex-start" }}>
-                        <div style={{ minWidth:0 }}>
-                          <div style={{ fontSize:11, fontWeight:700, color:"var(--cf-text-muted)", textTransform:"uppercase", letterSpacing:"0.04em" }}>{fw?.name} {fw?.version}</div>
-                          <div className="mono" style={{ fontSize:12.5, fontWeight:600, marginTop:2 }}>{req?.externalId} <span className="mono" style={{ fontWeight:400, color:"var(--cf-text-secondary)" }}>· {req?.title}</span></div>
-                          <div style={{ fontSize:11, marginTop:4 }}><strong>{relationshipMeta(m.relationship).label}</strong> <span style={{ color:"var(--cf-text-muted)" }}>· {m.coverage === "full" ? "Full" : "Partial"} coverage</span></div>
-                          {m.rationale && <div style={{ fontSize:10.5, color:"var(--cf-text-muted)", marginTop:3 }}>{m.rationale}</div>}
-                          <div style={{ fontSize:9.5, color:"var(--cf-text-muted)", marginTop:4 }}>{readOnly ? `Imported from ${m.importedFrom||"benchmark"} · read-only` : "Manual mapping"}</div>
-                        </div>
-                        {!readOnly && (
-                          <div style={{ display:"flex", gap:4, flexShrink:0 }}>
-                            <button className="btn-icon focus-ring" title="Edit mapping" onClick={()=>setMappingEditor(mappingEditor?.mapping?.id===m.id ? null : { mapping:m })}><Icon name="gear" size={12}/></button>
-                            <button className="btn-icon focus-ring" title="Remove mapping" onClick={()=>removeMapping(m.id)}><Icon name="x" size={12}/></button>
-                          </div>
-                        )}
-                      </div>
-                      {mappingEditor?.mapping?.id === m.id && (
-                        <InlineMappingEditor
-                          initial={mappingEditor.mapping}
-                          existingMappings={form.mappings}
-                          onCancel={()=>setMappingEditor(null)}
-                          onSave={(mm)=>{ saveMapping(mm); setMappingEditor(null); }}
-                        />
-                      )}
-                    </div>
-                  ); })}
-                </div>
-              )}
-              {mappingEditor && !mappingEditor.mapping && (
-                <InlineMappingEditor
-                  existingMappings={form.mappings}
-                  onCancel={()=>setMappingEditor(null)}
-                  onSave={(mm)=>{ saveMapping(mm); setMappingEditor(null); }}
-                />
-              )}
-              {!mappingEditor && (
-                <button className="btn btn-ghost focus-ring" type="button" onClick={()=>setMappingEditor({})}>
-                  <Icon name="plus" size={12}/> Add mapping
-                </button>
-              )}
-              </>
-              )}
-
-              {tab === "rule" && (
-              <>
-              {/* Rules */}
-              <div>
-                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:8 }}>
-                  <label style={{ fontSize:12, fontWeight:600 }}>Assertions &amp; gate rules ({form.rules.length})</label>
-                  <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>All must hold — each compiles to a nix-eval-job check.</span>
-                </div>
-                <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-                  {form.rules.map((r, i) => (
-                    <div key={i} style={{ display:"grid", gridTemplateColumns:"1fr auto", gap:8, alignItems:"center", padding:"8px 10px", background:"var(--cf-subtle-bg)", borderRadius:8 }}>
-                      <RuleEditor rule={r} onChange={patch => updateRule(i, patch)}/>
-                      <button className="btn-icon focus-ring" onClick={()=>removeRule(i)} title="Remove rule">
-                        <Icon name="x" size={13}/>
-                      </button>
-                    </div>
-                  ))}
-                </div>
-                <div style={{ marginTop:8, display:"flex", gap:8, flexWrap:"wrap" }}>
-                  <select className="input focus-ring" defaultValue=""
-                    onChange={e => { if (e.target.value) { addRule(e.target.value); e.target.value = ""; } }}
-                    style={{ maxWidth:260, fontSize:12 }}>
-                    <option value="" disabled>+ Add assertion / rule…</option>
-                    <optgroup label="NixOS config assertions">
-                      <option value="packages_installed">Packages installed</option>
-                      <option value="nixos_option">NixOS option equals</option>
-                      <option value="custom_eval">Custom nix expression</option>
-                    </optgroup>
-                    <optgroup label="Pipeline gates">
-                      <option value="eval_passed">Eval must pass</option>
-                      <option value="build_succeeded">Build must succeed</option>
-                      <option value="cve_block">CVE gate</option>
-                    </optgroup>
-                    <optgroup label="Rollout gates">
-                      <option value="time_window">Time window</option>
-                      <option value="approval_required">Approval required</option>
-                      <option value="rollout_percent">Canary rollout</option>
-                    </optgroup>
-                  </select>
-                </div>
-              </div>
-              </>
-              )}
-
-              {tab === "evidence" && (
-              <>
-              {/* Evidence */}
-              <div>
-                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:8 }}>
-                  <label style={{ fontSize:12, fontWeight:600 }}>Evidence for ATO ({form.evidence.length})</label>
-                  <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>Artifacts collected to prove compliance to an assessor.</span>
-                </div>
-                {form.evidence.length === 0 && (
-                  <div className="sd-callout sd-callout-info" style={{ marginBottom:8 }}>
-                    <Icon name="file" size={13}/>
-                    <div style={{ fontSize:12 }}>No evidence defined. Without it, this policy gates deploys but produces nothing for an audit package. Add command output, logs, or attestations.</div>
-                  </div>
-                )}
-                <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-                  {form.evidence.map((ev, i) => (
-                    <div key={i} style={{ display:"grid", gridTemplateColumns:"1fr auto", gap:8, alignItems:"flex-start", padding:"8px 10px", background:"var(--cf-subtle-bg)", borderRadius:8 }}>
-                      <EvidenceEditor ev={ev} onChange={patch => updateEvidence(i, patch)}/>
-                      <button className="btn-icon focus-ring" onClick={()=>removeEvidence(i)} title="Remove evidence">
-                        <Icon name="x" size={13}/>
-                      </button>
-                    </div>
-                  ))}
-                </div>
-                <div style={{ marginTop:8 }}>
-                  <select className="input focus-ring" defaultValue=""
-                    onChange={e => { if (e.target.value) { addEvidence(e.target.value); e.target.value = ""; } }}
-                    style={{ maxWidth:260, fontSize:12 }}>
-                    <option value="" disabled>+ Add evidence source…</option>
-                    <option value="command">Command output</option>
-                    <option value="log">Log line match</option>
-                    <option value="file">File contents</option>
-                    <option value="unit_state">systemd unit state</option>
-                    <option value="eval_attr">Nix eval attribute</option>
-                    <option value="attestation">Signed attestation</option>
-                  </select>
-                </div>
-              </div>
-              </>
-              )}
-
-                </div>
-              </div>
-
-              {isEdit && (
-                <div style={{ marginTop:10, paddingTop:14, borderTop:"1px solid var(--cf-divider)" }}>
-                  <div style={{ fontSize:11, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", marginBottom:8 }}>Danger zone</div>
-                  <button className="btn btn-ghost focus-ring" onClick={()=>setConfirmDelete(true)} style={{ color:"#f87171", borderColor:"rgba(248,113,113,0.3)" }}>
-                    <Icon name="x" size={12}/> Remove policy
-                  </button>
-                </div>
-              )}
-            </div>
-            <div className="modal-foot">
-              <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
-              <button className="btn btn-primary focus-ring" onClick={()=>{ doSave(); onClose(); }} disabled={!form.name}>
-                <Icon name="check" size={13}/> {isEdit ? "Save changes" : "Create policy"}
-              </button>
-            </div>
-          </>
-        )}
-      </div>
-    </div>
   );
 }
 
@@ -1897,4 +1651,4 @@ function DeletePolicyConfirm({ policy, onCancel, onConfirm }) {
   );
 }
 
-Object.assign(window, { PoliciesView, PolicyDrawer, RuleEditor, policyToExternal, externalToPolicy, slugify, downloadFile, exportPolicies, parsePolicyFile, ruleDescription, ImportPoliciesModal, RevisionPickerModal, AdminGroupingsModal, InlineMappingEditor });
+Object.assign(window, { PoliciesView, PolicyDrawer, RuleEditor, policyToExternal, externalToPolicy, slugify, downloadFile, exportPolicies, parsePolicyFile, ruleDescription, ImportPoliciesModal, RevisionPickerModal, EvidenceEditor, AdminGroupingsModal, InlineMappingEditor, PolicyRow, BulkDeletePoliciesConfirm });

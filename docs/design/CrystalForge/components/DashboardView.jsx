@@ -8,6 +8,8 @@ function DashboardView({ onNavigate }) {
       if (saved) {
         const parsed = JSON.parse(saved);
         if (!parsed.find(w => w.id === "attestationTrust")) parsed.splice(1, 0, { id:"attestationTrust", cols:1 }, { id:"deployApprovals", cols:1 });
+        if (!parsed.find(w => w.id === "poamSummary")) parsed.splice(1, 0, { id:"poamSummary", cols:1 });
+        if (!parsed.find(w => w.id === "poamWatchlist")) parsed.push({ id:"poamWatchlist", cols:2 });
         return parsed;
       }
     } catch {}
@@ -170,7 +172,7 @@ function DashboardView({ onNavigate }) {
 // Widgets whose content is a list/feed — extra height shows more rows.
 // Everything else (stat rollups, the self-sizing git graph) stays fit-to-content.
 const HEIGHT_RESIZABLE = new Set([
-  "deploymentTimeline", "recentCommits", "topAffected",
+  "deploymentTimeline", "recentCommits", "topAffected", "poamWatchlist",
 ]);
 // rows setting → how many list items the widget shows.
 const HEIGHT_COUNTS = { 1: 4, 2: 8, 3: 13 };
@@ -190,6 +192,8 @@ function Widget({ id, editMode, onNavigate, rows }) {
     case "quickActions":    return <WQuickActions onNavigate={onNavigate}/>;
     case "deployApprovals": return <WDeployApprovals onNavigate={onNavigate}/>;
     case "attestationTrust": return <WAttestationTrust onNavigate={onNavigate}/>;
+    case "poamSummary":      return <WPoamSummary onNavigate={onNavigate}/>;
+    case "poamWatchlist":    return <WPoamWatchlist onNavigate={onNavigate} rows={rows}/>;
     default: return <div style={{ padding:14 }}>Unknown widget</div>;
   }
 }
@@ -257,6 +261,65 @@ function WAttestationTrust({ onNavigate }) {
           <div className="dash-w-mini"><span>Authorized</span><strong style={{ color:"#34d399" }}>{authorizedCurrent}</strong></div>
           <div className="dash-w-mini"><span>Stale evidence</span><strong style={{ color: staleEvidence > 0 ? "#60a5fa" : undefined }}>{staleEvidence}</strong></div>
         </div>
+      </div>
+    </>
+  );
+}
+
+function WPoamSummary({ onNavigate }) {
+  usePoamStore();
+  const list = typeof POAMS !== "undefined" ? POAMS : [];
+  const open = list.filter(p => p.status !== "completed");
+  const overdue = open.filter(poamIsOverdue).length;
+  const awaiting = open.filter(p => p.status === "awaiting_verification").length;
+  const closed = list.filter(p => p.status === "completed").length;
+  return (
+    <>
+      <WidgetHeader icon="activity" title="POA&M Summary" action="Review →" onAction={() => onNavigate("compliance")}/>
+      <div className="dash-w-body" style={{ display:"flex", flexDirection:"column", gap:10 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline" }}>
+          <span style={{ fontSize:32, fontWeight:700, color: open.length > 0 ? "#60a5fa" : "#34d399", lineHeight:1, fontVariantNumeric:"tabular-nums" }}>{open.length}</span>
+          <span style={{ fontSize:12, color:"var(--cf-text-muted)" }}>open remediation plans</span>
+        </div>
+        {overdue > 0 && (
+          <div style={{ padding:"8px 10px", borderRadius:6, background:"rgba(248,113,113,0.08)", border:"1px solid rgba(248,113,113,0.25)", fontSize:11, color:"#fca5a5" }}>
+            {overdue} overdue
+          </div>
+        )}
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, fontSize:11 }}>
+          <div className="dash-w-mini"><span>Awaiting verification</span><strong style={{ color: awaiting > 0 ? "#a78bfa" : undefined }}>{awaiting}</strong></div>
+          <div className="dash-w-mini"><span>Closed</span><strong style={{ color:"#34d399" }}>{closed}</strong></div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function WPoamWatchlist({ onNavigate, rows }) {
+  usePoamStore();
+  const list = typeof POAMS !== "undefined" ? POAMS : [];
+  const ranked = list
+    .filter(p => p.status !== "completed")
+    .map(p => ({ p, overdue: poamIsOverdue(p) }))
+    .filter(x => x.overdue || x.p.status === "awaiting_verification")
+    .sort((a, b) => (b.overdue - a.overdue) || (a.p.due || "").localeCompare(b.p.due || ""))
+    .slice(0, HEIGHT_COUNTS[rows || 1] || 5);
+  return (
+    <>
+      <WidgetHeader icon="activity" title="POA&M Watchlist" action="Review →" onAction={() => onNavigate("compliance")}/>
+      <div className="dash-w-body" style={{ display:"flex", flexDirection:"column", gap:6 }}>
+        {ranked.map(({ p, overdue }) => (
+          <div key={p.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"7px 10px", background:"var(--cf-subtle-bg)", borderRadius:6, fontSize:12, cursor:"pointer" }}
+            onClick={() => { onNavigate("compliance"); if (typeof openPoamDetail === "function") setTimeout(() => openPoamDetail(p.id), 60); }}>
+            <span className="mono" style={{ fontWeight:700, fontSize:11, color:"var(--cf-brand-purple)", flexShrink:0 }}>{p.id}</span>
+            <span style={{ flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.title}</span>
+            <span className="chip" style={{ fontSize:9.5, flexShrink:0, color: overdue ? "#f87171" : "#a78bfa", background: overdue ? "rgba(248,113,113,0.14)" : "rgba(167,139,250,0.16)" }}>
+              {overdue ? "Overdue" : "Awaiting verification"}
+            </span>
+            <span style={{ fontSize:10, color:"var(--cf-text-muted)", flexShrink:0 }}>{p.owner}</span>
+          </div>
+        ))}
+        {ranked.length === 0 && <div style={{ fontSize:12, color:"var(--cf-text-muted)" }}>Nothing overdue or awaiting verification.</div>}
       </div>
     </>
   );
@@ -769,6 +832,9 @@ const WIDGET_CATEGORIES = {
   recentCommits:      "Activity",
   deploymentTimeline: "Activity",
   gitGraph:           "Activity",
+  attestationTrust:   "Security",
+  poamSummary:        "Security",
+  poamWatchlist:      "Security",
   quickActions:       "Actions",
 };
 const CATEGORY_ORDER = ["Fleet", "Pipeline", "Security", "Activity", "Infrastructure", "Actions"];

@@ -320,9 +320,11 @@ function App() {
   const [policyFocus, setPolicyFocus] = React.useState(null);
   const [policyBackTo, setPolicyBackTo] = React.useState(null);
   const [complianceBundleView, setComplianceBundleView] = React.useState(null);
+  const [complianceFinding, setComplianceFinding] = React.useState(null);
   const [detailTab, setDetailTab] = React.useState("overview");
   const [topView, setTopView] = React.useState("dashboard"); // dashboard | systems | builds | evals | flakes | environments | caches | cves
   const coach = useCoach();
+  React.useEffect(() => { window.__cfCoach = coach; }, [coach]);
   const [classif, setClassif] = React.useState(() => {
     try { const r = localStorage.getItem("cf.classification"); if (r) return JSON.parse(r); } catch {}
     return { enabled: false, level: "UNCLASSIFIED", text: "" };
@@ -402,7 +404,7 @@ function App() {
           {topView === "caches" && <CachesView focus={cacheFocus} onClearFocus={() => setCacheFocus(null)} onOpenSystem={(s) => { setTopView("systems"); openDetail(s); }} />}
           {topView === "builders" && <BuildersView defaultView={defaultView} />}
           {topView === "policies" && <PoliciesView onOpenSystem={(s)=>{ setTopView("systems"); openDetail(s); }} focus={policyFocus} onClearFocus={() => setPolicyFocus(null)} backTo={policyBackTo} onBack={() => { const bt = policyBackTo; setPolicyBackTo(null); if (bt) { setComplianceBundleId(bt.bundleId); setComplianceBundleView("coverage"); setTopView("compliance"); } }} onClearBack={() => setPolicyBackTo(null)} />}
-          {topView === "compliance" && <ComplianceView selectedBundleId={complianceBundleId} onClearBundle={() => setComplianceBundleId(null)} selectedBundleView={complianceBundleView} onClearBundleView={() => setComplianceBundleView(null)} onOpenSystem={(s)=>{ setTopView("systems"); openDetail(s); }} onOpenPolicy={(id, bundleId) => { setPolicyFocus(id); setPolicyBackTo({ bundleId, label:"Back to compliance" }); setTopView("policies"); }}/>}
+          {topView === "compliance" && <ComplianceView selectedBundleId={complianceBundleId} onClearBundle={() => setComplianceBundleId(null)} selectedBundleView={complianceBundleView} onClearBundleView={() => setComplianceBundleView(null)} selectedFinding={complianceFinding} onClearFinding={() => setComplianceFinding(null)} onOpenSystem={(s)=>{ setTopView("systems"); openDetail(s); }} onOpenPolicy={(id, bundleId) => { setPolicyFocus(id); setPolicyBackTo({ bundleId, label:"Back to compliance" }); setTopView("policies"); }}/>}
           {topView === "cves" && <CvesView onOpenSystem={(s)=>{ setTopView("systems"); openDetail(s); }}/>}
           {topView === "dashboard" && <DashboardView onNavigate={(r, focus) => { setTopView(r); setDetailSystem(null); if (focus && r === "evals") setEvalFocus(focus); if (focus && r === "builds") setBuildFocus(focus); }}/>}
           {topView === "admin" && <AdminView onNavigate={(r) => { setTopView(r); setDetailSystem(null); }} coach={coach} classif={classif} onClassif={setClassif}/>}
@@ -466,6 +468,7 @@ function App() {
       
       <SetupCoach coach={coach} onNavigate={goTo} />
       <CoachBubble coach={coach} topView={topView} />
+      <PoamDetailHost onOpenFinding={(f) => { setDetailSystem(null); setComplianceFinding(f); setTopView("compliance"); }} />
     </div>);
 
 }
