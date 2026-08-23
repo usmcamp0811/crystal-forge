@@ -1,10 +1,11 @@
 ---
 id: TASK-410
 title: Refactor Dashboard view UI/UX for exact parity with latest design examples
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - opencode-agent
 created_date: '2026-05-31 15:14'
-updated_date: '2026-06-10 02:53'
+updated_date: '2026-08-23 19:54'
 labels:
   - ui
   - dashboard
@@ -104,3 +105,11 @@ This task is intentionally strict and objective. Parity decisions must defer to 
 - [ ] #1 Attach dashboard loading-state and loaded-state screenshot evidence from web-ui checks to MR.
 - [ ] #2 Document any unavoidable visual deltas with rationale and explicit sign-off request (if exact parity cannot be achieved due to technical constraints).
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-agent on reckless in /home/mcamp/code/crystal-forge/TASK-410-dashboard-parity
+
+Preflight: branch `TASK-410-dashboard-parity` at committed `dev` HEAD `24835e6c`; dedicated worktree verified clean. The `main` integration worktree is clean. Per user authorization, the three unrelated untracked files in the `dev` integration worktree are left untouched. Authoritative design source for this execution is the repository copy under `docs/design/CrystalForge`, per user direction. Intended scope is dashboard view/components/styles and authoritative web-ui assertions/screenshots only. Planned verification follows task AC: WASM cargo check and `checks.x86_64-linux.web-ui`, with targeted formatting/tests as applicable.
+<!-- SECTION:NOTES:END -->
