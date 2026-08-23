@@ -3,11 +3,11 @@ id: TASK-433.3
 title: >-
   TASK-433 Phase 2: Unified policy editor
   (Basics/Enforcement/Compliance/Evidence/Provenance)
-status: In Progress
+status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-23 16:20'
+updated_date: '2026-08-23 18:13'
 labels:
   - design-parity
   - policy
@@ -78,9 +78,16 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Phase 2 implementation started. Added server-side enforcement that policy requirement mapping update/delete operations only affect provenance=manual mappings; imported mappings now return HTTP 409 Conflict with a read-only error. Verified with `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all -- --check` and `nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-server`. Phase 1 GitLab CI remains pending/unverified per user authorization.
+## Design Decisions
+- Provenance source of truth: `compliance_source_artifacts` → `fetch_policy_version_provenance` → DTO. Never inferred from display strings.
+- Empty enforcement canonical form: `{"mode":"all","rules":[]}` — no extra fields. Evaluator skips it. Validator rejects invalid mode even on empty rule sets.
+- Mapping editability: `provenance == "manual"` only. All non-manual values (imported, inherited, inferred, suggested) are read-only.
+- Category selector: single four-value radio (Deployment/Pipeline/Rollout/Security). Selecting a category changes guidance text only; never mutates rules.
+- Import path for provenance: `docs/design/CrystalForge/components/PolicyEditor.jsx`.
 
-Phase 2 implementation committed as 4f38564a and pushed to origin/TASK-433-policy-poam-workflows (MR !318). Unified editor now presents Basics, Compliance, Enforcement, and Evidence sections; imported mapping provenance is read-only; mapping/enforcement state is explicit; empty enforcement saves as an explicit empty custom_check rule set; existing rules remain untouched by category changes. `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml` passed; `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml` passed (201 passed, 1 ignored); targeted server test passed. The Nix web-ui package build completed; the full web-ui VM check was started but exceeded the execution timeout before completion and is unverified.
+## Out-of-Scope Decisions
+- System-detail PolicyTab: flagged as using a local shadow `PolicyDefinition` type. Left as-is because it edits local presets, not real API policies. Would require TASK-422 architecture rewrite to route through shared editor.
+- Phase-1 GitLab CI verification: not explicitly verified. Proceeded under user authorization.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
@@ -91,3 +98,44 @@ created: 2026-08-23 14:19
 Started Phase 2 under explicit user override of the pending Phase-1 CI gate. Phase-1 head is present and working tree is clean; MR !318 pipeline remains pending/running at this time. Scope is limited to unified policy editor and mapping/provenance behavior; later phases will not be implemented.
 ---
 <!-- COMMENTS:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+## Phase 2 Remediation Complete — All 10 ACs Pass
+
+### Changes Made
+
+**Server (5 files):**
+- `PolicyOriginProvenance` DTO added to `api/models.rs` with all authoritative fields
+- `fetch_policy_version_provenance()` in `queries/deployment_policies.rs` — single recursive CTE, no N+1
+- `fetch_policy_version_summaries()` hydrates provenance via batched query
+- `validate_policy_config()` rejects invalid mode on empty rule sets too
+- `parse_custom_check_skips_the_explicit_no_enforcement_representation` test confirms `{"mode":"all","rules":[]}` → `None`
+
+**Frontend (6 files):**
+- `PolicyOriginProvenance` mirror DTO in `web-ui/src/api/models.rs`
+- `PolicyDefinition` and `PolicyRevisionSummary` carry `provenance` field
+- `policy_is_imported()`, `PolicyCategory`, `recommended_enforcement()`, `off_category_rule_kinds()`, `POLICY_CATEGORIES` in `types.rs`
+- `policy_editor_modal.rs` rewritten: five tabs (Basics/Enforcement/Compliance/Evidence/Provenance), single four-value category radio, origin-aware empty states, no seeded unsavable rules, `build_persisted_payload` emits canonical `{"mode":"all","rules":[]}`
+- Mapping loading on editor open, non-manual = read-only, accurate provenance labels
+- `policy_definition_for_revision()` in `policies_api.rs` projects exact revision for editing
+- Compliance drawer opens shared `PolicyEditorModal`
+
+**DB Tests (1 file):**
+- `policy_editor_phase2.rs` — 5 tests: custom→no provenance, imported→correct provenance, derived draft→inherits provenance, manual mapping CRUD, non-manual mutation rejection
+
+**Browser Tests (1 file):**
+- `20ab-policy-editor-no-enforcement-unmapped-roundtrip` — zero enforcement persists, survives reload, stays savable
+- `20ac-policy-editor-category-and-imported-provenance` — category change preserves rules, imported provenance tab read-only
+
+### Verification
+- `nix build .#checks.x86_64-linux.server-regressions` ✅
+- `nix build .#checks.x86_64-linux.web-ui` ✅
+- `nix build .#packages.x86_64-linux.server` ✅
+- `nix build .#packages.x86_64-linux.web-ui` ✅
+- `cargo fmt --all -- --check` ✅ (both server and web-ui)
+- `cargo check --all-targets` ✅ (both server and web-ui)
+- `cargo test` ✅ (web-ui: 207 passed, 0 failed)
+- Independent maintainer review: all 10 ACs pass, no defects found
+<!-- SECTION:FINAL_SUMMARY:END -->
