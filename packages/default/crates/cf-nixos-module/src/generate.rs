@@ -235,6 +235,7 @@ fn render_manifest(
                 "version": generated.policy.version,
                 "policy_type": generated.policy.policy_type,
                 "implementation_state": generated.policy.implementation_state,
+                "publication_state": generated.policy.publication_state,
                 "semantic_digest": generated.policy.semantic_digest,
                 "generated_file": MANIFEST_FILE,
                 "source_inputs": generated.policy.origin.input_labels,
@@ -511,6 +512,7 @@ mod tests {
         let policy = &manifest["policies"][0];
         assert_eq!(policy["policy_id"], L1);
         assert_eq!(policy["policy_version_id"], V1);
+        assert_eq!(policy["publication_state"], "accepted");
         assert_eq!(policy["semantic_digest"], "digest-alpha");
         assert_eq!(policy["source_inputs"], serde_json::json!(["in.json"]));
         assert_eq!(policy["source_export_digests"], serde_json::json!(["f00d"]));

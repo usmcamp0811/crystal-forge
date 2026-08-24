@@ -431,14 +431,23 @@ mod tests {
     }
 
     #[test]
-    fn mutable_bundle_export_is_rejected() {
+    fn mutable_selected_policy_in_accepted_bundle_is_rejected() {
         let xml = crate::fixture::bundle_xccdf_xml().replace(
-            "publication-state=\"accepted\"",
-            "publication-state=\"interim\"",
+            "policy-version-id=\"urn:uuid:22222222-0000-0000-0000-0000000000a1\" publication-state=\"accepted\"",
+            "policy-version-id=\"urn:uuid:22222222-0000-0000-0000-0000000000a1\" publication-state=\"draft\"",
         );
-        let error = load_input(xml.as_bytes(), "interim.xml").expect_err("interim must fail");
+        assert!(xml.contains("<cf:bundle "));
+        assert!(xml.contains("publication-state=\"accepted\""));
+        let error = load_input(xml.as_bytes(), "draft-policy.xml")
+            .expect_err("draft selected policy must fail");
         assert!(error.message.contains("publication_state"), "{error}");
-        assert!(error.message.contains("interim"), "{error}");
+        assert!(error.message.contains("draft"), "{error}");
+        assert!(
+            error
+                .message
+                .contains("22222222-0000-0000-0000-0000000000a1"),
+            "{error}"
+        );
     }
 
     #[test]
