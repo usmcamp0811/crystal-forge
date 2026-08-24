@@ -1,11 +1,11 @@
 ---
 id: TASK-433.4
 title: 'TASK-433 Phase 3: NixOS option metadata and composite policy serializer'
-status: Review
+status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-24 06:38'
+updated_date: '2026-08-24 13:03'
 labels:
   - design-parity
   - policy
@@ -54,6 +54,7 @@ nix build .#checks.x86_64-linux.server-regressions --no-link
 - [x] #1 NixOS option editor supports boolean, enum, numeric, short, multiline and unknown/custom fallback from real metadata or safe fallback.
 - [x] #2 Long semantic values round-trip exact difficult strings including the DoD multiline banner.
 - [x] #3 Composite and legacy policy representations have deterministic digest/round-trip and preserve immutable history.
+- [ ] #4 Permanent repository documentation states that packaged NixOS option metadata is authoring guidance from Crystal Forge's pinned nixpkgs rather than authoritative target schema and regression coverage preserves the unknown/custom path
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -71,6 +72,8 @@ nix build .#checks.x86_64-linux.server-regressions --no-link
 8. Extend the accepted Phase-2 common Dioxus editor: typed composite hydration/serialization, stable UUID state, debounced bounded metadata search with stale-response suppression, distinct loading/error/unavailable/zero-result states, manual arbitrary paths, metadata-driven boolean/enum/integer/string/lines controls, and unknown/custom semantic-string fallback. Untouched legacy policies remain legacy; unsupported/opaque types cannot be mistaken for intentional zero enforcement.
 9. Add exact semantic round-trip tests using the repository's full `DOD_CONSENT_BANNER` content (read from the authoritative design file without trimming) plus a difficult quotes/backslashes/`${...}`/blank-lines/leading-trailing-whitespace string. Add provider unit tests, composite serde/validation/digest tests, a live isolated-Postgres immutable ancestor/derived composite draft regression, API/import bypass regressions, and browser workflow coverage for real metadata types, unknown fallback, exact banner reload, and stable IDs.
 10. Run all required server/web/Nix/SQLx/browser checks plus the metadata package/check and `nix flake check --keep-going` if feasible. Then perform separate requirements, data integrity, runtime safety, metadata correctness, performance, UI/error-state, E2E, and regression-adequacy reviews. Only if AC1-AC3 are completely proven: record exact evidence, move TASK-433.4 to Review, update MR !318, commit/push, confirm clean worktree, and stop before Phase 4.
+
+11. Review follow-up: add a focused architecture document under the existing `docs/` hierarchy that records metadata source, authoring uses, foreign-flake limitations, authority hierarchy, unknown/custom invariant, version-skew examples, future target-specific metadata/cache identity, and the Phase 3/Phase 4 boundary. Link it from the policy enforcement documentation and TASK-433.4 notes; add concise provider/API authority comments; confirm server and browser tests preserve unknown-option authoring rather than treating baseline absence as target invalidity. Run targeted documentation/code checks, Web UI and server tests, and the authoritative browser check as needed, then update MR evidence and return the task to Review.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -83,6 +86,8 @@ Final verification proved all Phase 3 acceptance criteria. The authoritative bro
 Pushed commit `a00e15ff` to `origin/TASK-433-policy-poam-workflows`. MR !318 was updated with the Phase 3 summary, exact verification evidence, and the passing dark-mode browser screenshot. The new MR pipeline is running at https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2784287195. Per repository workflow, the task is now in Review rather than Done; it must not move to Done until the MR is merged and the dedicated worktree is removed.
 
 After the initial push, GitLab reported one merge conflict in the canonical TASK-433.2 backlog record because `dev` had advanced through task-metadata commits. `git merge-tree` confirmed this was the only conflict and no application code conflicted. Merged `origin/dev` with the canonical `dev` TASK-433.2 record in merge commit `0e03d783` and pushed it. MR !318 now reports `has_conflicts: false`; the task worktree is clean and matches origin. The Phase 3 implementation commit remains `a00e15ff`.
+
+Review feedback reopened Phase 3 to make metadata authority explicit. The packaged catalog is generated from Crystal Forge's pinned nixpkgs and is authoring guidance only; a monitored foreign flake's own evaluation remains authoritative. Scope is documentation, concise provider/API comments, and regression protection for the existing unknown/custom path only. Target-specific metadata generation remains future work and Phase 4 execution will not be implemented here.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
