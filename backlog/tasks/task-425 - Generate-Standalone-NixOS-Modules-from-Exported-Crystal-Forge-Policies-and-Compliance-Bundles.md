@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude-opus-5'
 created_date: '2026-08-16 15:17'
-updated_date: '2026-08-24 13:45'
+updated_date: '2026-08-24 14:04'
 labels:
   - cli
   - nixos
@@ -284,6 +284,10 @@ Implemented TASK-425 through commit 29d39e2e, then fixed MR !317 review findings
 Commit 696707c8 specifically added default-apply/explicit-disable behavior, immutable accepted/deprecated policy lifecycle validation, accepted bundle lifecycle validation, manifest `generated_file`, history-independent output rejection, immutable bundle-version baseline identity, and discriminating regressions. It was rebased onto current `origin/dev` and pushed to MR !317.
 
 P2 remediation now in progress: add implemented-policy `publication_state` to `manifest.json` with a regression assertion, replace the broad XCCDF lifecycle mutation with a regression where the bundle remains accepted while one selected policy is draft, and rerun required verification. TASK-425 remains In Progress; DoD items remain unchecked until final verification and pipeline completion.
+
+P2 remediation committed and pushed as dbf49f81 (MR !317 branch). Changes: implemented policy manifest entries now emit `publication_state` from `ResolvedPolicy`, with `generate::tests::manifest_records_full_provenance` asserting `accepted`; the XCCDF lifecycle regression now mutates only selected policy version `22222222-0000-0000-0000-0000000000a1` to `draft`, asserts the bundle remains accepted, and verifies rejection names the policy lifecycle state and immutable version ID.
+
+Verification against dbf49f81/current origin/dev: `nix develop -c cargo fmt --all --check` passed; `nix develop -c env SQLX_OFFLINE=true cargo check -p cf-compliance -p cf-nixos-module -p cf-server --all-targets` passed; `nix develop -c env SQLX_OFFLINE=true cargo test -p cf-compliance -p cf-nixos-module` passed with 302 cf-compliance, 75 cf-nixos-module library, 7 CLI, and 16 integration tests passing, 1 cf-compliance test ignored; `nix develop -c env SQLX_OFFLINE=true cargo test -p cf-server --lib` passed with 889 tests and 376 ignored; `nix build .#checks.x86_64-linux.compliance-module --no-link -L` passed with 22 assertions; `nix build .#checks.x86_64-linux.nixos-module-generation --no-link -L` passed; `nix build .#cf-nixos-module --no-link -L` passed after retry with longer timeout; `nix build .#server --no-link -L` passed after retry and ran 891 package tests with 0 failures. `nix flake check --keep-going` evaluated outputs and began 108 checks but exceeded the local 120-second timeout while building broader checks; it was not completed. MR pipeline for dbf49f81 is pending, so keep TASK-425 In Progress and DoD unchecked.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
