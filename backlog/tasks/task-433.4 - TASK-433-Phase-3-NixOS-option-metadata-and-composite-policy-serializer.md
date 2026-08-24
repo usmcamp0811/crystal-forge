@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-24 06:36'
+updated_date: '2026-08-24 06:38'
 labels:
   - design-parity
   - policy
@@ -81,6 +81,8 @@ Ownership/preflight audit: task worktree is clean at 36736d8d with no later comm
 Final verification proved all Phase 3 acceptance criteria. The authoritative browser workflow `20ab1-policy-editor-composite-metadata-roundtrip` passed against real packaged NixOS metadata and produced dark/light screenshots at `/nix/store/kcfzj8xvfrvfslbj7q5wcy24dik5zwvh-vm-test-run-crystal-forge-web-ui-mega-integration/screenshots/`. The workflow verifies boolean, enum, integer, lines, and unknown/custom controls; exact DoD banner and difficult-string reload; semantic JSON values; unique stable UUIDv4 IDs; hydration; reorder; and reserialization. A catalog reload defect in the test was corrected by reopening the Security domain, and dynamic enum hydration was made explicit by preserving the selected option. Targeted Web UI tests passed (30/30), the authoritative Web UI Nix check passed, and final `nix flake check --keep-going` completed with `all checks passed!`. One earlier Web-check attempt failed in the known unrelated timing-sensitive hardening scanner test; the unchanged retry passed. Phase 4 execution remains intentionally unimplemented and composite execution paths fail closed.
 
 Pushed commit `a00e15ff` to `origin/TASK-433-policy-poam-workflows`. MR !318 was updated with the Phase 3 summary, exact verification evidence, and the passing dark-mode browser screenshot. The new MR pipeline is running at https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2784287195. Per repository workflow, the task is now in Review rather than Done; it must not move to Done until the MR is merged and the dedicated worktree is removed.
+
+After the initial push, GitLab reported one merge conflict in the canonical TASK-433.2 backlog record because `dev` had advanced through task-metadata commits. `git merge-tree` confirmed this was the only conflict and no application code conflicted. Merged `origin/dev` with the canonical `dev` TASK-433.2 record in merge commit `0e03d783` and pushed it. MR !318 now reports `has_conflicts: false`; the task worktree is clean and matches origin. The Phase 3 implementation commit remains `a00e15ff`.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
