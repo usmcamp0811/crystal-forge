@@ -4,6 +4,186 @@ use std::collections::{BTreeMap, HashMap};
 use tracing::warn;
 use uuid::Uuid;
 
+pub const COMPOSITE_POLICY_TYPE: &str = "composite";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompositePolicyConfig {
+    pub schema_version: u8,
+    pub mode: CompositeRuleMode,
+    pub rules: Vec<CompositeRule>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompositeRuleMode {
+    All,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompositeRule {
+    pub id: Uuid,
+    #[serde(flatten)]
+    pub rule: CompositeRuleKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "config", rename_all = "snake_case")]
+pub enum CompositeRuleKind {
+    NixosOption(NixosOptionRuleConfig),
+    PackagesInstalled(PackagesInstalledRuleConfig),
+    CustomEval(CustomEvalRuleConfig),
+    CveBlock(CveBlockRuleConfig),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NixosOptionValueType {
+    Boolean,
+    Enum,
+    Integer,
+    String,
+    Lines,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NixosOptionRuleConfig {
+    pub path: String,
+    pub operator: String,
+    pub value_type: NixosOptionValueType,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackagesInstalledRuleConfig {
+    pub packages: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomEvalRuleConfig {
+    pub expression: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CveBlockSeverity {
+    Critical,
+    High,
+    Medium,
+    Low,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CveBlockRuleConfig {
+    pub severity: CveBlockSeverity,
+    pub max_allowed: u32,
+}
+
+/// Validate the exact stored policy type/config pairing at every persistence boundary.
+/// Non-composite policy validation remains on its legacy paths.
+pub fn validate_policy_type_config(
+    policy_type: &str,
+    config: &serde_json::Value,
+) -> Result<Option<CompositePolicyConfig>, String> {
+    if policy_type != COMPOSITE_POLICY_TYPE {
+        return Ok(None);
+    }
+
+    let composite: CompositePolicyConfig = serde_json::from_value(config.clone())
+        .map_err(|error| format!("invalid composite policy config: {error}"))?;
+    if composite.schema_version != 1 {
+        return Err("composite config.schema_version must be 1".to_string());
+    }
+    if composite.rules.is_empty() {
+        return Err("composite config.rules must not be empty".to_string());
+    }
+
+    let mut ids = std::collections::HashSet::with_capacity(composite.rules.len());
+    for (index, rule) in composite.rules.iter().enumerate() {
+        if rule.id.is_nil() {
+            return Err(format!(
+                "composite config.rules[{index}].id must not be nil"
+            ));
+        }
+        if !ids.insert(rule.id) {
+            return Err(format!(
+                "composite config.rules[{index}].id {} is duplicated",
+                rule.id
+            ));
+        }
+
+        match &rule.rule {
+            CompositeRuleKind::NixosOption(option) => {
+                if option.path.trim().is_empty() {
+                    return Err(format!(
+                        "composite config.rules[{index}].config.path must not be empty"
+                    ));
+                }
+                let valid_operator = match option.value_type {
+                    NixosOptionValueType::Boolean
+                    | NixosOptionValueType::Enum
+                    | NixosOptionValueType::String
+                    | NixosOptionValueType::Lines
+                    | NixosOptionValueType::Unknown => {
+                        matches!(option.operator.as_str(), "==" | "!=")
+                    }
+                    NixosOptionValueType::Integer => {
+                        matches!(option.operator.as_str(), "==" | "!=" | ">=" | "<=")
+                    }
+                };
+                if !valid_operator {
+                    return Err(format!(
+                        "composite config.rules[{index}].config.operator is invalid for {:?}",
+                        option.value_type
+                    ));
+                }
+                let valid_value = match option.value_type {
+                    NixosOptionValueType::Boolean => option.value.is_boolean(),
+                    NixosOptionValueType::Integer => option.value.as_i64().is_some(),
+                    NixosOptionValueType::Enum
+                    | NixosOptionValueType::String
+                    | NixosOptionValueType::Lines
+                    | NixosOptionValueType::Unknown => option.value.is_string(),
+                };
+                if !valid_value {
+                    return Err(format!(
+                        "composite config.rules[{index}].config.value does not match value_type"
+                    ));
+                }
+            }
+            CompositeRuleKind::PackagesInstalled(packages) => {
+                if packages.packages.is_empty()
+                    || packages
+                        .packages
+                        .iter()
+                        .any(|package| package.trim().is_empty())
+                {
+                    return Err(format!(
+                        "composite config.rules[{index}].config.packages must contain non-empty strings"
+                    ));
+                }
+            }
+            CompositeRuleKind::CustomEval(custom) => {
+                if custom.expression.trim().is_empty() {
+                    return Err(format!(
+                        "composite config.rules[{index}].config.expression must not be empty"
+                    ));
+                }
+            }
+            CompositeRuleKind::CveBlock(_) => {}
+        }
+    }
+
+    Ok(Some(composite))
+}
+
 // ============================================================================
 // CVE Check Config
 // ============================================================================
@@ -279,6 +459,9 @@ pub enum DeploymentPolicy {
     /// More flexible than RequireCveCheck.
     /// NOT Nix-evaluated; checked at deployment time.
     CveThreshold { config: CveThresholdConfig },
+    /// Typed heterogeneous representation. Execution is deliberately deferred;
+    /// enforcement boundaries must reject this variant rather than flatten it.
+    Composite { config: CompositePolicyConfig },
 }
 
 impl DeploymentPolicy {
@@ -293,6 +476,7 @@ impl DeploymentPolicy {
             DeploymentPolicy::RequireApprovals { .. } => true,
             DeploymentPolicy::CanaryRollout { .. } => true,
             DeploymentPolicy::CveThreshold { .. } => true,
+            DeploymentPolicy::Composite { .. } => true,
         }
     }
 
@@ -328,6 +512,9 @@ impl DeploymentPolicy {
             DeploymentPolicy::RequireApprovals { config } => config.description.clone(),
             DeploymentPolicy::CanaryRollout { config } => config.description.clone(),
             DeploymentPolicy::CveThreshold { config } => config.description.clone(),
+            DeploymentPolicy::Composite { config } => {
+                format!("Composite policy ({} rules, all mode)", config.rules.len())
+            }
         }
     }
 
@@ -341,6 +528,7 @@ impl DeploymentPolicy {
                 | DeploymentPolicy::RequireApprovals { .. }
                 | DeploymentPolicy::CanaryRollout { .. }
                 | DeploymentPolicy::CveThreshold { .. }
+                | DeploymentPolicy::Composite { .. }
         )
     }
 
@@ -406,6 +594,9 @@ impl DeploymentPolicy {
             DeploymentPolicy::CveThreshold { .. } => {
                 panic!("CveThreshold is not a Nix-evaluated policy")
             }
+            DeploymentPolicy::Composite { .. } => {
+                panic!("Composite policy execution is not supported")
+            }
         }
     }
 
@@ -433,6 +624,7 @@ impl DeploymentPolicy {
             DeploymentPolicy::RequireApprovals { .. } => "requireApprovals".to_string(),
             DeploymentPolicy::CanaryRollout { .. } => "canaryRollout".to_string(),
             DeploymentPolicy::CveThreshold { .. } => "cveThreshold".to_string(),
+            DeploymentPolicy::Composite { .. } => "compositeNotChecked".to_string(),
         }
     }
 
@@ -495,6 +687,7 @@ fn policy_kind(policy: &DeploymentPolicy) -> &'static str {
         DeploymentPolicy::RequireApprovals { .. } => "require_approvals",
         DeploymentPolicy::CanaryRollout { .. } => "canary_rollout",
         DeploymentPolicy::CveThreshold { .. } => "cve_threshold",
+        DeploymentPolicy::Composite { .. } => COMPOSITE_POLICY_TYPE,
     }
 }
 
@@ -583,7 +776,9 @@ pub fn policy_results_json(
 ) -> serde_json::Value {
     let mut assigned_results = serde_json::Map::new();
 
-    for assigned_policy in assigned.iter().filter(|ap| ap.policy.is_nix_evaluated()) {
+    for assigned_policy in assigned.iter().filter(|ap| {
+        ap.policy.is_nix_evaluated() || matches!(ap.policy, DeploymentPolicy::Composite { .. })
+    }) {
         let passed = resolve_assigned_policy_passed(assigned_policy, check);
         assigned_results.insert(
             assigned_policy.policy_id.to_string(),
@@ -728,6 +923,12 @@ impl PolicyCheckResult {
         };
 
         for (idx, ap) in assigned.iter().enumerate() {
+            if matches!(ap.policy, DeploymentPolicy::Composite { .. }) {
+                return Err(format!(
+                    "Configuration {:?}: composite policy {} cannot be executed before Phase 4 support",
+                    system_name, ap.policy_id
+                ));
+            }
             if !ap.policy.is_nix_evaluated() {
                 continue;
             }
@@ -931,6 +1132,9 @@ impl PolicyCheckResult {
                     // Not Nix-evaluated; already filtered by is_nix_evaluated().
                     let _ = (idx, key);
                 }
+                DeploymentPolicy::Composite { .. } => {
+                    unreachable!("handled before phase filtering")
+                }
             }
         }
 
@@ -989,6 +1193,17 @@ impl PolicyCheckResult {
 
         let mut nix_policy_idx = 0usize;
         for policy in policies {
+            if matches!(policy, DeploymentPolicy::Composite { .. }) {
+                warnings.push(format!(
+                    "{}: composite policy execution is not supported",
+                    system_name
+                ));
+                failed_policies.push((
+                    "Composite policy execution is not supported".to_string(),
+                    true,
+                ));
+                continue;
+            }
             // CVE policies are not Nix-evaluated; skip here.
             if !policy.is_nix_evaluated() {
                 continue;
@@ -1119,6 +1334,9 @@ impl PolicyCheckResult {
                 }
                 DeploymentPolicy::CveThreshold { .. } => {
                     // Deployment-time policy, not Nix-evaluated
+                }
+                DeploymentPolicy::Composite { .. } => {
+                    unreachable!("handled before phase filtering")
                 }
             }
         }
@@ -1458,6 +1676,182 @@ pub struct UpdateDeploymentPolicyRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn composite_config() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "mode": "all",
+            "rules": [
+                {
+                    "id": "10000000-0000-0000-0000-000000000001",
+                    "kind": "nixos_option",
+                    "config": {
+                        "path": "networking.firewall.enable",
+                        "operator": "==",
+                        "value_type": "boolean",
+                        "value": true
+                    }
+                },
+                {
+                    "id": "10000000-0000-0000-0000-000000000002",
+                    "kind": "packages_installed",
+                    "config": { "packages": ["openssh"] }
+                },
+                {
+                    "id": "10000000-0000-0000-0000-000000000003",
+                    "kind": "custom_eval",
+                    "config": { "expression": "config.security.audit.enable", "message": "audit" }
+                },
+                {
+                    "id": "10000000-0000-0000-0000-000000000004",
+                    "kind": "cve_block",
+                    "config": { "severity": "critical", "max_allowed": 0 }
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn composite_round_trip_preserves_ids_order_kinds_and_semantic_values() {
+        let parsed = validate_policy_type_config(COMPOSITE_POLICY_TYPE, &composite_config())
+            .unwrap()
+            .unwrap();
+        let serialized = serde_json::to_value(&parsed).unwrap();
+
+        assert_eq!(serialized, composite_config());
+        assert_eq!(parsed.rules.len(), 4);
+        assert!(matches!(
+            parsed.rules[0].rule,
+            CompositeRuleKind::NixosOption(NixosOptionRuleConfig {
+                value: serde_json::Value::Bool(true),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn composite_validation_rejects_empty_nil_duplicate_unknown_and_type_mismatches() {
+        let mut cases = Vec::new();
+
+        let mut wrong_schema = composite_config();
+        wrong_schema["schema_version"] = serde_json::json!(2);
+        cases.push(wrong_schema);
+
+        let mut unsupported_mode = composite_config();
+        unsupported_mode["mode"] = serde_json::json!("any");
+        cases.push(unsupported_mode);
+
+        let mut malformed_id = composite_config();
+        malformed_id["rules"][0]["id"] = serde_json::json!("not-a-uuid");
+        cases.push(malformed_id);
+
+        let mut empty = composite_config();
+        empty["rules"] = serde_json::json!([]);
+        cases.push(empty);
+
+        let mut nil = composite_config();
+        nil["rules"][0]["id"] = serde_json::json!(Uuid::nil());
+        cases.push(nil);
+
+        let mut duplicate = composite_config();
+        duplicate["rules"][1]["id"] = duplicate["rules"][0]["id"].clone();
+        cases.push(duplicate);
+
+        let mut unknown = composite_config();
+        unknown["rules"][0]["kind"] = serde_json::json!("packages_absent");
+        cases.push(unknown);
+
+        let mut wrong_value = composite_config();
+        wrong_value["rules"][0]["config"]["value"] = serde_json::json!("true");
+        cases.push(wrong_value);
+
+        let mut wrong_operator = composite_config();
+        wrong_operator["rules"][0]["config"]["operator"] = serde_json::json!(">=");
+        cases.push(wrong_operator);
+
+        for config in cases {
+            assert!(validate_policy_type_config(COMPOSITE_POLICY_TYPE, &config).is_err());
+        }
+    }
+
+    #[test]
+    fn nixos_option_semantic_types_and_operators_are_typed() {
+        let cases = [
+            ("boolean", serde_json::json!(false), "!="),
+            ("enum", serde_json::json!("nftables"), "=="),
+            ("integer", serde_json::json!(-9), ">="),
+            ("string", serde_json::json!("short"), "=="),
+            ("lines", serde_json::json!("line one\n\nline three\n"), "!="),
+            ("unknown", serde_json::json!("${config.foo}\\n"), "=="),
+        ];
+        for (value_type, value, operator) in cases {
+            let config = serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "10000000-0000-0000-0000-000000000001",
+                    "kind": "nixos_option",
+                    "config": {
+                        "path": "services.example.option",
+                        "operator": operator,
+                        "value_type": value_type,
+                        "value": value
+                    }
+                }]
+            });
+            let parsed = validate_policy_type_config(COMPOSITE_POLICY_TYPE, &config)
+                .unwrap()
+                .unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), config);
+        }
+    }
+
+    #[test]
+    fn legacy_empty_custom_check_remains_outside_composite_validation() {
+        assert_eq!(
+            validate_policy_type_config(
+                "custom_check",
+                &serde_json::json!({"mode": "all", "rules": []})
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn composite_evaluation_fails_closed_and_reporting_is_not_checked() {
+        let config = validate_policy_type_config(COMPOSITE_POLICY_TYPE, &composite_config())
+            .unwrap()
+            .unwrap();
+        let assigned = AssignedPolicy {
+            policy_id: Uuid::from_u128(99),
+            policy_name: "composite".into(),
+            policy: DeploymentPolicy::Composite { config },
+        };
+        let error = PolicyCheckResult::from_assigned(
+            "host".into(),
+            &serde_json::json!({"cfAgentEnabled": true}),
+            std::slice::from_ref(&assigned),
+        )
+        .unwrap_err();
+        assert!(error.contains("cannot be executed"));
+
+        let check = PolicyCheckResult {
+            system_name: "host".into(),
+            cf_agent_enabled: Some(true),
+            assigned_results: BTreeMap::new(),
+            has_required_packages: None,
+            custom_checks: HashMap::new(),
+            meets_requirements: true,
+            warnings: Vec::new(),
+            failed_policies: Vec::new(),
+            cve_checks: Vec::new(),
+        };
+        assert_eq!(
+            policy_results_json(&check, &[assigned])["assigned"][Uuid::from_u128(99).to_string()]["passed"],
+            serde_json::Value::Null
+        );
+    }
 
     /// Test helper: wrap a flat `Vec<DeploymentPolicy>` into a `PoliciesByConfiguration`
     /// under the key `"test-config"` with sequential UUIDs.

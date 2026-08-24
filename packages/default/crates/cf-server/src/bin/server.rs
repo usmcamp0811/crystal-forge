@@ -24,8 +24,8 @@ use crystal_forge::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
             builders, caches, commits, compliance, config_health, cves, dashboard,
             deployment_policies, deployments, environments, flakes, framework_requirements,
-            hardening, navigation, scanning, setup_wizard, systems, user_notifications,
-            user_preferences, user_sessions,
+            hardening, navigation, nixos_options, scanning, setup_wizard, systems,
+            user_notifications, user_preferences, user_sessions,
         },
         status,
         webhook::webhook_handler,
@@ -228,6 +228,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/agent/deployment-failed", post(deployment_failed::report))
         .route("/webhook", post(webhook_handler))
         // REST API v1
+        .route(
+            "/api/v1/nixos/options",
+            get(nixos_options::search_nixos_options),
+        )
         .route(
             "/api/v1/dashboard/summary",
             get(dashboard::dashboard_summary),

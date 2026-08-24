@@ -15,7 +15,8 @@ use crate::compliance::mappings::{
     merge_evidence_into_metadata, merge_policy_mappings,
 };
 use crate::models::deployment_policies::{
-    CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
+    COMPOSITE_POLICY_TYPE, CreateDeploymentPolicyRequest, DeploymentPolicyRecord,
+    UpdateDeploymentPolicyRequest, validate_policy_type_config,
 };
 use crate::queries::compliance::ensure_policy_draft;
 use crate::queries::deletion::{blocker, eligibility};
@@ -318,8 +319,8 @@ pub async fn get_deployment_policy_by_version(
 ) -> Result<Option<DeploymentPolicyRecord>> {
     let row = sqlx::query_as::<_, DeploymentPolicyRecord>(
         r#"
-        SELECT dp.id, dp.name, dp.description, dp.policy_type,
-               COALESCE(pv.config, dp.config) AS config,
+        SELECT dp.id, dp.name, dp.description, pv.policy_type,
+               pv.config,
                dp.enabled, dp.created_at, dp.updated_at
           FROM deployment_policy_versions pv
           JOIN deployment_policies dp ON dp.id = pv.policy_id
@@ -365,8 +366,8 @@ pub async fn get_deployment_policies_by_versions(
         ),
     >(
         r#"
-        SELECT pv.id, dp.id, dp.name, dp.description, dp.policy_type,
-               COALESCE(pv.config, dp.config) AS config,
+        SELECT pv.id, dp.id, dp.name, dp.description, pv.policy_type,
+               pv.config,
                dp.enabled, dp.created_at, dp.updated_at
           FROM deployment_policy_versions pv
           JOIN deployment_policies dp ON dp.id = pv.policy_id
@@ -783,6 +784,8 @@ pub async fn create_deployment_policy_with_mappings(
     request: &CreateDeploymentPolicyRequest,
     actor_id: Option<Uuid>,
 ) -> Result<DeploymentPolicyRecord> {
+    validate_policy_type_config(&request.policy_type, &request.config)
+        .map_err(anyhow::Error::msg)?;
     if let Some(requirement_version_id) = duplicate_requirement_mapping_id(request) {
         anyhow::bail!(
             "Duplicate requirement mapping {} in policy request",
@@ -848,7 +851,11 @@ pub async fn create_deployment_policy_with_mappings(
         description: policy.description.clone(),
         policy_type: policy.policy_type.clone(),
         implementation_state: "native".to_string(),
-        execution_phase: "nix-evaluation".to_string(),
+        execution_phase: if policy.policy_type == COMPOSITE_POLICY_TYPE {
+            "multi-phase".to_string()
+        } else {
+            "nix-evaluation".to_string()
+        },
         config: policy.config.clone(),
         compliance_metadata,
         dependencies: serde_json::json!([]),
@@ -904,6 +911,20 @@ pub async fn update_deployment_policy(
     actor_id: Option<Uuid>,
 ) -> Result<Option<DeploymentPolicyRecord>> {
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+
+    let current_pair: Option<(String, serde_json::Value)> =
+        sqlx::query_as("SELECT policy_type, config FROM deployment_policies WHERE id = $1")
+            .bind(policy_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to load deployment policy type/config")?;
+    if let Some((current_type, current_config)) = current_pair {
+        validate_policy_type_config(
+            request.policy_type.as_deref().unwrap_or(&current_type),
+            request.config.as_ref().unwrap_or(&current_config),
+        )
+        .map_err(anyhow::Error::msg)?;
+    }
 
     // Load the current draft version's rich fields before the lineage update,
     // so that updating the lineage cannot erase imported semantics (P1 #4).
@@ -971,7 +992,7 @@ pub async fn update_deployment_policy(
         // Merge: preserve existing rich fields; update only what the legacy
         // request supports. Callers using the full version-aware API can update
         // implementation_state, execution_phase, etc. separately.
-        let (impl_state, exec_phase, existing_meta, deps, opaque_xml) =
+        let (impl_state, mut exec_phase, existing_meta, deps, opaque_xml) =
             if let Some(df) = draft_fields {
                 (
                     df.implementation_state,
@@ -990,6 +1011,9 @@ pub async fn update_deployment_policy(
                     None,
                 )
             };
+        if p.policy_type == COMPOSITE_POLICY_TYPE {
+            exec_phase = "multi-phase".to_string();
+        }
 
         // Merge SRG/CCI mappings into existing compliance_metadata, preserving
         // all other metadata keys (source fidelity, rationale, checks, etc.).

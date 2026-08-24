@@ -867,6 +867,22 @@ fn parse_deployment_policy_record(
                 }
             }
         }
+        "composite" => {
+            match crate::models::deployment_policies::validate_policy_type_config(
+                &record.policy_type,
+                cfg,
+            ) {
+                Ok(Some(config)) => Some(DeploymentPolicy::Composite { config }),
+                Ok(None) => unreachable!("composite validator returned a non-composite result"),
+                Err(err) => {
+                    warn!(
+                        "Skipping composite policy '{}' ({}): {}",
+                        record.name, record.id, err
+                    );
+                    None
+                }
+            }
+        }
         other => {
             warn!(
                 "Skipping unsupported deployment policy type '{}' for policy '{}' ({})",
@@ -877,9 +893,27 @@ fn parse_deployment_policy_record(
     }
 }
 
-async fn load_deployment_policies_for_eval(pool: &PgPool, flake_id: i32) -> Vec<DeploymentPolicy> {
+async fn load_deployment_policies_for_eval(
+    pool: &PgPool,
+    flake_id: i32,
+) -> anyhow::Result<Vec<DeploymentPolicy>> {
     match list_enabled_policies_for_flake(pool, flake_id).await {
         Ok(records) => {
+            if let Some(record) = records
+                .iter()
+                .find(|record| record.policy_type == "composite")
+            {
+                parse_deployment_policy_record(record).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Composite policy '{}' ({}) has invalid persisted config; refusing evaluation",
+                        record.name,
+                        record.id
+                    )
+                })?;
+                anyhow::bail!(
+                    "Composite policy execution is not supported by the legacy evaluation loader"
+                );
+            }
             let all_policies = records
                 .iter()
                 .filter_map(parse_deployment_policy_record)
@@ -902,7 +936,7 @@ async fn load_deployment_policies_for_eval(pool: &PgPool, flake_id: i32) -> Vec<
                 policies.push(DeploymentPolicy::RequireCrystalForgeAgent { strict: true });
             }
 
-            policies
+            Ok(policies)
         }
         Err(err) => {
             error!(
@@ -912,7 +946,9 @@ async fn load_deployment_policies_for_eval(pool: &PgPool, flake_id: i32) -> Vec<
             // Use strict mode in fallback to enforce core security policy even in error scenarios.
             // This ensures systems without the agent package cannot pass evaluation when policy
             // loading fails, maintaining the "always enforce core policy" safety model.
-            vec![DeploymentPolicy::RequireCrystalForgeAgent { strict: true }]
+            Ok(vec![DeploymentPolicy::RequireCrystalForgeAgent {
+                strict: true,
+            }])
         }
     }
 }
@@ -1026,6 +1062,18 @@ async fn load_policies_by_configuration_for_eval(
                 record.config = effective_policy.effective_config;
             }
 
+            if record.policy_type == "composite" {
+                parse_deployment_policy_record(&record).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Composite policy version {} has invalid persisted config; refusing evaluation",
+                        effective_policy.policy_version_id
+                    )
+                })?;
+                anyhow::bail!(
+                    "Composite policy version {} is assigned in enforce mode, but composite execution is not supported",
+                    effective_policy.policy_version_id
+                );
+            }
             if let Some(policy) = parse_deployment_policy_record(&record) {
                 if policy.is_nix_evaluated()
                     && !matches!(policy, DeploymentPolicy::RequireCrystalForgeAgent { .. })
@@ -1135,6 +1183,20 @@ async fn load_policies_by_configuration_for_eval_legacy(
                 continue; // duplicate — skip
             }
             let record = row.as_policy_record();
+            if record.policy_type == "composite" {
+                parse_deployment_policy_record(&record).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Composite policy {} has invalid persisted config for configuration {:?}; refusing evaluation",
+                        policy_id,
+                        config_name
+                    )
+                })?;
+                anyhow::bail!(
+                    "Composite policy {} is assigned for configuration {:?}, but composite execution is not supported",
+                    policy_id,
+                    config_name
+                );
+            }
             if let Some(parsed) = parse_deployment_policy_record(&record) {
                 if parsed.is_nix_evaluated() {
                     // require_cf_agent is handled by the unconditional
@@ -2227,6 +2289,34 @@ mod tests {
             parse_deployment_policy_record(&record).is_none(),
             "an empty rule set must not produce an executable policy"
         );
+    }
+
+    #[test]
+    fn parse_composite_preserves_typed_representation_without_marking_it_nix_executable() {
+        let record = DeploymentPolicyRecord {
+            id: Uuid::new_v4(),
+            name: "mixed".to_string(),
+            description: Some("mixed phases".to_string()),
+            policy_type: "composite".to_string(),
+            config: json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "40000000-0000-0000-0000-000000000001",
+                    "kind": "cve_block",
+                    "config": {"severity": "critical", "max_allowed": 0}
+                }]
+            }),
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
+        };
+
+        let parsed = parse_deployment_policy_record(&record).expect("typed representation");
+        assert!(matches!(parsed, DeploymentPolicy::Composite { .. }));
+        assert!(!parsed.is_nix_evaluated());
     }
 
     #[test]

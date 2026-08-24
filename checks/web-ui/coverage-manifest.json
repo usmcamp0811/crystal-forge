@@ -1590,6 +1590,20 @@
       "baseline": "advisory"
     },
     {
+      "name": "20ab1-policy-editor-composite-metadata-roundtrip",
+      "description": "Real NixOS metadata drives typed composite values and stable rule IDs across save and reload",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/data-enforcement.js",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
       "name": "20ac-policy-editor-category-and-imported-provenance",
       "description": "Category change preserves rules, and imported policies show read-only provenance tab",
       "route": "/deployment-policies",

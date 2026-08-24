@@ -25,8 +25,9 @@ use crate::compliance::mappings::{normalise_cci_ids, normalise_srg_ids};
 use crate::handlers::agent_request::CFState;
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
-    is_reserved_policy_result_field,
+    is_reserved_policy_result_field, validate_policy_type_config,
 };
+use crate::nixos_options_metadata::NixosOptionsMetadataProvider;
 use crate::queries::deployment_policies;
 use crate::queries::deployment_policies::PolicyDeleteOutcome;
 
@@ -441,10 +442,30 @@ fn validate_policy_config(
                 }
             }
         }
+        "composite" => {
+            validate_policy_type_config(policy_type, config)
+                .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+        }
         _ => {}
     }
 
     Ok(validated_config)
+}
+
+fn validate_policy_config_with_metadata(
+    policy_type: &str,
+    config: &Value,
+    metadata: &NixosOptionsMetadataProvider,
+) -> Result<Value, (StatusCode, String)> {
+    let validated = validate_policy_config(policy_type, config)?;
+    if let Some(composite) = validate_policy_type_config(policy_type, &validated)
+        .map_err(|message| (StatusCode::BAD_REQUEST, message))?
+    {
+        metadata
+            .validate_composite_config(&composite)
+            .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+    }
+    Ok(validated)
 }
 
 impl PaginationParams {
@@ -758,6 +779,7 @@ pub async fn create_deployment_policy(
         "require_approvals",
         "canary_rollout",
         "cve_threshold",
+        "composite",
     ];
     if !valid_types.contains(&request.policy_type.as_str()) {
         return Err((
@@ -771,7 +793,11 @@ pub async fn create_deployment_policy(
     }
 
     // Validate and normalize the config (may auto-fix expressions)
-    request.config = validate_policy_config(&request.policy_type, &request.config)?;
+    request.config = validate_policy_config_with_metadata(
+        &request.policy_type,
+        &request.config,
+        &state.nixos_options_metadata,
+    )?;
 
     // Check if policy name already exists
     let name_exists =
@@ -989,6 +1015,7 @@ pub async fn update_deployment_policy(
             "require_approvals",
             "canary_rollout",
             "cve_threshold",
+            "composite",
         ];
         if !valid_types.contains(&policy_type.as_str()) {
             return Err((
@@ -1013,7 +1040,11 @@ pub async fn update_deployment_policy(
 
     if request.policy_type.is_some() || request.config.is_some() {
         // Validate and normalize the config (may auto-fix expressions)
-        candidate_config = validate_policy_config(&candidate_policy_type, &candidate_config)?;
+        candidate_config = validate_policy_config_with_metadata(
+            &candidate_policy_type,
+            &candidate_config,
+            &state.nixos_options_metadata,
+        )?;
         // Update the request with the normalized config
         request.config = Some(candidate_config.clone());
     }

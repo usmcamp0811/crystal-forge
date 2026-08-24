@@ -7,6 +7,7 @@ let
   serverCargoToml = builtins.fromTOML (builtins.readFile (src + "/crates/cf-server/Cargo.toml"));
   version = serverCargoToml.package.version;
   migrationsDir = ./crates/cf-server/migrations;
+  nixosOptionsMetadata = pkgs.crystal-forge.nixos-options-metadata;
 
   # ─────────────────────────────────────────────────────────────────────────
   # Source filtering
@@ -226,6 +227,7 @@ let
     postPatch = ''
       cp ${serverWorkspaceManifest} Cargo.toml
     '';
+    CRYSTAL_FORGE_NIXOS_OPTIONS_METADATA = "${nixosOptionsMetadata}/share/crystal-forge/nixos-options.json";
 
     nativeBuildInputs = commonNativeBuildInputs ++ (with pkgs; [ sqlx-cli ]);
     buildInputs = commonBuildInputs;

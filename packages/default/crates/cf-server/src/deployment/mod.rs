@@ -588,6 +588,12 @@ impl DeploymentPolicyManager {
                         }
                     }
                 }
+                "composite" => {
+                    return AdvancedGateDecision::Block(format!(
+                        "Composite policy {} cannot be enforced before composite execution support is implemented",
+                        policy.id
+                    ));
+                }
                 _ => {}
             }
         }

@@ -74,6 +74,21 @@ pub async fn fetch_dashboard_activity(
     fetch_json(&url).await
 }
 
+/// Search the packaged NixOS option metadata index. The server clamps the
+/// limit too; clamping here keeps browser requests bounded by construction.
+pub async fn search_nixos_options(
+    query: &str,
+    limit: usize,
+) -> Result<Vec<NixosOptionMetadata>, ApiClientError> {
+    let url = format!(
+        "{}/nixos/options?query={}&limit={}",
+        base_url(),
+        js_sys::encode_uri_component(query),
+        limit.clamp(1, 50)
+    );
+    fetch_json(&url).await
+}
+
 /// Fetch admin-only CVE dashboard summary.
 pub async fn fetch_cve_dashboard_summary() -> Result<CveDashboardSummary, ApiClientError> {
     let url = format!("{}/cves/summary", base_url());

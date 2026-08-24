@@ -1394,6 +1394,43 @@ pub struct DeploymentPolicySummary {
     pub rationale: Option<String>,
 }
 
+/// Search metadata for one NixOS option. The server derives these fields from
+/// the pinned NixOS module option set; `value_type` controls the policy value
+/// editor while unknown types deliberately fall back to a semantic string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NixosOptionValueType {
+    Boolean,
+    Enum,
+    Integer,
+    String,
+    Lines,
+    Unknown,
+}
+
+impl NixosOptionValueType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Boolean => "boolean",
+            Self::Enum => "enum",
+            Self::Integer => "integer",
+            Self::String => "string",
+            Self::Lines => "lines",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NixosOptionMetadata {
+    pub path: String,
+    pub value_type: NixosOptionValueType,
+    #[serde(default)]
+    pub enum_values: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Deployment Policies CRUD DTOs
 // ─────────────────────────────────────────────────────────────────────────────

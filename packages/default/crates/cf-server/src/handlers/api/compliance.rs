@@ -43,6 +43,7 @@ use crate::compliance::xccdf::package::{ProcessingError, process_xccdf_bytes};
 use crate::compliance::xccdf::reconciliation::{NativeReconcileFailure, ReconcileConflict};
 use crate::compliance::xccdf::xml_writer::{XccdfWriterError, write_bundle_xccdf_export};
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
+use crate::nixos_options_metadata::NixosOptionsMetadataProvider;
 use crate::queries::compliance::{
     BundleDeleteOutcome, BundleDraftDerivationError, BundleDraftIntent, BundleValidationError,
     PolicyDraftDerivationError, PolicyDraftIntent, bundle_deletion_eligibility,
@@ -3774,9 +3775,25 @@ pub struct CfNativeReconciliationPreview {
     pub import_trust_state: String, // untrusted
 }
 
+fn validate_imported_policy_metadata(
+    records: &[crate::compliance::xccdf::import_models::ImportedPolicyRecord],
+    metadata: &NixosOptionsMetadataProvider,
+) -> Result<(), String> {
+    for record in records {
+        if let Some(composite) = crate::models::deployment_policies::validate_policy_type_config(
+            &record.policy_type,
+            &record.config,
+        )? {
+            metadata.validate_composite_config(&composite)?;
+        }
+    }
+    Ok(())
+}
+
 /// Compute CF-native reconciliation data for preview.
-pub(crate) async fn compute_cf_native_reconciliation(
+pub(crate) async fn compute_cf_native_reconciliation_with_metadata(
     pool: &PgPool,
+    metadata: &NixosOptionsMetadataProvider,
     parsed: &crate::compliance::xccdf::models::ParsedXccdf,
 ) -> Result<Option<CfNativeReconciliationPreview>, String> {
     use crate::compliance::xccdf::models::DocumentClass;
@@ -3792,6 +3809,7 @@ pub(crate) async fn compute_cf_native_reconciliation(
     // Validate CF-native document to get policy records
     let (_validated, policy_records) = validate_cf_native_document(parsed)
         .map_err(|e| format!("CF-native validation failed: {}", e.message))?;
+    validate_imported_policy_metadata(&policy_records, metadata)?;
 
     let bundle_meta = match &parsed.cf_bundle_meta {
         Some(m) => m,
@@ -4147,6 +4165,15 @@ pub(crate) async fn compute_cf_native_reconciliation(
     }))
 }
 
+#[cfg(test)]
+pub(crate) async fn compute_cf_native_reconciliation(
+    pool: &PgPool,
+    parsed: &crate::compliance::xccdf::models::ParsedXccdf,
+) -> Result<Option<CfNativeReconciliationPreview>, String> {
+    let metadata = NixosOptionsMetadataProvider::from_runtime();
+    compute_cf_native_reconciliation_with_metadata(pool, &metadata, parsed).await
+}
+
 /// Compute the mutation-free reconciliation projection for a foreign DISA STIG.
 /// This deliberately uses the parsed rules and authoritative mapping tables, not
 /// legacy policy metadata, so the client can ask for review only where a human
@@ -4415,6 +4442,7 @@ async fn compute_foreign_stig_reconciliation(
 /// classifies the document, and returns typed metadata without durable writes.
 pub async fn xccdf_preview(
     State(pool): State<PgPool>,
+    State(metadata): State<NixosOptionsMetadataProvider>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
@@ -4465,20 +4493,50 @@ pub async fn xccdf_preview(
             .into_response();
     }
 
-    // Compute CF-native reconciliation data for CfNativeExact documents
-    let cf_native_reconciliation = match compute_cf_native_reconciliation(&pool, &parsed).await {
-        Ok(recon) => recon,
-        Err(e) => {
+    if matches!(
+        parsed.class,
+        crate::compliance::xccdf::models::DocumentClass::CfNativeExact
+    ) {
+        let policy_records = match validate_cf_native_document(&parsed) {
+            Ok((_, records)) => records,
+            Err(error) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({
+                        "error": error.code,
+                        "message": error.message,
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        if let Err(message) = validate_imported_policy_metadata(&policy_records, &metadata) {
             return (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::UNPROCESSABLE_ENTITY,
                 Json(serde_json::json!({
-                    "error": "CF-native reconciliation failed",
-                    "message": e,
+                    "error": "CF_NATIVE_PAYLOAD_INVALID",
+                    "message": message,
                 })),
             )
                 .into_response();
         }
-    };
+    }
+
+    // Compute CF-native reconciliation data for CfNativeExact documents
+    let cf_native_reconciliation =
+        match compute_cf_native_reconciliation_with_metadata(&pool, &metadata, &parsed).await {
+            Ok(recon) => recon,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "CF-native reconciliation failed",
+                        "message": e,
+                    })),
+                )
+                    .into_response();
+            }
+        };
     let foreign_stig_reconciliation =
         match compute_foreign_stig_reconciliation(&pool, &parsed, &original_sha256).await {
             Ok(reconciliation) => reconciliation,
@@ -4705,6 +4763,7 @@ fn extract_preview_discussion(description: &str) -> String {
 /// the plan, and commits all durable records in a single atomic transaction.
 pub async fn xccdf_import(
     State(pool): State<PgPool>,
+    State(metadata): State<NixosOptionsMetadataProvider>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
@@ -4803,8 +4862,20 @@ pub async fn xccdf_import(
                     .into_response();
             }
         };
-        let result = compliance_interchange::commit_cf_native_import(
+        if let Err(message) = validate_imported_policy_metadata(&policy_records, &metadata) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiError {
+                    error: "CF_NATIVE_PAYLOAD_INVALID".into(),
+                    message,
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+        let result = compliance_interchange::commit_cf_native_import_with_metadata(
             &pool,
+            &metadata,
             user_id,
             pkg,
             validated,
@@ -6210,6 +6281,7 @@ async fn load_and_plan_policy_reconciliation_in_tx(
 
 pub async fn policy_interchange_import(
     State(pool): State<PgPool>,
+    State(metadata): State<NixosOptionsMetadataProvider>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
@@ -6258,7 +6330,7 @@ pub async fn policy_interchange_import(
     };
 
     // Validate no duplicate version IDs within the document (shared validator)
-    if let Err(message) = validate_policy_interchange_document(&policies) {
+    if let Err(message) = validate_policy_interchange_document_with_metadata(&policies, &metadata) {
         return policy_interchange_invalid_response(&message).into_response();
     }
 
@@ -7014,6 +7086,7 @@ async fn load_and_plan_policy_reconciliation(
 /// be checked against by the caller.
 pub async fn policy_interchange_preview(
     State(pool): State<PgPool>,
+    State(metadata): State<NixosOptionsMetadataProvider>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
@@ -7049,7 +7122,7 @@ pub async fn policy_interchange_preview(
     };
 
     // Validate no duplicate version IDs within the document (shared validator)
-    if let Err(message) = validate_policy_interchange_document(&policies) {
+    if let Err(message) = validate_policy_interchange_document_with_metadata(&policies, &metadata) {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({
@@ -7121,11 +7194,37 @@ fn validate_policy_interchange_document(policies: &[NormalizedPolicyImport]) -> 
     // Check for duplicate version IDs within the document
     let mut seen_versions = std::collections::HashSet::new();
     for policy in policies {
+        crate::models::deployment_policies::validate_policy_type_config(
+            &policy.policy_type,
+            &policy.config,
+        )?;
         if !seen_versions.insert(policy.version_id) {
             return Err(format!(
                 "Duplicate version ID {} in import document",
                 policy.version_id
             ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_policy_interchange_document_with_metadata(
+    policies: &[NormalizedPolicyImport],
+    metadata: &NixosOptionsMetadataProvider,
+) -> Result<(), String> {
+    validate_policy_interchange_document(policies)?;
+    for policy in policies {
+        if let Some(composite) = crate::models::deployment_policies::validate_policy_type_config(
+            &policy.policy_type,
+            &policy.config,
+        )? {
+            metadata.validate_composite_config(&composite)?;
+            if policy.execution_phase != "multi-phase" {
+                return Err(format!(
+                    "composite policy version {} must use execution_phase multi-phase",
+                    policy.version_id
+                ));
+            }
         }
     }
     Ok(())
@@ -15382,6 +15481,37 @@ packages = ["git"]
 
         let result = validate_policy_interchange_document(&policies);
         assert!(result.is_ok(), "should accept unique version IDs");
+    }
+
+    #[test]
+    fn generic_interchange_cannot_bypass_composite_validation() {
+        let policies = vec![NormalizedPolicyImport {
+            lineage_id: Uuid::new_v4(),
+            version_id: Uuid::new_v4(),
+            name: "invalid composite".into(),
+            description: None,
+            policy_type: "composite".into(),
+            implementation_state: "native".into(),
+            execution_phase: "multi-phase".into(),
+            config: serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": Uuid::nil(),
+                    "kind": "cve_block",
+                    "config": {"severity": "critical", "max_allowed": 0}
+                }]
+            }),
+            compliance_metadata: serde_json::json!({}),
+            dependencies: serde_json::json!([]),
+            opaque_xml: None,
+            enabled_by_default: Some(false),
+            semantic_digest: "not-reached".into(),
+            version: "1.0".into(),
+        }];
+
+        let error = validate_policy_interchange_document(&policies).unwrap_err();
+        assert!(error.contains("id must not be nil"));
     }
 
     // ──────────────────────────────────────────────────────────────────────────────

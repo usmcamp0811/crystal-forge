@@ -13,14 +13,14 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use crate::api::client::{
-    create_deployment_policy, create_policy_mapping, delete_deployment_policy,
+    ApiClientError, create_deployment_policy, create_policy_mapping, delete_deployment_policy,
     delete_policy_mapping, fetch_compliance_framework_versions, fetch_compliance_frameworks,
-    fetch_policy_requirement_mappings, search_requirements, update_deployment_policy,
-    update_policy_mapping,
+    fetch_policy_requirement_mappings, search_nixos_options, search_requirements,
+    update_deployment_policy, update_policy_mapping,
 };
 use crate::api::models::{
     ComplianceFrameworkSummary, ComplianceFrameworkVersionSummary, CreateDeploymentPolicyRequest,
-    CreatePolicyMappingRequest, EvidenceKind, EvidenceSpec, PolicyMappingRow,
+    CreatePolicyMappingRequest, EvidenceKind, EvidenceSpec, NixosOptionMetadata, PolicyMappingRow,
     RequirementVersionSummary, UpdateDeploymentPolicyRequest, UpdatePolicyMappingRequest,
 };
 use crate::views::policies_api;
@@ -148,6 +148,9 @@ const MAPPING_RELATIONSHIPS: [(&str, &str, &str); 3] = [
 /// modal matches the design, but are flagged in the UI.
 #[derive(Clone, Debug, PartialEq)]
 struct PolicyRule {
+    /// Persisted identity. New IDs are allocated only by `new`, when the user
+    /// adds a rule, and are thereafter carried through every state transition.
+    id: Uuid,
     kind: String,
     // cve_block
     severity: String,
@@ -167,7 +170,11 @@ struct PolicyRule {
     // nixos_option
     path: String,
     op: String,
-    value: String,
+    value: serde_json::Value,
+    option_type: String,
+    option_values: Vec<String>,
+    option_description: String,
+    option_unit: Option<String>,
     // custom_eval
     expr: String,
     message: String,
@@ -175,7 +182,12 @@ struct PolicyRule {
 
 impl PolicyRule {
     fn new(kind: &str) -> Self {
+        Self::new_with_id(kind, Uuid::new_v4())
+    }
+
+    fn new_with_id(kind: &str, id: Uuid) -> Self {
         let mut rule = Self {
+            id,
             kind: kind.to_string(),
             severity: "critical".to_string(),
             max_allowed: "0".to_string(),
@@ -189,7 +201,11 @@ impl PolicyRule {
             packages: "openssh, auditd".to_string(),
             path: "services.openssh.settings.PermitRootLogin".to_string(),
             op: "==".to_string(),
-            value: "\"no\"".to_string(),
+            value: serde_json::Value::String("no".to_string()),
+            option_type: "unknown".to_string(),
+            option_values: Vec::new(),
+            option_description: String::new(),
+            option_unit: None,
             expr: "config.services.openssh.enable == true".to_string(),
             message: "SSH must be enabled".to_string(),
         };
@@ -199,9 +215,43 @@ impl PolicyRule {
         rule
     }
 
+    fn apply_option_metadata(&mut self, metadata: &NixosOptionMetadata) {
+        self.path = metadata.path.clone();
+        self.option_type = metadata.value_type.as_str().to_string();
+        self.option_values = metadata
+            .enum_values
+            .iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect();
+        self.option_description = metadata.description.clone().unwrap_or_default();
+        self.option_unit = None;
+        self.op = "==".to_string();
+        self.value = default_option_value(&self.option_type, &self.option_values);
+    }
+
     /// Whether this rule kind can be persisted via the existing policy API config.
     fn is_persisted(&self) -> bool {
         rule_kind_is_persisted(&self.kind)
+    }
+}
+
+fn normalize_option_type(option_type: &str) -> &str {
+    match option_type {
+        "bool" | "boolean" => "boolean",
+        "enum" => "enum",
+        "int" | "integer" => "integer",
+        "str" | "string" => "string",
+        "lines" => "lines",
+        _ => "unknown",
+    }
+}
+
+fn default_option_value(option_type: &str, values: &[String]) -> serde_json::Value {
+    match normalize_option_type(option_type) {
+        "boolean" => serde_json::Value::Bool(false),
+        "integer" => serde_json::json!(0),
+        "enum" => serde_json::Value::String(values.first().cloned().unwrap_or_default()),
+        _ => serde_json::Value::String(String::new()),
     }
 }
 
@@ -448,16 +498,10 @@ fn rule_label(kind: &str) -> &'static str {
 // Payload mapping (UI rules → real API config)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Build the persisted `(policy_type, config)` from the persistable rules only.
-///
-/// Persistable rules are mapped into a `custom_check` with a `rules[]` array (or a
-/// single CVE gate / packages policy when that is the only rule), matching the
-/// shapes the real API already round-trips.
+/// Build the persisted `(policy_type, config)` from the persistable rules.
+/// Empty remains the Phase-2 zero-enforcement legacy representation; every
+/// authored rule set uses the versioned composite representation.
 fn build_persisted_payload(rules: &[PolicyRule]) -> Option<(String, serde_json::Value)> {
-    if has_cve_combination(rules) {
-        return None;
-    }
-
     let persistable: Vec<&PolicyRule> = rules.iter().filter(|r| r.is_persisted()).collect();
     if persistable.is_empty() && !rules.is_empty() {
         return None;
@@ -477,84 +521,56 @@ fn build_persisted_payload(rules: &[PolicyRule]) -> Option<(String, serde_json::
         ));
     }
 
-    // Single CVE gate → require_cve_check
-    if persistable.len() == 1 && persistable[0].kind == "cve_block" {
-        let rule = persistable[0];
-        let max = rule.max_allowed.trim().parse::<u32>().unwrap_or(0);
-        let config = if rule.severity == "critical" {
-            serde_json::json!({ "max_critical": max, "max_high": null, "strict": true, "when_no_scan": "block" })
-        } else {
-            serde_json::json!({ "max_critical": 0, "max_high": max, "strict": true, "when_no_scan": "block" })
-        };
-        return Some(("require_cve_check".to_string(), config));
-    }
-
-    // Single packages rule → require_packages
-    if persistable.len() == 1 && persistable[0].kind == "packages_installed" {
-        let packages = split_packages(&persistable[0].packages);
-        return Some((
-            "require_packages".to_string(),
-            serde_json::json!({ "packages": packages, "strict": true }),
-        ));
-    }
-
-    // Otherwise → custom_check with rules[]
-    let mut json_rules = Vec::new();
-    for (index, rule) in persistable.into_iter().enumerate() {
-        if let Some(value) = rule_to_custom_check_entry(rule, index) {
-            json_rules.push(value);
-        }
-    }
-    if json_rules.is_empty() {
-        return None;
-    }
+    let json_rules = persistable
+        .into_iter()
+        .map(rule_to_composite_entry)
+        .collect::<Option<Vec<_>>>()?;
     Some((
-        "custom_check".to_string(),
-        serde_json::json!({ "rules": json_rules, "mode": "all", "strict": true }),
+        "composite".to_string(),
+        serde_json::json!({ "schema_version": 1, "mode": "all", "rules": json_rules }),
     ))
 }
 
-fn rule_to_custom_check_entry(rule: &PolicyRule, index: usize) -> Option<serde_json::Value> {
-    let field_name = format!("policy_rule_{}", index + 1);
-
-    match rule.kind.as_str() {
-        "custom_eval" => Some(serde_json::json!({
-            "expression": rule.expr.trim(),
-            "description": if rule.message.trim().is_empty() { "Custom rule failed" } else { rule.message.trim() },
-            "field_name": field_name,
-            "strict": true,
-        })),
-        "nixos_option" => {
-            let expression = format!(
-                "config.{} {} {}",
-                rule.path.trim(),
-                rule.op.trim(),
-                rule.value.trim()
-            );
-            Some(serde_json::json!({
-                "expression": expression,
-                "description": format!("config.{} must be {} {}", rule.path.trim(), rule.op.trim(), rule.value.trim()),
-                "field_name": field_name,
-                "strict": true,
-            }))
-        }
-        "packages_installed" => {
-            let packages = split_packages(&rule.packages);
-            let checks = packages
-                .iter()
-                .map(|p| format!("builtins.any (x: (x.pname or \"\") == \"{p}\") config.environment.systemPackages"))
-                .collect::<Vec<_>>()
-                .join(" && ");
-            Some(serde_json::json!({
-                "expression": if checks.is_empty() { "true".to_string() } else { checks },
-                "description": format!("Packages installed: {}", packages.join(", ")),
-                "field_name": field_name,
-                "strict": true,
-            }))
-        }
-        "cve_block" => None,
-        _ => None,
+fn persisted_payload_for_save(
+    is_editing: bool,
+    enforcement_changed: bool,
+    existing_type: &str,
+    existing_config: &serde_json::Value,
+    rules: &[PolicyRule],
+) -> Option<(String, serde_json::Value)> {
+    if is_editing && !enforcement_changed {
+        Some((existing_type.to_string(), existing_config.clone()))
+    } else {
+        build_persisted_payload(rules)
     }
+}
+
+fn rule_to_composite_entry(rule: &PolicyRule) -> Option<serde_json::Value> {
+    let config = match rule.kind.as_str() {
+        "nixos_option" => serde_json::json!({
+            "path": rule.path,
+            "operator": rule.op,
+            "value_type": normalize_option_type(&rule.option_type),
+            "value": rule.value,
+        }),
+        "packages_installed" => serde_json::json!({
+            "packages": split_packages(&rule.packages),
+        }),
+        "custom_eval" => serde_json::json!({
+            "expression": rule.expr,
+            "message": rule.message,
+        }),
+        "cve_block" => serde_json::json!({
+            "severity": rule.severity,
+            "max_allowed": rule.max_allowed.parse::<u32>().ok()?,
+        }),
+        _ => return None,
+    };
+    Some(serde_json::json!({
+        "id": rule.id,
+        "kind": rule.kind,
+        "config": config,
+    }))
 }
 
 fn unsupported_rule_labels(rules: &[PolicyRule]) -> Vec<&'static str> {
@@ -563,14 +579,6 @@ fn unsupported_rule_labels(rules: &[PolicyRule]) -> Vec<&'static str> {
         .filter(|rule| !rule.is_persisted())
         .map(|rule| rule_label(&rule.kind))
         .collect()
-}
-
-fn has_cve_combination(rules: &[PolicyRule]) -> bool {
-    let persistable = rules
-        .iter()
-        .filter(|rule| rule.is_persisted())
-        .collect::<Vec<_>>();
-    persistable.len() > 1 && persistable.iter().any(|rule| rule.kind == "cve_block")
 }
 
 fn cve_config_is_representable(config: &serde_json::Value) -> bool {
@@ -665,6 +673,123 @@ fn require_packages_config_is_representable(config: &serde_json::Value) -> bool 
             .is_none_or(|value| value.as_bool() == Some(true))
 }
 
+fn existing_enforcement_is_opaque(
+    format: PolicyFormat,
+    policy_type: &str,
+    config: &serde_json::Value,
+) -> bool {
+    if format == PolicyFormat::Toml {
+        return true;
+    }
+    match policy_type {
+        "require_cve_check" => !cve_config_is_representable(config),
+        "require_packages" => !require_packages_config_is_representable(config),
+        "custom_check" => !custom_check_config_is_representable(config),
+        "composite" => !composite_config_is_representable(config),
+        _ => true,
+    }
+}
+
+fn composite_config_is_representable(config: &serde_json::Value) -> bool {
+    let hydrated = rules_from_policy("composite", config);
+    let exact_round_trip =
+        build_persisted_payload(&hydrated).is_some_and(|(policy_type, hydrated_config)| {
+            policy_type == "composite" && hydrated_config == *config
+        });
+    let unique_ids = hydrated
+        .iter()
+        .map(|rule| rule.id)
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        == hydrated.len();
+    let exact_rule_shapes = config
+        .get("rules")
+        .and_then(|value| value.as_array())
+        .is_some_and(|rules| {
+            rules.iter().all(|rule| {
+                if !object_keys_are_subset(rule, &["id", "kind", "config"]) {
+                    return false;
+                }
+                let Some(kind) = rule.get("kind").and_then(|value| value.as_str()) else {
+                    return false;
+                };
+                let Some(rule_config) = rule.get("config") else {
+                    return false;
+                };
+                let allowed = match kind {
+                    "nixos_option" => &["path", "operator", "value_type", "value"][..],
+                    "packages_installed" => &["packages"][..],
+                    "custom_eval" => &["expression", "message"][..],
+                    "cve_block" => &["severity", "max_allowed"][..],
+                    _ => return false,
+                };
+                object_keys_are_subset(rule_config, allowed)
+            })
+        });
+    config
+        .get("schema_version")
+        .and_then(|value| value.as_u64())
+        == Some(1)
+        && config.get("mode").and_then(|value| value.as_str()) == Some("all")
+        && object_keys_are_subset(config, &["schema_version", "mode", "rules"])
+        && config
+            .get("rules")
+            .and_then(|value| value.as_array())
+            .is_some_and(|rules| !rules.is_empty() && hydrated.len() == rules.len())
+        && unique_ids
+        && exact_rule_shapes
+        && exact_round_trip
+}
+
+fn rule_validation_error(rule: &PolicyRule) -> Option<String> {
+    match rule.kind.as_str() {
+        "nixos_option" => {
+            if rule.path.trim().is_empty() {
+                return Some("NixOS option path is required.".to_string());
+            }
+            let valid_operator = match normalize_option_type(&rule.option_type) {
+                "integer" => matches!(rule.op.as_str(), "==" | "!=" | ">=" | "<="),
+                _ => matches!(rule.op.as_str(), "==" | "!="),
+            };
+            if !valid_operator {
+                return Some(
+                    "The selected operator is not valid for this option type.".to_string(),
+                );
+            }
+            match normalize_option_type(&rule.option_type) {
+                "boolean" if !rule.value.is_boolean() => {
+                    Some("Boolean options require a true or false value.".to_string())
+                }
+                "integer" if rule.value.as_i64().is_none() => {
+                    Some("Integer options require a valid 64-bit integer.".to_string())
+                }
+                "enum"
+                    if !rule.option_values.is_empty()
+                        && !rule.value.as_str().is_some_and(|value| {
+                            rule.option_values.iter().any(|item| item == value)
+                        }) =>
+                {
+                    Some("Select one of the authoritative enum values.".to_string())
+                }
+                "enum" | "string" | "lines" | "unknown" if !rule.value.is_string() => {
+                    Some("This option requires a string value.".to_string())
+                }
+                _ => None,
+            }
+        }
+        "packages_installed" if split_packages(&rule.packages).is_empty() => {
+            Some("Enter at least one required package.".to_string())
+        }
+        "custom_eval" if rule.expr.trim().is_empty() => {
+            Some("Custom Nix expression is required.".to_string())
+        }
+        "cve_block" if rule.max_allowed.parse::<u32>().is_err() => {
+            Some("CVE maximum must be a non-negative integer.".to_string())
+        }
+        _ => None,
+    }
+}
+
 fn save_blocker(
     is_editing: bool,
     format: PolicyFormat,
@@ -675,6 +800,27 @@ fn save_blocker(
     if is_editing && format == PolicyFormat::Toml {
         return Some(
             "TOML policies are read-only in this form to avoid rewriting them as JSON.".to_string(),
+        );
+    }
+
+    if is_editing
+        && !matches!(
+            existing_type,
+            "require_cve_check" | "require_packages" | "custom_check" | "composite"
+        )
+    {
+        return Some(format!(
+            "This {existing_type} policy is not supported by this form. Its enforcement is preserved and cannot be saved here."
+        ));
+    }
+
+    if is_editing
+        && existing_type == "composite"
+        && !composite_config_is_representable(existing_config)
+    {
+        return Some(
+            "This composite policy contains unsupported or opaque fields. Its enforcement cannot be safely edited in this form."
+                .to_string(),
         );
     }
 
@@ -713,11 +859,12 @@ fn save_blocker(
         ));
     }
 
-    if has_cve_combination(rules) {
-        return Some(
-            "CVE gates cannot be combined with other rules until backend multi-rule CVE support exists."
-                .to_string(),
-        );
+    if let Some((index, error)) = rules
+        .iter()
+        .enumerate()
+        .find_map(|(index, rule)| rule_validation_error(rule).map(|error| (index, error)))
+    {
+        return Some(format!("Rule {}: {error}", index + 1));
     }
 
     None
@@ -882,6 +1029,103 @@ fn rules_from_policy(policy_type: &str, config: &serde_json::Value) -> Vec<Polic
                     rule.message = message.to_string();
                 }
                 rules.push(rule);
+            }
+        }
+        "composite" => {
+            let Some(entries) = config.get("rules").and_then(|value| value.as_array()) else {
+                return rules;
+            };
+            for entry in entries {
+                let Some(id) = entry
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    .filter(|id| !id.is_nil())
+                else {
+                    continue;
+                };
+                let Some(kind) = entry.get("kind").and_then(|value| value.as_str()) else {
+                    continue;
+                };
+                if !rule_kind_is_persisted(kind) {
+                    continue;
+                }
+                let Some(rule_config) = entry.get("config").and_then(|value| value.as_object())
+                else {
+                    continue;
+                };
+                let mut rule = PolicyRule::new_with_id(kind, id);
+                let valid = match kind {
+                    "nixos_option" => {
+                        let Some(path) = rule_config.get("path").and_then(|value| value.as_str())
+                        else {
+                            continue;
+                        };
+                        let Some(operator) =
+                            rule_config.get("operator").and_then(|value| value.as_str())
+                        else {
+                            continue;
+                        };
+                        let Some(value) = rule_config.get("value") else {
+                            continue;
+                        };
+                        let Some(value_type) = rule_config
+                            .get("value_type")
+                            .and_then(|value| value.as_str())
+                        else {
+                            continue;
+                        };
+                        rule.path = path.to_string();
+                        rule.op = operator.to_string();
+                        rule.value = value.clone();
+                        rule.option_type = normalize_option_type(value_type).to_string();
+                        true
+                    }
+                    "packages_installed" => rule_config
+                        .get("packages")
+                        .and_then(|value| value.as_array())
+                        .filter(|values| values.iter().all(|value| value.as_str().is_some()))
+                        .map(|values| {
+                            rule.packages = values
+                                .iter()
+                                .filter_map(|value| value.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                        })
+                        .is_some(),
+                    "custom_eval" => rule_config
+                        .get("expression")
+                        .and_then(|value| value.as_str())
+                        .map(|expression| {
+                            rule.expr = expression.to_string();
+                            rule.message = rule_config
+                                .get("message")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                        })
+                        .is_some(),
+                    "cve_block" => {
+                        let Some(severity) =
+                            rule_config.get("severity").and_then(|value| value.as_str())
+                        else {
+                            continue;
+                        };
+                        let Some(max_allowed) = rule_config
+                            .get("max_allowed")
+                            .and_then(|value| value.as_u64())
+                        else {
+                            continue;
+                        };
+                        rule.severity = severity.to_string();
+                        rule.max_allowed = max_allowed.to_string();
+                        true
+                    }
+                    _ => false,
+                };
+                if valid {
+                    rules.push(rule);
+                }
             }
         }
         _ => {}
@@ -1264,11 +1508,6 @@ pub fn PolicyEditorModal(
     // A new policy starts with no enforcement. Seeding UI-only rule kinds that
     // cannot be persisted forced the user to delete them before the very first
     // save, and contradicted "No enforcement defined" being a valid state.
-    let seed_rules = if is_editing {
-        rules_from_policy(&existing_type, &existing_config)
-    } else {
-        Vec::new()
-    };
     let existing_policy = editing_policy.clone().or_else(|| {
         editing_policy_id.read().and_then(|id| {
             policy_library
@@ -1346,7 +1585,18 @@ pub fn PolicyEditorModal(
             .unwrap_or_default()
     });
     let framework_options = custom_frameworks(&policy_library.read());
-    let mut rules = use_signal(|| seed_rules);
+    let initial_existing_type = existing_type.clone();
+    let initial_existing_config = existing_config.clone();
+    let mut rules = use_signal(move || {
+        if is_editing {
+            rules_from_policy(&initial_existing_type, &initial_existing_config)
+        } else {
+            Vec::new()
+        }
+    });
+    // Enforcement dirtiness is separate from metadata/category edits so an
+    // untouched legacy payload can be sent back byte-for-byte semantically.
+    let mut enforcement_changed = use_signal(|| false);
     // Initialize evidence from existing policy specs, or empty if creating new
     let initial_evidence: Vec<PolicyEvidence> = existing_policy
         .as_ref()
@@ -1430,6 +1680,8 @@ pub fn PolicyEditorModal(
         &existing_config,
         &current_rules,
     );
+    let enforcement_opaque = is_editing
+        && existing_enforcement_is_opaque(*edit_format.read(), &existing_type, &existing_config);
     let can_save = !name_missing && current_save_blocker.is_none() && !*is_saving.read();
     let rule_count = rules.read().len();
     let evidence_count = evidence.read().len();
@@ -1456,13 +1708,17 @@ pub fn PolicyEditorModal(
 
     let mapping_count = mappings.read().len() + pending_mappings.read().len();
     let mapping_state = *mapping_load_state.read();
-    let policy_state = policy_editor_state(
+    let mut policy_state = policy_editor_state(
         is_imported,
         mapping_state,
         mapping_count,
         rule_count,
         evidence_count,
     );
+    if enforcement_opaque {
+        policy_state.enforcement = "Enforcement unavailable in this editor";
+        policy_state.mapped_not_enforced = false;
+    }
     let delete_matches = delete_typed.read().as_str() == name_value;
 
     rsx! {
@@ -1846,7 +2102,9 @@ pub fn PolicyEditorModal(
                             }
                             if rule_count == 0 {
                                 div { class: if is_imported { "sd-callout sd-callout-warn" } else { "sd-callout sd-callout-info" }, "data-testid": "policy-enforcement-empty", style: "margin-bottom:8px;font-size:12px;",
-                                    if is_imported {
+                                    if enforcement_opaque {
+                                        span { strong { "Enforcement preserved but unavailable." } " This policy uses an unsupported or opaque representation. It is not a zero-enforcement policy, and this form will not rewrite it." }
+                                    } else if is_imported {
                                         span { strong { "Enforcement needs refinement." } " This control was imported with its compliance mappings and provenance, but no assertion was inferred. Until one exists it asserts nothing." }
                                     } else {
                                         span { strong { "No enforcement defined." } " Add at least one requirement for this policy to have an effect. Saving with none is valid; the policy simply asserts nothing." }
@@ -1873,20 +2131,25 @@ pub fn PolicyEditorModal(
                             div { style: "display:flex;flex-direction:column;gap:6px;",
                                 for (index, rule) in rules.read().iter().cloned().enumerate() {
                                     div {
-                                        key: "rule-{index}",
+                                        key: "rule-{rule.id}",
                                         style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:8px 10px;background:var(--cf-subtle-bg);border-radius:8px;",
-                                        RuleEditorRow { index, rule: rule.clone(), rules }
-                                        button {
-                                            class: "btn-icon focus-ring",
-                                            "data-testid": "policy-rule-remove-{index}",
-                                            title: "Remove rule",
-                                            onclick: move |_| {
-                                                let mut next = rules.read().clone();
-                                                if index < next.len() { next.remove(index); }
-                                                rules.set(next);
-                                            },
-                                            svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                                                path { d: "M18 6 6 18M6 6l12 12" }
+                                        RuleEditorRow { index, rule: rule.clone(), rules, enforcement_changed }
+                                        div { style: "display:flex;flex-direction:column;gap:3px;",
+                                            button { class: "btn-icon focus-ring", title: "Move rule up", disabled: index == 0, onclick: move |_| { let mut next = rules.read().clone(); if index > 0 && index < next.len() { next.swap(index, index - 1); rules.set(next); enforcement_changed.set(true); } }, "↑" }
+                                            button { class: "btn-icon focus-ring", title: "Move rule down", disabled: index + 1 >= rule_count, onclick: move |_| { let mut next = rules.read().clone(); if index + 1 < next.len() { next.swap(index, index + 1); rules.set(next); enforcement_changed.set(true); } }, "↓" }
+                                            button {
+                                                class: "btn-icon focus-ring",
+                                                "data-testid": "policy-rule-remove-{index}",
+                                                title: "Remove rule",
+                                                onclick: move |_| {
+                                                    let mut next = rules.read().clone();
+                                                    if index < next.len() { next.remove(index); }
+                                                    rules.set(next);
+                                                    enforcement_changed.set(true);
+                                                },
+                                                svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                                    path { d: "M18 6 6 18M6 6l12 12" }
+                                                }
                                             }
                                         }
                                     }
@@ -1907,6 +2170,7 @@ pub fn PolicyEditorModal(
                                             let mut next = rules.read().clone();
                                             next.push(PolicyRule::new(&kind));
                                             rules.set(next);
+                                            enforcement_changed.set(true);
                                         }
                                         add_rule_kind.set(String::new());
                                     },
@@ -2057,7 +2321,14 @@ pub fn PolicyEditorModal(
                                 let mut is_saving = is_saving;
                                 let on_close = on_close;
 
-                                let Some((policy_type, config)) = build_persisted_payload(&current_rules) else {
+                                let persisted = persisted_payload_for_save(
+                                    editing_id.is_some(),
+                                    *enforcement_changed.read(),
+                                    &existing_type,
+                                    &existing_config,
+                                    &current_rules,
+                                );
+                                let Some((policy_type, config)) = persisted else {
                                     save_error.set("Add at least one backend-supported assertion before saving.".to_string());
                                     return;
                                 };
@@ -2255,6 +2526,16 @@ pub fn PolicyEditorModal(
 // Rule editor row
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[derive(Clone, Debug, PartialEq)]
+enum OptionSearchState {
+    Idle,
+    Loading,
+    Error(String),
+    Unavailable(String),
+    Zero,
+    Results(Vec<NixosOptionMetadata>),
+}
+
 #[component]
 fn PolicyEditorTabButton(
     tab: PolicyEditorTab,
@@ -2275,9 +2556,17 @@ fn PolicyEditorTabButton(
 }
 
 #[component]
-fn RuleEditorRow(index: usize, rule: PolicyRule, rules: Signal<Vec<PolicyRule>>) -> Element {
+fn RuleEditorRow(
+    index: usize,
+    rule: PolicyRule,
+    rules: Signal<Vec<PolicyRule>>,
+    mut enforcement_changed: Signal<bool>,
+) -> Element {
     let kind = rule.kind.clone();
     let persisted = rule.is_persisted();
+    let mut option_search = use_signal(|| OptionSearchState::Idle);
+    let mut search_generation = use_signal(|| 0_u64);
+    let mut initial_metadata_requested = use_signal(|| false);
 
     // Mutate one field of the rule at `index` and write it back to the signal.
     macro_rules! set_rule_field {
@@ -2287,7 +2576,32 @@ fn RuleEditorRow(index: usize, rule: PolicyRule, rules: Signal<Vec<PolicyRule>>)
                 target.$field = $value;
             }
             rules.set(next);
+            enforcement_changed.set(true);
         }};
+    }
+
+    if kind == "nixos_option" && !*initial_metadata_requested.read() {
+        initial_metadata_requested.set(true);
+        let path = rule.path.clone();
+        let mut rules_for_lookup = rules;
+        spawn(async move {
+            if let Ok(response) = search_nixos_options(&path, 10).await {
+                if let Some(metadata) = response.iter().find(|item| item.path == path) {
+                    let mut next = rules_for_lookup.read().clone();
+                    if let Some(target) = next
+                        .get_mut(index)
+                        .filter(|target| target.id == rule.id && target.path == path)
+                    {
+                        let value = target.value.clone();
+                        let operator = target.op.clone();
+                        target.apply_option_metadata(metadata);
+                        target.value = value;
+                        target.op = operator;
+                        rules_for_lookup.set(next);
+                    }
+                }
+            }
+        });
     }
 
     rsx! {
@@ -2335,30 +2649,101 @@ fn RuleEditorRow(index: usize, rule: PolicyRule, rules: Signal<Vec<PolicyRule>>)
                     }
                 },
                 "nixos_option" => rsx! {
-                    div { style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;",
+                    div { style: "display:flex;flex-direction:column;gap:6px;",
                         input {
+                            "data-testid": "policy-rule-nixos-path-{index}",
                             class: "input focus-ring mono",
-                            style: "font-size:11px;padding:5px 8px;flex:1;min-width:200px;",
+                            style: "font-size:11px;padding:5px 8px;width:100%;",
                             placeholder: "services.openssh.settings.PermitRootLogin",
                             value: "{rule.path}",
-                            oninput: move |event| set_rule_field!(path, event.value()),
+                            oninput: move |event| {
+                                let query = event.value();
+                                let mut next = rules.read().clone();
+                                if let Some(target) = next.get_mut(index) {
+                                    target.path = query.clone();
+                                    target.option_type = "unknown".to_string();
+                                    target.option_values.clear();
+                                    target.option_description.clear();
+                                    target.option_unit = None;
+                                    if !target.value.is_string() {
+                                        target.value = serde_json::Value::String(target.value.to_string());
+                                    }
+                                }
+                                rules.set(next);
+                                enforcement_changed.set(true);
+                                let generation = *search_generation.read() + 1;
+                                search_generation.set(generation);
+                                if query.trim().is_empty() {
+                                    option_search.set(OptionSearchState::Idle);
+                                    return;
+                                }
+                                option_search.set(OptionSearchState::Loading);
+                                spawn(async move {
+                                    gloo_timers::future::TimeoutFuture::new(250).await;
+                                    let result = search_nixos_options(&query, 20).await;
+                                    if *search_generation.read() != generation { return; }
+                                    match result {
+                                        Ok(response) if response.is_empty() => option_search.set(OptionSearchState::Zero),
+                                        Ok(response) => option_search.set(OptionSearchState::Results(response)),
+                                        Err(ApiClientError::Status { code: 503, body }) => option_search.set(OptionSearchState::Unavailable(if body.is_empty() { "NixOS option metadata is unavailable. Manual paths remain available.".to_string() } else { body })),
+                                        Err(error) => option_search.set(OptionSearchState::Error(error.to_string())),
+                                    }
+                                });
+                            },
                         }
-                        select {
-                            "data-testid": "policy-evidence-unit-state-{index}",
-                            class: "input focus-ring mono",
-                            style: "width:auto;font-size:12px;padding:5px 6px;",
-                            value: "{rule.op}",
-                            onchange: move |event| set_rule_field!(op, event.value()),
-                            option { value: "==", "==" }
-                            option { value: "!=", "!=" }
-                            option { value: ">=", "≥" }
-                            option { value: "<=", "≤" }
+                        match option_search.read().clone() {
+                            OptionSearchState::Idle => rsx! { span { "data-testid": "policy-option-search-idle", class: "help", "Type any option path, or search the metadata index." } },
+                            OptionSearchState::Loading => rsx! { span { "data-testid": "policy-option-search-loading", class: "help", "Searching NixOS options…" } },
+                            OptionSearchState::Error(error) => rsx! { span { "data-testid": "policy-option-search-error", class: "help", style: "color:#f87171;", "Search failed: {error}. You can still enter a path manually." } },
+                            OptionSearchState::Unavailable(message) => rsx! { span { "data-testid": "policy-option-search-unavailable", class: "help", "{message}" } },
+                            OptionSearchState::Zero => rsx! { span { "data-testid": "policy-option-search-zero", class: "help", "No metadata matches. The entered path will be kept as a custom string option." } },
+                            OptionSearchState::Results(results) => rsx! {
+                                div { "data-testid": "policy-option-search-results", style: "display:flex;flex-direction:column;max-height:150px;overflow:auto;border:1px solid var(--cf-divider);border-radius:7px;",
+                                    for metadata in results {
+                                        {
+                                            let selected = metadata.clone();
+                                            rsx! { button { r#type: "button", class: "btn btn-ghost focus-ring", style: "text-align:left;display:block;padding:6px 8px;border-radius:0;", onclick: move |_| {
+                                                let mut next = rules.read().clone();
+                                                if let Some(target) = next.get_mut(index) { target.apply_option_metadata(&selected); }
+                                                rules.set(next);
+                                                enforcement_changed.set(true);
+                                                option_search.set(OptionSearchState::Idle);
+                                            },
+                                                span { class: "mono", style: "display:block;font-size:11px;", "{metadata.path}" }
+                                                span { style: "display:block;font-size:10px;color:var(--cf-text-muted);", "{metadata.value_type.as_str()} · {metadata.description.as_deref().unwrap_or_default()}" }
+                                            } }
+                                        }
+                                    }
+                                }
+                            },
                         }
-                        input {
-                            class: "input focus-ring mono",
-                            style: "width:90px;font-size:11px;padding:5px 8px;",
-                            value: "{rule.value}",
-                            oninput: move |event| set_rule_field!(value, event.value()),
+                        if !rule.option_description.is_empty() {
+                            span { class: "help", "{rule.option_description}" }
+                        }
+                        div { style: "display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap;",
+                            select {
+                                "data-testid": "policy-rule-nixos-operator-{index}",
+                                aria_label: "Comparison operator",
+                                class: "input focus-ring mono",
+                                style: "width:auto;font-size:12px;padding:5px 6px;",
+                                value: "{rule.op}",
+                                onchange: move |event| set_rule_field!(op, event.value()),
+                                option { value: "==", "==" }
+                                option { value: "!=", "!=" }
+                                if normalize_option_type(&rule.option_type) == "integer" {
+                                    option { value: ">=", "≥" }
+                                    option { value: "<=", "≤" }
+                                }
+                            }
+                            match normalize_option_type(&rule.option_type) {
+                                "boolean" => rsx! { select { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected boolean value", class: "input focus-ring mono", value: if rule.value.as_bool().unwrap_or(false) { "true" } else { "false" }, onchange: move |event| set_rule_field!(value, serde_json::Value::Bool(event.value() == "true")), option { value: "true", "true" } option { value: "false", "false" } } },
+                                "enum" if !rule.option_values.is_empty() => rsx! { select { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected enum value", class: "input focus-ring mono", value: "{rule.value.as_str().unwrap_or_default()}", onchange: move |event| set_rule_field!(value, serde_json::Value::String(event.value())), for value in rule.option_values.iter() { option { value: "{value}", selected: rule.value.as_str() == Some(value.as_str()), "{value}" } } } },
+                                "integer" => rsx! { input { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected integer value", r#type: "number", class: "input focus-ring mono", value: "{rule.value.as_i64().unwrap_or_default()}", oninput: move |event| { if let Ok(value) = event.value().parse::<i64>() { set_rule_field!(value, serde_json::json!(value)); } } } },
+                                "lines" => rsx! { textarea { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected multiline value", class: "input focus-ring mono code-editor", rows: "8", style: "flex:1;min-width:260px;resize:vertical;", value: "{rule.value.as_str().unwrap_or_default()}", oninput: move |event| set_rule_field!(value, serde_json::Value::String(event.value())) } },
+                                _ => rsx! { input { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected string value", class: "input focus-ring mono", style: "flex:1;min-width:180px;", value: "{rule.value.as_str().unwrap_or_default()}", oninput: move |event| set_rule_field!(value, serde_json::Value::String(event.value())) } },
+                            }
+                            span { class: "chip chip-neutral", style: "font-size:10px;", "{normalize_option_type(&rule.option_type)}" }
+                            if let Some(unit) = rule.option_unit.as_ref() { span { class: "help", "{unit}" } }
                         }
                     }
                 },
@@ -2626,11 +3011,16 @@ mod tests {
     }
 
     #[test]
-    fn cve_rule_is_not_serialized_as_always_true_custom_check() {
+    fn cve_rule_combination_is_a_typed_composite_not_an_always_true_check() {
         let rules = vec![PolicyRule::new("cve_block"), PolicyRule::new("custom_eval")];
 
-        assert!(has_cve_combination(&rules));
-        assert!(build_persisted_payload(&rules).is_none());
+        let (policy_type, config) = build_persisted_payload(&rules).expect("composite");
+        assert_eq!(policy_type, "composite");
+        assert_eq!(config["schema_version"], 1);
+        assert_eq!(config["mode"], "all");
+        assert_eq!(config["rules"][0]["kind"], "cve_block");
+        assert_eq!(config["rules"][1]["kind"], "custom_eval");
+        assert!(!config.to_string().contains("\"expression\":\"true\""));
         assert!(
             save_blocker(
                 false,
@@ -2639,7 +3029,7 @@ mod tests {
                 &serde_json::Value::Null,
                 &rules
             )
-            .is_some()
+            .is_none()
         );
     }
 
@@ -3012,6 +3402,141 @@ mod tests {
             (policy_type, config),
             "round-tripping must be stable"
         );
+    }
+
+    fn design_dod_consent_banner() -> String {
+        let path = option_env!("CRYSTAL_FORGE_DESIGN_ENFORCEMENT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../docs/design/CrystalForge/data-enforcement.js")
+            });
+        let source = std::fs::read_to_string(path).expect("read data-enforcement.js test oracle");
+        source
+            .split_once("const DOD_CONSENT_BANNER = `")
+            .expect("DOD_CONSENT_BANNER declaration")
+            .1
+            .split_once("`;\n\n// Known NixOS option types")
+            .expect("DOD_CONSENT_BANNER terminator")
+            .0
+            .to_string()
+    }
+
+    #[test]
+    fn composite_semantic_values_and_stable_ids_round_trip_exactly() {
+        let banner = design_dod_consent_banner();
+        let difficult =
+            "  leading \"quotes\" and \\\\slashes ${config.foo}\n\nblank line\ntrailing  \n";
+        let mut boolean = PolicyRule::new("nixos_option");
+        boolean.path = "services.openssh.enable".into();
+        boolean.option_type = "boolean".into();
+        boolean.value = serde_json::Value::Bool(true);
+        let mut integer = PolicyRule::new("nixos_option");
+        integer.path = "services.openssh.settings.ClientAliveInterval".into();
+        integer.option_type = "integer".into();
+        integer.op = ">=".into();
+        integer.value = serde_json::json!(-9_i64);
+        let mut lines = PolicyRule::new("nixos_option");
+        lines.path = "environment.etc.\"issue\".text".into();
+        lines.option_type = "lines".into();
+        lines.value = serde_json::Value::String(banner.clone());
+        let mut custom_string = PolicyRule::new("nixos_option");
+        custom_string.path = "services.example.difficult".into();
+        custom_string.value = serde_json::Value::String(difficult.to_string());
+        let mut rules = vec![boolean, integer, lines, custom_string];
+        let original_ids = rules.iter().map(|rule| rule.id).collect::<Vec<_>>();
+
+        let (policy_type, config) = build_persisted_payload(&rules).expect("serialize");
+        assert_eq!(policy_type, "composite");
+        assert_eq!(config["schema_version"], 1);
+        assert_eq!(config["mode"], "all");
+        assert_eq!(config["rules"][0]["config"]["value"], true);
+        assert_eq!(config["rules"][1]["config"]["value"], -9);
+        assert_eq!(config["rules"][2]["config"]["value"], banner.as_str());
+        assert_eq!(config["rules"][3]["config"]["value"], difficult);
+        assert!(!config.to_string().contains("''"));
+
+        let reopened = rules_from_policy(&policy_type, &config);
+        assert_eq!(
+            reopened.iter().map(|rule| rule.id).collect::<Vec<_>>(),
+            original_ids
+        );
+        assert_eq!(reopened[2].value.as_str(), Some(banner.as_str()));
+        assert_eq!(reopened[3].value.as_str(), Some(difficult));
+        assert_eq!(
+            build_persisted_payload(&reopened),
+            Some((policy_type, config.clone()))
+        );
+
+        rules.swap(0, 3);
+        let (_, reordered) = build_persisted_payload(&rules).expect("reorder");
+        assert_eq!(reordered["rules"][0]["id"], original_ids[3].to_string());
+        assert_eq!(reordered["rules"][3]["id"], original_ids[0].to_string());
+    }
+
+    #[test]
+    fn non_idempotent_composite_shapes_are_opaque() {
+        let missing_message = serde_json::json!({
+            "schema_version": 1,
+            "mode": "all",
+            "rules": [{
+                "id": "10000000-0000-0000-0000-000000000001",
+                "kind": "custom_eval",
+                "config": { "expression": "config.services.openssh.enable" }
+            }]
+        });
+        assert!(!composite_config_is_representable(&missing_message));
+
+        let whitespace_package = serde_json::json!({
+            "schema_version": 1,
+            "mode": "all",
+            "rules": [{
+                "id": "10000000-0000-0000-0000-000000000002",
+                "kind": "packages_installed",
+                "config": { "packages": [" openssh"] }
+            }]
+        });
+        assert!(!composite_config_is_representable(&whitespace_package));
+    }
+
+    #[test]
+    fn untouched_legacy_enforcement_is_preserved_until_explicitly_changed() {
+        let legacy = serde_json::json!({
+            "mode": "all",
+            "rules": [{
+                "expression": "config.networking.firewall.enable == true",
+                "description": "Firewall",
+                "field_name": "firewall",
+                "strict": true
+            }],
+            "strict": true
+        });
+        let rules = rules_from_policy("custom_check", &legacy);
+        assert_eq!(
+            persisted_payload_for_save(true, false, "custom_check", &legacy, &rules),
+            Some(("custom_check".to_string(), legacy.clone()))
+        );
+        assert_eq!(
+            persisted_payload_for_save(true, true, "custom_check", &legacy, &rules)
+                .expect("changed payload")
+                .0,
+            "composite"
+        );
+    }
+
+    #[test]
+    fn opaque_existing_policy_is_not_presented_as_zero_enforcement() {
+        let opaque = serde_json::json!({"opaque": {"must_survive": true}});
+        let rules = rules_from_policy("future_policy", &opaque);
+        assert!(rules.is_empty());
+        assert!(existing_enforcement_is_opaque(
+            PolicyFormat::Json,
+            "future_policy",
+            &opaque
+        ));
+        let blocker = save_blocker(true, PolicyFormat::Json, "future_policy", &opaque, &rules)
+            .expect("opaque policy must be blocked");
+        assert!(blocker.contains("not supported"));
     }
 
     #[test]

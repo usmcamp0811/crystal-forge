@@ -19,6 +19,7 @@ pub mod flakes;
 pub mod framework_requirements;
 pub mod hardening;
 pub mod navigation;
+pub mod nixos_options;
 pub mod rbac;
 pub mod scanning;
 pub mod setup_wizard;

@@ -449,16 +449,21 @@ fn rule_summary_from_json(rule: &serde_json::Value) -> PolicyRuleSummary {
         .get("kind")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
+    // Composite rules nest their typed fields under `config`; legacy display
+    // fixtures keep them flat. Supporting both preserves old read-back while
+    // rendering the new representation accurately.
+    let config = rule.get("config").unwrap_or(rule);
     let label = match kind {
         "eval_passed" => "Evaluation must pass".to_string(),
         "build_succeeded" => "Build must succeed and be cacheable".to_string(),
         "cve_block" => {
-            let severity = rule
+            let severity = config
                 .get("severity")
                 .and_then(|value| value.as_str())
                 .unwrap_or("critical");
-            let max = rule
-                .get("maxAllowed")
+            let max = config
+                .get("max_allowed")
+                .or_else(|| config.get("maxAllowed"))
                 .and_then(|value| value.as_u64())
                 .unwrap_or(0);
             format!("Block deploy when {severity} CVEs exceed {max}")
@@ -493,7 +498,7 @@ fn rule_summary_from_json(rule: &serde_json::Value) -> PolicyRuleSummary {
             format!("Canary rollout: {percent}% at a time")
         }
         "packages_installed" => {
-            let packages = rule
+            let packages = config
                 .get("packages")
                 .and_then(|value| value.as_array())
                 .map(|items| {
@@ -507,22 +512,27 @@ fn rule_summary_from_json(rule: &serde_json::Value) -> PolicyRuleSummary {
             format!("Packages installed: {packages}")
         }
         "nixos_option" => {
-            let path = rule
+            let path = config
                 .get("path")
                 .and_then(|value| value.as_str())
                 .unwrap_or("option");
-            let op = rule
-                .get("op")
+            let op = config
+                .get("operator")
+                .or_else(|| config.get("op"))
                 .and_then(|value| value.as_str())
                 .unwrap_or("==");
-            let value = rule
+            let value = config
                 .get("value")
-                .and_then(|value| value.as_str())
-                .unwrap_or("expected");
+                .map(|value| match value {
+                    serde_json::Value::String(value) => value.clone(),
+                    other => other.to_string(),
+                })
+                .unwrap_or_else(|| "expected".to_string());
             format!("config.{path} {op} {value}")
         }
-        "custom_eval" => rule
-            .get("message")
+        "custom_eval" => config
+            .get("description")
+            .or_else(|| config.get("message"))
             .and_then(|value| value.as_str())
             .unwrap_or("Custom Nix expression must pass")
             .to_string(),

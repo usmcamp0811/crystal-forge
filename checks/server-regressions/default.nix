@@ -60,6 +60,7 @@ pkgs.rustPlatform.buildRustPackage {
     echo "=== Critical cf-server integration targets ==="
     cargo test --offline --package cf-server \
       --test assignment_semantics \
+      --test composite_policy \
       --test evidence_for_ato \
       --test framework_version_id_lifecycle \
       --test policy_counts_defect \

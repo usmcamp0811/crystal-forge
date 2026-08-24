@@ -3521,6 +3521,38 @@ mod tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// NixOS option metadata — GET /api/v1/nixos/options
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NixosOptionMetadata {
+    pub path: String,
+    pub value_type: NixosOptionValueType,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enum_values: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NixosOptionValueType {
+    Boolean,
+    Enum,
+    Integer,
+    String,
+    Lines,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NixosOptionsSearchQuery {
+    #[serde(default)]
+    pub query: String,
+    pub limit: Option<usize>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Admin Config Health DTOs — GET /api/v1/admin/config-health
 // ─────────────────────────────────────────────────────────────────────────────
 

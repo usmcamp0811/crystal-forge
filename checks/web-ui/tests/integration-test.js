@@ -7559,6 +7559,153 @@ const steps = [
     },
   },
   {
+    name: "20ab1-policy-editor-composite-metadata-roundtrip",
+    description: "Real NixOS metadata drives typed composite values and stable rule IDs across save and reload",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+      await collapseOnboardingCoach(page);
+
+      const metadataPaths = {
+        boolean: "networking.firewall.enable",
+        enum: "networking.networkmanager.dns",
+        integer: "boot.consoleLogLevel",
+        lines: "networking.extraHosts",
+      };
+      const metadata = await page.evaluate(async ({ base, paths }) => {
+        const found = {};
+        for (const [kind, path] of Object.entries(paths)) {
+          const response = await fetch(`${base}/api/v1/nixos/options?query=${encodeURIComponent(path)}&limit=10`, { credentials: "include" });
+          if (!response.ok) throw new Error(`NixOS metadata ${kind} query failed: ${response.status}`);
+          const body = await response.json();
+          const options = Array.isArray(body) ? body : body.options || body.results || [];
+          if (body.available === false || body.status === "unavailable") throw new Error(`NixOS metadata unavailable for ${kind}`);
+          const option = options.find((item) => item.path === path);
+          if (!option) throw new Error(`Real NixOS metadata did not return ${path}: ${JSON.stringify(body)}`);
+          const actualType = option.value_type || option.type || option.option_type || option.kind;
+          const expected = kind === "boolean" ? ["boolean", "bool"] : kind === "integer" ? ["integer", "int"] : [kind];
+          if (!expected.includes(actualType)) throw new Error(`Expected ${kind} metadata for ${path}, got ${actualType}`);
+          found[kind] = option;
+        }
+        return found;
+      }, { base: apiBaseUrl, paths: metadataPaths });
+
+      const policyName = `UI composite metadata ${Date.now()}`;
+      const dodConsentBanner = `You are accessing a U.S. Government (USG) Information System (IS) that is provided for USG-authorized use only.
+
+By using this IS (which includes any device attached to this IS), you consent to the following conditions:
+
+-The USG routinely intercepts and monitors communications on this IS for purposes including, but not limited to, penetration testing, COMSEC monitoring, network operations and defense, personnel misconduct (PM), law enforcement (LE), and counterintelligence (CI) investigations.
+
+-At any time, the USG may inspect and seize data stored on this IS.
+
+-Communications using, or data stored on, this IS are not private, are subject to routine monitoring, interception, and search, and may be disclosed or used for any USG-authorized purpose.
+
+-This IS includes security measures (e.g., authentication and access controls) to protect USG interests--not for your personal benefit or privacy.
+
+-Notwithstanding the above, using this IS does not constitute consent to PM, LE or CI investigative searching or monitoring of the content of privileged communications, or work product, related to personal representation or services by attorneys, psychotherapists, or clergy, and their assistants. Such communications and work product are private and confidential. See User Agreement for details.`;
+      const difficult = "  leading \"quotes\" and \\\\slashes ${config.foo} trailing  ";
+      await page.getByRole("button", { name: /New custom policy/i }).first().click();
+      await page.getByPlaceholder("e.g. canary-25").fill(policyName);
+      await page.getByTestId("policy-editor-tab-enforcement").click();
+      const addRule = page.getByTestId("policy-editor-add-rule");
+
+      const addMetadataRule = async (index, path) => {
+        await addRule.selectOption("nixos_option");
+        const pathInput = page.getByTestId(`policy-rule-nixos-path-${index}`);
+        await pathInput.fill(path);
+        const results = page.getByTestId("policy-option-search-results").last();
+        await results.waitFor({ state: "visible", timeout: 10000 });
+        await results.getByRole("button").filter({ hasText: path }).first().click();
+      };
+
+      await addMetadataRule(0, metadataPaths.boolean);
+      await page.getByTestId("policy-rule-nixos-value-0").selectOption("true");
+
+      await addMetadataRule(1, metadataPaths.enum);
+      const enumValues = metadata.enum.enum_values || metadata.enum.values || [];
+      if (enumValues.length < 1) throw new Error("Authoritative enum metadata had no values");
+      const enumValue = enumValues[enumValues.length - 1];
+      await page.getByTestId("policy-rule-nixos-value-1").selectOption(enumValue);
+
+      await addMetadataRule(2, metadataPaths.integer);
+      await page.getByTestId("policy-rule-nixos-operator-2").selectOption(">=");
+      await page.getByTestId("policy-rule-nixos-value-2").fill("42");
+
+      await addMetadataRule(3, metadataPaths.lines);
+      await page.getByTestId("policy-rule-nixos-value-3").fill(dodConsentBanner);
+
+      await addRule.selectOption("nixos_option");
+      const unknownPath = `services.crystalForge.unknown.${Date.now()}`;
+      await page.getByTestId("policy-rule-nixos-path-4").fill(unknownPath);
+      await page.getByTestId("policy-option-search-zero").waitFor({ state: "visible", timeout: 10000 });
+      await page.getByTestId("policy-rule-nixos-value-4").fill(difficult);
+
+      const createResponsePromise = page.waitForResponse(
+        (response) => response.url().includes("/api/v1/deployment-policies") && response.request().method() === "POST",
+      );
+      await page.getByRole("button", { name: "Create policy", exact: true }).click();
+      const createResponse = await createResponsePromise;
+      if (createResponse.status() !== 201) throw new Error(`Expected composite policy create 201, got ${createResponse.status()}`);
+      const created = await createResponse.json();
+      const sent = JSON.parse(createResponse.request().postData() || "{}");
+      if (sent.policy_type !== "composite" || sent.config.schema_version !== 1 || sent.config.mode !== "all") {
+        throw new Error(`Unexpected composite envelope: ${JSON.stringify(sent)}`);
+      }
+      if (sent.config.rules.length !== 5) throw new Error(`Expected five ordered rules, got ${sent.config.rules.length}`);
+      const ids = sent.config.rules.map((rule) => rule.id);
+      if (new Set(ids).size !== ids.length || ids.some((id) => !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id))) {
+        throw new Error(`Rules did not have unique stable UUIDv4 IDs: ${JSON.stringify(ids)}`);
+      }
+      const values = sent.config.rules.map((rule) => rule.config.value);
+      if (values[0] !== true || values[1] !== enumValue || values[2] !== 42 || values[3] !== dodConsentBanner || values[4] !== difficult) {
+        throw new Error(`Composite semantic values were altered: ${JSON.stringify(values)}`);
+      }
+
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await collapseOnboardingCoach(page);
+      await openSecurityPolicyTab(page);
+      const card = page.locator(`[data-policy-card="true"][data-policy-id="${created.id}"]`);
+      await card.waitFor({ timeout: 20000 });
+      await card.getByRole("button", { name: "Edit", exact: true }).click();
+      await page.getByTestId("policy-editor-tab-enforcement").click();
+      await page.waitForFunction((expectedEnum) => {
+        const values = [0, 1, 2, 3].map((index) => document.querySelector(`[data-testid="policy-rule-nixos-value-${index}"]`));
+        return values[0]?.tagName === "SELECT" && values[1]?.tagName === "SELECT" &&
+          values[1]?.value === expectedEnum && values[2]?.getAttribute("type") === "number" &&
+          values[3]?.tagName === "TEXTAREA";
+      }, enumValue, { timeout: 10000 });
+      if (await page.getByTestId("policy-rule-nixos-value-0").inputValue() !== "true") throw new Error("Boolean did not reload as a boolean control");
+      if (await page.getByTestId("policy-rule-nixos-value-1").inputValue() !== enumValue) throw new Error("Enum did not reload with its authoritative choice");
+      if (await page.getByTestId("policy-rule-nixos-value-2").inputValue() !== "42") throw new Error("Integer did not reload as an integer control");
+      if (await page.getByTestId("policy-rule-nixos-value-3").inputValue() !== dodConsentBanner) throw new Error("DoD consent banner did not round-trip exactly");
+      if (await page.getByTestId("policy-rule-nixos-value-4").inputValue() !== difficult) throw new Error("Unknown custom string did not round-trip exactly");
+
+      // Force hydration back through composite serialization and reorder stable IDs.
+      await page.getByTitle("Move rule down").first().click();
+
+      const updateResponsePromise = page.waitForResponse(
+        (response) => response.url().includes(`/api/v1/deployment-policies/${created.id}`) && response.request().method() === "PUT",
+      );
+      await page.getByRole("button", { name: "Save changes", exact: true }).click();
+      const updateResponse = await updateResponsePromise;
+      if (updateResponse.status() !== 200) throw new Error(`Expected composite re-save 200, got ${updateResponse.status()}`);
+      const update = JSON.parse(updateResponse.request().postData() || "{}");
+      const reloadedIds = update.config.rules.map((rule) => rule.id);
+      const expectedIds = [ids[1], ids[0], ...ids.slice(2)];
+      if (JSON.stringify(reloadedIds) !== JSON.stringify(expectedIds)) {
+        throw new Error(`Rule IDs were not preserved across hydration/reorder: ${JSON.stringify(expectedIds)} -> ${JSON.stringify(reloadedIds)}`);
+      }
+      const reserializedValues = update.config.rules.map((rule) => rule.config.value);
+      if (reserializedValues[0] !== enumValue || reserializedValues[1] !== true || reserializedValues[2] !== 42 || reserializedValues[3] !== dodConsentBanner || reserializedValues[4] !== difficult) {
+        throw new Error(`Hydrated composite values were altered: ${JSON.stringify(reserializedValues)}`);
+      }
+
+      await page.evaluate(async ({ base, id }) => {
+        await fetch(`${base}/api/v1/deployment-policies/${id}`, { method: "DELETE", credentials: "include" });
+      }, { base: apiBaseUrl, id: created.id });
+    },
+  },
+  {
      name: "20ad-stig-nixos-assertion-roundtrip",
      description: "STIG auditd assertions remain structured through refinement and import serialization",
      action: async (page) => {
