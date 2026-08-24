@@ -1,11 +1,11 @@
 ---
 id: TASK-433.4
 title: 'TASK-433 Phase 3: NixOS option metadata and composite policy serializer'
-status: In Progress
+status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-24 06:34'
+updated_date: '2026-08-24 06:36'
 labels:
   - design-parity
   - policy
@@ -16,6 +16,7 @@ dependencies:
 references:
   - TASK-433
   - TASK-433.1
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/318'
 documentation:
   - docs/design/CrystalForge/data-enforcement.js
 parent_task_id: TASK-433
@@ -78,6 +79,8 @@ nix build .#checks.x86_64-linux.server-regressions --no-link
 Ownership/preflight audit: task worktree is clean at 36736d8d with no later commits; 36736d8d is an ancestor and origin matches. Central task records show TASK-433.3 Review with all four ACs checked and TASK-433.4 In Progress. Partial Phase-3 work consisted only of an untracked experimental `packages/default/nixos-options-metadata.nix` in `dev`; it had useful raw-type/enum ideas but was incomplete (undefined `lib`, incorrect submodule traversal, overbroad separatedString→lines classification, no wrapper/integer handling, and proposed nested Nix evaluation). It will be replaced, not continued. Two unrelated untracked compliance-audit text files in `dev` were inspected and will not be touched. No commits exist after 36736d8d and no Phase-4 work was found.
 
 Final verification proved all Phase 3 acceptance criteria. The authoritative browser workflow `20ab1-policy-editor-composite-metadata-roundtrip` passed against real packaged NixOS metadata and produced dark/light screenshots at `/nix/store/kcfzj8xvfrvfslbj7q5wcy24dik5zwvh-vm-test-run-crystal-forge-web-ui-mega-integration/screenshots/`. The workflow verifies boolean, enum, integer, lines, and unknown/custom controls; exact DoD banner and difficult-string reload; semantic JSON values; unique stable UUIDv4 IDs; hydration; reorder; and reserialization. A catalog reload defect in the test was corrected by reopening the Security domain, and dynamic enum hydration was made explicit by preserving the selected option. Targeted Web UI tests passed (30/30), the authoritative Web UI Nix check passed, and final `nix flake check --keep-going` completed with `all checks passed!`. One earlier Web-check attempt failed in the known unrelated timing-sensitive hardening scanner test; the unchanged retry passed. Phase 4 execution remains intentionally unimplemented and composite execution paths fail closed.
+
+Pushed commit `a00e15ff` to `origin/TASK-433-policy-poam-workflows`. MR !318 was updated with the Phase 3 summary, exact verification evidence, and the passing dark-mode browser screenshot. The new MR pipeline is running at https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2784287195. Per repository workflow, the task is now in Review rather than Done; it must not move to Done until the MR is merged and the dedicated worktree is removed.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
