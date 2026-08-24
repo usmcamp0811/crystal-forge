@@ -1,11 +1,11 @@
 ---
 id: TASK-433.4
 title: 'TASK-433 Phase 3: NixOS option metadata and composite policy serializer'
-status: In Progress
+status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-24 13:03'
+updated_date: '2026-08-24 13:41'
 labels:
   - design-parity
   - policy
@@ -19,6 +19,7 @@ references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/318'
 documentation:
   - docs/design/CrystalForge/data-enforcement.js
+  - docs/nixos-option-metadata.md
 parent_task_id: TASK-433
 priority: high
 type: feature
@@ -54,7 +55,7 @@ nix build .#checks.x86_64-linux.server-regressions --no-link
 - [x] #1 NixOS option editor supports boolean, enum, numeric, short, multiline and unknown/custom fallback from real metadata or safe fallback.
 - [x] #2 Long semantic values round-trip exact difficult strings including the DoD multiline banner.
 - [x] #3 Composite and legacy policy representations have deterministic digest/round-trip and preserve immutable history.
-- [ ] #4 Permanent repository documentation states that packaged NixOS option metadata is authoring guidance from Crystal Forge's pinned nixpkgs rather than authoritative target schema and regression coverage preserves the unknown/custom path
+- [x] #4 Permanent repository documentation states that packaged NixOS option metadata is authoring guidance from Crystal Forge's pinned nixpkgs rather than authoritative target schema and regression coverage preserves the unknown/custom path
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -88,6 +89,8 @@ Pushed commit `a00e15ff` to `origin/TASK-433-policy-poam-workflows`. MR !318 was
 After the initial push, GitLab reported one merge conflict in the canonical TASK-433.2 backlog record because `dev` had advanced through task-metadata commits. `git merge-tree` confirmed this was the only conflict and no application code conflicted. Merged `origin/dev` with the canonical `dev` TASK-433.2 record in merge commit `0e03d783` and pushed it. MR !318 now reports `has_conflicts: false`; the task worktree is clean and matches origin. The Phase 3 implementation commit remains `a00e15ff`.
 
 Review feedback reopened Phase 3 to make metadata authority explicit. The packaged catalog is generated from Crystal Forge's pinned nixpkgs and is authoring guidance only; a monitored foreign flake's own evaluation remains authoritative. Scope is documentation, concise provider/API comments, and regression protection for the existing unknown/custom path only. Target-specific metadata generation remains future work and Phase 4 execution will not be implemented here.
+
+Metadata-authority review follow-up completed in commit `5c0a1ac4` and pushed to MR !318. Added `docs/nixos-option-metadata.md`, linked from the architecture overview and deployment-policy documentation, and recorded the invariant that CF's pinned-nixpkgs catalog is authoring guidance while target evaluation is authoritative. Added concise provider/API comments, clarified unknown/unavailable editor copy, extracted a server regression proving an absent baseline option can persist through the `unknown` custom path, and strengthened browser workflow 20ab1 to assert the target-validity message. Verification passed: provider tests 6/6, policy-editor tests 30/30, Rust formatting, JavaScript syntax, diff checks, and `nix build .#checks.x86_64-linux.web-ui --no-link --print-out-paths`; 20ab1 reports `ok: true` with dark/light screenshots under `/nix/store/2n31cpqacyx5w1il5f9r50dg4xyck79v-vm-test-run-crystal-forge-web-ui-mega-integration/screenshots/`. MR is conflict-free and pipeline https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2785632979 is running.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
@@ -108,4 +111,13 @@ Review feedback reopened Phase 3 to make metadata authority explicit. The packag
 
 ## Risk
 - Composite execution is deliberately unsupported until Phase 4; callers receive explicit unsupported/fail-closed behavior rather than partial execution or success.
+
+### Metadata authority
+
+- Production packaged option metadata is generated from Crystal Forge's pinned nixpkgs.
+- It is policy-authoring guidance, not authoritative schema for a monitored foreign flake; targets may use different nixpkgs revisions and custom or third-party modules.
+- The intentional `unknown` custom-string fallback preserves authoring when the baseline does not know an option or metadata is unavailable; absence is not a target-invalidity verdict.
+- The target flake's actual evaluation remains authoritative for option existence, accepted values, module composition, and compliance.
+- Target-specific metadata derived from the monitored flake, including immutable-input cache identity, is documented as explicit future work rather than Phase 3 scope.
+- Phase 4 must evaluate typed rules against the real target and must not infer compliance or failure solely from CF's baseline catalog.
 <!-- SECTION:FINAL_SUMMARY:END -->
