@@ -1,11 +1,11 @@
 ---
 id: TASK-433.4
 title: 'TASK-433 Phase 3: NixOS option metadata and composite policy serializer'
-status: Review
+status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-24 13:41'
+updated_date: '2026-08-24 18:48'
 labels:
   - design-parity
   - policy
@@ -52,10 +52,9 @@ nix build .#checks.x86_64-linux.server-regressions --no-link
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 NixOS option editor supports boolean, enum, numeric, short, multiline and unknown/custom fallback from real metadata or safe fallback.
-- [x] #2 Long semantic values round-trip exact difficult strings including the DoD multiline banner.
-- [x] #3 Composite and legacy policy representations have deterministic digest/round-trip and preserve immutable history.
-- [x] #4 Permanent repository documentation states that packaged NixOS option metadata is authoring guidance from Crystal Forge's pinned nixpkgs rather than authoritative target schema and regression coverage preserves the unknown/custom path
+- [ ] #1 NixOS option editor supports boolean, enum, numeric, short, multiline and unknown/custom fallback from real metadata or safe fallback.
+- [ ] #2 Long semantic values round-trip exact difficult strings including the DoD multiline banner.
+- [ ] #3 Composite and legacy policy representations have deterministic digest/round-trip and preserve immutable history.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -75,6 +74,8 @@ nix build .#checks.x86_64-linux.server-regressions --no-link
 10. Run all required server/web/Nix/SQLx/browser checks plus the metadata package/check and `nix flake check --keep-going` if feasible. Then perform separate requirements, data integrity, runtime safety, metadata correctness, performance, UI/error-state, E2E, and regression-adequacy reviews. Only if AC1-AC3 are completely proven: record exact evidence, move TASK-433.4 to Review, update MR !318, commit/push, confirm clean worktree, and stop before Phase 4.
 
 11. Review follow-up: add a focused architecture document under the existing `docs/` hierarchy that records metadata source, authoring uses, foreign-flake limitations, authority hierarchy, unknown/custom invariant, version-skew examples, future target-specific metadata/cache identity, and the Phase 3/Phase 4 boundary. Link it from the policy enforcement documentation and TASK-433.4 notes; add concise provider/API authority comments; confirm server and browser tests preserve unknown-option authoring rather than treating baseline absence as target invalidity. Run targeted documentation/code checks, Web UI and server tests, and the authoritative browser check as needed, then update MR evidence and return the task to Review.
+
+12. Maintainer remediation at reviewed head `5c0a1ac4`: make packaged metadata advisory at every persistence/import caller while retaining the existing typed structural validator as the hard boundary; split persisted-rule metadata enrichment from deliberate autocomplete application so hydration preserves UUID/path/type/value/operator/order and displays a non-blocking known-path baseline-difference advisory; extend server, real API/persistence, interchange, and browser regressions for known-path unknown semantics, enum-domain skew, unavailable/corrupt metadata, structural invalidity, and a real metadata-backed short string; restore all TASK-422/TASK-432 task files exactly from current `origin/dev`; run every required server, Web UI, metadata, browser, and flake gate; perform an independent requirements/backend/runtime/performance/UI/error/E2E review; then check exactly AC1-AC3 and return to Review only if no P0/P1/P2 remains. Phase 4 remains out of scope.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
