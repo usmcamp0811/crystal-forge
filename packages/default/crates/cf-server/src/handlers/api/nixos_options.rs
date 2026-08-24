@@ -12,6 +12,8 @@ use crate::nixos_options_metadata::{
     DEFAULT_SEARCH_LIMIT, MetadataProviderError, NixosOptionsMetadataProvider,
 };
 
+/// Search CF's pinned-nixpkgs authoring catalog. Results are guidance, not an
+/// authoritative schema for a monitored target's nixpkgs and custom modules.
 pub async fn search_nixos_options(
     State(state): State<CFState>,
     Query(query): Query<NixosOptionsSearchQuery>,

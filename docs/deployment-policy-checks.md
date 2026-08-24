@@ -4,12 +4,15 @@ This document describes the deployment **check policy** types supported by Cryst
 
 > Note: These checks are distinct from environment rollout modes such as `manual`, `auto_latest`, and `pinned`.
 
+For the authority boundary between Crystal Forge's packaged option catalog and a monitored flake's actual module graph, see [NixOS Option Metadata Authority](./nixos-option-metadata.md). Packaged metadata is policy-authoring guidance; target evaluation remains authoritative.
+
 ## Supported policy types
 
 - `require_cf_agent`
 - `require_packages`
 - `custom_check`
 - `require_cve_check`
+- `composite` (typed representation only until its execution phase is implemented)
 
 ## `custom_check`
 

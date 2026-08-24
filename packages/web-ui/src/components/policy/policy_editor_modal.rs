@@ -2685,7 +2685,7 @@ fn RuleEditorRow(
                                     match result {
                                         Ok(response) if response.is_empty() => option_search.set(OptionSearchState::Zero),
                                         Ok(response) => option_search.set(OptionSearchState::Results(response)),
-                                        Err(ApiClientError::Status { code: 503, body }) => option_search.set(OptionSearchState::Unavailable(if body.is_empty() { "NixOS option metadata is unavailable. Manual paths remain available.".to_string() } else { body })),
+                                        Err(ApiClientError::Status { code: 503, body }) => option_search.set(OptionSearchState::Unavailable(if body.is_empty() { "Crystal Forge baseline metadata is unavailable. Manual paths remain available, and target evaluation remains authoritative.".to_string() } else { body })),
                                         Err(error) => option_search.set(OptionSearchState::Error(error.to_string())),
                                     }
                                 });
@@ -2696,7 +2696,7 @@ fn RuleEditorRow(
                             OptionSearchState::Loading => rsx! { span { "data-testid": "policy-option-search-loading", class: "help", "Searching NixOS options…" } },
                             OptionSearchState::Error(error) => rsx! { span { "data-testid": "policy-option-search-error", class: "help", style: "color:#f87171;", "Search failed: {error}. You can still enter a path manually." } },
                             OptionSearchState::Unavailable(message) => rsx! { span { "data-testid": "policy-option-search-unavailable", class: "help", "{message}" } },
-                            OptionSearchState::Zero => rsx! { span { "data-testid": "policy-option-search-zero", class: "help", "No metadata matches. The entered path will be kept as a custom string option." } },
+                            OptionSearchState::Zero => rsx! { span { "data-testid": "policy-option-search-zero", class: "help", "No Crystal Forge baseline metadata matches. The option may still be valid for the target and will be kept as a custom string option." } },
                             OptionSearchState::Results(results) => rsx! {
                                 div { "data-testid": "policy-option-search-results", style: "display:flex;flex-direction:column;max-height:150px;overflow:auto;border:1px solid var(--cf-divider);border-radius:7px;",
                                     for metadata in results {

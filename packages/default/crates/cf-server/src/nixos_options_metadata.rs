@@ -10,6 +10,9 @@ pub const METADATA_PATH_ENV: &str = "CRYSTAL_FORGE_NIXOS_OPTIONS_METADATA";
 pub const DEFAULT_SEARCH_LIMIT: usize = 20;
 pub const MAX_SEARCH_LIMIT: usize = 100;
 
+/// Packaged entries reflect Crystal Forge's pinned nixpkgs and are authoring
+/// guidance only. A monitored target can use a different nixpkgs revision or
+/// additional modules; evaluation of that target remains authoritative.
 #[derive(Clone)]
 pub struct NixosOptionsMetadataProvider {
     state: Arc<ProviderState>,
@@ -148,9 +151,10 @@ impl NixosOptionsMetadataProvider {
             .map(|index| entries[index].metadata.clone()))
     }
 
-    /// Validate metadata-dependent semantics when the production catalog is
-    /// available. When the catalog is unavailable or corrupt, only the
-    /// explicit `unknown` semantic-string fallback is safe to persist.
+    /// Validate authoring/serialization semantics against CF's baseline
+    /// catalog. This does not prove target validity. When the baseline is
+    /// missing an entry, unavailable, or corrupt, the explicit `unknown`
+    /// semantic-string path preserves authoring for foreign module graphs.
     pub fn validate_composite_config(&self, config: &CompositePolicyConfig) -> Result<(), String> {
         for (index, rule) in config.rules.iter().enumerate() {
             let CompositeRuleKind::NixosOption(option) = &rule.rule else {
@@ -290,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn validates_known_types_enums_and_unknown_fallback() {
+    fn validates_known_types_and_enums() {
         let provider = NixosOptionsMetadataProvider::from_json_bytes(FIXTURE).unwrap();
         let config: CompositePolicyConfig = serde_json::from_value(serde_json::json!({
             "schema_version": 1,
@@ -316,14 +320,34 @@ mod tests {
             unreachable!();
         }
         assert!(provider.validate_composite_config(&wrong).is_err());
+    }
 
-        if let CompositeRuleKind::NixosOption(option) = &mut wrong.rules[0].rule {
-            option.path = "services.example.freeform".into();
-            option.value_type = NixosOptionValueType::Unknown;
-        } else {
-            unreachable!();
-        }
-        assert!(provider.validate_composite_config(&wrong).is_ok());
+    #[test]
+    fn baseline_absence_preserves_unknown_custom_authoring_path() {
+        let provider = NixosOptionsMetadataProvider::from_json_bytes(FIXTURE).unwrap();
+        let config: CompositePolicyConfig = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "mode": "all",
+            "rules": [{
+                "id": "10000000-0000-0000-0000-000000000001",
+                "kind": "nixos_option",
+                "config": {
+                    "path": "acme.security.fips.enable",
+                    "operator": "==",
+                    "value_type": "unknown",
+                    "value": "true"
+                }
+            }]
+        }))
+        .unwrap();
+
+        assert!(
+            provider
+                .get_exact("acme.security.fips.enable")
+                .unwrap()
+                .is_none()
+        );
+        assert!(provider.validate_composite_config(&config).is_ok());
     }
 
     #[test]

@@ -7637,7 +7637,11 @@ By using this IS (which includes any device attached to this IS), you consent to
       await addRule.selectOption("nixos_option");
       const unknownPath = `services.crystalForge.unknown.${Date.now()}`;
       await page.getByTestId("policy-rule-nixos-path-4").fill(unknownPath);
-      await page.getByTestId("policy-option-search-zero").waitFor({ state: "visible", timeout: 10000 });
+      const unknownMetadataNotice = page.getByTestId("policy-option-search-zero");
+      await unknownMetadataNotice.waitFor({ state: "visible", timeout: 10000 });
+      if (!(await unknownMetadataNotice.innerText()).includes("may still be valid for the target")) {
+        throw new Error("Unknown baseline metadata was not presented as potentially valid for the target");
+      }
       await page.getByTestId("policy-rule-nixos-value-4").fill(difficult);
 
       const createResponsePromise = page.waitForResponse(
