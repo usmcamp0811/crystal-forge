@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-24 01:22'
+updated_date: '2026-08-24 06:34'
 labels:
   - design-parity
   - policy
@@ -50,9 +50,9 @@ nix build .#checks.x86_64-linux.server-regressions --no-link
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 NixOS option editor supports boolean, enum, numeric, short, multiline and unknown/custom fallback from real metadata or safe fallback.
-- [ ] #2 Long semantic values round-trip exact difficult strings including the DoD multiline banner.
-- [ ] #3 Composite and legacy policy representations have deterministic digest/round-trip and preserve immutable history.
+- [x] #1 NixOS option editor supports boolean, enum, numeric, short, multiline and unknown/custom fallback from real metadata or safe fallback.
+- [x] #2 Long semantic values round-trip exact difficult strings including the DoD multiline banner.
+- [x] #3 Composite and legacy policy representations have deterministic digest/round-trip and preserve immutable history.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -76,4 +76,26 @@ nix build .#checks.x86_64-linux.server-regressions --no-link
 
 <!-- SECTION:NOTES:BEGIN -->
 Ownership/preflight audit: task worktree is clean at 36736d8d with no later commits; 36736d8d is an ancestor and origin matches. Central task records show TASK-433.3 Review with all four ACs checked and TASK-433.4 In Progress. Partial Phase-3 work consisted only of an untracked experimental `packages/default/nixos-options-metadata.nix` in `dev`; it had useful raw-type/enum ideas but was incomplete (undefined `lib`, incorrect submodule traversal, overbroad separatedString→lines classification, no wrapper/integer handling, and proposed nested Nix evaluation). It will be replaced, not continued. Two unrelated untracked compliance-audit text files in `dev` were inspected and will not be touched. No commits exist after 36736d8d and no Phase-4 work was found.
+
+Final verification proved all Phase 3 acceptance criteria. The authoritative browser workflow `20ab1-policy-editor-composite-metadata-roundtrip` passed against real packaged NixOS metadata and produced dark/light screenshots at `/nix/store/kcfzj8xvfrvfslbj7q5wcy24dik5zwvh-vm-test-run-crystal-forge-web-ui-mega-integration/screenshots/`. The workflow verifies boolean, enum, integer, lines, and unknown/custom controls; exact DoD banner and difficult-string reload; semantic JSON values; unique stable UUIDv4 IDs; hydration; reorder; and reserialization. A catalog reload defect in the test was corrected by reopening the Security domain, and dynamic enum hydration was made explicit by preserving the selected option. Targeted Web UI tests passed (30/30), the authoritative Web UI Nix check passed, and final `nix flake check --keep-going` completed with `all checks passed!`. One earlier Web-check attempt failed in the known unrelated timing-sensitive hardening scanner test; the unchanged retry passed. Phase 4 execution remains intentionally unimplemented and composite execution paths fail closed.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+## Summary
+- Added a pinned-Nixpkgs NixOS option metadata package/check and packaged, cached server provider with authenticated bounded search and explicit unavailable/corrupt states.
+- Added the versioned `composite` policy representation with ordered stable UUID rules, typed configs and semantic JSON values, deterministic digest/round-trip behavior, exact-version persistence, immutable derived history, and JSON/TOML/XCCDF representation support.
+- Extended the shared policy editor with real metadata search, metadata-driven boolean/enum/integer/string/lines controls, safe unknown/custom fallback, exact multiline hydration, and stable rule IDs.
+- Kept Phase 4 out of scope: composite policies are representation-only and fail closed on execution paths.
+
+## Verification
+- Full server and Web UI Cargo test suites passed.
+- SQLx workspace preparation passed against the isolated repository database.
+- Server, Web UI, metadata, and server-regression Nix builds passed.
+- Authoritative Web UI workflow `20ab1-policy-editor-composite-metadata-roundtrip` passed with dark/light screenshots.
+- `nix flake check --keep-going` passed all checks.
+
+## Risk
+- Composite execution is deliberately unsupported until Phase 4; callers receive explicit unsupported/fail-closed behavior rather than partial execution or success.
+<!-- SECTION:FINAL_SUMMARY:END -->
