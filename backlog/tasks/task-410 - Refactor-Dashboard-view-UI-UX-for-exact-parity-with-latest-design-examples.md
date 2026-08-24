@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-agent
 created_date: '2026-05-31 15:14'
-updated_date: '2026-08-23 20:57'
+updated_date: '2026-08-24 14:18'
 labels:
   - ui
   - dashboard
@@ -20,9 +20,15 @@ references:
   - TASK-415
   - TASK-433.8
 modified_files:
-  - packages/web-ui/src/views/
-  - packages/web-ui/src/components/
-  - checks/web-ui/
+  - packages/web-ui/src/views/dashboard.rs
+  - packages/web-ui/src/components/dashboard/cve_summary.rs
+  - packages/web-ui/src/components/dashboard/operational.rs
+  - packages/web-ui/src/components/dashboard/mod.rs
+  - packages/web-ui/src/components/loading.rs
+  - packages/web-ui/src/components/widget_grid.rs
+  - packages/web-ui/assets/app.css
+  - checks/web-ui/tests/integration-test.js
+  - checks/web-ui/coverage-manifest.json
 priority: high
 ordinal: 20000
 ---
@@ -148,4 +154,14 @@ Preflight: branch `TASK-410-dashboard-parity` at committed `dev` HEAD `24835e6c`
 Research completed against `docs/design/CrystalForge`. TASK-342.2 already matches the authoritative 3/2/1-column grid, base card styling, page heading, customization shell, and Fleet Health. Remaining source drift is substantial: the design defaults 15 widgets while current product defaults 8–10; Build Queue, CVE Summary, Flake Git Graph, Deployment Timeline, and spinner internals differ; mobile and deterministic loading→loaded evidence are missing. Exact source widgets Attestation Trust, Deploy Approvals, POA&M Summary/Watchlist, and exploited-CVE metrics lack existing frontend contracts/data. Adding fabricated data would violate prior no-mock behavior; adding backend contracts would conflict with this task's frontend scope/AC #8 unless separately tracked. The source dashboard has no page loading/error branch; only generic `Spinner.jsx` defines exact spinner geometry/accessibility. Awaiting user scope decision before recording the implementation plan or writing application code.
 
 Frontend phase progress: implemented the exact Spinner.jsx ring geometry (27% arc, 0.78s linear rotation, accessible status label, reduced-motion treatment) and a single primary page-loading gate; added deterministic drag-end cleanup and source control titles; added real-data CVE exploited/patchable, Heartbeats, Top CVE-affected Systems (admin-scoped), Recent Commits, and Environments widgets; aligned non-POA&M default ordering and added a versioned saved-layout migration; filtered unauthorized CVE actions. Added current-source loading→loaded, mobile one-column, real-data/error, default-order, and cancelled-drag assertions. Targeted WASM cargo check and heartbeat unit test passed. Full web-ui Nix check pending. Remaining source widgets are blocked on TASK-410.1 and the active approval/attestation owner; POA&M remains exclusively TASK-433.8.
+
+Current-phase verification:
+- PASS: `node --check checks/web-ui/tests/integration-test.js`.
+- PASS: changed-file Rust formatting via `nix develop -c rustfmt --edition 2024 --check ...` (the package-wide cargo fmt check is currently blocked by unrelated pre-existing formatting drift in policy/compliance/environment files).
+- PASS: `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`.
+- PASS: `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml heartbeat_rollup_uses_each_systems_effective_interval` (1 passed).
+- PASS (exit 0): `nix build .#checks.x86_64-linux.web-ui --out-link /tmp/cf-task410-web-ui-check`.
+- PASS with all selected results `ok: true`: focused dashboard runs covering loading spinner, loading→loaded, mobile loaded, recent-deployment optional-layout regression, Fleet Health, API error/no-fabricated data, populated widget parity/default ordering/cancelled drag, and optional Pipeline Readiness. Final focused artifacts are under `/tmp/cf-task410-dashboard-final/screenshots`; earlier loading/mobile/error evidence is in the Nix store paths recorded during this session.
+
+Verification caveat: the full web-ui derivation currently exits 0 even when unrelated browser steps in `results.json` report `ok: false`. TASK-434 was created to make those failures propagate. The TASK-410 dashboard steps were rerun focused after fixes and all passed with dark/light screenshots. TASK-410 remains In Progress because TASK-410.1 and the approval/attestation owner must merge before remaining real-data widgets can be integrated; no POA&M work was duplicated.
 <!-- SECTION:NOTES:END -->
