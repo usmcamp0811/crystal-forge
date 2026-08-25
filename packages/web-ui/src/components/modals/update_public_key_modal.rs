@@ -10,6 +10,8 @@ use crate::theme;
 pub fn UpdatePublicKeyModal(
     system_id: Uuid,
     hostname: String,
+    #[props(default = false)] in_flight: bool,
+    #[props(default)] api_error: Option<String>,
     on_cancel: EventHandler<()>,
     on_confirm: EventHandler<String>,
 ) -> Element {
@@ -17,6 +19,9 @@ pub fn UpdatePublicKeyModal(
     let mut error_message = use_signal(|| None::<String>);
 
     let handle_confirm = move |_| {
+        if in_flight {
+            return;
+        }
         // Shared with the Agent identity rotate flow in EditSystemModal so both
         // surfaces accept exactly the same key format (TASK-435).
         match validate_public_key_input(&new_public_key.read()) {
@@ -31,10 +36,15 @@ pub fn UpdatePublicKeyModal(
     rsx! {
         div {
             class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
-            onclick: move |_| on_cancel.call(()),
+            onclick: move |_| {
+                if !in_flight {
+                    on_cancel.call(());
+                }
+            },
 
             div {
                 class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 space-y-4 cf-modal-panel-44",
+                "data-testid": "update-public-key-modal",
                 onclick: move |evt| evt.stop_propagation(),
 
                 // Header
@@ -46,7 +56,12 @@ pub fn UpdatePublicKeyModal(
                     }
                     button {
                         class: "text-gray-400 hover:text-gray-200 transition-colors",
-                        onclick: move |_| on_cancel.call(()),
+                        disabled: in_flight,
+                        onclick: move |_| {
+                            if !in_flight {
+                                on_cancel.call(());
+                            }
+                        },
                         "✕"
                     }
                 }
@@ -89,6 +104,7 @@ pub fn UpdatePublicKeyModal(
                         rows: 4,
                         placeholder: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...",
                         value: "{new_public_key}",
+                        disabled: in_flight,
                         oninput: move |evt| {
                             new_public_key.set(evt.value());
                             error_message.set(None);
@@ -110,19 +126,32 @@ pub fn UpdatePublicKeyModal(
                         }
                     }
                 }
+                if let Some(error) = api_error.as_ref() {
+                    div {
+                        "data-testid": "update-key-api-error",
+                        class: "p-3 bg-red-500/10 border border-red-500/30 rounded",
+                        p { class: "text-red-300 text-sm", "{error}" }
+                    }
+                }
 
                 // Actions
                 div {
                     class: "flex gap-3 justify-end",
                     button {
                         class: "px-4 py-2 bg-gray-700 hover:bg-gray-600 {theme::text::PRIMARY} rounded transition-colors",
-                        onclick: move |_| on_cancel.call(()),
+                        disabled: in_flight,
+                        onclick: move |_| {
+                            if !in_flight {
+                                on_cancel.call(());
+                            }
+                        },
                         "Cancel"
                     }
                     button {
                         class: "px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors",
+                        disabled: in_flight,
                         onclick: handle_confirm,
-                        "Update Key"
+                        if in_flight { "Updating…" } else { "Update Key" }
                     }
                 }
             }

@@ -21,6 +21,7 @@ const { chromium } = require("playwright");
 const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
+const { createHash, generateKeyPairSync } = require("crypto");
 
 const baseUrl = process.argv[2] || "http://127.0.0.1:3000";
 const outputDir = process.argv[3] || "/tmp/screenshots";
@@ -1823,7 +1824,18 @@ async function unrouteConfigHealth(page) {
   await page.unroute("**/api/v1/admin/config-health*");
 }
 
-async function routeSystemsWarningData(page) {
+function agentPublicKeyFingerprint(publicKey) {
+  const digest = createHash("sha256").update(Buffer.from(publicKey, "base64")).digest("base64");
+  return `SHA256:${digest.replace(/=+$/, "")}`;
+}
+
+function generateAgentPublicKey() {
+  const { publicKey } = generateKeyPairSync("ed25519");
+  const spki = publicKey.export({ format: "der", type: "spki" });
+  return spki.subarray(spki.length - 32).toString("base64");
+}
+
+async function routeSystemsWarningData(page, options = {}) {
   const items = [
     {
       id: "00000000-0000-0000-0000-0000000000a1",
@@ -1982,10 +1994,16 @@ async function routeSystemsWarningData(page) {
     }
     if (/^\/api\/v1\/systems\/[0-9a-f-]+$/.test(pathname)) {
       const requestedId = pathname.split("/").pop() || detail.id;
+      const publicKeyFingerprint =
+        options.getPublicKeyFingerprint?.() ?? detail.public_key_fingerprint;
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ ...detail, id: requestedId }),
+        body: JSON.stringify({
+          ...detail,
+          id: requestedId,
+          public_key_fingerprint: publicKeyFingerprint,
+        }),
       });
       return;
     }
@@ -4601,32 +4619,60 @@ const steps = [
       const systemId = "00000000-0000-0000-0000-0000000000a1";
       const seededFingerprint = "SHA256:S7Bvjk46dxXSAdVz0KpCN2LlXavWGiwCJ4+lbMbSlOA";
       const publicKeyRoute = `**/api/v1/systems/${systemId}/public-key`;
+      let persistedFingerprint = seededFingerprint;
+      let releaseAmbiguousRotation;
+      let markAmbiguousRotationStarted;
+      const ambiguousRotationRelease = new Promise((resolve) => {
+        releaseAmbiguousRotation = resolve;
+      });
+      const ambiguousRotationStarted = new Promise((resolve) => {
+        markAmbiguousRotationStarted = resolve;
+      });
 
-      await routeSystemsWarningData(page);
+      await routeSystemsWarningData(page, {
+        getPublicKeyFingerprint: () => persistedFingerprint,
+      });
       try {
         // Registered after routeSystemsWarningData so this narrower route wins.
         let capturedKeyRequests = [];
-        let failNextRotation = true;
+        let rotationAttempt = 0;
         await page.route(publicKeyRoute, async (route) => {
           if (route.request().method() !== "PUT") {
             await route.fallback();
             return;
           }
-          capturedKeyRequests.push(route.request().postDataJSON());
-          if (failNextRotation) {
-            // First attempt fails: the UI must not claim success and must keep
-            // the generated key on screen for retry.
-            failNextRotation = false;
+          const payload = route.request().postDataJSON();
+          capturedKeyRequests.push(payload);
+          rotationAttempt += 1;
+          if (rotationAttempt === 1) {
+            // A definitive pre-mutation rejection keeps the generated key for retry.
+            await route.fulfill({
+              status: 400,
+              contentType: "application/json",
+              body: JSON.stringify({
+                error: "invalid_request",
+                message: "Replacement key rejected",
+              }),
+            });
+            return;
+          }
+          if (rotationAttempt === 2) {
+            // Model the server's audit-after-update failure: keep the request
+            // pending for egress-lock assertions, persist the key, then return 500.
+            markAmbiguousRotationStarted();
+            await ambiguousRotationRelease;
+            persistedFingerprint = agentPublicKeyFingerprint(payload.public_key);
             await route.fulfill({
               status: 500,
               contentType: "application/json",
               body: JSON.stringify({
                 error: "internal_error",
-                message: "Failed to update public key",
+                message: "Audit persistence failed after key update",
               }),
             });
             return;
           }
+          persistedFingerprint = agentPublicKeyFingerprint(payload.public_key);
           await route.fulfill({
             status: 200,
             contentType: "application/json",
@@ -4708,6 +4754,46 @@ const steps = [
           throw new Error("Expected distinct generated public and private keys");
         }
 
+        // Clipboard state must reflect the asynchronous write result, not the click.
+        await page.evaluate(() => {
+          window.__cfRejectPrivateKeyCopy = true;
+          window.__cfCopiedPrivateKey = null;
+          Object.defineProperty(navigator, "clipboard", {
+            configurable: true,
+            value: {
+              writeText: async (value) => {
+                if (window.__cfRejectPrivateKeyCopy) {
+                  throw new Error("clipboard denied");
+                }
+                window.__cfCopiedPrivateKey = value;
+              },
+            },
+          });
+        });
+        const copyButton = section.locator("[data-testid='copy-private-key-button']").first();
+        await copyButton.click();
+        await assertVisible(
+          section.locator("[data-testid='copy-private-key-error']").first(),
+          "Expected rejected clipboard writes to show an explicit error",
+          10000,
+        );
+        if ((await copyButton.textContent())?.includes("Copied")) {
+          throw new Error("A rejected clipboard write must not be reported as Copied");
+        }
+        await page.evaluate(() => {
+          window.__cfRejectPrivateKeyCopy = false;
+        });
+        await copyButton.click();
+        await assertVisible(
+          section.getByText("Copied", { exact: true }).first(),
+          "Expected Copied only after the clipboard promise resolves",
+          10000,
+        );
+        const copiedPrivateKey = await page.evaluate(() => window.__cfCopiedPrivateKey);
+        if (copiedPrivateKey !== privateKeyText) {
+          throw new Error("Resolved clipboard write did not receive the displayed private key");
+        }
+
         // First confirm fails: no success state, key material retained.
         await confirmButton.click();
         await page.waitForTimeout(900);
@@ -4726,11 +4812,42 @@ const steps = [
           throw new Error("A failed rotation must keep the generated keypair for retry");
         }
 
-        // Retry succeeds.
+        // Retry commits but returns 500. While unresolved, every modal egress
+        // path must be locked so the only private-key copy cannot be discarded.
         await section.locator("[data-testid='rotate-confirm-button']").first().click();
+        await Promise.race([
+          ambiguousRotationStarted,
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("Timed out waiting for stalled key PUT")), 10000),
+          ),
+        ]);
+        await assertDisabled(confirmButton, "Expected rotation confirm to disable in flight");
+        await assertDisabled(
+          section.locator("[data-testid='rotate-cancel-button']").first(),
+          "Expected rotation Cancel to disable in flight",
+        );
+        await assertDisabled(
+          modal.getByRole("button", { name: "General", exact: true }).first(),
+          "Expected modal tabs to disable in flight",
+        );
+        await assertDisabled(
+          modal.locator("[data-testid='edit-system-footer-cancel']").first(),
+          "Expected footer Cancel to disable in flight",
+        );
+        await assertDisabled(
+          modal.locator("[data-testid='edit-system-save']").first(),
+          "Expected Save changes to disable in flight",
+        );
+        await page
+          .locator("[data-testid='edit-system-modal-backdrop']")
+          .first()
+          .click({ position: { x: 2, y: 2 }, force: true });
+        await assertVisible(modal, "Backdrop click must not dismiss a rotation in flight", 5000);
+
+        releaseAmbiguousRotation();
         await assertVisible(
           section.locator("[data-testid='rotate-success-callout']").first(),
-          "Expected the success callout after a successful rotation",
+          "Expected canonical GET to reconcile a committed-then-500 rotation as success",
           10000,
         );
 
@@ -4808,6 +4925,176 @@ const steps = [
         );
         if (!(await pasteConfirm.isEnabled())) {
           throw new Error("Confirm must be enabled once a valid key is pasted");
+        }
+
+        // The authoritative generator must fail closed when Web Crypto fails.
+        await reopenedSection.locator("[data-testid='rotate-cancel-button']").first().click();
+        await reopenedSection.locator("[data-testid='rotate-key-button']").first().click();
+        await page.evaluate(() => {
+          window.__cfOriginalGetRandomValues = window.crypto.getRandomValues.bind(window.crypto);
+          Object.defineProperty(window.crypto, "getRandomValues", {
+            configurable: true,
+            value: () => {
+              throw new Error("secure RNG unavailable");
+            },
+          });
+        });
+        await reopenedSection.locator("[data-testid='generate-keypair-button']").first().click();
+        const rngError = reopenedSection.locator("[data-testid='rotate-error-callout']").first();
+        await assertVisible(rngError, "Expected secure RNG failure to be actionable", 10000);
+        if (!/secure random key generation failed/i.test((await rngError.textContent()) || "")) {
+          throw new Error("Expected Web Crypto failure copy from the fail-closed generator");
+        }
+        if ((await reopenedSection.locator("[data-testid='generated-private-key']").count()) > 0) {
+          throw new Error("A secure RNG failure must not generate private-key material");
+        }
+        await page.evaluate(() => {
+          Object.defineProperty(window.crypto, "getRandomValues", {
+            configurable: true,
+            value: window.__cfOriginalGetRandomValues,
+          });
+        });
+      } finally {
+        await page.unroute(publicKeyRoute).catch(() => {});
+        await unrouteSystemsWarningData(page);
+      }
+    },
+  },
+  {
+    name: "12e3-system-detail-key-rotation-reopen",
+    description: "System Detail refreshes canonical key state across edit-modal reopen",
+    designRef: "docs/design/CrystalForge/components/EditSystemModal.jsx",
+    action: async (page) => {
+      const systemId = "00000000-0000-0000-0000-0000000000a1";
+      const publicKeyRoute = `**/api/v1/systems/${systemId}/public-key`;
+      let persistedFingerprint = "SHA256:S7Bvjk46dxXSAdVz0KpCN2LlXavWGiwCJ4+lbMbSlOA";
+      let putCount = 0;
+
+      await routeSystemsWarningData(page, {
+        getPublicKeyFingerprint: () => persistedFingerprint,
+      });
+      await page.route(publicKeyRoute, async (route) => {
+        if (route.request().method() !== "PUT") {
+          await route.fallback();
+          return;
+        }
+        const payload = route.request().postDataJSON();
+        persistedFingerprint = agentPublicKeyFingerprint(payload.public_key);
+        putCount += 1;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            status: "success",
+            message: "Public key updated for warning-system-01",
+          }),
+        });
+      });
+
+      try {
+        await page.goto(`${baseUrl}/systems/${systemId}`, { timeout: LOAD_TIMEOUT });
+        const editButton = page.getByRole("button", { name: "Edit", exact: true }).first();
+        await assertVisible(editButton, "Expected System Detail Edit action", 15000);
+        await editButton.click();
+
+        const modal = page.locator(".modal").filter({ hasText: "Edit warning-system-01" }).first();
+        await assertVisible(modal, "Expected System Detail edit modal", 10000);
+        await modal.getByRole("button", { name: "Security", exact: true }).click();
+        const section = modal.locator("[data-testid='agent-identity-section']").first();
+        await section.locator("[data-testid='rotate-key-button']").first().click();
+        await section.locator("[data-testid='generate-keypair-button']").first().click();
+        await assertVisible(
+          section.locator("[data-testid='generated-private-key']").first(),
+          "Expected one-time private key before System Detail rotation",
+          10000,
+        );
+        await section.locator("[data-testid='rotate-confirm-button']").first().click();
+        await assertVisible(
+          section.locator("[data-testid='rotate-success-callout']").first(),
+          "Expected confirmed System Detail rotation",
+          10000,
+        );
+        const rotatedFingerprint = (
+          await section.locator("[data-testid='agent-key-fingerprint']").first().textContent()
+        )?.trim();
+        if (rotatedFingerprint !== persistedFingerprint) {
+          throw new Error("Modal did not render the canonical persisted fingerprint");
+        }
+
+        // Close and reopen from System Detail without page.reload(). The
+        // parent-owned detail must seed the modal with the canonical new key.
+        await modal.locator("[data-testid='edit-system-footer-cancel']").first().click();
+        await assertVisible(editButton, "Expected System Detail after canonical refresh", 15000);
+        await editButton.click();
+        const reopened = page.locator(".modal").filter({ hasText: "Edit warning-system-01" }).first();
+        await assertVisible(reopened, "Expected edit modal to reopen without page reload", 10000);
+        await reopened.getByRole("button", { name: "Security", exact: true }).click();
+        const reopenedSection = reopened.locator("[data-testid='agent-identity-section']").first();
+        const reopenedFingerprint = (
+          await reopenedSection.locator("[data-testid='agent-key-fingerprint']").first().textContent()
+        )?.trim();
+        if (reopenedFingerprint !== persistedFingerprint) {
+          throw new Error(
+            `Expected reopened fingerprint ${persistedFingerprint}, got ${reopenedFingerprint}`,
+          );
+        }
+        if ((await reopenedSection.locator("[data-testid='generated-private-key']").count()) > 0) {
+          throw new Error("System Detail reopen must not restore the rotated-out private key");
+        }
+        if (putCount !== 1) {
+          throw new Error(`Expected one System Detail key PUT, got ${putCount}`);
+        }
+      } finally {
+        await page.unroute(publicKeyRoute).catch(() => {});
+        await unrouteSystemsWarningData(page);
+      }
+    },
+  },
+  {
+    name: "12e4-systems-update-key-row-action",
+    description: "Systems-list Update Key action retains its backend-backed PUT flow",
+    designRef: "docs/design/CrystalForge/components/EditSystemModal.jsx",
+    action: async (page) => {
+      const systemId = "00000000-0000-0000-0000-0000000000a1";
+      const publicKeyRoute = `**/api/v1/systems/${systemId}/public-key`;
+      let persistedFingerprint = "SHA256:S7Bvjk46dxXSAdVz0KpCN2LlXavWGiwCJ4+lbMbSlOA";
+      let capturedPayload = null;
+
+      await routeSystemsWarningData(page, {
+        getPublicKeyFingerprint: () => persistedFingerprint,
+      });
+      await page.route(publicKeyRoute, async (route) => {
+        if (route.request().method() !== "PUT") {
+          await route.fallback();
+          return;
+        }
+        capturedPayload = route.request().postDataJSON();
+        persistedFingerprint = agentPublicKeyFingerprint(capturedPayload.public_key);
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ status: "success", message: "Public key updated" }),
+        });
+      });
+
+      try {
+        await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+        await page.getByRole("button", { name: "Table" }).first().click();
+        const row = page.locator("tr").filter({ hasText: "warning-system-01" }).first();
+        await assertVisible(row, "Expected system row for Update Key regression", 15000);
+        await row.getByRole("button", { name: "Update Key", exact: true }).click();
+        const updateModal = page.getByTestId("update-public-key-modal");
+        await assertVisible(updateModal, "Expected Update Public Key modal", 10000);
+
+        const validPublicKey = generateAgentPublicKey();
+        await fillDioxusInput(
+          updateModal.locator("textarea").first(),
+          validPublicKey,
+        );
+        await updateModal.getByRole("button", { name: "Update Key", exact: true }).click();
+        await assertHidden(updateModal, "Expected Update Public Key modal to close after reconciliation");
+        if (!capturedPayload || capturedPayload.public_key !== validPublicKey) {
+          throw new Error(`Unexpected Update Key payload: ${JSON.stringify(capturedPayload)}`);
         }
       } finally {
         await page.unroute(publicKeyRoute).catch(() => {});

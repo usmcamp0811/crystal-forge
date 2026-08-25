@@ -55,6 +55,50 @@ pub struct SystemDetailLoadResult {
     pub redirect_to_login: bool,
 }
 
+/// Failure from the public-key mutation endpoint.
+///
+/// A 5xx response, network failure, or malformed success response is
+/// ambiguous because the server may have persisted the key before the
+/// response failed (for example, when the subsequent audit insert fails).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SystemPublicKeyUpdateError {
+    /// The server definitively rejected the request before reporting success.
+    Rejected(String),
+    /// The request may have changed the key and must be reconciled with GET.
+    Ambiguous(String),
+}
+
+impl std::fmt::Display for SystemPublicKeyUpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(message) | Self::Ambiguous(message) => f.write_str(message),
+        }
+    }
+}
+
+/// Final result of reconciling a public-key mutation with canonical detail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SystemPublicKeyRotationError {
+    /// The mutation was definitively rejected.
+    Rejected(String),
+    /// The mutation may have committed, but canonical state could not confirm it.
+    Unknown(String),
+}
+
+impl SystemPublicKeyRotationError {
+    pub fn outcome_unknown(&self) -> bool {
+        matches!(self, Self::Unknown(_))
+    }
+}
+
+impl std::fmt::Display for SystemPublicKeyRotationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(message) | Self::Unknown(message) => f.write_str(message),
+        }
+    }
+}
+
 /// Result of loading registered flake names for form dropdowns.
 #[derive(Debug, Clone)]
 pub struct FlakeNamesLoadResult {
@@ -282,20 +326,74 @@ pub async fn update_system_via_api(
 pub async fn update_system_public_key_via_api(
     system_id: Uuid,
     new_public_key: String,
-) -> Result<String, String> {
+) -> Result<String, SystemPublicKeyUpdateError> {
     let request = UpdateSystemPublicKeyRequest {
         public_key: new_public_key,
     };
 
-    match update_system_public_key(&system_id, &request).await {
-        Ok(response) => Ok(response.message),
-        Err(ApiClientError::Status {
+    update_system_public_key(&system_id, &request)
+        .await
+        .map(|response| response.message)
+        .map_err(classify_public_key_update_error)
+}
+
+fn classify_public_key_update_error(error: ApiClientError) -> SystemPublicKeyUpdateError {
+    match error {
+        ApiClientError::Status {
             code: 401 | 403, ..
-        }) => Err("Authentication required. Please log in.".to_string()),
-        Err(ApiClientError::Status { body, .. }) => Err(body),
-        Err(ApiClientError::Network(msg)) => Err(format!("Network error: {}", msg)),
-        Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {}", msg)),
+        } => SystemPublicKeyUpdateError::Rejected(
+            "Authentication required. Please log in.".to_string(),
+        ),
+        ApiClientError::Status { code, body } if code >= 500 => {
+            SystemPublicKeyUpdateError::Ambiguous(body)
+        }
+        ApiClientError::Status { body, .. } => SystemPublicKeyUpdateError::Rejected(body),
+        ApiClientError::Network(msg) => {
+            SystemPublicKeyUpdateError::Ambiguous(format!("Network error: {msg}"))
+        }
+        ApiClientError::Deserialize(msg) => {
+            SystemPublicKeyUpdateError::Ambiguous(format!("Invalid response: {msg}"))
+        }
     }
+}
+
+/// Update a system public key and reconcile the outcome against canonical detail.
+///
+/// The server can return 500 after persisting the key if its audit write fails.
+/// A successful response can also be lost to the network. Therefore all 2xx and
+/// ambiguous outcomes are followed by GET, and only a matching server-derived
+/// fingerprint is reported as success.
+pub async fn update_system_public_key_and_reconcile(
+    system_id: Uuid,
+    new_public_key: String,
+    expected_fingerprint: String,
+) -> Result<SystemDetail, SystemPublicKeyRotationError> {
+    let update_result = update_system_public_key_via_api(system_id, new_public_key).await;
+
+    if let Err(SystemPublicKeyUpdateError::Rejected(message)) = &update_result {
+        return Err(SystemPublicKeyRotationError::Rejected(message.clone()));
+    }
+
+    let detail_result = load_system_detail_with_fallback(&system_id.to_string()).await;
+    if let Some(detail) = detail_result.system
+        && detail.public_key_fingerprint.as_deref() == Some(expected_fingerprint.as_str())
+    {
+        return Ok(detail);
+    }
+
+    let mutation_context = match update_result {
+        Ok(_) => "The server acknowledged the request, but the current key could not be confirmed."
+            .to_string(),
+        Err(error) => format!("{error}. The current key could not be confirmed."),
+    };
+    let read_context = detail_result
+        .notice
+        .map(|notice| format!(" Detail refresh failed: {notice}."))
+        .unwrap_or_default();
+
+    Err(SystemPublicKeyRotationError::Unknown(format!(
+        "{mutation_context}{read_context} Keep the replacement credential and verify the system state before retrying."
+    )))
 }
 
 /// Deploy a system to a specific commit via the backend API.
@@ -655,6 +753,36 @@ mod tests {
         assert!(!should_redirect_to_login(&ApiClientError::Network(
             "connection refused".to_string()
         )));
+    }
+
+    #[test]
+    fn public_key_update_classifies_rejections_and_unknown_outcomes() {
+        assert!(matches!(
+            classify_public_key_update_error(ApiClientError::Status {
+                code: 400,
+                body: "invalid key".to_string(),
+            }),
+            SystemPublicKeyUpdateError::Rejected(_)
+        ));
+        assert!(matches!(
+            classify_public_key_update_error(ApiClientError::Status {
+                code: 500,
+                body: "audit write failed".to_string(),
+            }),
+            SystemPublicKeyUpdateError::Ambiguous(_)
+        ));
+        assert!(matches!(
+            classify_public_key_update_error(ApiClientError::Network(
+                "connection reset".to_string()
+            )),
+            SystemPublicKeyUpdateError::Ambiguous(_)
+        ));
+        assert!(matches!(
+            classify_public_key_update_error(ApiClientError::Deserialize(
+                "invalid success response".to_string()
+            )),
+            SystemPublicKeyUpdateError::Ambiguous(_)
+        ));
     }
 
     #[test]

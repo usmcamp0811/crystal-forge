@@ -12,6 +12,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
 
 /// Raw byte length of an Ed25519 public key.
@@ -20,9 +21,9 @@ const ED25519_PUBLIC_KEY_LEN: usize = 32;
 /// Validate an operator-supplied agent public key.
 ///
 /// Mirrors the server-side `PublicKey::from_base64` contract used by
-/// `PUT /systems/:id/public-key` closely enough to catch the common paste
-/// mistakes in the browser, while the server stays the authoritative check
-/// (it additionally rejects keys that are not valid Ed25519 curve points).
+/// `PUT /systems/:id/public-key`, including Ed25519 point validation. The
+/// server remains authoritative, but the browser does not knowingly enable a
+/// confirm control for a key the server will reject as malformed.
 ///
 /// Returns the trimmed key on success, or an operator-facing message.
 pub fn validate_public_key_input(input: &str) -> Result<String, String> {
@@ -36,12 +37,16 @@ pub fn validate_public_key_input(input: &str) -> Result<String, String> {
         .decode(candidate)
         .map_err(|_| "Public key must be a base64-encoded Ed25519 key".to_string())?;
 
-    if decoded.len() != ED25519_PUBLIC_KEY_LEN {
-        return Err(format!(
-            "Public key must decode to {ED25519_PUBLIC_KEY_LEN} bytes, got {}",
-            decoded.len()
-        ));
-    }
+    let key_bytes: [u8; ED25519_PUBLIC_KEY_LEN] =
+        decoded.try_into().map_err(|decoded: Vec<u8>| {
+            format!(
+                "Public key must decode to {ED25519_PUBLIC_KEY_LEN} bytes, got {}",
+                decoded.len()
+            )
+        })?;
+
+    VerifyingKey::from_bytes(&key_bytes)
+        .map_err(|_| "Public key is not a valid Ed25519 public key".to_string())?;
 
     Ok(candidate.to_string())
 }
@@ -119,7 +124,16 @@ mod tests {
         assert!(!is_valid_public_key("YWJj"));
         // Valid base64 of 31 bytes.
         assert!(!is_valid_public_key(&STANDARD.encode([1_u8; 31])));
-        assert!(is_valid_public_key(&STANDARD.encode([1_u8; 32])));
+    }
+
+    #[test]
+    fn validation_rejects_invalid_ed25519_point_encoding() {
+        let invalid_encoding = (0_u8..=u8::MAX)
+            .map(|byte| [byte; 32])
+            .find(|bytes| VerifyingKey::from_bytes(bytes).is_err())
+            .expect("at least one repeated-byte encoding is not an Ed25519 point");
+
+        assert!(!is_valid_public_key(&STANDARD.encode(invalid_encoding)));
     }
 
     #[test]
@@ -134,9 +148,21 @@ mod tests {
 
     #[test]
     fn fingerprint_is_stable_and_key_specific() {
-        let a = public_key_fingerprint(&STANDARD.encode([7_u8; 32])).expect("valid key");
-        let b = public_key_fingerprint(&STANDARD.encode([7_u8; 32])).expect("valid key");
-        let c = public_key_fingerprint(&STANDARD.encode([8_u8; 32])).expect("valid key");
+        use ed25519_dalek::SigningKey;
+
+        let key_a = STANDARD.encode(
+            SigningKey::from_bytes(&[7_u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let key_b = STANDARD.encode(
+            SigningKey::from_bytes(&[8_u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let a = public_key_fingerprint(&key_a).expect("valid key");
+        let b = public_key_fingerprint(&key_a).expect("valid key");
+        let c = public_key_fingerprint(&key_b).expect("valid key");
 
         assert_eq!(a, b);
         assert_ne!(a, c);

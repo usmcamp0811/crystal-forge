@@ -938,6 +938,34 @@
       "baseline": "advisory"
     },
     {
+      "name": "12e3-system-detail-key-rotation-reopen",
+      "description": "System Detail refreshes canonical key state across edit-modal reopen",
+      "route": "/systems/:id",
+      "designRef": "docs/design/CrystalForge/components/EditSystemModal.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "12e4-systems-update-key-row-action",
+      "description": "Systems-list Update Key action retains its backend-backed PUT flow",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/EditSystemModal.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
       "name": "12f-systems-deploy-modal",
       "description": "Systems deploy modal with commit selector",
       "route": "/systems",

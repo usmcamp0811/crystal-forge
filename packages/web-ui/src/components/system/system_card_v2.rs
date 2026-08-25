@@ -327,22 +327,35 @@ pub fn SystemCardV2(
                         span { class: "chip chip-healthy", "✓ clean" }
                     }
                 }
-                button {
-                    class: "btn btn-subtle focus-ring",
-                    style: "padding: 4px 10px; font-size: 12px;",
-                    onclick: move |e| {
-                        e.stop_propagation();
-                        on_deploy.call(());
-                    },
-                    svg {
-                        class: "w-3 h-3",
-                        fill: "none",
-                        stroke: "currentColor",
-                        stroke_width: "2",
-                        view_box: "0 0 24 24",
-                        path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
+                div {
+                    style: "display: flex; gap: 6px;",
+                    button {
+                        class: "btn btn-subtle focus-ring",
+                        "data-testid": "system-update-key",
+                        style: "padding: 4px 10px; font-size: 12px;",
+                        onclick: move |e| {
+                            e.stop_propagation();
+                            on_update_key.call(());
+                        },
+                        "Update Key"
                     }
-                    " Deploy"
+                    button {
+                        class: "btn btn-subtle focus-ring",
+                        style: "padding: 4px 10px; font-size: 12px;",
+                        onclick: move |e| {
+                            e.stop_propagation();
+                            on_deploy.call(());
+                        },
+                        svg {
+                            class: "w-3 h-3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
+                        }
+                        " Deploy"
+                    }
                 }
             }
         }

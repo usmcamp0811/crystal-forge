@@ -319,7 +319,8 @@ pub fn SystemDetailView(id: String) -> Element {
             Tab::Overview
         }
     });
-    let mut edit_modal_open = use_signal(|| false);
+    let mut edit_modal_system = use_signal(|| None::<SystemDetail>);
+    let mut refresh_detail_after_edit = use_signal(|| false);
     let mut remove_in_progress = use_signal(|| false);
     let mut remove_error_message: Signal<Option<String>> = use_signal(|| None);
     let mut show_ssh_modal = use_signal(|| false);
@@ -941,7 +942,10 @@ pub fn SystemDetailView(id: String) -> Element {
                         button {
                             class: "btn btn-ghost focus-ring",
                             disabled: !can_mutate,
-                            onclick: move |_| edit_modal_open.set(true),
+                            onclick: {
+                                let system = system.clone();
+                                move |_| edit_modal_system.set(Some(system.clone()))
+                            },
                             Icon { name: IconName::Gear, size: 14 }
                             "Edit"
                         }
@@ -1335,10 +1339,10 @@ pub fn SystemDetailView(id: String) -> Element {
         }
 
         // Sync confirmation dialog (rendered as portal outside main content)
-        if *edit_modal_open.read() {
+        if let Some(edit_system) = edit_modal_system.read().clone() {
             EditSystemModal {
-                system: system.clone(),
-                flake_names: system
+                system: edit_system.clone(),
+                flake_names: edit_system
                     .flake
                     .as_ref()
                     .map(|flake| vec![flake.name.clone()])
@@ -1346,13 +1350,17 @@ pub fn SystemDetailView(id: String) -> Element {
                 recent_commits: edit_recent_commits.clone(),
                 remove_in_progress: remove_in_progress(),
                 remove_error_message: remove_error_message.read().clone(),
-                on_close: move |_| {
-                    remove_error_message.set(None);
-                    remove_in_progress.set(false);
-                    edit_modal_open.set(false);
-                },
+                    on_close: move |_| {
+                        remove_error_message.set(None);
+                        remove_in_progress.set(false);
+                        edit_modal_system.set(None);
+                        if refresh_detail_after_edit() {
+                            refresh_detail_after_edit.set(false);
+                            detail_reload.set(detail_reload() + 1);
+                        }
+                    },
                 on_save: move |request: crate::api::models::UpdateSystemRequest| {
-                    let system_id = system.id;
+                    let system_id = edit_system.id;
                     spawn(async move {
                         match update_system_via_api(
                             system_id,
@@ -1361,19 +1369,25 @@ pub fn SystemDetailView(id: String) -> Element {
                         .await
                         {
                             Ok(_) => {
-                                edit_modal_open.set(false);
+                                edit_modal_system.set(None);
                                 detail_reload.set(detail_reload() + 1);
                             }
                             Err(error_message) => {
                                 toast_message.set(Some((error_message, false)));
-                                edit_modal_open.set(false);
+                                edit_modal_system.set(None);
                             }
                         }
                     });
                 },
+                on_key_rotated: move |updated_detail: SystemDetail| {
+                    // Keep the canonical GET result as the next modal seed so
+                    // closing and reopening cannot resurrect a stale fingerprint.
+                    edit_modal_system.set(Some(updated_detail));
+                    refresh_detail_after_edit.set(true);
+                },
                 on_delete: {
-                    let system_id = system.id;
-                    let hostname = system.hostname.clone();
+                    let system_id = edit_system.id;
+                    let hostname = edit_system.hostname.clone();
                     let nav = nav.clone();
                     move |_| {
                         let system_id = system_id;

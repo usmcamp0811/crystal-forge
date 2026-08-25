@@ -27,6 +27,7 @@ use crate::components::modals::{
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::system::{
     EditSystemModal, PendingDeployBanner, SystemCardV2, deployment_state_label,
+    key_rotation::public_key_fingerprint,
 };
 use crate::components::systems_stat_strip::SystemsStatStrip;
 use crate::components::tables::SystemsTable;
@@ -44,7 +45,7 @@ use crate::systems::adapter::{
     load_flake_context_with_fallback, load_flake_names_with_fallback,
     load_system_deployment_progress_with_fallback, load_system_detail_with_fallback,
     load_system_history_with_fallback, load_systems_with_fallback,
-    update_system_public_key_via_api, update_system_via_api,
+    update_system_public_key_and_reconcile, update_system_via_api,
 };
 use crate::theme;
 
@@ -274,6 +275,7 @@ pub fn SystemsListView() -> Element {
     let mut show_key_modal = use_signal(|| false);
     let mut generated_keys = use_signal(|| None::<GeneratedKeyPair>);
     let mut update_key_error = use_signal(|| None::<String>);
+    let mut update_key_in_flight = use_signal(|| false);
     let mut onboarding_agent_reminder = use_signal(|| None::<String>);
 
     // New modal state for edit
@@ -660,8 +662,14 @@ pub fn SystemsListView() -> Element {
                         });
                     },
                     on_generate_keys: move |_| {
-                        generated_keys.set(Some(generate_key_pair()));
-                        show_key_modal.set(true);
+                        match generate_key_pair() {
+                            Ok(keys) => {
+                                generated_keys.set(Some(keys));
+                                add_error.set(None);
+                                show_key_modal.set(true);
+                            }
+                            Err(message) => add_error.set(Some(message)),
+                        }
                     },
                     environments: dropdown_environments.clone(),
                     flake_names: registered_flakes.clone(),
@@ -671,9 +679,11 @@ pub fn SystemsListView() -> Element {
             }
 
             // Key Pair Modal
-            if *show_key_modal.read() {
+            if *show_key_modal.read()
+                && let Some(keys) = generated_keys.read().clone()
+            {
                 KeyPairModal {
-                    keys: generated_keys.read().clone(),
+                    keys,
                     on_close: move |_| show_key_modal.set(false),
                     on_use_public_key: move |_| {
                         if let Some(keys) = generated_keys.read().clone() {
@@ -1025,24 +1035,41 @@ pub fn SystemsListView() -> Element {
                 UpdatePublicKeyModal {
                     system_id: system.id,
                     hostname: system.hostname.clone(),
+                    in_flight: update_key_in_flight(),
+                    api_error: update_key_error.read().clone(),
                     on_cancel: move |_| {
                         pending_update_key.set(None);
                         update_key_error.set(None);
                     },
-                    on_confirm: move |new_public_key| {
+                    on_confirm: move |new_public_key: String| {
                         let system_id = system.id;
+                        let Some(expected_fingerprint) = public_key_fingerprint(&new_public_key) else {
+                            update_key_error.set(Some("Public key is not a valid Ed25519 public key".to_string()));
+                            return;
+                        };
+                        update_key_in_flight.set(true);
+                        update_key_error.set(None);
                         spawn(async move {
-                            match update_system_public_key_via_api(system_id, new_public_key).await {
-                                Ok(message) => {
-                                    // Success - close modal and maybe show a success toast
+                            match update_system_public_key_and_reconcile(
+                                system_id,
+                                new_public_key,
+                                expected_fingerprint,
+                            ).await {
+                                Ok(_) => {
                                     pending_update_key.set(None);
                                     update_key_error.set(None);
-                                    // TODO: Show success toast with message
                                 }
                                 Err(error_message) => {
-                                    update_key_error.set(Some(error_message));
+                                    let prefix = if error_message.outcome_unknown() {
+                                        "Rotation outcome is unknown. "
+                                    } else {
+                                        ""
+                                    };
+                                    update_key_error
+                                        .set(Some(format!("{prefix}{error_message}")));
                                 }
                             }
+                            update_key_in_flight.set(false);
                         });
                     }
                 }
@@ -1088,6 +1115,9 @@ pub fn SystemsListView() -> Element {
                                  }
                              }
                          });
+                    },
+                    on_key_rotated: move |updated_detail: SystemDetail| {
+                        edit_modal_system.set(Some(updated_detail));
                     },
                     on_delete: move |_| {
                         let system_id = detail.id;

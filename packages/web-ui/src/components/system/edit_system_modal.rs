@@ -6,7 +6,7 @@ use crate::api::models::{CommitInfo, FieldUpdate, SystemDetail, UpdateSystemRequ
 use crate::components::icon::{Icon, IconName};
 use crate::components::modals::{GeneratedKeyPair, RemoveSystemDialog, generate_key_pair};
 use crate::components::system::key_rotation;
-use crate::systems::adapter::update_system_public_key_via_api;
+use crate::systems::adapter::update_system_public_key_and_reconcile;
 use dioxus::prelude::*;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -30,17 +30,32 @@ enum KeyMode {
 ///
 /// Best effort: the private key stays on screen either way, and no failure path
 /// here may be reported to the operator as a successful copy.
-fn copy_to_clipboard(value: &str) {
+async fn copy_to_clipboard(value: &str) -> Result<(), String> {
     #[cfg(target_arch = "wasm32")]
     {
-        if let Some(window) = web_sys::window() {
-            let _ = window.navigator().clipboard().write_text(value);
-        }
+        use wasm_bindgen_futures::JsFuture;
+
+        let window = web_sys::window().ok_or_else(|| {
+            "Clipboard access is unavailable in this browser context.".to_string()
+        })?;
+        JsFuture::from(window.navigator().clipboard().write_text(value))
+            .await
+            .map_err(|_| {
+                "Copy failed. Select and copy the private key manually before rotating.".to_string()
+            })?;
+        Ok(())
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
         let _ = value;
+        Err("Clipboard access is available only in a browser.".to_string())
     }
+}
+
+#[derive(Clone, PartialEq)]
+struct RotationError {
+    message: String,
+    outcome_unknown: bool,
 }
 
 /// Branch options for the flake branch field.
@@ -73,6 +88,7 @@ pub fn EditSystemModal(
     on_close: EventHandler<()>,
     on_save: EventHandler<UpdateSystemRequest>,
     on_delete: EventHandler<()>,
+    on_key_rotated: EventHandler<SystemDetail>,
 ) -> Element {
     let mut hostname = use_signal(|| system.hostname.clone());
     let mut environment = use_signal(|| system.environment.clone().unwrap_or_default());
@@ -137,8 +153,10 @@ pub fn EditSystemModal(
     let mut generated_keys = use_signal(|| None::<GeneratedKeyPair>);
     let mut pasted_public_key = use_signal(String::new);
     let mut private_key_copied = use_signal(|| false);
+    let mut copy_in_flight = use_signal(|| false);
+    let mut copy_error = use_signal(|| None::<String>);
     let mut rotate_in_flight = use_signal(|| false);
-    let mut rotate_error = use_signal(|| None::<String>);
+    let mut rotate_error = use_signal(|| None::<RotationError>);
     let mut rotated = use_signal(|| false);
 
     // Leaving the rotate flow discards local key material only; the stored key,
@@ -149,6 +167,8 @@ pub fn EditSystemModal(
         generated_keys.set(None);
         pasted_public_key.set(String::new());
         private_key_copied.set(false);
+        copy_in_flight.set(false);
+        copy_error.set(None);
         rotate_error.set(None);
     };
 
@@ -168,7 +188,7 @@ pub fn EditSystemModal(
         let candidate = candidate_public_key.clone();
         move |_| {
             // Duplicate-submit guard: one click sequence must produce one request.
-            if *rotate_in_flight.read() {
+            if *rotate_in_flight.read() || *copy_in_flight.read() {
                 return;
             }
             let Some(new_public_key) = candidate.clone() else {
@@ -181,24 +201,44 @@ pub fn EditSystemModal(
             spawn(async move {
                 // Same endpoint the Systems-list "Update Key" action uses.
                 // Only the public half is ever sent.
-                match update_system_public_key_via_api(system_id, new_public_key.clone()).await {
-                    Ok(_) => {
-                        current_fingerprint
-                            .set(key_rotation::public_key_fingerprint(&new_public_key));
+                let Some(expected_fingerprint) =
+                    key_rotation::public_key_fingerprint(&new_public_key)
+                else {
+                    rotate_error.set(Some(RotationError {
+                        message: "Public key is not a valid Ed25519 public key".to_string(),
+                        outcome_unknown: false,
+                    }));
+                    rotate_in_flight.set(false);
+                    return;
+                };
+                match update_system_public_key_and_reconcile(
+                    system_id,
+                    new_public_key,
+                    expected_fingerprint,
+                )
+                .await
+                {
+                    Ok(detail) => {
+                        current_fingerprint.set(detail.public_key_fingerprint.clone());
                         rotated.set(true);
                         rotating_key.set(false);
                         // The private key is shown exactly once and is dropped here.
                         generated_keys.set(None);
                         pasted_public_key.set(String::new());
                         private_key_copied.set(false);
+                        copy_error.set(None);
                         rotate_error.set(None);
+                        on_key_rotated.call(detail);
                     }
-                    Err(message) => {
+                    Err(error) => {
                         // Never present a failure as a rotation. The generated
                         // keypair stays on screen so the operator — who may
                         // already be installing that exact private key — can
                         // retry without regenerating.
-                        rotate_error.set(Some(message));
+                        rotate_error.set(Some(RotationError {
+                            message: error.to_string(),
+                            outcome_unknown: error.outcome_unknown(),
+                        }));
                     }
                 }
                 rotate_in_flight.set(false);
@@ -231,6 +271,9 @@ pub fn EditSystemModal(
     }
 
     let handle_save = move |_| {
+        if rotate_in_flight() || copy_in_flight() {
+            return;
+        }
         is_saving.set(true);
 
         // FieldUpdate semantics for heartbeat_interval_secs:
@@ -281,10 +324,17 @@ pub fn EditSystemModal(
     rsx! {
         div {
             class: "modal-backdrop",
-            onclick: move |_| on_close.call(()),
+            "data-testid": "edit-system-modal-backdrop",
+            onclick: move |_| {
+                if !rotate_in_flight() && !copy_in_flight() {
+                    on_close.call(());
+                }
+            },
 
             div {
                 class: "modal",
+                "data-testid": "edit-system-modal",
+                "aria-busy": rotate_in_flight() || copy_in_flight(),
                 style: "width:min(620px,96vw); max-height:92vh;",
                 onclick: move |e| e.stop_propagation(),
 
@@ -309,7 +359,12 @@ pub fn EditSystemModal(
                         style: "width: fit-content; margin: 0;",
                         button {
                             class: if *active_tab.read() == Tab::General { "active" } else { "" },
-                            onclick: move |_| active_tab.set(Tab::General),
+                            disabled: rotate_in_flight() || copy_in_flight(),
+                            onclick: move |_| {
+                                if !rotate_in_flight() && !copy_in_flight() {
+                                    active_tab.set(Tab::General);
+                                }
+                            },
                             span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
                                 Icon { name: IconName::Gear, size: 12 }
                             }
@@ -317,7 +372,12 @@ pub fn EditSystemModal(
                         }
                         button {
                             class: if *active_tab.read() == Tab::Deployment { "active" } else { "" },
-                            onclick: move |_| active_tab.set(Tab::Deployment),
+                            disabled: rotate_in_flight() || copy_in_flight(),
+                            onclick: move |_| {
+                                if !rotate_in_flight() && !copy_in_flight() {
+                                    active_tab.set(Tab::Deployment);
+                                }
+                            },
                             span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
                                 Icon { name: IconName::Git, size: 12 }
                             }
@@ -325,7 +385,12 @@ pub fn EditSystemModal(
                         }
                         button {
                             class: if *active_tab.read() == Tab::Security { "active" } else { "" },
-                            onclick: move |_| active_tab.set(Tab::Security),
+                            disabled: rotate_in_flight() || copy_in_flight(),
+                            onclick: move |_| {
+                                if !rotate_in_flight() && !copy_in_flight() {
+                                    active_tab.set(Tab::Security);
+                                }
+                            },
                             span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
                                 Icon { name: IconName::Key, size: 12 }
                             }
@@ -333,7 +398,12 @@ pub fn EditSystemModal(
                         }
                         button {
                             class: if *active_tab.read() == Tab::Danger { "active" } else { "" },
-                            onclick: move |_| active_tab.set(Tab::Danger),
+                            disabled: rotate_in_flight() || copy_in_flight(),
+                            onclick: move |_| {
+                                if !rotate_in_flight() && !copy_in_flight() {
+                                    active_tab.set(Tab::Danger);
+                                }
+                            },
                             span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
                                 Icon { name: IconName::Warn, size: 12 }
                             }
@@ -683,10 +753,11 @@ pub fn EditSystemModal(
                                             class: "btn btn-ghost focus-ring",
                                             "data-testid": "rotate-key-button",
                                             style: "margin-top: 4px;",
-                                            onclick: move |_| {
-                                                rotate_error.set(None);
-                                                rotating_key.set(true);
-                                            },
+                                                onclick: move |_| {
+                                                    rotate_error.set(None);
+                                                    copy_error.set(None);
+                                                    rotating_key.set(true);
+                                                },
                                             span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
                                                 Icon { name: IconName::Sync, size: 12 }
                                             }
@@ -700,21 +771,22 @@ pub fn EditSystemModal(
                                         button {
                                             class: if *key_mode.read() == KeyMode::Generate { "active" } else { "" },
                                             "data-testid": "key-mode-generate",
-                                            disabled: rotate_in_flight(),
+                                            disabled: rotate_in_flight() || copy_in_flight(),
                                             onclick: move |_| key_mode.set(KeyMode::Generate),
                                             "Generate new keypair"
                                         }
                                         button {
                                             class: if *key_mode.read() == KeyMode::Paste { "active" } else { "" },
                                             "data-testid": "key-mode-paste",
-                                            disabled: rotate_in_flight(),
+                                            disabled: rotate_in_flight() || copy_in_flight(),
                                             onclick: move |_| {
                                                 key_mode.set(KeyMode::Paste);
                                                 // Switching away discards any generated
                                                 // material so the private key is never
                                                 // left dangling out of view.
-                                                generated_keys.set(None);
-                                                private_key_copied.set(false);
+                                                 generated_keys.set(None);
+                                                 private_key_copied.set(false);
+                                                 copy_error.set(None);
                                             },
                                             "Paste existing public key"
                                         }
@@ -750,11 +822,21 @@ pub fn EditSystemModal(
                                                         class: "btn btn-ghost focus-ring xs",
                                                         "data-testid": "copy-private-key-button",
                                                         style: "position: absolute; top: 6px; right: 6px;",
+                                                        disabled: copy_in_flight() || rotate_in_flight(),
                                                         onclick: {
                                                             let private_key = keys.private_key.clone();
                                                             move |_| {
-                                                                copy_to_clipboard(&private_key);
-                                                                private_key_copied.set(true);
+                                                                let private_key = private_key.clone();
+                                                                private_key_copied.set(false);
+                                                                copy_error.set(None);
+                                                                copy_in_flight.set(true);
+                                                                spawn(async move {
+                                                                    match copy_to_clipboard(&private_key).await {
+                                                                        Ok(()) => private_key_copied.set(true),
+                                                                        Err(message) => copy_error.set(Some(message)),
+                                                                    }
+                                                                    copy_in_flight.set(false);
+                                                                });
                                                             }
                                                         },
                                                         span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
@@ -763,7 +845,20 @@ pub fn EditSystemModal(
                                                                 size: 11,
                                                             }
                                                         }
-                                                        if private_key_copied() { "Copied" } else { "Copy" }
+                                                        if copy_in_flight() {
+                                                            "Copying…"
+                                                        } else if private_key_copied() {
+                                                            "Copied"
+                                                        } else {
+                                                            "Copy"
+                                                        }
+                                                    }
+                                                }
+                                                if let Some(message) = copy_error.read().clone() {
+                                                    p {
+                                                        "data-testid": "copy-private-key-error",
+                                                        style: "margin-top: 8px; color: #fca5a5; font-size: 11.5px;",
+                                                        "{message}"
                                                     }
                                                 }
                                                 p {
@@ -786,7 +881,15 @@ pub fn EditSystemModal(
                                                     disabled: rotate_in_flight(),
                                                     onclick: move |_| {
                                                         private_key_copied.set(false);
-                                                        generated_keys.set(Some(generate_key_pair()));
+                                                        copy_error.set(None);
+                                                        rotate_error.set(None);
+                                                        match generate_key_pair() {
+                                                            Ok(keys) => generated_keys.set(Some(keys)),
+                                                            Err(message) => rotate_error.set(Some(RotationError {
+                                                                message,
+                                                                outcome_unknown: false,
+                                                            })),
+                                                        }
                                                     },
                                                     span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
                                                         Icon { name: IconName::Key, size: 12 }
@@ -861,13 +964,19 @@ pub fn EditSystemModal(
                                         }
                                     }
 
-                                    if let Some(message) = rotate_error.read().clone() {
+                                    if let Some(error) = rotate_error.read().clone() {
                                         div {
                                             class: "sd-callout sd-callout-danger",
                                             "data-testid": "rotate-error-callout",
+                                            "data-outcome": if error.outcome_unknown { "unknown" } else { "failed" },
                                             style: "margin-top: 8px;",
                                             div { style: "font-size: 12px;",
-                                                "Key rotation failed: {message}"
+                                                if error.outcome_unknown {
+                                                    strong { "Key rotation outcome unknown. " }
+                                                } else {
+                                                    strong { "Key rotation failed. " }
+                                                }
+                                                "{error.message}"
                                             }
                                         }
                                     }
@@ -877,15 +986,15 @@ pub fn EditSystemModal(
                                         button {
                                             class: "btn btn-ghost focus-ring",
                                             "data-testid": "rotate-cancel-button",
-                                            disabled: rotate_in_flight(),
+                                            disabled: rotate_in_flight() || copy_in_flight(),
                                             onclick: move |_| cancel_rotation(),
                                             "Cancel"
                                         }
                                         button {
                                             class: "btn focus-ring",
                                             "data-testid": "rotate-confirm-button",
-                                            disabled: rotate_in_flight() || candidate_public_key.is_none(),
-                                            style: if candidate_public_key.is_some() && !rotate_in_flight() {
+                                            disabled: rotate_in_flight() || copy_in_flight() || candidate_public_key.is_none(),
+                                            style: if candidate_public_key.is_some() && !rotate_in_flight() && !copy_in_flight() {
                                                 "background: #dc2626; color: white;"
                                             } else {
                                                 "background: var(--cf-subtle-bg); color: var(--cf-text-muted);"
@@ -939,15 +1048,24 @@ pub fn EditSystemModal(
 
                     button {
                         class: "btn btn-ghost focus-ring",
-                        onclick: move |_| on_close.call(()),
-                        disabled: is_saving(),
+                        "data-testid": "edit-system-footer-cancel",
+                        onclick: move |_| {
+                            if !rotate_in_flight() && !copy_in_flight() {
+                                on_close.call(());
+                            }
+                        },
+                        disabled: is_saving() || rotate_in_flight() || copy_in_flight(),
                         "Cancel"
                     }
 
                     button {
                         class: "btn btn-primary focus-ring disabled:opacity-50 disabled:cursor-not-allowed",
+                        "data-testid": "edit-system-save",
                         onclick: handle_save,
-                        disabled: is_saving() || hostname.read().trim().is_empty(),
+                        disabled: is_saving()
+                            || rotate_in_flight()
+                            || copy_in_flight()
+                            || hostname.read().trim().is_empty(),
 
                         if is_saving() {
                             "Saving…"
