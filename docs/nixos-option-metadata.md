@@ -135,9 +135,9 @@ The option may still be valid for the target system.
 
 The operator can continue authoring the rule with the `unknown` semantic-string representation. A missing, unavailable, or corrupt baseline catalog must not be silently converted into a claim that the option does not exist.
 
-Baseline validation may reject an obvious mismatch against a known baseline entry or require the explicit unknown/custom representation when CF cannot provide a reliable type. That is a serialization and authoring-safety boundary, not a target-validity verdict. The eventual target evaluation remains authoritative.
+Persistence validates the composite schema, rule identity, operator, and semantic JSON type without consulting packaged metadata. A baseline path/type/enum difference is non-blocking guidance: the editor preserves the stored target semantics, displays an advisory when metadata is available, and allows the operator to save. Deliberately selecting an autocomplete result may still initialize a typed control and baseline value as an authoring convenience.
 
-Tests must preserve this distinction. Do not add a test that treats absence from packaged metadata as proof that a target option is invalid.
+Tests must preserve this distinction. Do not add a test that rejects a structurally valid policy because packaged metadata is missing, unavailable, corrupt, or different from the target semantics.
 
 ## Phase 3 and Phase 4 separation
 

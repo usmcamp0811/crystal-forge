@@ -1,7 +1,4 @@
 use crate::api::models::NixosOptionMetadata;
-use crate::models::deployment_policies::{
-    CompositePolicyConfig, CompositeRuleKind, NixosOptionValueType,
-};
 use std::fmt::{Display, Formatter};
 use std::path::Path;
 use std::sync::Arc;
@@ -150,74 +147,6 @@ impl NixosOptionsMetadataProvider {
             .ok()
             .map(|index| entries[index].metadata.clone()))
     }
-
-    /// Validate authoring/serialization semantics against CF's baseline
-    /// catalog. This does not prove target validity. When the baseline is
-    /// missing an entry, unavailable, or corrupt, the explicit `unknown`
-    /// semantic-string path preserves authoring for foreign module graphs.
-    pub fn validate_composite_config(&self, config: &CompositePolicyConfig) -> Result<(), String> {
-        for (index, rule) in config.rules.iter().enumerate() {
-            let CompositeRuleKind::NixosOption(option) = &rule.rule else {
-                continue;
-            };
-            let metadata = match self.get_exact(&option.path) {
-                Ok(metadata) => metadata,
-                Err(MetadataProviderError::Unavailable(_) | MetadataProviderError::Corrupt(_))
-                    if option.value_type == NixosOptionValueType::Unknown =>
-                {
-                    continue;
-                }
-                Err(MetadataProviderError::Unavailable(message)) => {
-                    return Err(format!(
-                        "composite config.rules[{index}] cannot verify option '{}' because metadata is unavailable ({message}); use value_type unknown",
-                        option.path
-                    ));
-                }
-                Err(MetadataProviderError::Corrupt(message)) => {
-                    return Err(format!(
-                        "composite config.rules[{index}] cannot verify option '{}' because metadata is corrupt ({message}); use value_type unknown",
-                        option.path
-                    ));
-                }
-            };
-            let Some(metadata) = metadata else {
-                if option.value_type != NixosOptionValueType::Unknown {
-                    return Err(format!(
-                        "composite config.rules[{index}] option '{}' is not in metadata; use value_type unknown",
-                        option.path
-                    ));
-                }
-                continue;
-            };
-            let expected = match metadata.value_type {
-                crate::api::models::NixosOptionValueType::Boolean => NixosOptionValueType::Boolean,
-                crate::api::models::NixosOptionValueType::Enum => NixosOptionValueType::Enum,
-                crate::api::models::NixosOptionValueType::Integer => NixosOptionValueType::Integer,
-                crate::api::models::NixosOptionValueType::String => NixosOptionValueType::String,
-                crate::api::models::NixosOptionValueType::Lines => NixosOptionValueType::Lines,
-                crate::api::models::NixosOptionValueType::Unknown => NixosOptionValueType::Unknown,
-            };
-            if option.value_type != expected {
-                return Err(format!(
-                    "composite config.rules[{index}] value_type does not match metadata for '{}'",
-                    option.path
-                ));
-            }
-            if expected == NixosOptionValueType::Enum
-                && !metadata.enum_values.is_empty()
-                && !metadata
-                    .enum_values
-                    .iter()
-                    .any(|value| value == &option.value)
-            {
-                return Err(format!(
-                    "composite config.rules[{index}] enum value is not allowed for '{}'",
-                    option.path
-                ));
-            }
-        }
-        Ok(())
-    }
 }
 
 fn match_rank(entry: &IndexedEntry, query: &str) -> Option<u8> {
@@ -291,91 +220,5 @@ mod tests {
             corrupt.search("", 1),
             Err(MetadataProviderError::Corrupt(_))
         ));
-    }
-
-    #[test]
-    fn validates_known_types_and_enums() {
-        let provider = NixosOptionsMetadataProvider::from_json_bytes(FIXTURE).unwrap();
-        let config: CompositePolicyConfig = serde_json::from_value(serde_json::json!({
-            "schema_version": 1,
-            "mode": "all",
-            "rules": [{
-                "id": "10000000-0000-0000-0000-000000000001",
-                "kind": "nixos_option",
-                "config": {
-                    "path": "networking.firewall.backend",
-                    "operator": "==",
-                    "value_type": "enum",
-                    "value": "nftables"
-                }
-            }]
-        }))
-        .unwrap();
-        provider.validate_composite_config(&config).unwrap();
-
-        let mut wrong = config.clone();
-        if let CompositeRuleKind::NixosOption(option) = &mut wrong.rules[0].rule {
-            option.value = serde_json::json!("unknown-backend");
-        } else {
-            unreachable!();
-        }
-        assert!(provider.validate_composite_config(&wrong).is_err());
-    }
-
-    #[test]
-    fn baseline_absence_preserves_unknown_custom_authoring_path() {
-        let provider = NixosOptionsMetadataProvider::from_json_bytes(FIXTURE).unwrap();
-        let config: CompositePolicyConfig = serde_json::from_value(serde_json::json!({
-            "schema_version": 1,
-            "mode": "all",
-            "rules": [{
-                "id": "10000000-0000-0000-0000-000000000001",
-                "kind": "nixos_option",
-                "config": {
-                    "path": "acme.security.fips.enable",
-                    "operator": "==",
-                    "value_type": "unknown",
-                    "value": "true"
-                }
-            }]
-        }))
-        .unwrap();
-
-        assert!(
-            provider
-                .get_exact("acme.security.fips.enable")
-                .unwrap()
-                .is_none()
-        );
-        assert!(provider.validate_composite_config(&config).is_ok());
-    }
-
-    #[test]
-    fn unavailable_metadata_only_allows_unknown_string_fallback() {
-        let provider = NixosOptionsMetadataProvider::from_path("/definitely/not/present.json");
-        let mut config: CompositePolicyConfig = serde_json::from_value(serde_json::json!({
-            "schema_version": 1,
-            "mode": "all",
-            "rules": [{
-                "id": "10000000-0000-0000-0000-000000000001",
-                "kind": "nixos_option",
-                "config": {
-                    "path": "networking.firewall.enable",
-                    "operator": "==",
-                    "value_type": "boolean",
-                    "value": true
-                }
-            }]
-        }))
-        .unwrap();
-
-        assert!(provider.validate_composite_config(&config).is_err());
-        if let CompositeRuleKind::NixosOption(option) = &mut config.rules[0].rule {
-            option.value_type = NixosOptionValueType::Unknown;
-            option.value = serde_json::json!("true");
-        } else {
-            unreachable!();
-        }
-        assert!(provider.validate_composite_config(&config).is_ok());
     }
 }

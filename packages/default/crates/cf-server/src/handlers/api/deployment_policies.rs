@@ -27,7 +27,6 @@ use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
     is_reserved_policy_result_field, validate_policy_type_config,
 };
-use crate::nixos_options_metadata::NixosOptionsMetadataProvider;
 use crate::queries::deployment_policies;
 use crate::queries::deployment_policies::PolicyDeleteOutcome;
 
@@ -452,22 +451,6 @@ fn validate_policy_config(
     Ok(validated_config)
 }
 
-fn validate_policy_config_with_metadata(
-    policy_type: &str,
-    config: &Value,
-    metadata: &NixosOptionsMetadataProvider,
-) -> Result<Value, (StatusCode, String)> {
-    let validated = validate_policy_config(policy_type, config)?;
-    if let Some(composite) = validate_policy_type_config(policy_type, &validated)
-        .map_err(|message| (StatusCode::BAD_REQUEST, message))?
-    {
-        metadata
-            .validate_composite_config(&composite)
-            .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
-    }
-    Ok(validated)
-}
-
 impl PaginationParams {
     /// Validate and normalize pagination parameters
     fn validate(&self) -> Result<(), (StatusCode, String)> {
@@ -793,11 +776,7 @@ pub async fn create_deployment_policy(
     }
 
     // Validate and normalize the config (may auto-fix expressions)
-    request.config = validate_policy_config_with_metadata(
-        &request.policy_type,
-        &request.config,
-        &state.nixos_options_metadata,
-    )?;
+    request.config = validate_policy_config(&request.policy_type, &request.config)?;
 
     // Check if policy name already exists
     let name_exists =
@@ -1040,11 +1019,7 @@ pub async fn update_deployment_policy(
 
     if request.policy_type.is_some() || request.config.is_some() {
         // Validate and normalize the config (may auto-fix expressions)
-        candidate_config = validate_policy_config_with_metadata(
-            &candidate_policy_type,
-            &candidate_config,
-            &state.nixos_options_metadata,
-        )?;
+        candidate_config = validate_policy_config(&candidate_policy_type, &candidate_config)?;
         // Update the request with the normalized config
         request.config = Some(candidate_config.clone());
     }
@@ -1496,6 +1471,85 @@ mod tests {
             result.get("field_name").and_then(|v| v.as_str()),
             Some("firewallEnabled")
         );
+    }
+
+    #[test]
+    fn composite_validation_treats_nixpkgs_baseline_semantics_as_advisory() {
+        let cases = [
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "10000000-0000-0000-0000-000000000001",
+                    "kind": "nixos_option",
+                    "config": {
+                        "path": "networking.firewall.backend",
+                        "operator": "==",
+                        "value_type": "unknown",
+                        "value": "target-specific-backend"
+                    }
+                }]
+            }),
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "10000000-0000-0000-0000-000000000002",
+                    "kind": "nixos_option",
+                    "config": {
+                        "path": "networking.firewall.backend",
+                        "operator": "==",
+                        "value_type": "enum",
+                        "value": "target-specific-backend"
+                    }
+                }]
+            }),
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "10000000-0000-0000-0000-000000000003",
+                    "kind": "nixos_option",
+                    "config": {
+                        "path": "target.module.typedOption",
+                        "operator": ">=",
+                        "value_type": "integer",
+                        "value": 7
+                    }
+                }]
+            }),
+        ];
+
+        for config in cases {
+            let validated = validate_policy_config("composite", &config)
+                .expect("structurally valid target semantics must persist without metadata");
+            assert_eq!(validated, config);
+        }
+    }
+
+    #[test]
+    fn composite_validation_still_rejects_semantic_json_type_mismatches() {
+        let error = validate_policy_config(
+            "composite",
+            &serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "10000000-0000-0000-0000-000000000001",
+                    "kind": "nixos_option",
+                    "config": {
+                        "path": "networking.firewall.enable",
+                        "operator": "==",
+                        "value_type": "boolean",
+                        "value": "banana"
+                    }
+                }]
+            }),
+        )
+        .expect_err("boolean semantic values must remain JSON booleans");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("value does not match value_type"));
     }
 
     async fn create_test_policy(pool: &PgPool, name: &str) -> Uuid {

@@ -1591,7 +1591,7 @@
     },
     {
       "name": "20ab1-policy-editor-composite-metadata-roundtrip",
-      "description": "Real NixOS metadata drives typed composite values and stable rule IDs across save and reload",
+      "description": "Real NixOS metadata guides typed composites without overriding target-specific semantics across save and reload",
       "route": "/deployment-policies",
       "designRef": "docs/design/CrystalForge/data-enforcement.js",
       "profiles": [

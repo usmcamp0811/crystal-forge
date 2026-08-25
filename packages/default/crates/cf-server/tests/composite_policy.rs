@@ -177,3 +177,59 @@ async fn query_layer_rejects_invalid_composite_when_handler_is_bypassed(pool: Pg
     .unwrap();
     assert_eq!(count, 0);
 }
+
+#[sqlx::test]
+async fn query_layer_persists_target_specific_nixos_option_semantics(pool: PgPool) {
+    let config = serde_json::json!({
+        "schema_version": 1,
+        "mode": "all",
+        "rules": [
+            {
+                "id": "30000000-0000-0000-0000-000000000003",
+                "kind": "nixos_option",
+                "config": {
+                    "path": "networking.firewall.backend",
+                    "operator": "==",
+                    "value_type": "unknown",
+                    "value": "target-specific-unknown"
+                }
+            },
+            {
+                "id": "30000000-0000-0000-0000-000000000004",
+                "kind": "nixos_option",
+                "config": {
+                    "path": "networking.firewall.backend",
+                    "operator": "==",
+                    "value_type": "enum",
+                    "value": "target-specific-enum"
+                }
+            }
+        ]
+    });
+    let created = create_deployment_policy(
+        &pool,
+        &CreateDeploymentPolicyRequest {
+            name: format!("target-specific-composite-{}", Uuid::new_v4()),
+            policy_type: "composite".into(),
+            config: config.clone(),
+            enabled: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let version_id: Uuid = sqlx::query_scalar(
+        "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+    )
+    .bind(created.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let persisted = get_deployment_policy_by_version(&pool, &version_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.policy_type, "composite");
+    assert_eq!(persisted.config, config);
+}

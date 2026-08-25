@@ -1634,25 +1634,19 @@ pub async fn commit_foreign_import(
 /// Commit a validated CF-native import. Unlike the foreign path, portable UUIDs
 /// are authoritative and existing immutable versions are reused rather than
 /// copied into new local lineages.
-pub async fn commit_cf_native_import_with_metadata(
+pub async fn commit_cf_native_import(
     pool: &PgPool,
-    metadata: &crate::nixos_options_metadata::NixosOptionsMetadataProvider,
     importing_user_id: Uuid,
     pkg: ProcessedXccdfPackage,
     validated: ValidatedImportPlan,
     policy_records: Vec<ImportedPolicyRecord>,
 ) -> Result<XccdfCommittedImportResult> {
     for record in &policy_records {
-        if let Some(composite) = crate::models::deployment_policies::validate_policy_type_config(
+        crate::models::deployment_policies::validate_policy_type_config(
             &record.policy_type,
             &record.config,
         )
-        .map_err(anyhow::Error::msg)?
-        {
-            metadata
-                .validate_composite_config(&composite)
-                .map_err(anyhow::Error::msg)?;
-        }
+        .map_err(anyhow::Error::msg)?;
     }
     let mut tx = pool
         .begin()
@@ -2114,26 +2108,6 @@ pub async fn commit_cf_native_import_with_metadata(
         bundle_semantic_digest: bundle_digest,
         warnings: vec![],
     })
-}
-
-#[cfg(test)]
-pub async fn commit_cf_native_import(
-    pool: &PgPool,
-    importing_user_id: Uuid,
-    pkg: ProcessedXccdfPackage,
-    validated: ValidatedImportPlan,
-    policy_records: Vec<ImportedPolicyRecord>,
-) -> Result<XccdfCommittedImportResult> {
-    let metadata = crate::nixos_options_metadata::NixosOptionsMetadataProvider::from_runtime();
-    commit_cf_native_import_with_metadata(
-        pool,
-        &metadata,
-        importing_user_id,
-        pkg,
-        validated,
-        policy_records,
-    )
-    .await
 }
 
 async fn upsert_source_artifact(

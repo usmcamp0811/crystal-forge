@@ -7560,7 +7560,7 @@ const steps = [
   },
   {
     name: "20ab1-policy-editor-composite-metadata-roundtrip",
-    description: "Real NixOS metadata drives typed composite values and stable rule IDs across save and reload",
+    description: "Real NixOS metadata guides typed composites without overriding target-specific semantics across save and reload",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
       await collapseOnboardingCoach(page);
@@ -7570,6 +7570,7 @@ const steps = [
         enum: "networking.networkmanager.dns",
         integer: "boot.consoleLogLevel",
         lines: "networking.extraHosts",
+        string: "networking.hostName",
       };
       const metadata = await page.evaluate(async ({ base, paths }) => {
         const found = {};
@@ -7644,6 +7645,18 @@ By using this IS (which includes any device attached to this IS), you consent to
       }
       await page.getByTestId("policy-rule-nixos-value-4").fill(difficult);
 
+      await addMetadataRule(5, metadataPaths.string);
+      const shortString = `cf-${Date.now()}`;
+      await page.getByTestId("policy-rule-nixos-value-5").fill(shortString);
+
+      // Keep target-specific semantics for a path that the CF baseline knows.
+      // Typing without selecting autocomplete deliberately retains `unknown`.
+      await addRule.selectOption("nixos_option");
+      const targetSpecificValue = `target-specific-${Date.now()}`;
+      await page.getByTestId("policy-rule-nixos-path-6").fill(metadataPaths.enum);
+      await page.getByTestId("policy-option-search-results").last().waitFor({ state: "visible", timeout: 10000 });
+      await page.getByTestId("policy-rule-nixos-value-6").fill(targetSpecificValue);
+
       const createResponsePromise = page.waitForResponse(
         (response) => response.url().includes("/api/v1/deployment-policies") && response.request().method() === "POST",
       );
@@ -7655,15 +7668,34 @@ By using this IS (which includes any device attached to this IS), you consent to
       if (sent.policy_type !== "composite" || sent.config.schema_version !== 1 || sent.config.mode !== "all") {
         throw new Error(`Unexpected composite envelope: ${JSON.stringify(sent)}`);
       }
-      if (sent.config.rules.length !== 5) throw new Error(`Expected five ordered rules, got ${sent.config.rules.length}`);
+      if (sent.config.rules.length !== 7) throw new Error(`Expected seven ordered rules, got ${sent.config.rules.length}`);
       const ids = sent.config.rules.map((rule) => rule.id);
       if (new Set(ids).size !== ids.length || ids.some((id) => !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id))) {
         throw new Error(`Rules did not have unique stable UUIDv4 IDs: ${JSON.stringify(ids)}`);
       }
       const values = sent.config.rules.map((rule) => rule.config.value);
-      if (values[0] !== true || values[1] !== enumValue || values[2] !== 42 || values[3] !== dodConsentBanner || values[4] !== difficult) {
+      if (values[0] !== true || values[1] !== enumValue || values[2] !== 42 || values[3] !== dodConsentBanner || values[4] !== difficult || values[5] !== shortString || values[6] !== targetSpecificValue) {
         throw new Error(`Composite semantic values were altered: ${JSON.stringify(values)}`);
       }
+      const targetSpecificRule = sent.config.rules[6];
+      if (targetSpecificRule.config.path !== metadataPaths.enum || targetSpecificRule.config.value_type !== "unknown" || targetSpecificRule.config.operator !== "==") {
+        throw new Error(`Known-path target semantics were rewritten by baseline metadata: ${JSON.stringify(targetSpecificRule)}`);
+      }
+
+      // Persist an enum value from the target's domain that is absent from CF's
+      // baseline, then hydrate it through the editor as an advisory text input.
+      const enumSkewConfig = JSON.parse(JSON.stringify(sent.config));
+      enumSkewConfig.rules[6].config.value_type = "enum";
+      const enumSkewStatus = await page.evaluate(async ({ base, id, config }) => {
+        const response = await fetch(`${base}/api/v1/deployment-policies/${id}`, {
+          method: "PUT",
+          credentials: "include",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ policy_type: "composite", config }),
+        });
+        return response.status;
+      }, { base: apiBaseUrl, id: created.id, config: enumSkewConfig });
+      if (enumSkewStatus !== 200) throw new Error(`Expected target enum-domain persistence 200, got ${enumSkewStatus}`);
 
       await page.reload({ waitUntil: "domcontentloaded" });
       await collapseOnboardingCoach(page);
@@ -7673,16 +7705,23 @@ By using this IS (which includes any device attached to this IS), you consent to
       await card.getByRole("button", { name: "Edit", exact: true }).click();
       await page.getByTestId("policy-editor-tab-enforcement").click();
       await page.waitForFunction((expectedEnum) => {
-        const values = [0, 1, 2, 3].map((index) => document.querySelector(`[data-testid="policy-rule-nixos-value-${index}"]`));
+        const values = [0, 1, 2, 3, 5].map((index) => document.querySelector(`[data-testid="policy-rule-nixos-value-${index}"]`));
         return values[0]?.tagName === "SELECT" && values[1]?.tagName === "SELECT" &&
           values[1]?.value === expectedEnum && values[2]?.getAttribute("type") === "number" &&
-          values[3]?.tagName === "TEXTAREA";
+          values[3]?.tagName === "TEXTAREA" && values[4]?.tagName === "INPUT";
       }, enumValue, { timeout: 10000 });
       if (await page.getByTestId("policy-rule-nixos-value-0").inputValue() !== "true") throw new Error("Boolean did not reload as a boolean control");
       if (await page.getByTestId("policy-rule-nixos-value-1").inputValue() !== enumValue) throw new Error("Enum did not reload with its authoritative choice");
       if (await page.getByTestId("policy-rule-nixos-value-2").inputValue() !== "42") throw new Error("Integer did not reload as an integer control");
       if (await page.getByTestId("policy-rule-nixos-value-3").inputValue() !== dodConsentBanner) throw new Error("DoD consent banner did not round-trip exactly");
       if (await page.getByTestId("policy-rule-nixos-value-4").inputValue() !== difficult) throw new Error("Unknown custom string did not round-trip exactly");
+      if (await page.getByTestId("policy-rule-nixos-value-5").inputValue() !== shortString) throw new Error("Metadata-backed short string did not round-trip exactly");
+      if (await page.getByTestId("policy-rule-nixos-value-6").inputValue() !== targetSpecificValue) throw new Error("Known-path target-specific value did not round-trip exactly");
+      const advisory = page.getByTestId("policy-rule-nixos-baseline-advisory-6");
+      await advisory.waitFor({ state: "visible", timeout: 10000 });
+      if (!(await advisory.innerText()).includes("target evaluation remains authoritative")) {
+        throw new Error("Known-path target-specific semantics did not show the baseline advisory");
+      }
 
       // Force hydration back through composite serialization and reorder stable IDs.
       await page.getByTitle("Move rule down").first().click();
@@ -7700,8 +7739,11 @@ By using this IS (which includes any device attached to this IS), you consent to
         throw new Error(`Rule IDs were not preserved across hydration/reorder: ${JSON.stringify(expectedIds)} -> ${JSON.stringify(reloadedIds)}`);
       }
       const reserializedValues = update.config.rules.map((rule) => rule.config.value);
-      if (reserializedValues[0] !== enumValue || reserializedValues[1] !== true || reserializedValues[2] !== 42 || reserializedValues[3] !== dodConsentBanner || reserializedValues[4] !== difficult) {
+      if (reserializedValues[0] !== enumValue || reserializedValues[1] !== true || reserializedValues[2] !== 42 || reserializedValues[3] !== dodConsentBanner || reserializedValues[4] !== difficult || reserializedValues[5] !== shortString || reserializedValues[6] !== targetSpecificValue) {
         throw new Error(`Hydrated composite values were altered: ${JSON.stringify(reserializedValues)}`);
+      }
+      if (update.config.rules[6].config.value_type !== "enum" || update.config.rules[6].config.path !== metadataPaths.enum) {
+        throw new Error(`Hydration rewrote known-path target semantics: ${JSON.stringify(update.config.rules[6])}`);
       }
 
       await page.evaluate(async ({ base, id }) => {

@@ -175,6 +175,7 @@ struct PolicyRule {
     option_values: Vec<String>,
     option_description: String,
     option_unit: Option<String>,
+    baseline_option_type: Option<String>,
     // custom_eval
     expr: String,
     message: String,
@@ -206,6 +207,7 @@ impl PolicyRule {
             option_values: Vec::new(),
             option_description: String::new(),
             option_unit: None,
+            baseline_option_type: None,
             expr: "config.services.openssh.enable == true".to_string(),
             message: "SSH must be enabled".to_string(),
         };
@@ -218,6 +220,13 @@ impl PolicyRule {
     fn apply_option_metadata(&mut self, metadata: &NixosOptionMetadata) {
         self.path = metadata.path.clone();
         self.option_type = metadata.value_type.as_str().to_string();
+        self.enrich_option_metadata(metadata);
+        self.op = "==".to_string();
+        self.value = default_option_value(&self.option_type, &self.option_values);
+    }
+
+    /// Attach authoring guidance without changing persisted target semantics.
+    fn enrich_option_metadata(&mut self, metadata: &NixosOptionMetadata) {
         self.option_values = metadata
             .enum_values
             .iter()
@@ -225,8 +234,32 @@ impl PolicyRule {
             .collect();
         self.option_description = metadata.description.clone().unwrap_or_default();
         self.option_unit = None;
-        self.op = "==".to_string();
-        self.value = default_option_value(&self.option_type, &self.option_values);
+        self.baseline_option_type = Some(metadata.value_type.as_str().to_string());
+    }
+
+    fn baseline_advisory(&self) -> Option<String> {
+        let baseline_type = self.baseline_option_type.as_deref()?;
+        let stored_type = normalize_option_type(&self.option_type);
+        if stored_type != normalize_option_type(baseline_type) {
+            return Some(format!(
+                "This policy keeps the target-specific {stored_type} semantics. Crystal Forge's pinned nixpkgs baseline currently describes this option as {baseline_type}; target evaluation remains authoritative."
+            ));
+        }
+        if stored_type == "enum"
+            && !self.option_values.is_empty()
+            && self.value.as_str().is_some_and(|value| {
+                !self
+                    .option_values
+                    .iter()
+                    .any(|candidate| candidate == value)
+            })
+        {
+            return Some(
+                "This policy keeps a target-specific enum value that is not listed by Crystal Forge's pinned nixpkgs baseline; target evaluation remains authoritative."
+                    .to_string(),
+            );
+        }
+        None
     }
 
     /// Whether this rule kind can be persisted via the existing policy API config.
@@ -762,14 +795,6 @@ fn rule_validation_error(rule: &PolicyRule) -> Option<String> {
                 }
                 "integer" if rule.value.as_i64().is_none() => {
                     Some("Integer options require a valid 64-bit integer.".to_string())
-                }
-                "enum"
-                    if !rule.option_values.is_empty()
-                        && !rule.value.as_str().is_some_and(|value| {
-                            rule.option_values.iter().any(|item| item == value)
-                        }) =>
-                {
-                    Some("Select one of the authoritative enum values.".to_string())
                 }
                 "enum" | "string" | "lines" | "unknown" if !rule.value.is_string() => {
                     Some("This option requires a string value.".to_string())
@@ -2592,11 +2617,7 @@ fn RuleEditorRow(
                         .get_mut(index)
                         .filter(|target| target.id == rule.id && target.path == path)
                     {
-                        let value = target.value.clone();
-                        let operator = target.op.clone();
-                        target.apply_option_metadata(metadata);
-                        target.value = value;
-                        target.op = operator;
+                        target.enrich_option_metadata(metadata);
                         rules_for_lookup.set(next);
                     }
                 }
@@ -2665,6 +2686,7 @@ fn RuleEditorRow(
                                     target.option_values.clear();
                                     target.option_description.clear();
                                     target.option_unit = None;
+                                    target.baseline_option_type = None;
                                     if !target.value.is_string() {
                                         target.value = serde_json::Value::String(target.value.to_string());
                                     }
@@ -2720,6 +2742,14 @@ fn RuleEditorRow(
                         if !rule.option_description.is_empty() {
                             span { class: "help", "{rule.option_description}" }
                         }
+                        if let Some(advisory) = rule.baseline_advisory() {
+                            div {
+                                "data-testid": "policy-rule-nixos-baseline-advisory-{index}",
+                                class: "sd-callout sd-callout-warn",
+                                style: "font-size:11px;padding:7px 9px;",
+                                "{advisory}"
+                            }
+                        }
                         div { style: "display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap;",
                             select {
                                 "data-testid": "policy-rule-nixos-operator-{index}",
@@ -2737,7 +2767,7 @@ fn RuleEditorRow(
                             }
                             match normalize_option_type(&rule.option_type) {
                                 "boolean" => rsx! { select { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected boolean value", class: "input focus-ring mono", value: if rule.value.as_bool().unwrap_or(false) { "true" } else { "false" }, onchange: move |event| set_rule_field!(value, serde_json::Value::Bool(event.value() == "true")), option { value: "true", "true" } option { value: "false", "false" } } },
-                                "enum" if !rule.option_values.is_empty() => rsx! { select { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected enum value", class: "input focus-ring mono", value: "{rule.value.as_str().unwrap_or_default()}", onchange: move |event| set_rule_field!(value, serde_json::Value::String(event.value())), for value in rule.option_values.iter() { option { value: "{value}", selected: rule.value.as_str() == Some(value.as_str()), "{value}" } } } },
+                                "enum" if !rule.option_values.is_empty() && rule.value.as_str().is_some_and(|value| rule.option_values.iter().any(|candidate| candidate == value)) => rsx! { select { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected enum value", class: "input focus-ring mono", value: "{rule.value.as_str().unwrap_or_default()}", onchange: move |event| set_rule_field!(value, serde_json::Value::String(event.value())), for value in rule.option_values.iter() { option { value: "{value}", selected: rule.value.as_str() == Some(value.as_str()), "{value}" } } } },
                                 "integer" => rsx! { input { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected integer value", r#type: "number", class: "input focus-ring mono", value: "{rule.value.as_i64().unwrap_or_default()}", oninput: move |event| { if let Ok(value) = event.value().parse::<i64>() { set_rule_field!(value, serde_json::json!(value)); } } } },
                                 "lines" => rsx! { textarea { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected multiline value", class: "input focus-ring mono code-editor", rows: "8", style: "flex:1;min-width:260px;resize:vertical;", value: "{rule.value.as_str().unwrap_or_default()}", oninput: move |event| set_rule_field!(value, serde_json::Value::String(event.value())) } },
                                 _ => rsx! { input { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected string value", class: "input focus-ring mono", style: "flex:1;min-width:180px;", value: "{rule.value.as_str().unwrap_or_default()}", oninput: move |event| set_rule_field!(value, serde_json::Value::String(event.value())) } },
@@ -3472,6 +3502,50 @@ mod tests {
         let (_, reordered) = build_persisted_payload(&rules).expect("reorder");
         assert_eq!(reordered["rules"][0]["id"], original_ids[3].to_string());
         assert_eq!(reordered["rules"][3]["id"], original_ids[0].to_string());
+    }
+
+    #[test]
+    fn metadata_enrichment_preserves_persisted_target_semantics() {
+        let mut rule = PolicyRule::new("nixos_option");
+        rule.path = "networking.firewall.backend".into();
+        rule.option_type = "unknown".into();
+        rule.op = "!=".into();
+        rule.value = serde_json::json!("target-specific-backend");
+        let original_id = rule.id;
+        let metadata = NixosOptionMetadata {
+            path: "networking.firewall.backend".into(),
+            value_type: crate::api::models::NixosOptionValueType::Enum,
+            enum_values: vec![serde_json::json!("iptables"), serde_json::json!("nftables")],
+            description: Some("Firewall implementation".into()),
+        };
+
+        rule.enrich_option_metadata(&metadata);
+
+        assert_eq!(rule.id, original_id);
+        assert_eq!(rule.path, "networking.firewall.backend");
+        assert_eq!(rule.option_type, "unknown");
+        assert_eq!(rule.op, "!=");
+        assert_eq!(rule.value, serde_json::json!("target-specific-backend"));
+        assert_eq!(rule.baseline_option_type.as_deref(), Some("enum"));
+        assert!(rule.baseline_advisory().is_some());
+        assert!(rule_validation_error(&rule).is_none());
+    }
+
+    #[test]
+    fn baseline_enum_domain_is_advisory_for_persisted_values() {
+        let mut rule = PolicyRule::new("nixos_option");
+        rule.path = "networking.firewall.backend".into();
+        rule.option_type = "enum".into();
+        rule.value = serde_json::json!("target-specific-backend");
+        rule.enrich_option_metadata(&NixosOptionMetadata {
+            path: rule.path.clone(),
+            value_type: crate::api::models::NixosOptionValueType::Enum,
+            enum_values: vec![serde_json::json!("iptables"), serde_json::json!("nftables")],
+            description: None,
+        });
+
+        assert!(rule.baseline_advisory().is_some());
+        assert!(rule_validation_error(&rule).is_none());
     }
 
     #[test]
