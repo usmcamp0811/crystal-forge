@@ -1,11 +1,11 @@
 ---
 id: TASK-410.1
 title: Add real dashboard aggregate APIs for non-POA&M parity widgets
-status: In Progress
+status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 20:32'
-updated_date: '2026-08-25 16:24'
+updated_date: '2026-08-25 21:14'
 labels:
   - dashboard
   - api
@@ -132,4 +132,6 @@ Review fixes implemented locally: restored non-terminal derivation semantics for
 Review-fix verification so far: `SQLX_OFFLINE=true cargo check --manifest-path packages/default/Cargo.toml -p cf-server --lib --tests` passed with existing warnings; `nix run .#devScripts.dashboard-visibility-test -- up --tui=false` passed (query suite 1/1 and handler suite 2/2); Rust formatting and `git diff --check` passed. `nix flake check --no-build` evaluated the changed devScript target but could not complete because existing `packages.x86_64-linux.dev-env` evaluation referenced an invalid Nix store derivation path. No web-ui check was run locally per user instruction.
 
 Additional review-fix verification passed: `cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib queries::dashboard::tests -- --skip visibility_` (8 passed, 2 ignored); `cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib handlers::api::dashboard::tests -- --skip visibility_` (8 passed); and `nix build .#packages.x86_64-linux.server --no-link`. Existing repository warnings remain. The task stays In Progress until the pushed MR pipeline, including web-ui, is green.
+
+CI pipeline 2725 passed for MR !320 at commit `fe0615dd`: dashboard-visibility-tests, web-ui, server-regressions, integration, OIDC auth, state-machine, CVE processing, complexity, coverage, and screenshot comment jobs all succeeded. The first web-ui attempt produced no result/fatal/exit marker and hit GitLab's 60-minute server timeout; retry job 16103032928 passed in 22m16s without code changes, confirming a transient harness/runner hang rather than a dashboard assertion failure. Review fixes are pushed and ready for re-review.
 <!-- SECTION:NOTES:END -->
