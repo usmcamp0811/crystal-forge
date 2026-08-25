@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 20:32'
-updated_date: '2026-08-25 16:08'
+updated_date: '2026-08-25 16:24'
 labels:
   - dashboard
   - api
@@ -130,4 +130,6 @@ MR !320 review requested changes. Resumed implementation in the existing TASK-41
 Review fixes implemented locally: restored non-terminal derivation semantics for active_builds; restricted used/total slots to the same enabled+registered+active visible builder set; added exact worker eligibility and active-build compatibility assertions; added real authenticated handler tests for visibility and no-membership empty states; and added a merge-request CI process-compose target for these DB regressions.
 
 Review-fix verification so far: `SQLX_OFFLINE=true cargo check --manifest-path packages/default/Cargo.toml -p cf-server --lib --tests` passed with existing warnings; `nix run .#devScripts.dashboard-visibility-test -- up --tui=false` passed (query suite 1/1 and handler suite 2/2); Rust formatting and `git diff --check` passed. `nix flake check --no-build` evaluated the changed devScript target but could not complete because existing `packages.x86_64-linux.dev-env` evaluation referenced an invalid Nix store derivation path. No web-ui check was run locally per user instruction.
+
+Additional review-fix verification passed: `cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib queries::dashboard::tests -- --skip visibility_` (8 passed, 2 ignored); `cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib handlers::api::dashboard::tests -- --skip visibility_` (8 passed); and `nix build .#packages.x86_64-linux.server --no-link`. Existing repository warnings remain. The task stays In Progress until the pushed MR pipeline, including web-ui, is green.
 <!-- SECTION:NOTES:END -->
