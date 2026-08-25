@@ -4672,6 +4672,19 @@ const steps = [
             });
             return;
           }
+          if (rotationAttempt === 3) {
+            // An ambiguous response without a matching canonical fingerprint
+            // must remain unknown and retain the generated credential.
+            await route.fulfill({
+              status: 500,
+              contentType: "application/json",
+              body: JSON.stringify({
+                error: "internal_error",
+                message: "Database write failed before key update",
+              }),
+            });
+            return;
+          }
           persistedFingerprint = agentPublicKeyFingerprint(payload.public_key);
           await route.fulfill({
             status: 200,
@@ -4846,10 +4859,22 @@ const steps = [
 
         releaseAmbiguousRotation();
         await assertVisible(
-          section.locator("[data-testid='rotate-success-callout']").first(),
-          "Expected canonical GET to reconcile a committed-then-500 rotation as success",
+          section.locator("[data-testid='rotate-confirmed-warning-callout']").first(),
+          "Expected committed-then-500 rotation to retain its degraded audit outcome",
           10000,
         );
+        const confirmedWarning = (
+          await section
+            .locator("[data-testid='rotate-confirmed-warning-callout']")
+            .first()
+            .textContent()
+        ) || "";
+        if (!/confirmed active/i.test(confirmedWarning) || !/audit event/i.test(confirmedWarning)) {
+          throw new Error(`Expected confirmed-key audit warning, got: ${confirmedWarning}`);
+        }
+        if ((await section.locator("[data-testid='rotate-success-callout']").count()) > 0) {
+          throw new Error("A committed-then-500 response must not render ordinary green success");
+        }
 
         if (capturedKeyRequests.length !== 2) {
           throw new Error(
@@ -4954,6 +4979,66 @@ const steps = [
             value: window.__cfOriginalGetRandomValues,
           });
         });
+
+        // Generate a fresh replacement and exercise the actual unknown-state
+        // recovery path: an ambiguous PUT with a non-matching canonical GET
+        // must retain the pair, avoid success, and remain retryable.
+        await reopenedSection.locator("[data-testid='generate-keypair-button']").first().click();
+        const unknownPublicKey = (
+          await reopenedSection.locator("[data-testid='generated-public-key']").first().textContent()
+        )?.trim();
+        const unknownPrivateKey = (
+          await reopenedSection.locator("[data-testid='generated-private-key']").first().textContent()
+        )?.trim();
+        if (!unknownPublicKey || !unknownPrivateKey) {
+          throw new Error("Expected a generated replacement pair for unknown-state recovery");
+        }
+        const unknownConfirm = reopenedSection
+          .locator("[data-testid='rotate-confirm-button']")
+          .first();
+        await unknownConfirm.click();
+        const unknownError = reopenedSection.locator("[data-testid='rotate-error-callout']").first();
+        await assertVisible(unknownError, "Expected ambiguous non-confirmed rotation state", 10000);
+        if ((await unknownError.getAttribute("data-outcome")) !== "unknown") {
+          throw new Error("Expected the dedicated key-rotation outcome-unknown state");
+        }
+        if (!/Key rotation outcome unknown/i.test((await unknownError.textContent()) || "")) {
+          throw new Error("Expected explicit outcome-unknown operator guidance");
+        }
+        if ((await reopenedSection.locator("[data-testid='rotate-success-callout']").count()) > 0) {
+          throw new Error("An unconfirmed ambiguous rotation must not render success");
+        }
+        if (
+          (await reopenedSection.locator("[data-testid='generated-public-key']").first().textContent())
+            ?.trim() !== unknownPublicKey ||
+          (await reopenedSection.locator("[data-testid='generated-private-key']").first().textContent())
+            ?.trim() !== unknownPrivateKey
+        ) {
+          throw new Error("Outcome-unknown recovery must retain the generated keypair");
+        }
+        if (!(await unknownConfirm.isEnabled())) {
+          throw new Error("Outcome-unknown recovery must allow retry with the retained keypair");
+        }
+
+        await unknownConfirm.click();
+        await assertVisible(
+          reopenedSection.locator("[data-testid='rotate-success-callout']").first(),
+          "Expected retry after an unknown outcome to reconcile normally",
+          10000,
+        );
+        if (capturedKeyRequests.length !== 4) {
+          throw new Error(
+            `Expected definitive failure, confirmed warning, unknown outcome, and retry; got ${capturedKeyRequests.length} requests`,
+          );
+        }
+        for (const payload of capturedKeyRequests.slice(2)) {
+          if (Object.keys(payload).length !== 1 || payload.public_key !== unknownPublicKey) {
+            throw new Error(`Unknown-state retry sent an unexpected payload: ${JSON.stringify(payload)}`);
+          }
+          if (JSON.stringify(payload).includes(unknownPrivateKey)) {
+            throw new Error("Unknown-state retry must never send the generated private key");
+          }
+        }
       } finally {
         await page.unroute(publicKeyRoute).catch(() => {});
         await unrouteSystemsWarningData(page);

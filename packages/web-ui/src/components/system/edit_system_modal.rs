@@ -6,7 +6,9 @@ use crate::api::models::{CommitInfo, FieldUpdate, SystemDetail, UpdateSystemRequ
 use crate::components::icon::{Icon, IconName};
 use crate::components::modals::{GeneratedKeyPair, RemoveSystemDialog, generate_key_pair};
 use crate::components::system::key_rotation;
-use crate::systems::adapter::update_system_public_key_and_reconcile;
+use crate::systems::adapter::{
+    SystemPublicKeyRotationOutcome, update_system_public_key_and_reconcile,
+};
 use dioxus::prelude::*;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -157,6 +159,7 @@ pub fn EditSystemModal(
     let mut copy_error = use_signal(|| None::<String>);
     let mut rotate_in_flight = use_signal(|| false);
     let mut rotate_error = use_signal(|| None::<RotationError>);
+    let mut rotate_warning = use_signal(|| None::<String>);
     let mut rotated = use_signal(|| false);
 
     // Leaving the rotate flow discards local key material only; the stored key,
@@ -170,6 +173,7 @@ pub fn EditSystemModal(
         copy_in_flight.set(false);
         copy_error.set(None);
         rotate_error.set(None);
+        rotate_warning.set(None);
     };
 
     // The public key that would be submitted, if there is a valid one.
@@ -197,6 +201,7 @@ pub fn EditSystemModal(
 
             rotate_in_flight.set(true);
             rotate_error.set(None);
+            rotate_warning.set(None);
 
             spawn(async move {
                 // Same endpoint the Systems-list "Update Key" action uses.
@@ -218,7 +223,14 @@ pub fn EditSystemModal(
                 )
                 .await
                 {
-                    Ok(detail) => {
+                    Ok(outcome) => {
+                        let (detail, warning) = match outcome {
+                            SystemPublicKeyRotationOutcome::Confirmed(detail) => (detail, None),
+                            SystemPublicKeyRotationOutcome::ConfirmedAfterAmbiguousResponse {
+                                detail,
+                                warning,
+                            } => (detail, Some(warning)),
+                        };
                         current_fingerprint.set(detail.public_key_fingerprint.clone());
                         rotated.set(true);
                         rotating_key.set(false);
@@ -228,6 +240,7 @@ pub fn EditSystemModal(
                         private_key_copied.set(false);
                         copy_error.set(None);
                         rotate_error.set(None);
+                        rotate_warning.set(warning);
                         on_key_rotated.call(detail);
                     }
                     Err(error) => {
@@ -739,13 +752,25 @@ pub fn EditSystemModal(
                                     }
 
                                     if rotated() {
-                                        div {
-                                            class: "sd-callout sd-callout-healthy",
-                                            "data-testid": "rotate-success-callout",
-                                            style: "margin-top: 8px;",
-                                            Icon { name: IconName::Check, size: 13 }
-                                            div { style: "font-size: 12px;",
-                                                "Key rotated. The old key is revoked immediately — the agent will authenticate with the new key on its next heartbeat."
+                                        if let Some(warning) = rotate_warning.read().clone() {
+                                            div {
+                                                class: "sd-callout sd-callout-warn",
+                                                "data-testid": "rotate-confirmed-warning-callout",
+                                                style: "margin-top: 8px;",
+                                                Icon { name: IconName::Warn, size: 13 }
+                                                div { style: "font-size: 12px;",
+                                                    "{warning}"
+                                                }
+                                            }
+                                        } else {
+                                            div {
+                                                class: "sd-callout sd-callout-healthy",
+                                                "data-testid": "rotate-success-callout",
+                                                style: "margin-top: 8px;",
+                                                Icon { name: IconName::Check, size: 13 }
+                                                div { style: "font-size: 12px;",
+                                                    "Key rotated. The old key is revoked immediately — the agent will authenticate with the new key on its next heartbeat."
+                                                }
                                             }
                                         }
                                     } else {
@@ -755,6 +780,7 @@ pub fn EditSystemModal(
                                             style: "margin-top: 4px;",
                                                 onclick: move |_| {
                                                     rotate_error.set(None);
+                                                    rotate_warning.set(None);
                                                     copy_error.set(None);
                                                     rotating_key.set(true);
                                                 },

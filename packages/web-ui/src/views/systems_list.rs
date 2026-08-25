@@ -41,8 +41,8 @@ use crate::state::auth;
 use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 use crate::state::preferences;
 use crate::systems::adapter::{
-    create_system_via_api, deactivate_system_via_api, fallback_flake_names,
-    load_flake_context_with_fallback, load_flake_names_with_fallback,
+    SystemPublicKeyRotationOutcome, create_system_via_api, deactivate_system_via_api,
+    fallback_flake_names, load_flake_context_with_fallback, load_flake_names_with_fallback,
     load_system_deployment_progress_with_fallback, load_system_detail_with_fallback,
     load_system_history_with_fallback, load_systems_with_fallback,
     update_system_public_key_and_reconcile, update_system_via_api,
@@ -1055,9 +1055,17 @@ pub fn SystemsListView() -> Element {
                                 new_public_key,
                                 expected_fingerprint,
                             ).await {
-                                Ok(_) => {
+                                Ok(SystemPublicKeyRotationOutcome::Confirmed(_)) => {
                                     pending_update_key.set(None);
                                     update_key_error.set(None);
+                                }
+                                Ok(SystemPublicKeyRotationOutcome::ConfirmedAfterAmbiguousResponse {
+                                    warning,
+                                    ..
+                                }) => {
+                                    pending_update_key.set(None);
+                                    update_key_error.set(None);
+                                    api_notice.set(Some(warning));
                                 }
                                 Err(error_message) => {
                                     let prefix = if error_message.outcome_unknown() {

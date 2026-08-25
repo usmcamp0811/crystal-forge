@@ -77,6 +77,19 @@ impl std::fmt::Display for SystemPublicKeyUpdateError {
 }
 
 /// Final result of reconciling a public-key mutation with canonical detail.
+#[derive(Debug, Clone)]
+pub enum SystemPublicKeyRotationOutcome {
+    /// The server acknowledged the mutation and canonical state confirms it.
+    Confirmed(SystemDetail),
+    /// Canonical state confirms the key is active, but the mutation response was
+    /// ambiguous, so server-side completion (including audit persistence) is unknown.
+    ConfirmedAfterAmbiguousResponse {
+        detail: SystemDetail,
+        warning: String,
+    },
+}
+
+/// Failure to establish the requested public-key state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SystemPublicKeyRotationError {
     /// The mutation was definitively rejected.
@@ -367,7 +380,7 @@ pub async fn update_system_public_key_and_reconcile(
     system_id: Uuid,
     new_public_key: String,
     expected_fingerprint: String,
-) -> Result<SystemDetail, SystemPublicKeyRotationError> {
+) -> Result<SystemPublicKeyRotationOutcome, SystemPublicKeyRotationError> {
     let update_result = update_system_public_key_via_api(system_id, new_public_key).await;
 
     if let Err(SystemPublicKeyUpdateError::Rejected(message)) = &update_result {
@@ -378,7 +391,20 @@ pub async fn update_system_public_key_and_reconcile(
     if let Some(detail) = detail_result.system
         && detail.public_key_fingerprint.as_deref() == Some(expected_fingerprint.as_str())
     {
-        return Ok(detail);
+        return Ok(match update_result {
+            Ok(_) => SystemPublicKeyRotationOutcome::Confirmed(detail),
+            Err(SystemPublicKeyUpdateError::Ambiguous(message)) => {
+                SystemPublicKeyRotationOutcome::ConfirmedAfterAmbiguousResponse {
+                    detail,
+                    warning: format!(
+                        "The replacement key is confirmed active, but the rotation request returned an error after the key changed: {message}. Server-side completion, including the audit event, could not be confirmed."
+                    ),
+                }
+            }
+            Err(SystemPublicKeyUpdateError::Rejected(message)) => {
+                return Err(SystemPublicKeyRotationError::Rejected(message));
+            }
+        });
     }
 
     let mutation_context = match update_result {
