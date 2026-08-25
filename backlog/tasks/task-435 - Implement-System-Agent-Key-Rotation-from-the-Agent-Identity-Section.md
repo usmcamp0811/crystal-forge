@@ -4,7 +4,7 @@ title: Implement System Agent Key Rotation from the Agent Identity Section
 status: In Progress
 assignee: []
 created_date: '2026-08-25 03:12'
-updated_date: '2026-08-25 03:18'
+updated_date: '2026-08-25 03:22'
 labels:
   - web-ui
   - server
@@ -118,6 +118,47 @@ Tier 2: new scenario in `checks/web-ui/tests/integration-test.js` + `coverage-ma
 - [ ] #4 nix build .#checks.x86_64-linux.web-ui passes with a new browser scenario covering the Agent Identity rotate flow, and the pre-existing Systems-list Update Key scenario still passes.
 - [ ] #5 The Security tab's Agent Identity section matches the EditSystemModal.jsx design reference for this feature (mode toggle, one-time key display, destructive confirm styling, success state).
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Implementation plan (TASK-435)
+
+Worktree: `/home/mcamp/code/crystal-forge/TASK-435-system-agent-key-rotation`, branch `TASK-435-system-agent-key-rotation` off `dev` (d5e4a19d).
+
+### Decisions recorded
+1. **Fingerprint is computed client-side in the UI** (new `sha2` direct dep on `crystal-forge-ui`; already present transitively via `ed25519-dalek`, already pinned at 0.10.9 in `packages/web-ui/Cargo.lock`). Rationale: the design reference shows a *live* "New fingerprint" preview for a pasted key before any request is sent, which no server response can provide. The same helper then satisfies AC#7 (in-place update after success) deterministically, without a refetch and without changing `SystemMutationResponse`. Format is byte-identical to `PublicKey::fingerprint()` (`SHA256:` + base64-nopad(sha256(raw 32 bytes))) and is unit-tested against a fixed key.
+2. **Current fingerprint comes from the server** as a new read-only `SystemDetail.public_key_fingerprint` field (mirrors the existing `builders.public_key_fingerprint` precedent). No schema/migration change: `get_system_detail_by_id` joins `systems s` for `public_key`; the query is runtime-checked `query_as::<_, SystemDetailRow>`, so no SQLx offline metadata regeneration is required.
+3. `SystemMutationResponse` is left unchanged (no new response field), per decision 1.
+
+### Backend (cf-server)
+- `api/models.rs`: add `AuditAction::SystemKeyRotated`; add `#[serde(default)] pub public_key_fingerprint: Option<String>` to `SystemDetail`.
+- `queries/systems.rs`: add `public_key: Option<String>` to `SystemDetailRow`; change `get_system_detail_by_id` to `SELECT vsd.*, s.public_key FROM view_system_detail vsd JOIN systems s ON s.id = vsd.id WHERE vsd.id = $1`.
+- `handlers/api/systems.rs`: map the fingerprint in `detail_row_to_api_model` via `PublicKey::from_base64(...).fingerprint()`; replace the `AuditAction::UserUpdated` placeholder in `update_system_public_key` with `AuditAction::SystemKeyRotated`; extend `action_to_str`.
+- `services/systems.rs`: map the fingerprint in its `detail_row_to_api_model`.
+- `handlers/api/admin.rs`: extend `action_to_str` and `parse_audit_action` (`"system_key_rotated"`).
+- No changes to the endpoint contract, authz order, or error semantics of `update_system_public_key`. The pre-existing "audit-write failure after a successful DB write returns 500 while the key IS already rotated" behaviour is intentionally left as-is and documented in a code comment.
+
+### Frontend (web-ui)
+- `api/models.rs`: mirror `AuditAction::SystemKeyRotated`; add `public_key_fingerprint` to `SystemDetail`.
+- `views/admin.rs`: add the new variant to the severity + label maps (`system.rotate_key`).
+- **New** `components/system/key_rotation.rs` — pure, natively unit-tested logic shared by both surfaces:
+  - `validate_public_key_input(&str) -> Result<String, String>` (trim, empty, base64 decode, 32-byte length) — the single shared paste validator (AC#5).
+  - `public_key_fingerprint(&str) -> Option<String>` — server-identical SHA256 fingerprint.
+- `components/modals/update_public_key_modal.rs`: switch its inline checks to `validate_public_key_input` (no behaviour regression for the Systems-list row action; AC#17).
+- `components/system/edit_system_modal.rs`: replace the "unavailable" callout + Systems-view help text with the real Agent-identity flow mirroring `EditSystemModal.jsx` L263-360: current fingerprint → `Rotate key` → Generate/Paste segmented toggle → generate via the existing `generate_key_pair()` (no second keygen) with one-time private-key display + copy → destructive `Revoke old key & rotate` confirm (disabled until valid, disabled while in flight) → `update_system_public_key_via_api` → success callout with the fingerprint updated in place; on failure keep the key material and allow retry. Cancel resets local state only. Stable `data-testid` hooks added for the browser check.
+
+### Verification
+- `nix develop -c env SQLX_OFFLINE=true cargo check --package cf-server` (manifest `packages/default/Cargo.toml`).
+- `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml`.
+- `nix develop -c cargo test --manifest-path packages/default/Cargo.toml --package cf-server --lib` (new: `action_to_str` for the new variant, unauthenticated 403 on `update_system_public_key`, rotation regression in `handlers::agent_request::tests` proving old-key 401 / new-key accepted via `MockSystemLookup`, fingerprint parity).
+- `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml` (shared validator + fingerprint helper).
+- `cargo fmt --check` for both manifests.
+- Per explicit user instruction, `nix build .#checks.x86_64-linux.web-ui` is **not** run locally; the new `12e2-systems-edit-modal-key-rotation` scenario + `coverage-manifest.json` entry are added and CI runs the check on the MR.
+
+### Known adjacent risk to confirm on CI
+`checks/web-ui/tests/integration-test.js` scenario `12e-systems-edit-modal` asserts the modal subtitle "Update system registration, flake assignment, and deployment policy." while the component has said "…flake assignment, deployment policy, and security settings." since commit e6dd5014 (TASK-394, 2026-07-20). This looks like a pre-existing stale selector, not something this task introduces. Plan: leave it untouched initially, confirm against the CI run, and only then decide (with the user) whether to fix the selector in this MR.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
