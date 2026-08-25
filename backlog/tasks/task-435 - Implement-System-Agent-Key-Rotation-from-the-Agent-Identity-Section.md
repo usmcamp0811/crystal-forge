@@ -111,31 +111,31 @@ Tier 2: new scenario in `checks/web-ui/tests/integration-test.js` + `coverage-ma
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 The Agent identity section in EditSystemModal's Security tab provides a working Rotate key action (generate or paste), replacing the placeholder.
+- [ ] #1 The Agent identity section in EditSystemModal's Security tab provides a working Rotate key action (generate or paste), replacing the placeholder.
 - [x] #2 The 'SSH key rotation is unavailable in this modal…' callout and its 'use the Systems view' help text are removed from edit_system_modal.rs.
 - [x] #3 Rotation (both generate and paste modes) calls the existing update_system_public_key_via_api / PUT /systems/:id/public-key path — no new mutation endpoint is introduced.
 - [x] #4 Key generation reuses the existing generate_key_pair() (ed25519_dalek + browser CSPRNG) implementation — no second WASM/ed25519 keygen implementation is added anywhere in the frontend.
 - [x] #5 Paste-mode validation is shared/extracted rather than duplicated between UpdatePublicKeyModal and the new Agent Identity rotate flow.
 - [x] #6 A successful rotation persists the new public key for the correct system_id via the existing single-row UPDATE query.
 - [ ] #7 After a successful rotation the modal shows the updated fingerprint without a full page reload (via response data or an in-place refetch).
-- [x] #8 The generated private key is displayed at most once, is never sent to the server, and cannot be retrieved again through this workflow or any other UI after the modal is closed.
-- [x] #9 A failed public-key persistence request is never presented to the operator as a successful rotation, and the already-generated key pair remains visible for retry instead of forcing regeneration.
-- [x] #10 The confirm/rotate control is disabled while a rotation request is in flight, preventing duplicate submissions from a single click sequence.
-- [x] #11 Cancelling before confirm leaves the system's stored public key, fingerprint display, and audit log unchanged.
+- [ ] #8 The generated private key is displayed at most once, is never sent to the server, and cannot be retrieved again through this workflow or any other UI after the modal is closed.
+- [ ] #9 A failed public-key persistence request is never presented to the operator as a successful rotation, and the already-generated key pair remains visible for retry instead of forcing regeneration.
+- [ ] #10 The confirm/rotate control is disabled while a rotation request is in flight, preventing duplicate submissions from a single click sequence.
+- [ ] #11 Cancelling before confirm leaves the system's stored public key, fingerprint display, and audit log unchanged.
 - [x] #12 A Viewer (or a non-Admin caller without environment membership) cannot rotate a system's key; the server-side 403/404 behavior already in update_system_public_key is preserved and covered by a test.
 - [x] #13 A regression test proves a request signed with the pre-rotation private key is rejected (401) immediately after the public key row is updated, using authenticate_agent_request_with_lookup.
 - [x] #14 A regression test proves a request signed with the newly generated private key is accepted after rotation.
 - [x] #15 Successful rotation writes an audit event using a dedicated AuditAction::SystemKeyRotated variant (not the UserUpdated placeholder), verified by a test on action_to_str.
-- [x] #16 The rotate/generate/paste/confirm interaction in the Security tab matches docs/design/CrystalForge/components/EditSystemModal.jsx in structure, copy tone, and state transitions (mode toggle, one-time private key display, destructive-styled confirm, success callout), using the real base64 key format rather than the mock's OpenSSH-formatted strings.
-- [x] #17 The existing Systems-list 'Update Key' row action (UpdatePublicKeyModal) continues to work unchanged after this change.
+- [ ] #16 The rotate/generate/paste/confirm interaction in the Security tab matches docs/design/CrystalForge/components/EditSystemModal.jsx in structure, copy tone, and state transitions (mode toggle, one-time private key display, destructive-styled confirm, success callout), using the real base64 key format rather than the mock's OpenSSH-formatted strings.
+- [ ] #17 The existing Systems-list 'Update Key' row action (UpdatePublicKeyModal) continues to work unchanged after this change.
 - [ ] #18 cargo check for cf-server and the web-ui crate pass; the relevant cf-server --lib tests pass; nix build .#checks.x86_64-linux.web-ui passes including a new scenario exercising the rotate-from-Agent-Identity flow.
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Implementation reuses generate_key_pair() and PUT /systems/:id/public-key end-to-end; no parallel key-generation or key-persistence logic exists.
-- [ ] #2 SystemKeyRotated audit action is emitted server-side and covered by a test; no private-key material appears in logs, audit metadata, or URLs at any point.
-- [ ] #3 cf-server --lib tests (authorization, validation, persistence, audit, and the old-key-rejected/new-key-accepted auth regression) pass.
+- [x] #1 Implementation reuses generate_key_pair() and PUT /systems/:id/public-key end-to-end; no parallel key-generation or key-persistence logic exists.
+- [x] #2 SystemKeyRotated audit action is emitted server-side and covered by a test; no private-key material appears in logs, audit metadata, or URLs at any point.
+- [x] #3 cf-server --lib tests (authorization, validation, persistence, audit, and the old-key-rejected/new-key-accepted auth regression) pass.
 - [ ] #4 nix build .#checks.x86_64-linux.web-ui passes with a new browser scenario covering the Agent Identity rotate flow, and the pre-existing Systems-list Update Key scenario still passes.
 - [ ] #5 The Security tab's Agent Identity section matches the EditSystemModal.jsx design reference for this feature (mode toggle, one-time key display, destructive confirm styling, success state).
 <!-- DOD:END -->
@@ -213,4 +213,11 @@ Verification performed at commit 34a1133d:
 Note: an earlier `cargo test -p cf-server --lib` run showed 3 failures in `queries::cve_scans_tests` with `PoolTimedOut` / `relation "derivations" does not exist`. Those are environmental (unmigrated local database), unrelated to this task, and all pass after the migrations were applied.
 
 NOT run locally, per the user's explicit instruction to leave it to CI: `nix build .#checks.x86_64-linux.web-ui`. AC#18's browser-check clause and DoD#4/#5 therefore remain unverified until the MR pipeline reports, and the MR screenshot for the new Security-tab state must come from that run.
+
+Acceptance-criteria evidence status at Review time (deliberately conservative):
+- PROVEN by automated tests / objective inspection, checked: #2 (string removed from edit_system_modal.rs), #3, #4, #5 (code structure + no second keygen/validator), #6, #12 (DB-backed authz + persistence tests, 4 passed), #13, #14 (agent_request rotation regressions, 2 passed), #15 (action_to_str test + DB audit-row assertion).
+- NOT YET PROVEN, left unchecked because the only objective evidence is the new browser scenario `12e2-systems-edit-modal-key-rotation`, which was not run locally per the user's instruction: #1, #7, #8, #9, #10, #11, #16, #17, #18. These are implemented and compile/type-check on both native and wasm32, but per the finalization guide they must not be checked from code presence alone. They will be checked from the MR pipeline's web-ui check result.
+- DoD #1/#2/#3 checked (proven by tests). DoD #4/#5 left unchecked pending the pipeline.
+
+LOCK STATUS: awaiting review. Lock retained on /home/mcamp/code/crystal-forge/TASK-435-system-agent-key-rotation because MR !319 review feedback will be implemented in this same worktree. Worktree is clean at 34a1133d and matches origin.
 <!-- SECTION:NOTES:END -->
