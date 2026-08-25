@@ -893,30 +893,44 @@ fn parse_deployment_policy_record(
     }
 }
 
+fn is_explicit_no_enforcement_policy(
+    record: &crate::models::deployment_policies::DeploymentPolicyRecord,
+) -> bool {
+    record.policy_type == "custom_check"
+        && record.config.get("expression").is_none()
+        && record.config.get("mode").and_then(|value| value.as_str()) == Some("all")
+        && record
+            .config
+            .get("rules")
+            .and_then(|value| value.as_array())
+            .is_some_and(Vec::is_empty)
+}
+
+fn parse_enforced_policy_record(
+    record: &crate::models::deployment_policies::DeploymentPolicyRecord,
+) -> std::result::Result<Option<DeploymentPolicy>, EnforcedPolicyLoadSafetyError> {
+    match parse_deployment_policy_record(record) {
+        Some(policy) => Ok(Some(policy)),
+        None if is_explicit_no_enforcement_policy(record) => Ok(None),
+        None => Err(EnforcedPolicyLoadSafetyError(format!(
+            "enforced policy version {} of type {:?} has malformed or unsupported config; refusing evaluation",
+            record.id, record.policy_type
+        ))),
+    }
+}
+
 async fn load_deployment_policies_for_eval(
     pool: &PgPool,
     flake_id: i32,
 ) -> anyhow::Result<Vec<DeploymentPolicy>> {
     match list_enabled_policies_for_flake(pool, flake_id).await {
         Ok(records) => {
-            if let Some(record) = records
-                .iter()
-                .find(|record| record.policy_type == "composite")
-            {
-                parse_deployment_policy_record(record).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Composite policy '{}' ({}) has invalid persisted config; refusing evaluation",
-                        record.name,
-                        record.id
-                    )
-                })?;
-                anyhow::bail!(
-                    "Composite policy execution is not supported by the legacy evaluation loader"
-                );
-            }
             let all_policies = records
                 .iter()
-                .filter_map(parse_deployment_policy_record)
+                .map(parse_enforced_policy_record)
+                .collect::<std::result::Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
                 .collect::<Vec<_>>();
 
             // Only pass Nix-evaluated policies to the evaluator.
@@ -1002,7 +1016,6 @@ async fn load_policies_by_configuration_for_eval(
         if invalid_configurations.contains(&config_name) {
             continue;
         }
-
         let outcome = match batch_outcomes.get(&system_id) {
             Some(o) => match o {
                 ResolutionOutcome::Resolved(set) => set.policies.clone(),
@@ -1011,7 +1024,7 @@ async fn load_policies_by_configuration_for_eval(
                         %system_id,
                         %config_name,
                         conflicts = ?conflicts,
-                        "Compliance policy conflict; evaluating configuration without compliance gates"
+                        "Compliance policy conflict; preserving legacy behavior and evaluating configuration without compliance gates"
                     );
                     invalid_configurations.insert(config_name.clone());
                     resolved_systems
@@ -1025,6 +1038,9 @@ async fn load_policies_by_configuration_for_eval(
             }
         };
 
+        // Report-only policies are deliberately nonblocking at this loader
+        // boundary. Every record retained below must parse safely or fail the
+        // evaluation deterministically.
         let enforced = outcome
             .into_iter()
             .filter(|policy| matches!(policy.effective_mode, AssignmentMode::Enforce))
@@ -1047,10 +1063,10 @@ async fn load_policies_by_configuration_for_eval(
         let mut assigned = Vec::new();
         for effective_policy in effective {
             let Some(record) = policies_by_version.get(&effective_policy.policy_version_id) else {
-                anyhow::bail!(
-                    "Effective policy version {} was not found",
+                return Err(anyhow::Error::new(EnforcedPolicyLoadSafetyError(format!(
+                    "effective policy version {} was not found",
                     effective_policy.policy_version_id
-                );
+                ))));
             };
             let mut record = record.clone();
 
@@ -1062,19 +1078,7 @@ async fn load_policies_by_configuration_for_eval(
                 record.config = effective_policy.effective_config;
             }
 
-            if record.policy_type == "composite" {
-                parse_deployment_policy_record(&record).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Composite policy version {} has invalid persisted config; refusing evaluation",
-                        effective_policy.policy_version_id
-                    )
-                })?;
-                anyhow::bail!(
-                    "Composite policy version {} is assigned in enforce mode, but composite execution is not supported",
-                    effective_policy.policy_version_id
-                );
-            }
-            if let Some(policy) = parse_deployment_policy_record(&record) {
+            if let Some(policy) = parse_enforced_policy_record(&record)? {
                 if policy.is_nix_evaluated()
                     && !matches!(policy, DeploymentPolicy::RequireCrystalForgeAgent { .. })
                 {
@@ -1098,12 +1102,10 @@ async fn load_policies_by_configuration_for_eval(
 
         if let Some(existing_digest) = evaluation_digest_by_config.get(&config_name) {
             if existing_digest != &evaluation_digest {
-                anyhow::bail!(
+                return Err(anyhow::Error::new(EnforcedPolicyLoadSafetyError(format!(
                     "Configuration {:?} resolves to different Nix evaluation policy semantics across systems ({} vs {})",
-                    config_name,
-                    existing_digest,
-                    evaluation_digest
-                );
+                    config_name, existing_digest, evaluation_digest
+                ))));
             }
         } else {
             evaluation_digest_by_config.insert(config_name.clone(), evaluation_digest);
@@ -1126,6 +1128,30 @@ async fn load_policies_by_configuration_for_eval(
     );
 
     return Ok(map);
+}
+
+#[derive(Debug)]
+struct EnforcedPolicyLoadSafetyError(String);
+
+impl std::fmt::Display for EnforcedPolicyLoadSafetyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for EnforcedPolicyLoadSafetyError {}
+
+fn classify_policy_loader_failure(
+    error: &anyhow::Error,
+) -> crate::models::retry_policy::RetryFailureClass {
+    if error
+        .chain()
+        .any(|cause| cause.is::<EnforcedPolicyLoadSafetyError>())
+    {
+        crate::models::retry_policy::RetryFailureClass::Deterministic
+    } else {
+        crate::models::retry_policy::RetryFailureClass::Transient
+    }
 }
 
 /// Hash only the policies that can affect the Nix evaluation for one
@@ -1183,20 +1209,6 @@ async fn load_policies_by_configuration_for_eval_legacy(
                 continue; // duplicate — skip
             }
             let record = row.as_policy_record();
-            if record.policy_type == "composite" {
-                parse_deployment_policy_record(&record).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Composite policy {} has invalid persisted config for configuration {:?}; refusing evaluation",
-                        policy_id,
-                        config_name
-                    )
-                })?;
-                anyhow::bail!(
-                    "Composite policy {} is assigned for configuration {:?}, but composite execution is not supported",
-                    policy_id,
-                    config_name
-                );
-            }
             if let Some(parsed) = parse_deployment_policy_record(&record) {
                 if parsed.is_nix_evaluated() {
                     // require_cf_agent is handled by the unconditional
@@ -1889,20 +1901,24 @@ async fn process_pending_commits(
             match load_policies_by_configuration_for_eval(pool, flake.id).await {
                 Ok(m) => std::sync::Arc::new(m),
                 Err(e) => {
-                    // Compliance policy resolution is advisory for flake
-                    // evaluation. A bad assignment, missing policy version,
-                    // or database problem must not prevent nix-eval-jobs from
-                    // running. The affected configurations simply receive no
-                    // compliance gates in this evaluation.
+                    let failure_class = classify_policy_loader_failure(&e);
                     let e = e.context(format!(
                         "Failed to load per-configuration policies for flake {} (commit {})",
                         flake.id, commit.git_commit_hash,
                     ));
-                    warn!(
-                        "{:#}; continuing flake evaluation without compliance gates",
+                    error!(
+                        "{:#}; refusing evaluation because enforced policy context is unavailable",
                         e
                     );
-                    std::sync::Arc::new(PoliciesByConfiguration::new())
+                    let _ = mark_commit_evaluation_failed(
+                        pool,
+                        commit.id,
+                        &format!("{e:#}"),
+                        attempt,
+                        failure_class,
+                    )
+                    .await;
+                    return Ok(());
                 }
             };
 
@@ -2192,8 +2208,9 @@ fn select_next_pending_commit_id_for_cycle(
 #[cfg(test)]
 mod tests {
     use super::{
-        builder_stale_timeout_secs, evaluation_due_delay, evaluation_policy_digest,
-        normalize_custom_policy_expression, parse_deployment_policy_record,
+        EnforcedPolicyLoadSafetyError, builder_stale_timeout_secs, classify_policy_loader_failure,
+        evaluation_due_delay, evaluation_policy_digest, normalize_custom_policy_expression,
+        parse_deployment_policy_record, parse_enforced_policy_record,
         select_next_pending_commit_id_for_cycle,
     };
     use crate::models::deployment_policies::{
@@ -2202,6 +2219,74 @@ mod tests {
     use chrono::Utc;
     use serde_json::json;
     use uuid::Uuid;
+
+    fn policy_record(policy_type: &str, config: serde_json::Value) -> DeploymentPolicyRecord {
+        DeploymentPolicyRecord {
+            id: Uuid::new_v4(),
+            name: format!("{policy_type} policy"),
+            description: None,
+            policy_type: policy_type.to_string(),
+            config,
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
+        }
+    }
+
+    #[test]
+    fn enforced_policy_parser_rejects_every_malformed_or_unsupported_type_deterministically() {
+        let malformed = [
+            ("require_packages", json!({"packages": [42]})),
+            ("custom_check", json!({"rules": [false]})),
+            ("require_cve_check", json!({"max_critical": "none"})),
+            ("time_window", json!({"description": 42})),
+            ("require_approvals", json!({"count": "two"})),
+            ("canary_rollout", json!({"percentage": "ten"})),
+            ("cve_threshold", json!({"thresholds": "none"})),
+            ("composite", json!({"schema_version": "one"})),
+            ("future_policy_type", json!({})),
+        ];
+
+        for (policy_type, config) in malformed {
+            let record = policy_record(policy_type, config);
+            let error = parse_enforced_policy_record(&record)
+                .expect_err("malformed enforced policy must fail closed");
+            let error = anyhow::Error::new(error);
+            assert_eq!(
+                classify_policy_loader_failure(&error),
+                crate::models::retry_policy::RetryFailureClass::Deterministic,
+                "{policy_type}"
+            );
+            assert!(error.to_string().contains(policy_type));
+        }
+    }
+
+    #[test]
+    fn enforced_policy_parser_allows_explicit_empty_custom_check() {
+        let record = policy_record("custom_check", json!({"mode": "all", "rules": []}));
+        assert!(parse_enforced_policy_record(&record).unwrap().is_none());
+    }
+
+    #[test]
+    fn policy_loader_classifies_semantic_conflicts_as_deterministic() {
+        let conflict = anyhow::Error::new(EnforcedPolicyLoadSafetyError(
+            "shared configuration has conflicting policy semantics".to_string(),
+        ));
+        assert_eq!(
+            classify_policy_loader_failure(&conflict),
+            crate::models::retry_policy::RetryFailureClass::Deterministic
+        );
+    }
+
+    #[test]
+    fn policy_loader_classifies_infrastructure_failures_as_transient() {
+        assert_eq!(
+            classify_policy_loader_failure(&anyhow::anyhow!("database connection reset")),
+            crate::models::retry_policy::RetryFailureClass::Transient
+        );
+    }
 
     #[test]
     fn evaluation_due_wakeup_respects_zero_ten_and_thirty_second_backoffs() {
