@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-25 17:10'
+updated_date: '2026-08-25 17:10'
 labels:
   - deployment
   - bug
@@ -123,3 +124,20 @@ None external. Requires repo-managed isolated local dev Postgres for SQLx prepar
 - [ ] #18 SQLx offline metadata updated if query shapes change; cargo sqlx prepare check passes.
 - [ ] #19 nix develop -c cargo test --manifest-path packages/default/Cargo.toml passes; web-ui tests pass where affected; required Nix targets (nix build .#packages.x86_64-linux.web-ui --no-link, .#checks.x86_64-linux.web-ui --no-link) pass.
 <!-- AC:END -->
+
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 One authoritative semantic definition of "latest deployable target" is documented in code/task notes.
+- [ ] #2 auto_latest selects the newest deployable target across applicable commits, not only the absolute newest commit.
+- [ ] #3 A newer failed/pending/non-applicable commit cannot mask an older deployable target.
+- [ ] #4 A newly successful and cache-published target is automatically picked up without changing the deployment policy to manual.
+- [ ] #5 desired_target is updated by the auto-latest manager when a newer deployable target becomes available, and normal heartbeat delivery propagates it to the agent.
+- [ ] #6 System behind status is based on the newest deployable target for that system rather than merely the newest repository commit; a system on the last successful deployable build stays up_to_date when newer commits fail or are pending, and becomes behind when a newer deployable build exists.
+- [ ] #7 Systems list and system detail report consistent deployment status; host/configuration-specific selection works when several systems share a flake.
+- [ ] #8 Relevant policy and cache requirements remain enforced.
+- [ ] #9 Database regression tests cover failed, pending, successful, cache-pending, policy-failed, and host-missing newer commits; integration coverage proves automatic convergence after a new build becomes deployable.
+- [ ] #10 Existing manual and pinned deployment behavior does not regress.
+- [ ] #11 Server tests pass; web UI tests pass where affected; required Nix build/check targets pass.
+- [ ] #12 SQLx offline metadata is updated if query changes require it.
+- [ ] #13 Documentation is updated where semantics changed or were previously ambiguous.
+<!-- DOD:END -->
