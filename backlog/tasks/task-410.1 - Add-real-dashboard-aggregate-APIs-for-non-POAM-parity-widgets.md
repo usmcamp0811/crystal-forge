@@ -1,11 +1,11 @@
 ---
 id: TASK-410.1
 title: Add real dashboard aggregate APIs for non-POA&M parity widgets
-status: Review
+status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 20:32'
-updated_date: '2026-08-25 13:07'
+updated_date: '2026-08-25 16:03'
 labels:
   - dashboard
   - api
@@ -84,6 +84,16 @@ Targeted query/model/handler tests including visibility and empty states; server
 - [x] #9 Targeted Rust tests and applicable Nix server/integration checks pass and exact commands are recorded
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Restore the historical `active_builds` contract (non-terminal derivations) while applying viewer visibility only for authenticated callers.
+2. Make worker availability the shared eligibility set for active workers, occupied slots, and total slot capacity; add exact visible/hidden and enabled/registered/active builder regressions.
+3. Add authenticated dashboard handler regressions for viewer-scoped and no-membership empty states.
+4. Add a repository-owned process-compose/Nix CI target that runs the ignored database regressions automatically on merge requests.
+5. Run targeted non-web-ui verification, update committed task metadata, push review fixes, and confirm GitLab starts the required pipeline.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
@@ -106,4 +116,6 @@ Verification passed:
 - `git diff --check`
 
 Per user instruction, no authoritative web-ui check was run locally; CI owns that check. No migration or SQLx offline metadata update was needed because all SQL is runtime query_as against existing schema.
+
+MR !320 review requested changes. Resumed implementation in the existing TASK-410.1 worktree. Review-fix scope is limited to slot eligibility, active_builds compatibility, permanent authorization/empty-state regression coverage, CI wiring, and accurate task metadata. Per user instruction, the authoritative web-ui check will not be run locally.
 <!-- SECTION:NOTES:END -->
