@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode
 created_date: '2026-08-25 03:12'
-updated_date: '2026-08-25 15:05'
+updated_date: '2026-08-25 15:29'
 labels:
   - web-ui
   - server
@@ -236,4 +236,8 @@ Acceptance-criteria evidence status at Review time (deliberately conservative):
 LOCK STATUS: awaiting review. Lock retained on /home/mcamp/code/crystal-forge/TASK-435-system-agent-key-rotation because MR !319 review feedback will be implemented in this same worktree. Worktree is clean at 34a1133d and matches origin.
 
 Review changes requested on MR !319 at 34a1133d. Task moved from Review back to In Progress. Scope accepted from the user's review verdict: P1 ambiguous-state recovery, whole-modal in-flight lock, truthful async clipboard, canonical parent refresh, fail-closed CSPRNG; P2 validation parity, Systems-list Update Key browser regression, and expanded browser coverage. The existing worktree is clean and tracks origin at the reviewed commit.
+
+Review remediation implemented in the existing TASK-435 worktree. Final read-only review found no correctness or security blockers. Residual low risk: browser coverage tests committed-then-500 reconciliation and unit-tests network-error classification, but does not simulate an actual browser network-abort followed by a confirming canonical GET.
+
+Post-remediation verification passed: `cargo check --manifest-path packages/web-ui/Cargo.toml`; `cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`; `cargo test --manifest-path packages/web-ui/Cargo.toml`; changed-file `rustfmt --edition 2024 --check`; `node --check checks/web-ui/tests/integration-test.js`; coverage-manifest JSON parse; and `git diff --check`. Per user instruction, `nix build .#checks.x86_64-linux.web-ui` remains delegated to MR CI, so browser behavior and screenshots remain pending.
 <!-- SECTION:NOTES:END -->
