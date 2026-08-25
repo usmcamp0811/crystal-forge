@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode
 created_date: '2026-08-25 03:12'
-updated_date: '2026-08-25 15:29'
+updated_date: '2026-08-25 15:31'
 labels:
   - web-ui
   - server
@@ -30,6 +30,7 @@ references:
   - checks/web-ui/coverage-manifest.json
   - checks/web-ui/tests/integration-test.js
   - task-244
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2789565632'
 documentation:
   - docs/design/CrystalForge/components/EditSystemModal.jsx
 modified_files:
@@ -240,4 +241,6 @@ Review changes requested on MR !319 at 34a1133d. Task moved from Review back to 
 Review remediation implemented in the existing TASK-435 worktree. Final read-only review found no correctness or security blockers. Residual low risk: browser coverage tests committed-then-500 reconciliation and unit-tests network-error classification, but does not simulate an actual browser network-abort followed by a confirming canonical GET.
 
 Post-remediation verification passed: `cargo check --manifest-path packages/web-ui/Cargo.toml`; `cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`; `cargo test --manifest-path packages/web-ui/Cargo.toml`; changed-file `rustfmt --edition 2024 --check`; `node --check checks/web-ui/tests/integration-test.js`; coverage-manifest JSON parse; and `git diff --check`. Per user instruction, `nix build .#checks.x86_64-linux.web-ui` remains delegated to MR CI, so browser behavior and screenshots remain pending.
+
+Remediation committed and pushed as `0af481fa` (`TASK-435: Harden system key rotation`) to MR !319. Worktree is clean and matches origin. MR pipeline 2789565632 started for this commit and is currently running; `flake-check: [web-ui]` and `flake-check: [server-regressions]` are pending while integration and OIDC checks run. Task remains In Progress until the required web-ui check and screenshot evidence complete.
 <!-- SECTION:NOTES:END -->
