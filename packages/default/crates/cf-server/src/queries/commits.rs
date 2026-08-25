@@ -939,12 +939,21 @@ pub struct EvalQueueResult {
     pub rows: Vec<EvalQueueRow>,
     pub active_count: i64,
     pub completed_count: i64,
+    pub successful_count: i64,
     pub failed_count: i64,
     pub domain_total: i64,
     pub filtered_total: i64,
 }
 
 pub async fn list_eval_queue(pool: &PgPool, params: &EvalQueueParams) -> Result<EvalQueueResult> {
+    list_eval_queue_for_user(pool, params, None).await
+}
+
+pub async fn list_eval_queue_for_user(
+    pool: &PgPool,
+    params: &EvalQueueParams,
+    user_id: Option<uuid::Uuid>,
+) -> Result<EvalQueueResult> {
     let limit = params.limit.max(1).min(crate::api::models::LIMIT_MAX);
     let status_filter: Vec<String> = params
         .status
@@ -956,7 +965,7 @@ pub async fn list_eval_queue(pool: &PgPool, params: &EvalQueueParams) -> Result<
         .map(ToOwned::to_owned)
         .collect();
 
-    let counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
+    let counts: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         r#"
         WITH domain AS (
             SELECT
@@ -978,6 +987,10 @@ pub async fn list_eval_queue(pool: &PgPool, params: &EvalQueueParams) -> Result<
             JOIN flakes f ON f.id = c.flake_id
             LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
             WHERE COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress', 'cancelling', 'complete', 'failed', 'cancelled')
+              AND ($5::uuid IS NULL OR EXISTS (
+                SELECT 1 FROM systems s JOIN user_environment_memberships uem ON uem.environment_id = s.environment_id
+                WHERE s.flake_id = c.flake_id AND uem.user_id = $5
+              ))
         ), filtered AS (
             SELECT * FROM domain
             WHERE ($1::text[] IS NULL OR cardinality($1::text[]) = 0 OR evaluation_status = ANY($1::text[]))
@@ -991,6 +1004,7 @@ pub async fn list_eval_queue(pool: &PgPool, params: &EvalQueueParams) -> Result<
         SELECT
             COUNT(*) FILTER (WHERE evaluation_status IN ('pending', 'in_progress', 'cancelling')),
             COUNT(*) FILTER (WHERE evaluation_status NOT IN ('pending', 'in_progress', 'cancelling')),
+            COUNT(*) FILTER (WHERE evaluation_status = 'complete'),
             COUNT(*) FILTER (WHERE evaluation_status = 'failed'),
             (SELECT COUNT(*) FROM domain WHERE evaluation_status IN ('pending', 'in_progress', 'cancelling')),
             COUNT(*) FILTER (WHERE evaluation_status IN ('pending', 'in_progress', 'cancelling'))
@@ -1001,6 +1015,7 @@ pub async fn list_eval_queue(pool: &PgPool, params: &EvalQueueParams) -> Result<
     .bind(params.flake.as_deref())
     .bind(params.search.as_deref())
     .bind(params.latest_only)
+    .bind(user_id)
     .fetch_one(pool)
     .await?;
 
@@ -1065,6 +1080,10 @@ pub async fn list_eval_queue(pool: &PgPool, params: &EvalQueueParams) -> Result<
             LIMIT 1
         ) ea ON TRUE
         WHERE COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress', 'cancelling', 'complete', 'failed', 'cancelled')
+          AND ($5::uuid IS NULL OR EXISTS (
+            SELECT 1 FROM systems s JOIN user_environment_memberships uem ON uem.environment_id = s.environment_id
+            WHERE s.flake_id = c.flake_id AND uem.user_id = $5
+          ))
         ), filtered AS (
             SELECT * FROM domain
             WHERE ($1::text[] IS NULL OR cardinality($1::text[]) = 0 OR evaluation_status = ANY($1::text[]))
@@ -1087,13 +1106,14 @@ pub async fn list_eval_queue(pool: &PgPool, params: &EvalQueueParams) -> Result<
             queue_position DESC NULLS LAST,
             committed_at DESC,
             commit_id DESC
-        LIMIT $5
+        LIMIT $6
         "#,
     )
     .bind(if status_filter.is_empty() { None } else { Some(status_filter) })
     .bind(params.flake.as_deref())
     .bind(params.search.as_deref())
     .bind(params.latest_only)
+    .bind(user_id)
     .bind(limit)
     .fetch_all(pool)
     .await?;
@@ -1102,9 +1122,10 @@ pub async fn list_eval_queue(pool: &PgPool, params: &EvalQueueParams) -> Result<
         rows,
         active_count: counts.0,
         completed_count: counts.1,
-        failed_count: counts.2,
-        domain_total: counts.3,
-        filtered_total: counts.4,
+        successful_count: counts.2,
+        failed_count: counts.3,
+        domain_total: counts.4,
+        filtered_total: counts.5,
     })
 }
 
@@ -2221,6 +2242,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(summary.completed_count, 1);
+        assert_eq!(summary.successful_count, 0);
         assert_eq!(summary.failed_count, 0);
         assert!(
             get_commits_pending_evaluation(&pool)

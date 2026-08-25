@@ -445,6 +445,11 @@ pub fn DashboardView() -> Element {
         .unwrap_or_else(|| BuildQueueSummary {
             building_count: 0,
             queued_count: 0,
+            failed_24h_count: 0,
+            active_workers: 0,
+            total_workers: 0,
+            used_slots: 0,
+            total_slots: 0,
             items: vec![],
             timestamp: dashboard.timestamp,
         });

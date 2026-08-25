@@ -63,16 +63,25 @@ pub async fn list_eval_queue(
     headers: HeaderMap,
     axum::extract::Query(mut params): axum::extract::Query<EvalQueueParams>,
 ) -> impl IntoResponse {
-    if require_viewer_or_above(&state.pool, &headers)
-        .await
-        .is_none()
-    {
+    let Some((user_id, roles)) =
+        crate::handlers::api::rbac::authenticated_user_roles(&state.pool, &headers).await
+    else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let visibility_user = (!crate::handlers::api::rbac::has_admin_role(&roles)).then_some(user_id);
 
     params.limit = params.limit.max(1).min(crate::api::models::LIMIT_MAX);
 
-    let result = match crate::queries::commits::list_eval_queue(&state.pool, &params).await {
+    let result = match crate::queries::commits::list_eval_queue_for_user(
+        &state.pool,
+        &params,
+        visibility_user,
+    )
+    .await
+    {
         Ok(result) => result,
         Err(err) => {
             tracing::error!("Failed to list eval queue: {}", err);
@@ -111,6 +120,7 @@ pub async fn list_eval_queue(
     Json(EvalQueueSummary {
         active_count: result.active_count,
         completed_count: result.completed_count,
+        successful_count: result.successful_count,
         failed_count: result.failed_count,
         domain_total: result.domain_total,
         filtered_total: result.filtered_total,

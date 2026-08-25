@@ -65,6 +65,15 @@ pub async fn fetch_dashboard() -> Result<DashboardSummary, ApiClientError> {
     fetch_json(&url).await
 }
 
+/// Fetch persisted deployment, build, and evaluation activity.
+pub async fn fetch_dashboard_activity(
+    limit: Option<i64>,
+) -> Result<Vec<DashboardActivity>, ApiClientError> {
+    let limit = limit.unwrap_or(30).clamp(1, 200);
+    let url = format!("{}/dashboard/activity?limit={limit}", base_url());
+    fetch_json(&url).await
+}
+
 /// Fetch admin-only CVE dashboard summary.
 pub async fn fetch_cve_dashboard_summary() -> Result<CveDashboardSummary, ApiClientError> {
     let url = format!("{}/cves/summary", base_url());

@@ -66,11 +66,11 @@ use crate::api::models::CveDashboardVulnerability;
 use crate::api::models::CveScanFreshnessRow;
 use crate::api::models::CveSummary;
 use crate::api::models::DashboardSummary;
-use crate::handlers::api::rbac::require_admin;
-use crate::handlers::api::rbac::require_viewer_or_above;
+use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role, require_admin};
 use crate::queries::dashboard::{
-    fetch_active_builds, fetch_build_queue, fetch_cve_summary, fetch_deployment_status,
-    fetch_fleet_health, fetch_recent_deployments, fetch_total_systems,
+    fetch_active_builds_for_user, fetch_activity_for_user, fetch_build_queue_for_user,
+    fetch_cache_health_for_user, fetch_cve_summary_for_user, fetch_deployment_status_for_user,
+    fetch_fleet_health_for_user, fetch_recent_deployments_for_user, fetch_total_systems_for_user,
 };
 
 /// `GET /api/v1/dashboard/summary`
@@ -81,11 +81,15 @@ pub async fn dashboard_summary(
     State(pool): State<PgPool>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if require_viewer_or_above(&pool, &headers).await.is_none() {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
     }
+    let visibility_user = (!has_admin_role(&roles)).then_some(user_id);
 
-    let result = build_dashboard_summary(&pool).await;
+    let result = build_dashboard_summary(&pool, visibility_user).await;
 
     match result {
         Ok(summary) => (StatusCode::OK, Json(summary)).into_response(),
@@ -96,6 +100,39 @@ pub async fn dashboard_summary(
                 Json(serde_json::json!({
                     "error": "internal_error",
                     "message": "Failed to build dashboard summary"
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct DashboardActivityParams {
+    pub limit: Option<i64>,
+}
+
+pub async fn dashboard_activity(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Query(params): Query<DashboardActivityParams>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
+        return forbidden();
+    }
+    let visibility_user = (!has_admin_role(&roles)).then_some(user_id);
+    match fetch_activity_for_user(&pool, visibility_user, params.limit.unwrap_or(30)).await {
+        Ok(activity) => (StatusCode::OK, Json(activity)).into_response(),
+        Err(error) => {
+            error!("Dashboard activity query failed: {error:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "internal_error",
+                    "message": "Failed to load dashboard activity"
                 })),
             )
                 .into_response()
@@ -500,7 +537,10 @@ pub async fn cve_scan_freshness(
 }
 
 /// Build the full dashboard summary by running parallel queries.
-async fn build_dashboard_summary(pool: &PgPool) -> anyhow::Result<DashboardSummary> {
+async fn build_dashboard_summary(
+    pool: &PgPool,
+    visibility_user: Option<uuid::Uuid>,
+) -> anyhow::Result<DashboardSummary> {
     // Run all queries concurrently.
     let (
         fleet_health,
@@ -510,14 +550,16 @@ async fn build_dashboard_summary(pool: &PgPool) -> anyhow::Result<DashboardSumma
         active_builds,
         build_queue,
         recent_deployments,
+        cache_health,
     ) = tokio::try_join!(
-        fetch_fleet_health(pool),
-        fetch_deployment_status(pool),
-        fetch_cve_summary(pool),
-        fetch_total_systems(pool),
-        fetch_active_builds(pool),
-        fetch_build_queue(pool, 100),
-        fetch_recent_deployments(pool),
+        fetch_fleet_health_for_user(pool, visibility_user),
+        fetch_deployment_status_for_user(pool, visibility_user),
+        fetch_cve_summary_for_user(pool, visibility_user),
+        fetch_total_systems_for_user(pool, visibility_user),
+        fetch_active_builds_for_user(pool, visibility_user),
+        fetch_build_queue_for_user(pool, 100, visibility_user),
+        fetch_recent_deployments_for_user(pool, visibility_user),
+        fetch_cache_health_for_user(pool, visibility_user),
     )?;
 
     Ok(DashboardSummary {
@@ -527,6 +569,7 @@ async fn build_dashboard_summary(pool: &PgPool) -> anyhow::Result<DashboardSumma
         total_systems,
         active_builds,
         build_queue: Some(build_queue),
+        cache_health: Some(cache_health),
         recent_deployments,
         timestamp: Utc::now(),
     })
@@ -546,6 +589,23 @@ mod tests {
         let response = dashboard_summary(State(pool), HeaderMap::new())
             .await
             .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn dashboard_activity_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = dashboard_activity(
+            State(pool),
+            HeaderMap::new(),
+            Query(DashboardActivityParams::default()),
+        )
+        .await
+        .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }

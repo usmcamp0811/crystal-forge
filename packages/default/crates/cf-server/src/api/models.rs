@@ -187,6 +187,10 @@ pub struct DashboardSummary {
     /// Summary of builds in progress and queued.
     pub build_queue: Option<BuildQueueSummary>,
 
+    /// Health derived from configured destinations and persisted push jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_health: Option<CacheHealthSummary>,
+
     /// Recent deployment events (newest first, capped).
     pub recent_deployments: Vec<RecentDeployment>,
 
@@ -555,8 +559,82 @@ pub struct CveFleetStats {
 pub struct RecentDeployment {
     pub hostname: String,
     pub commit_hash: String,
+    #[serde(default)]
+    pub commit_message: Option<String>,
     pub deployed_at: DateTime<Utc>,
     pub status: DeploymentStatus,
+}
+
+/// Viewer-safe cache telemetry. Capacity is absent until a cache reports it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheHealthSummary {
+    pub status: CacheHealthStatus,
+    pub destination_count: i64,
+    pub enabled_destination_count: i64,
+    pub successful_pushes_24h: i64,
+    pub failed_pushes_24h: i64,
+    pub last_activity_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity_bytes: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheHealthStatus {
+    Healthy,
+    Degraded,
+    Unknown,
+    Disabled,
+}
+
+/// A persisted dashboard pipeline event with stable drill-down identifiers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardActivity {
+    /// Stable, domain-prefixed identifier suitable for client list keys.
+    #[serde(default)]
+    pub id: String,
+    pub kind: DashboardActivityKind,
+    pub status: DashboardActivityStatus,
+    pub occurred_at: DateTime<Utc>,
+    pub title: String,
+    pub system_id: Option<Uuid>,
+    pub flake_id: Option<i32>,
+    pub commit_id: Option<i32>,
+    pub commit_hash: Option<String>,
+    pub build_job_id: Option<Uuid>,
+    pub deployment_id: Option<Uuid>,
+    #[serde(default)]
+    pub evaluation_attempt_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardActivityKind {
+    Deployment,
+    Build,
+    Evaluation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardActivityStatus {
+    DeploymentStarted,
+    DeploymentSucceeded,
+    DeploymentFailed,
+    BuildQueued,
+    BuildBuilding,
+    BuildCancelling,
+    BuildSucceeded,
+    BuildFailed,
+    BuildCancelled,
+    EvaluationPending,
+    EvaluationInProgress,
+    EvaluationCancelling,
+    EvaluationSucceeded,
+    EvaluationFailed,
+    EvaluationCancelled,
 }
 
 /// Summary of the build queue for the dashboard widget.
@@ -566,6 +644,17 @@ pub struct BuildQueueSummary {
     pub building_count: i64,
     /// Number of builds waiting in the queue.
     pub queued_count: i64,
+    /// Permanently failed build attempts completed in the preceding 24 hours.
+    #[serde(default)]
+    pub failed_24h_count: i64,
+    #[serde(default)]
+    pub active_workers: i64,
+    #[serde(default)]
+    pub total_workers: i64,
+    #[serde(default)]
+    pub used_slots: i64,
+    #[serde(default)]
+    pub total_slots: i64,
     /// List of active build items (building + queued, limited).
     pub items: Vec<BuildQueueItem>,
     /// Server timestamp for freshness.
@@ -717,6 +806,9 @@ pub struct BuildQueuePageResponse {
 pub struct EvalQueueSummary {
     pub active_count: i64,
     pub completed_count: i64,
+    /// Evaluations whose terminal outcome is explicitly `complete`.
+    #[serde(default)]
+    pub successful_count: i64,
     pub failed_count: i64,
     /// Active evaluation rows before search and filters.
     #[serde(default)]
@@ -2910,6 +3002,78 @@ pub struct ApiError {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cache_health_omits_unavailable_capacity() {
+        let health = CacheHealthSummary {
+            status: CacheHealthStatus::Unknown,
+            destination_count: 1,
+            enabled_destination_count: 1,
+            successful_pushes_24h: 0,
+            failed_pushes_24h: 0,
+            last_activity_at: None,
+            used_bytes: None,
+            capacity_bytes: None,
+        };
+
+        let json = serde_json::to_value(health).expect("cache health should serialize");
+        assert!(json.get("used_bytes").is_none());
+        assert!(json.get("capacity_bytes").is_none());
+        assert_eq!(json["status"], "unknown");
+    }
+
+    #[test]
+    fn activity_kind_has_stable_typed_wire_values() {
+        assert_eq!(
+            serde_json::to_value(DashboardActivityKind::Deployment).unwrap(),
+            "deployment"
+        );
+        assert_eq!(
+            serde_json::to_value(DashboardActivityKind::Evaluation).unwrap(),
+            "evaluation"
+        );
+        assert_eq!(
+            serde_json::to_value(DashboardActivityStatus::EvaluationSucceeded).unwrap(),
+            "evaluation_succeeded"
+        );
+    }
+
+    #[test]
+    fn activity_identifier_fields_are_additive_for_older_payloads() {
+        let activity: DashboardActivity = serde_json::from_value(serde_json::json!({
+            "kind": "evaluation",
+            "status": "evaluation_succeeded",
+            "occurred_at": "2026-08-24T00:00:00Z",
+            "title": "flake",
+            "system_id": null,
+            "flake_id": 1,
+            "commit_id": 2,
+            "commit_hash": "abc",
+            "build_job_id": null,
+            "deployment_id": null
+        }))
+        .unwrap();
+
+        assert!(activity.id.is_empty());
+        assert!(activity.evaluation_attempt_id.is_none());
+    }
+
+    #[test]
+    fn evaluation_summary_remains_backward_compatible_without_successful_count() {
+        let summary: EvalQueueSummary = serde_json::from_value(serde_json::json!({
+            "active_count": 2,
+            "completed_count": 4,
+            "failed_count": 1,
+            "execution_mode": "native",
+            "items": [],
+            "timestamp": "2026-08-24T00:00:00Z"
+        }))
+        .unwrap();
+
+        assert_eq!(summary.completed_count, 4);
+        assert_eq!(summary.failed_count, 1);
+        assert_eq!(summary.successful_count, 0);
+    }
+
     /// TASK-422's design fixture included deadline/POA&M strings on mock
     /// assignments, but the production immutable assignment snapshot has no
     /// such fields. The API must expose only metadata backed by that domain
@@ -3213,9 +3377,15 @@ mod tests {
             build_queue: Some(BuildQueueSummary {
                 building_count: 1,
                 queued_count: 0,
+                failed_24h_count: 0,
+                active_workers: 0,
+                total_workers: 0,
+                used_slots: 0,
+                total_slots: 0,
                 items: vec![],
                 timestamp: Utc::now(),
             }),
+            cache_health: None,
             recent_deployments: vec![],
             timestamp: Utc::now(),
         };
