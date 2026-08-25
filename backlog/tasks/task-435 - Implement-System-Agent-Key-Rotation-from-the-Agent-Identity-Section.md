@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode
 created_date: '2026-08-25 03:12'
-updated_date: '2026-08-25 15:31'
+updated_date: '2026-08-25 16:31'
 labels:
   - web-ui
   - server
@@ -243,4 +243,8 @@ Review remediation implemented in the existing TASK-435 worktree. Final read-onl
 Post-remediation verification passed: `cargo check --manifest-path packages/web-ui/Cargo.toml`; `cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`; `cargo test --manifest-path packages/web-ui/Cargo.toml`; changed-file `rustfmt --edition 2024 --check`; `node --check checks/web-ui/tests/integration-test.js`; coverage-manifest JSON parse; and `git diff --check`. Per user instruction, `nix build .#checks.x86_64-linux.web-ui` remains delegated to MR CI, so browser behavior and screenshots remain pending.
 
 Remediation committed and pushed as `0af481fa` (`TASK-435: Harden system key rotation`) to MR !319. Worktree is clean and matches origin. MR pipeline 2789565632 started for this commit and is currently running; `flake-check: [web-ui]` and `flake-check: [server-regressions]` are pending while integration and OIDC checks run. Task remains In Progress until the required web-ui check and screenshot evidence complete.
+
+Re-review of `0af481fa` requested one focused remediation: preserve ambiguous mutation context when canonical GET confirms the replacement key, render confirmed-active-with-warning instead of ordinary green success for committed-then-500/audit-failure responses, and browser-test the separate non-confirmed outcome-unknown recovery path with retained keypair and retry. No backend transaction changes requested.
+
+Focused remediation implemented in four frontend/test files. Added `SystemPublicKeyRotationOutcome::{Confirmed, ConfirmedAfterAmbiguousResponse}`; EditSystemModal renders a warning for canonically confirmed keys after ambiguous responses and ordinary green success only for acknowledged responses; Systems-list Update Key surfaces the same warning in its action notice. `12e2` now asserts committed-then-500 warning semantics and separately exercises ambiguous 500 + non-matching canonical GET, retained generated pair, no success state, and successful retry. Verification passed: native web-ui cargo check; wasm32 web-ui cargo check; web-ui tests (203 passed, 1 ignored); changed-file rustfmt check; JS syntax; manifest parse; and git diff check. The authoritative Nix web-ui/browser artifact remains delegated to MR CI.
 <!-- SECTION:NOTES:END -->
