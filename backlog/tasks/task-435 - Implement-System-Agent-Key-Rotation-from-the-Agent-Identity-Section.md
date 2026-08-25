@@ -1,9 +1,10 @@
 ---
 id: TASK-435
 title: Implement System Agent Key Rotation from the Agent Identity Section
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-25 03:12'
+updated_date: '2026-08-25 03:18'
 labels:
   - web-ui
   - server
@@ -117,3 +118,9 @@ Tier 2: new scenario in `checks/web-ui/tests/integration-test.js` + `coverage-ma
 - [ ] #4 nix build .#checks.x86_64-linux.web-ui passes with a new browser scenario covering the Agent Identity rotate flow, and the pre-existing Systems-list Update Key scenario still passes.
 - [ ] #5 The Security tab's Agent Identity section matches the EditSystemModal.jsx design reference for this feature (mode toggle, one-time key display, destructive confirm styling, success state).
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode (claude-opus-5) on rift in /home/mcamp/code/crystal-forge/TASK-435-system-agent-key-rotation
+<!-- SECTION:NOTES:END -->
