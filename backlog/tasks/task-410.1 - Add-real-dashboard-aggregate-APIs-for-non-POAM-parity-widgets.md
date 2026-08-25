@@ -1,11 +1,11 @@
 ---
 id: TASK-410.1
 title: Add real dashboard aggregate APIs for non-POA&M parity widgets
-status: In Progress
+status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 20:32'
-updated_date: '2026-08-25 02:31'
+updated_date: '2026-08-25 13:07'
 labels:
   - dashboard
   - api
@@ -20,6 +20,7 @@ references:
   - TASK-433.8
   - docs/design/CrystalForge/components/DashboardView.jsx
   - docs/design/CrystalForge/data-dashboard.js
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/320'
 documentation:
   - docs/agents/database-safety.md
   - docs/agents/verification.md
@@ -72,21 +73,37 @@ Targeted query/model/handler tests including visibility and empty states; server
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 An authenticated visibility-scoped build aggregate returns real building queued failed-24h active/total worker and used/total slot values without requiring admin-only list access
-- [ ] #2 Evaluation aggregate semantics expose successful completion separately from failures and preserve compatibility for existing consumers
-- [ ] #3 A typed chronological dashboard activity API returns real deployment build and evaluation events with stable navigation metadata and deterministic ordering
-- [ ] #4 Dashboard flake timeline entries include real commit message and author plus only real available build/evaluation status or count data
-- [ ] #5 Cache health returns only states and metrics supported by real persisted telemetry and does not invent storage-capacity values
-- [ ] #6 All new aggregates enforce current user environment/system visibility and authorization rules
-- [ ] #7 Queries avoid per-system per-builder per-flake and per-cache N+1 behavior and have focused regression coverage
-- [ ] #8 Existing dashboard and API consumers remain backward compatible
-- [ ] #9 Targeted Rust tests and applicable Nix server/integration checks pass and exact commands are recorded
+- [x] #1 An authenticated visibility-scoped build aggregate returns real building queued failed-24h active/total worker and used/total slot values without requiring admin-only list access
+- [x] #2 Evaluation aggregate semantics expose successful completion separately from failures and preserve compatibility for existing consumers
+- [x] #3 A typed chronological dashboard activity API returns real deployment build and evaluation events with stable navigation metadata and deterministic ordering
+- [x] #4 Dashboard flake timeline entries include real commit message and author plus only real available build/evaluation status or count data
+- [x] #5 Cache health returns only states and metrics supported by real persisted telemetry and does not invent storage-capacity values
+- [x] #6 All new aggregates enforce current user environment/system visibility and authorization rules
+- [x] #7 Queries avoid per-system per-builder per-flake and per-cache N+1 behavior and have focused regression coverage
+- [x] #8 Existing dashboard and API consumers remain backward compatible
+- [x] #9 Targeted Rust tests and applicable Nix server/integration checks pass and exact commands are recorded
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: opencode-agent on reckless in /home/mcamp/code/crystal-forge/TASK-410.1-dashboard-aggregates
+AWAITING REVIEW: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/320
 
-Preflight: dedicated branch/worktree `TASK-410.1-dashboard-aggregates` at current `dev` commit `cebc4ce5`; worktree verified clean and based on `dev`. The `main` integration worktree is clean. Per the user's prior authorization and instruction to continue, the two unrelated untracked compliance audit files in the `dev` integration worktree remain untouched. Scope is limited to real authenticated dashboard aggregates and client contracts named by TASK-410.1; no POA&M, approval/attestation, compliance, or speculative telemetry work. Verification will use focused Rust tests/checks and applicable server checks; per user instruction the web-ui check will be left to CI.
+Implementation lock released after push and MR creation. Dedicated worktree retained pending review/merge.
+
+Implemented and pushed commit `5cd2f762` on `TASK-410.1-dashboard-aggregates`; opened MR !320 targeting `dev`.
+
+Delivered additive visibility-scoped build worker/slot/failure aggregates, explicit successful evaluation semantics, typed deterministic persisted activity, truthful cache health with capacity omitted, and a set-based enriched dashboard flake timeline. Non-admin queries fail closed through environment membership; focused isolated-DB coverage proves ambiguous configuration names do not leak hidden hostnames, global cache push activity is scoped, evaluation attempts remain stably ordered, hidden evaluation data is excluded, and the timeline avoids hidden failed-build influence.
+
+Verification passed:
+- server cargo formatting check
+- offline cf-server cargo check
+- WASM-target web-ui cargo check
+- dashboard test filter (19 passed in default profile)
+- API model tests (31 passed)
+- focused ignored SQL regression against repository-owned isolated db-only PostgreSQL on 127.0.0.1:3042 (1 passed)
+- `nix build .#packages.x86_64-linux.server --no-link`
+- `git diff --check`
+
+Per user instruction, no authoritative web-ui check was run locally; CI owns that check. No migration or SQLx offline metadata update was needed because all SQL is runtime query_as against existing schema.
 <!-- SECTION:NOTES:END -->
