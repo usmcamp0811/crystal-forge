@@ -1,9 +1,11 @@
 ---
 id: TASK-433.5
 title: 'TASK-433 Phase 4: Composite heterogeneous enforcement execution'
-status: Backlog
-assignee: []
+status: In Progress
+assignee:
+  - '@opencode-agent'
 created_date: '2026-08-23 01:42'
+updated_date: '2026-08-25 01:57'
 labels:
   - design-parity
   - policy
@@ -54,3 +56,9 @@ nix build .#checks.x86_64-linux.server-regressions --no-link
 - [ ] #2 Mixed Nix/evaluation-phase plus non-Nix rule sets persist and evaluate with all semantics and visible constituent outcomes.
 - [ ] #3 For every exposed enforcement kind tests cover create, validate, persist, reload, correct phase, pass, fail, error/not-checked, edit, evidence and import/export.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Phase-4 preflight began from clean shared task worktree `/home/mcamp/code/crystal-forge/TASK-433-policy-poam-workflows`, branch `TASK-433-policy-poam-workflows`, HEAD/base branch history containing reviewed Phase-3 remediation `34ceb84a`. Exact Phase-3 MR pipeline 2787525864 was verified successful at that SHA. No Phase-4 implementation commit exists after `34ceb84a`; Phase 5 remains out of scope.
+<!-- SECTION:NOTES:END -->
