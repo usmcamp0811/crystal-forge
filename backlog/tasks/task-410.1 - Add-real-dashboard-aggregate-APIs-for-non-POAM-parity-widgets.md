@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 20:32'
-updated_date: '2026-08-25 16:03'
+updated_date: '2026-08-25 16:08'
 labels:
   - dashboard
   - api
@@ -25,10 +25,18 @@ documentation:
   - docs/agents/database-safety.md
   - docs/agents/verification.md
 modified_files:
+  - .gitlab-ci.yml
+  - packages/default/crates/cf-server/src/api/client.rs
   - packages/default/crates/cf-server/src/api/models.rs
   - packages/default/crates/cf-server/src/handlers/api/dashboard.rs
+  - packages/default/crates/cf-server/src/handlers/api/flake_timelines.rs
+  - packages/default/crates/cf-server/src/handlers/api/mod.rs
+  - packages/default/crates/cf-server/src/queries/commits.rs
   - packages/default/crates/cf-server/src/queries/dashboard.rs
   - packages/default/crates/cf-server/src/queries/flakes.rs
+  - packages/default/crates/cf-server/src/queries/mod.rs
+  - packages/default/crates/cf-server/src/server/mod.rs
+  - packages/devScripts/default.nix
   - packages/web-ui/src/api/client.rs
   - packages/web-ui/src/api/models.rs
 parent_task_id: TASK-410
@@ -118,4 +126,8 @@ Verification passed:
 Per user instruction, no authoritative web-ui check was run locally; CI owns that check. No migration or SQLx offline metadata update was needed because all SQL is runtime query_as against existing schema.
 
 MR !320 review requested changes. Resumed implementation in the existing TASK-410.1 worktree. Review-fix scope is limited to slot eligibility, active_builds compatibility, permanent authorization/empty-state regression coverage, CI wiring, and accurate task metadata. Per user instruction, the authoritative web-ui check will not be run locally.
+
+Review fixes implemented locally: restored non-terminal derivation semantics for active_builds; restricted used/total slots to the same enabled+registered+active visible builder set; added exact worker eligibility and active-build compatibility assertions; added real authenticated handler tests for visibility and no-membership empty states; and added a merge-request CI process-compose target for these DB regressions.
+
+Review-fix verification so far: `SQLX_OFFLINE=true cargo check --manifest-path packages/default/Cargo.toml -p cf-server --lib --tests` passed with existing warnings; `nix run .#devScripts.dashboard-visibility-test -- up --tui=false` passed (query suite 1/1 and handler suite 2/2); Rust formatting and `git diff --check` passed. `nix flake check --no-build` evaluated the changed devScript target but could not complete because existing `packages.x86_64-linux.dev-env` evaluation referenced an invalid Nix store derivation path. No web-ui check was run locally per user instruction.
 <!-- SECTION:NOTES:END -->
