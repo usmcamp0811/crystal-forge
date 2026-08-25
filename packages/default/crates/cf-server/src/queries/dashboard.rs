@@ -167,14 +167,23 @@ pub async fn fetch_active_builds(pool: &PgPool) -> Result<i64> {
     fetch_active_builds_for_user(pool, None).await
 }
 
+/// Count active (non-terminal) builds visible to `user_id`.
+///
+/// The counted domain is intentionally identical to the historical
+/// `active_builds` contract: derivations whose status is non-terminal. Only the
+/// visibility predicate is new, so passing `None` reproduces the previous
+/// fleet-wide value exactly for existing consumers.
 pub async fn fetch_active_builds_for_user(pool: &PgPool, user_id: Option<Uuid>) -> Result<i64> {
     let count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM build_jobs bj \
-         JOIN derivations d ON d.id = bj.derivation_id \
-         WHERE bj.status IN ('building', 'cancelling') AND ($1::uuid IS NULL OR ( \
-           (bj.environment_id IS NOT NULL AND EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $1 AND uem.environment_id = bj.environment_id)) OR \
-           (bj.environment_id IS NULL AND EXISTS (SELECT 1 FROM systems s JOIN user_environment_memberships uem ON uem.environment_id = s.environment_id WHERE uem.user_id = $1 AND (s.hostname = d.derivation_target OR s.system_configuration_name = d.derivation_target))) \
-         ))",
+        "SELECT COUNT(*) FROM derivations d \
+         JOIN derivation_statuses ds ON d.status_id = ds.id \
+         WHERE ds.is_terminal = false \
+           AND ($1::uuid IS NULL OR EXISTS ( \
+             SELECT 1 FROM systems s \
+             JOIN user_environment_memberships uem ON uem.environment_id = s.environment_id \
+             WHERE uem.user_id = $1 \
+               AND (s.hostname = d.derivation_target OR s.system_configuration_name = d.derivation_target) \
+           ))",
     )
     .bind(user_id)
     .fetch_one(pool)
@@ -401,6 +410,11 @@ pub async fn fetch_build_queue_for_user(
     .fetch_one(pool)
     .await?;
 
+    // Slot capacity must describe workers that can actually accept build jobs.
+    // `available_builders` is therefore the single eligibility set behind
+    // `active_workers`, `used_slots`, and `total_slots`; a builder that is
+    // disabled, unregistered, or not `active` contributes neither capacity nor
+    // occupancy. `total_workers` remains the full visible inventory.
     let (active_workers, total_workers, used_slots, total_slots): (i64, i64, i64, i64) =
         sqlx::query_as(
             r#"WITH visible_builders AS (
@@ -413,11 +427,15 @@ pub async fn fetch_build_queue_for_user(
                 JOIN user_environment_memberships uem ON uem.environment_id = bea.environment_id
                 WHERE bea.builder_id = b.id AND uem.user_id = $1
               )
+            ), available_builders AS (
+              SELECT id, max_concurrent_jobs
+              FROM visible_builders
+              WHERE enabled AND registered AND status = 'active'
             ), used AS (
               SELECT COUNT(*)::bigint AS count FROM build_jobs bj
               JOIN derivations d ON d.id = bj.derivation_id
               WHERE bj.status IN ('building', 'cancelling')
-                AND bj.builder_id IN (SELECT id FROM visible_builders)
+                AND bj.builder_id IN (SELECT id FROM available_builders)
                 AND ($1::uuid IS NULL OR (
                   (bj.environment_id IS NOT NULL AND EXISTS (
                     SELECT 1 FROM user_environment_memberships uem
@@ -431,10 +449,10 @@ pub async fn fetch_build_queue_for_user(
                 ))
             )
             SELECT
-              COUNT(*) FILTER (WHERE enabled AND registered AND status = 'active'), COUNT(*),
+              (SELECT COUNT(*)::bigint FROM available_builders),
+              (SELECT COUNT(*)::bigint FROM visible_builders),
               (SELECT count FROM used),
-              COALESCE(SUM(max_concurrent_jobs) FILTER (WHERE enabled), 0)::bigint
-            FROM visible_builders"#,
+              (SELECT COALESCE(SUM(max_concurrent_jobs), 0)::bigint FROM available_builders)"#,
         )
         .bind(user_id)
         .fetch_one(pool)
@@ -1520,9 +1538,24 @@ mod tests {
         assert!(history.items.iter().all(|item| item.is_latest_per_flake));
     }
 
-    #[sqlx::test(migrations = "./migrations")]
-    #[ignore = "requires test database creation privileges"]
-    async fn viewer_scope_handles_ambiguous_systems_cache_pushes_and_eval_attempts(pool: PgPool) {
+    /// Connect to the migrated, repository-owned test database.
+    ///
+    /// Mirrors the pattern used by the other database-backed regressions so the
+    /// dashboard visibility suite can run inside the CI process-compose target
+    /// without requiring `CREATE DATABASE` privileges.
+    async fn visibility_test_pool() -> PgPool {
+        let db_url = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .expect("CRYSTAL_FORGE_TEST_DATABASE_URL or DATABASE_URL must be set");
+        PgPool::connect(&db_url)
+            .await
+            .expect("failed to connect to the migrated test database")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn visibility_scope_handles_ambiguous_systems_cache_pushes_and_eval_attempts() {
+        let pool = visibility_test_pool().await;
         let visible_env = Uuid::new_v4();
         let hidden_env = Uuid::new_v4();
         let suffix = Uuid::new_v4().simple().to_string();
@@ -1609,23 +1642,9 @@ mod tests {
         .await
         .unwrap();
 
-        for (name, registered) in [("registered", true), ("unregistered", false)] {
-            sqlx::query(
-                "INSERT INTO builders (name, public_key, status, arch, enabled, registered, max_concurrent_jobs) VALUES ($1, $2, 'active', 'x86_64-linux', TRUE, $3, 1)",
-            )
-            .bind(format!("dashboard-{name}-{suffix}"))
-            .bind(format!("dashboard-builder-key-{name}-{suffix}"))
-            .bind(registered)
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
-
         let queue = fetch_build_queue_for_user(&pool, 10, Some(user_id))
             .await
             .unwrap();
-        assert_eq!(queue.active_workers, 1);
-        assert_eq!(queue.total_workers, 2);
         let item = queue
             .items
             .iter()
@@ -1792,6 +1811,120 @@ mod tests {
         assert_eq!(evaluation_summary.completed_count, 1);
         assert_eq!(evaluation_summary.rows.len(), 1);
         assert_eq!(evaluation_summary.rows[0].commit_id, commit_id);
+
+        // ── Worker eligibility and slot capacity ─────────────────────────────
+        // Measured as deltas because builders without environment assignments
+        // are globally visible and may already exist in the shared test schema.
+        let before = fetch_build_queue_for_user(&pool, 10, Some(user_id))
+            .await
+            .unwrap();
+
+        let mut builder_ids = std::collections::HashMap::new();
+        for (label, environment_id, enabled, registered, status) in [
+            ("eligible", visible_env, true, true, "active"),
+            ("unregistered", visible_env, true, false, "active"),
+            ("inactive", visible_env, true, true, "inactive"),
+            ("disabled", visible_env, false, true, "active"),
+            ("hidden", hidden_env, true, true, "active"),
+        ] {
+            let builder_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO builders (name, public_key, status, arch, enabled, registered, max_concurrent_jobs) \
+                 VALUES ($1, $2, $3, 'x86_64-linux', $4, $5, 4) RETURNING id",
+            )
+            .bind(format!("dash-builder-{label}-{suffix}"))
+            .bind(format!("dash-builder-key-{label}-{suffix}"))
+            .bind(status)
+            .bind(enabled)
+            .bind(registered)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO builder_environment_assignments (builder_id, environment_id) VALUES ($1, $2)",
+            )
+            .bind(builder_id)
+            .bind(environment_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            builder_ids.insert(label, builder_id);
+        }
+
+        // Two building jobs in the visible environment: one on an eligible
+        // worker, one on a worker that can no longer accept work.
+        for (label, occupant) in [("eligible", "eligible"), ("inactive", "inactive")] {
+            let occupied_derivation_id: i32 = sqlx::query_scalar(
+                "INSERT INTO derivations (commit_id, derivation_name, derivation_target, derivation_type, status_id) \
+                 VALUES ($1, $2, $3, 'nixos', 5) RETURNING id",
+            )
+            .bind(commit_id)
+            .bind(format!("slot-{label}-{suffix}"))
+            .bind(&config_name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO build_jobs (derivation_id, environment_id, builder_id, status, started_at) \
+                 VALUES ($1, $2, $3, 'building', NOW())",
+            )
+            .bind(occupied_derivation_id)
+            .bind(visible_env)
+            .bind(builder_ids[occupant])
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let after = fetch_build_queue_for_user(&pool, 10, Some(user_id))
+            .await
+            .unwrap();
+
+        // Only the enabled, registered, active, visible builder is available.
+        assert_eq!(after.active_workers - before.active_workers, 1);
+        // Every visible builder is inventoried, including unusable ones.
+        assert_eq!(after.total_workers - before.total_workers, 4);
+        // Capacity counts only slots that can actually run builds.
+        assert_eq!(after.total_slots - before.total_slots, 4);
+        // Occupancy uses the same eligibility set as capacity.
+        assert_eq!(after.used_slots - before.used_slots, 1);
+        // Both jobs are still reported as building work in the visible scope.
+        assert_eq!(after.building_count - before.building_count, 2);
+        assert!(after.used_slots <= after.total_slots);
+
+        // ── active_builds keeps its non-terminal derivation semantics ────────
+        let unscoped_active_builds_before = fetch_active_builds(&pool).await.unwrap();
+        let scoped_active_builds_before = fetch_active_builds_for_user(&pool, Some(user_id))
+            .await
+            .unwrap();
+        for (label, target) in [
+            ("visible", config_name.clone()),
+            ("hidden", format!("hidden-only-{suffix}")),
+        ] {
+            sqlx::query(
+                "INSERT INTO derivations (commit_id, derivation_name, derivation_target, derivation_type, status_id) \
+                 VALUES ($1, $2, $3, 'nixos', 4)",
+            )
+            .bind(commit_id)
+            .bind(format!("active-build-{label}-{suffix}"))
+            .bind(target)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Unscoped callers keep counting every non-terminal derivation.
+        assert_eq!(
+            fetch_active_builds(&pool).await.unwrap() - unscoped_active_builds_before,
+            2
+        );
+        // The viewer only sees the derivation targeting a visible system.
+        assert_eq!(
+            fetch_active_builds_for_user(&pool, Some(user_id))
+                .await
+                .unwrap()
+                - scoped_active_builds_before,
+            1
+        );
     }
 
     // ── TASK-272: dashboard summary scope tests ──────────────────────────────

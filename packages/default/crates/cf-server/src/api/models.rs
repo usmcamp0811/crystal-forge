@@ -647,12 +647,19 @@ pub struct BuildQueueSummary {
     /// Permanently failed build attempts completed in the preceding 24 hours.
     #[serde(default)]
     pub failed_24h_count: i64,
+    /// Visible builders that can currently accept work (enabled, registered, active).
     #[serde(default)]
     pub active_workers: i64,
+    /// All visible builders, including those unable to accept work.
     #[serde(default)]
     pub total_workers: i64,
+    /// Slots currently occupied on workers counted by `active_workers`.
     #[serde(default)]
     pub used_slots: i64,
+    /// Slot capacity of workers counted by `active_workers`.
+    ///
+    /// Both slot values use the same worker eligibility set so utilization
+    /// describes capacity that can actually run builds.
     #[serde(default)]
     pub total_slots: i64,
     /// List of active build items (building + queued, limited).

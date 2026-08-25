@@ -579,6 +579,196 @@ async fn build_dashboard_summary(
 mod tests {
     use super::*;
     use sqlx::postgres::PgPoolOptions;
+    use uuid::Uuid;
+
+    /// Connect to the migrated, repository-owned test database.
+    async fn visibility_test_pool() -> PgPool {
+        let db_url = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .expect("CRYSTAL_FORGE_TEST_DATABASE_URL or DATABASE_URL must be set");
+        PgPool::connect(&db_url)
+            .await
+            .expect("failed to connect to the migrated test database")
+    }
+
+    /// Create a viewer user with an authenticated session and return
+    /// `(user_id, request headers carrying the session cookie)`.
+    async fn viewer_session(pool: &PgPool, suffix: &str) -> (Uuid, HeaderMap) {
+        use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
+        use crate::models::auth_identity::AuthRole;
+        use crate::queries::auth_identity::{create_user_session, sync_user_role};
+
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, username, first_name, last_name, email, user_type) \
+             VALUES ($1, $2, 'Dashboard', 'Viewer', $3, 'human')",
+        )
+        .bind(user_id)
+        .bind(format!("dash-viewer-{suffix}"))
+        .bind(format!("dash-viewer-{suffix}@example.invalid"))
+        .execute(pool)
+        .await
+        .expect("insert viewer user");
+
+        sync_user_role(pool, user_id, AuthRole::Viewer)
+            .await
+            .expect("assign viewer role");
+
+        let token = format!("dash-session-{suffix}");
+        create_user_session(
+            pool,
+            user_id,
+            hash_token(&token),
+            Utc::now() + chrono::Duration::hours(1),
+            Some("test-agent".to_string()),
+            Some("127.0.0.1".to_string()),
+            "local".to_string(),
+        )
+        .await
+        .expect("create viewer session");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("{SESSION_COOKIE_NAME}={token}")
+                .parse()
+                .expect("session cookie header"),
+        );
+        (user_id, headers)
+    }
+
+    /// Execute the real handler and deserialize its JSON body.
+    async fn dashboard_summary_body(pool: &PgPool, headers: HeaderMap) -> DashboardSummary {
+        let response = dashboard_summary(State(pool.clone()), headers)
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read dashboard summary body");
+        serde_json::from_slice(&bytes).expect("decode dashboard summary body")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn visibility_dashboard_summary_scopes_every_aggregate_for_viewer_session() {
+        let pool = visibility_test_pool().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let visible_env = Uuid::new_v4();
+        let hidden_env = Uuid::new_v4();
+        for (id, label) in [(visible_env, "visible"), (hidden_env, "hidden")] {
+            sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+                .bind(id)
+                .bind(format!("sum-{label}-{}", &suffix[..12]))
+                .execute(&pool)
+                .await
+                .expect("insert environment");
+        }
+
+        let (user_id, headers) = viewer_session(&pool, &suffix).await;
+        sqlx::query(
+            "INSERT INTO user_environment_memberships (user_id, environment_id) VALUES ($1, $2)",
+        )
+        .bind(user_id)
+        .bind(visible_env)
+        .execute(&pool)
+        .await
+        .expect("grant visible environment membership");
+
+        let flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("sum-flake-{suffix}"))
+        .bind(format!("https://example.invalid/sum-{suffix}.git"))
+        .fetch_one(&pool)
+        .await
+        .expect("insert flake");
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, NOW()) RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(format!("sum-commit-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .expect("insert commit");
+
+        let visible_host = format!("sum-visible-{}", &suffix[..12]);
+        let hidden_host = format!("sum-hidden-{}", &suffix[..12]);
+        for (environment_id, hostname, key_byte) in [
+            (visible_env, visible_host.clone(), 51_u8),
+            (hidden_env, hidden_host.clone(), 52_u8),
+        ] {
+            sqlx::query(
+                "INSERT INTO systems (id, hostname, system_configuration_name, public_key, is_active, derivation, deployment_policy, environment_id, flake_id) \
+                 VALUES ($1, $2, $2, $3, TRUE, '', 'manual', $4, $5)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(hostname)
+            .bind(vec![key_byte; 32])
+            .bind(environment_id)
+            .bind(flake_id)
+            .execute(&pool)
+            .await
+            .expect("insert system");
+        }
+
+        // One non-terminal derivation per environment.
+        for hostname in [visible_host.clone(), hidden_host.clone()] {
+            sqlx::query(
+                "INSERT INTO derivations (commit_id, derivation_name, derivation_target, derivation_type, status_id) \
+                 VALUES ($1, $2, $2, 'nixos', 4)",
+            )
+            .bind(commit_id)
+            .bind(hostname)
+            .execute(&pool)
+            .await
+            .expect("insert derivation");
+        }
+
+        let summary = dashboard_summary_body(&pool, headers).await;
+
+        assert_eq!(summary.total_systems, 1);
+        assert_eq!(summary.fleet_health.total(), 1);
+        assert_eq!(summary.deployment_status.total(), 1);
+        assert_eq!(summary.active_builds, 1);
+        assert!(
+            summary
+                .recent_deployments
+                .iter()
+                .all(|deployment| deployment.hostname != hidden_host)
+        );
+        let cache_health = summary.cache_health.expect("cache health is reported");
+        assert!(cache_health.used_bytes.is_none());
+        assert!(cache_health.capacity_bytes.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn visibility_dashboard_summary_is_empty_for_viewer_without_memberships() {
+        let pool = visibility_test_pool().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (_user_id, headers) = viewer_session(&pool, &suffix).await;
+
+        let summary = dashboard_summary_body(&pool, headers).await;
+
+        assert_eq!(summary.total_systems, 0);
+        assert_eq!(summary.fleet_health.total(), 0);
+        assert_eq!(summary.deployment_status.total(), 0);
+        assert_eq!(summary.cve_summary.total(), 0);
+        assert_eq!(summary.active_builds, 0);
+        assert!(summary.recent_deployments.is_empty());
+        let build_queue = summary.build_queue.expect("build queue is reported");
+        assert_eq!(build_queue.building_count, 0);
+        assert_eq!(build_queue.queued_count, 0);
+        assert_eq!(build_queue.failed_24h_count, 0);
+        assert!(build_queue.items.is_empty());
+        assert!(build_queue.used_slots <= build_queue.total_slots);
+        let cache_health = summary.cache_health.expect("cache health is reported");
+        assert_eq!(cache_health.successful_pushes_24h, 0);
+        assert_eq!(cache_health.failed_pushes_24h, 0);
+        assert!(cache_health.used_bytes.is_none());
+        assert!(cache_health.capacity_bytes.is_none());
+    }
 
     #[tokio::test]
     async fn dashboard_summary_requires_authenticated_role() {
