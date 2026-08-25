@@ -1009,6 +1009,11 @@ pub struct SystemDetail {
     /// Timestamp of the heartbeat that triggered the last restart classification.
     #[serde(default)]
     pub last_restart_at: Option<DateTime<Utc>>,
+    /// Stable SHA256 fingerprint of the system's registered agent public key.
+    /// Read-only display value derived from `systems.public_key` via
+    /// `PublicKey::fingerprint()`. `None` only if the stored key fails to parse.
+    #[serde(default)]
+    pub public_key_fingerprint: Option<String>,
 }
 
 /// Hardware information subset for system detail.
@@ -2801,6 +2806,9 @@ pub enum AuditAction {
     SystemSyncRequested,
     SystemDeployRequested,
     SystemRollbackRequested,
+    /// A system's agent public key was replaced via `PUT /systems/:id/public-key`.
+    /// The old key stops being accepted on the agent's next signed request.
+    SystemKeyRotated,
     CveScanRequested,
     SessionInvalidated,
 }

@@ -332,6 +332,11 @@ fn detail_row_to_api_model(
         .map(|v| v as i32)
         .unwrap_or(server_default_interval as i32);
 
+    let public_key_fingerprint = crate::handlers::api::systems::public_key_fingerprint(
+        row.public_key.as_deref(),
+        &row.hostname,
+    );
+
     SystemDetail {
         id: row.id,
         hostname: row.hostname,
@@ -391,6 +396,7 @@ fn detail_row_to_api_model(
         boot_id: row.boot_id,
         restart_type: row.last_restart_type,
         last_restart_at: row.last_restart_at,
+        public_key_fingerprint,
     }
 }
 

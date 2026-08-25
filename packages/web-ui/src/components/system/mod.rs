@@ -8,6 +8,7 @@ pub mod deploy_system_modal;
 pub mod edit_system_modal;
 pub mod helpers;
 pub mod info_row;
+pub mod key_rotation;
 pub mod pending_deploy_banner;
 pub mod system_card;
 pub mod system_card_v2;

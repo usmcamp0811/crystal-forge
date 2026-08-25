@@ -1108,6 +1108,10 @@ pub struct SystemDetailRow {
     // Restart classification (from migration 0148/0149)
     pub last_restart_type: Option<String>,
     pub last_restart_at: Option<DateTime<Utc>>,
+    /// Base64 agent public key, joined from `systems` (not part of
+    /// `view_system_detail`). Kept as a raw string here so a malformed stored
+    /// key degrades to "no fingerprint" instead of failing the whole row decode.
+    pub public_key: Option<String>,
 }
 
 /// Fetch system detail from view_system_detail
@@ -1116,8 +1120,9 @@ pub async fn get_system_detail_by_id(
     system_id: Uuid,
 ) -> Result<Option<SystemDetailRow>> {
     let row = sqlx::query_as::<_, SystemDetailRow>(
-        "SELECT vsd.*
+        "SELECT vsd.*, s.public_key
          FROM view_system_detail vsd
+         JOIN systems s ON s.id = vsd.id
          WHERE vsd.id = $1",
     )
     .bind(system_id)
@@ -2137,9 +2142,16 @@ mod tests {
         ]
         .concat();
 
+        // Every *detail* field must still come from the view. The single
+        // additional column is systems.public_key, which the view does not
+        // expose and which is only used to derive the read-only agent key
+        // fingerprint (TASK-435) — never to recompute a projected field.
         assert!(
-            source.contains("SELECT vsd.*\n         FROM view_system_detail vsd"),
-            "system detail query should source all detail fields from view_system_detail"
+            source.contains(
+                "SELECT vsd.*, s.public_key\n         FROM view_system_detail vsd\n         JOIN systems s ON s.id = vsd.id"
+            ),
+            "system detail query should source all detail fields from view_system_detail, \
+             joining systems only for the public key"
         );
         assert!(
             !source.contains(&legacy_regex_expr),

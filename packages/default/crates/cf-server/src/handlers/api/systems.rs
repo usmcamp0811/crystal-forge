@@ -1146,10 +1146,15 @@ pub async fn update_system_public_key(
         return internal_error("Failed to update public key");
     }
 
+    // Pre-existing behaviour, deliberately unchanged: the key row is already
+    // updated at this point, so a failed audit write returns 500 even though the
+    // rotation did take effect. Callers must treat 500 here as "unknown state"
+    // and re-read the system rather than assume the old key is still active.
+    // The audit payload intentionally carries no key material of any kind.
     if record_system_mutation_audit(
         &pool,
         user_id,
-        AuditAction::UserUpdated, // Using UserUpdated as placeholder - ideally would be SystemKeyRotated
+        AuditAction::SystemKeyRotated,
         format!("{} ({})", row.hostname, row.id),
         extract_request_origin(&headers),
         serde_json::json!({ "operation": "update_public_key" }),
@@ -1298,6 +1303,24 @@ fn parse_pipeline_stage(stage: &str) -> PipelineStage {
     }
 }
 
+/// Derive the display fingerprint for a stored base64 agent public key.
+///
+/// A stored key that no longer parses yields `None` rather than an error: the
+/// fingerprint is a read-only display value and must never make system detail
+/// unavailable.
+pub(crate) fn public_key_fingerprint(
+    stored_public_key: Option<&str>,
+    hostname: &str,
+) -> Option<String> {
+    use crate::models::public_key::PublicKey;
+
+    stored_public_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| PublicKey::from_base64(value, hostname).ok())
+        .map(|key| key.fingerprint())
+}
+
 fn detail_row_to_api_model(row: SystemDetailRow, server_default_interval: u64) -> SystemDetail {
     use crate::api::models::FlakeSummary;
 
@@ -1305,6 +1328,8 @@ fn detail_row_to_api_model(row: SystemDetailRow, server_default_interval: u64) -
         .heartbeat_interval_secs
         .map(|v| v as i32)
         .unwrap_or(server_default_interval as i32);
+
+    let public_key_fingerprint = public_key_fingerprint(row.public_key.as_deref(), &row.hostname);
 
     SystemDetail {
         id: row.id,
@@ -1365,6 +1390,7 @@ fn detail_row_to_api_model(row: SystemDetailRow, server_default_interval: u64) -
         boot_id: row.boot_id,
         restart_type: row.last_restart_type,
         last_restart_at: row.last_restart_at,
+        public_key_fingerprint,
     }
 }
 
@@ -1614,6 +1640,7 @@ fn action_to_str(action: AuditAction) -> &'static str {
         AuditAction::SystemSyncRequested => "system_sync_requested",
         AuditAction::SystemDeployRequested => "system_deploy_requested",
         AuditAction::SystemRollbackRequested => "system_rollback_requested",
+        AuditAction::SystemKeyRotated => "system_key_rotated",
         AuditAction::CveScanRequested => "cve_scan_requested",
         AuditAction::SessionInvalidated => "session_invalidated",
     }
@@ -2960,6 +2987,323 @@ mod tests {
         assert!(validate_target_commit("zzzzzzz").is_err());
         assert!(validate_target_commit("a1b2c3d").is_ok());
         assert!(validate_target_commit(&"a".repeat(65)).is_err());
+    }
+
+    // ── TASK-435: system agent key rotation ────────────────────────────────
+
+    /// Build the base64 public key and the matching signing key for a fixed seed.
+    fn rotation_key_material(seed: u8) -> (SigningKey, String) {
+        let signing_key = SigningKey::from_bytes(&[seed; 32]);
+        let public_key = PublicKey::from_verifying_key(signing_key.verifying_key());
+        let base64 = public_key.to_base64();
+        (signing_key, base64)
+    }
+
+    /// Seed a user with `role`, an active session, and return the cookie header.
+    async fn rotation_session_headers(pool: &PgPool, suffix: &str, role: AuthRole) -> HeaderMap {
+        let user = insert_user(
+            pool,
+            &format!("{suffix}@example.com"),
+            Some("TASK-435 Tester"),
+        )
+        .await
+        .expect("insert_user should succeed");
+        sync_user_role(pool, user.id, role)
+            .await
+            .expect("sync_user_role should succeed");
+
+        let session_token = format!("session-{suffix}");
+        create_user_session(
+            pool,
+            user.id,
+            hash_token(&session_token),
+            Utc::now() + chrono::Duration::hours(1),
+            Some("test-agent".to_string()),
+            Some("127.0.0.1".to_string()),
+            "local".to_string(),
+        )
+        .await
+        .expect("create_user_session should succeed");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{}={}", SESSION_COOKIE_NAME, session_token)
+                .parse()
+                .expect("cookie header should parse"),
+        );
+        headers
+    }
+
+    /// Insert a system carrying `public_key_base64`, optionally scoped to an environment.
+    ///
+    /// Returns the row as persisted: `insert_system` does not bind the id, so
+    /// the database-assigned id is the only one that can be used afterwards.
+    async fn rotation_insert_system(
+        pool: &PgPool,
+        hostname: &str,
+        public_key_base64: &str,
+        environment_id: Option<Uuid>,
+    ) -> System {
+        let system = System {
+            id: Uuid::new_v4(),
+            hostname: hostname.to_string(),
+            environment_id,
+            is_active: true,
+            public_key: PublicKey::from_base64(public_key_base64, hostname)
+                .expect("seed public key should parse"),
+            flake_id: None,
+            derivation: String::new(),
+            system_configuration_name: Some(hostname.to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            desired_target: None,
+            deployment_policy: "manual".to_string(),
+        };
+
+        insert_system(pool, &system)
+            .await
+            .expect("insert_system should succeed")
+    }
+
+    #[test]
+    fn action_to_str_maps_the_dedicated_system_key_rotation_action() {
+        // TASK-435: rotation must no longer reuse the UserUpdated placeholder.
+        assert_eq!(
+            action_to_str(AuditAction::SystemKeyRotated),
+            "system_key_rotated"
+        );
+        assert_ne!(
+            action_to_str(AuditAction::SystemKeyRotated),
+            action_to_str(AuditAction::UserUpdated)
+        );
+    }
+
+    #[test]
+    fn public_key_fingerprint_matches_the_public_key_model() {
+        let (_signing_key, base64) = rotation_key_material(11);
+        let expected = PublicKey::from_base64(&base64, "fingerprint-host")
+            .expect("key should parse")
+            .fingerprint();
+
+        assert_eq!(
+            public_key_fingerprint(Some(base64.as_str()), "fingerprint-host"),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn public_key_fingerprint_degrades_to_none_for_missing_or_unparseable_keys() {
+        assert_eq!(public_key_fingerprint(None, "host"), None);
+        assert_eq!(public_key_fingerprint(Some("   "), "host"), None);
+        assert_eq!(public_key_fingerprint(Some("not-base64!"), "host"), None);
+        // Correct base64, wrong length.
+        assert_eq!(public_key_fingerprint(Some("YWJj"), "host"), None);
+    }
+
+    #[tokio::test]
+    async fn update_system_public_key_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = update_system_public_key(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+            Json(UpdateSystemPublicKeyRequest {
+                public_key: "irrelevant".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn system_key_rotation_rejects_viewer_role() {
+        let pool = test_pool_from_env().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+
+        let (_old_key, old_public_key) = rotation_key_material(21);
+        let (_new_key, new_public_key) = rotation_key_material(22);
+        let system = rotation_insert_system(
+            &pool,
+            &format!("task435-viewer-{suffix}"),
+            &old_public_key,
+            None,
+        )
+        .await;
+        let headers = rotation_session_headers(&pool, &suffix, AuthRole::Viewer).await;
+
+        let response = update_system_public_key(
+            State(pool.clone()),
+            headers,
+            Path(system.id),
+            Json(UpdateSystemPublicKeyRequest {
+                public_key: new_public_key,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let stored =
+            sqlx::query_scalar::<_, String>("SELECT public_key FROM systems WHERE id = $1")
+                .bind(system.id)
+                .fetch_one(&pool)
+                .await
+                .expect("stored public key should be readable");
+        assert_eq!(
+            stored, old_public_key,
+            "a denied rotation must leave the stored key untouched"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn system_key_rotation_rejects_operator_outside_the_system_environment() {
+        let pool = test_pool_from_env().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+
+        let environment_id = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO environments (name) VALUES ($1) RETURNING id",
+        )
+        .bind(format!("task435-env-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .expect("environment insert should succeed");
+
+        let (_old_key, old_public_key) = rotation_key_material(31);
+        let (_new_key, new_public_key) = rotation_key_material(32);
+        let system = rotation_insert_system(
+            &pool,
+            &format!("task435-outsider-{suffix}"),
+            &old_public_key,
+            Some(environment_id),
+        )
+        .await;
+
+        // Operator role, but no membership in the system's environment.
+        let headers = rotation_session_headers(&pool, &suffix, AuthRole::Operator).await;
+
+        let response = update_system_public_key(
+            State(pool.clone()),
+            headers,
+            Path(system.id),
+            Json(UpdateSystemPublicKeyRequest {
+                public_key: new_public_key,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let stored =
+            sqlx::query_scalar::<_, String>("SELECT public_key FROM systems WHERE id = $1")
+                .bind(system.id)
+                .fetch_one(&pool)
+                .await
+                .expect("stored public key should be readable");
+        assert_eq!(stored, old_public_key);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn system_key_rotation_rejects_empty_and_malformed_keys_without_persisting() {
+        let pool = test_pool_from_env().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+
+        let (_old_key, old_public_key) = rotation_key_material(41);
+        let system = rotation_insert_system(
+            &pool,
+            &format!("task435-invalid-{suffix}"),
+            &old_public_key,
+            None,
+        )
+        .await;
+        let headers = rotation_session_headers(&pool, &suffix, AuthRole::Admin).await;
+
+        for candidate in ["", "   ", "not-base64!", "YWJj"] {
+            let response = update_system_public_key(
+                State(pool.clone()),
+                headers.clone(),
+                Path(system.id),
+                Json(UpdateSystemPublicKeyRequest {
+                    public_key: candidate.to_string(),
+                }),
+            )
+            .await
+            .into_response();
+
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "expected 400 for candidate {candidate:?}"
+            );
+        }
+
+        let stored =
+            sqlx::query_scalar::<_, String>("SELECT public_key FROM systems WHERE id = $1")
+                .bind(system.id)
+                .fetch_one(&pool)
+                .await
+                .expect("stored public key should be readable");
+        assert_eq!(stored, old_public_key);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn system_key_rotation_persists_the_new_key_and_audits_it_as_system_key_rotated() {
+        let pool = test_pool_from_env().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+
+        let (_old_key, old_public_key) = rotation_key_material(51);
+        let (_new_key, new_public_key) = rotation_key_material(52);
+        let hostname = format!("task435-rotate-{suffix}");
+        let system = rotation_insert_system(&pool, &hostname, &old_public_key, None).await;
+        let headers = rotation_session_headers(&pool, &suffix, AuthRole::Admin).await;
+
+        let response = update_system_public_key(
+            State(pool.clone()),
+            headers,
+            Path(system.id),
+            Json(UpdateSystemPublicKeyRequest {
+                public_key: new_public_key.clone(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let stored =
+            sqlx::query_scalar::<_, String>("SELECT public_key FROM systems WHERE id = $1")
+                .bind(system.id)
+                .fetch_one(&pool)
+                .await
+                .expect("stored public key should be readable");
+        assert_eq!(stored, new_public_key);
+
+        let (action, metadata) = sqlx::query_as::<_, (String, serde_json::Value)>(
+            "SELECT action, metadata FROM admin_audit_events \
+             WHERE target = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(format!("{} ({})", hostname, system.id))
+        .fetch_one(&pool)
+        .await
+        .expect("audit event should exist");
+
+        assert_eq!(action, "system_key_rotated");
+        assert_eq!(metadata["operation"], "update_public_key");
+        // The audit trail must never carry key material of any kind.
+        let serialized = metadata.to_string();
+        assert!(!serialized.contains(&new_public_key));
+        assert!(!serialized.contains(&old_public_key));
     }
 
     #[test]

@@ -3,6 +3,7 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
+use crate::components::system::key_rotation::validate_public_key_input;
 use crate::theme;
 
 #[component]
@@ -16,21 +17,15 @@ pub fn UpdatePublicKeyModal(
     let mut error_message = use_signal(|| None::<String>);
 
     let handle_confirm = move |_| {
-        let key = new_public_key.read().trim().to_string();
-
-        if key.is_empty() {
-            error_message.set(Some("Public key cannot be empty".to_string()));
-            return;
+        // Shared with the Agent identity rotate flow in EditSystemModal so both
+        // surfaces accept exactly the same key format (TASK-435).
+        match validate_public_key_input(&new_public_key.read()) {
+            Ok(key) => {
+                error_message.set(None);
+                on_confirm.call(key);
+            }
+            Err(message) => error_message.set(Some(message)),
         }
-
-        // Basic validation - check if it looks like a base64 encoded key
-        if key.len() < 32 {
-            error_message.set(Some("Public key is too short".to_string()));
-            return;
-        }
-
-        error_message.set(None);
-        on_confirm.call(key);
     };
 
     rsx! {

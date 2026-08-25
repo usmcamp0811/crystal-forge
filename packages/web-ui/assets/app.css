@@ -6123,3 +6123,5 @@ tr.attention-flash {
 .sys-table-dense td, .sys-table-dense th { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sd-callout-warn { background: rgba(251,191,36,0.08); border-color: rgba(251,191,36,0.28); color: var(--cf-text-primary); }
 .sd-callout-warn svg { color: #fbbf24; flex-shrink: 0; margin-top: 1px; }
+.sd-callout-healthy { background: rgba(52,211,153,0.08); border-color: rgba(52,211,153,0.28); color: var(--cf-text-primary); }
+.sd-callout-healthy svg { color: #34d399; flex-shrink: 0; margin-top: 1px; }

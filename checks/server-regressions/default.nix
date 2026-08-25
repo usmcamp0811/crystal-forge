@@ -94,6 +94,14 @@ pkgs.rustPlatform.buildRustPackage {
       bundle_summary_aggregate_query_count_is_bounded_across_versions \
       -- --ignored --test-threads=1
 
+    # TASK-435. Agent key rotation is a security boundary: a denied caller must
+    # never mutate systems.public_key, and a successful rotation must persist
+    # exactly one new key and audit it as system_key_rotated.
+    echo "=== System agent key rotation authorization/persistence regressions ==="
+    cargo test --offline --package cf-server --lib \
+      system_key_rotation_ \
+      -- --ignored --test-threads=1
+
     runHook postCheck
   '';
 

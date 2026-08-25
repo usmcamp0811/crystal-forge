@@ -329,6 +329,70 @@ mod tests {
         assert_eq!(verified.body, body);
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // TASK-435: key rotation regression
+    //
+    // Agent authentication verifies every request fresh against the live
+    // `systems.public_key` column — there is no session or cached key. These
+    // tests pin that contract by swapping the looked-up system's public key
+    // exactly the way `PUT /systems/:id/public-key` updates the row, and prove
+    // the cutover is immediate in both directions.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn rotating_the_public_key_rejects_the_previous_private_key() {
+        let (old_signing_key, mut system) = create_test_system("rotating-host");
+        let body = Bytes::from(b"heartbeat payload".to_vec());
+        let old_key_headers = create_signed_headers("rotating-host", &body, &old_signing_key);
+
+        // Pre-rotation the old key is accepted.
+        let lookup = MockSystemLookup::new(Some(system.clone()));
+        assert!(
+            authenticate_agent_request_with_lookup(&old_key_headers, body.clone(), &lookup)
+                .await
+                .is_ok(),
+            "old key must be accepted before rotation"
+        );
+
+        // Rotate: replace the stored public key exactly as the handler does.
+        let (_new_signing_key, new_verifying_key) = generate_keypair();
+        system.public_key = PublicKey::from_verifying_key(new_verifying_key);
+
+        let lookup = MockSystemLookup::new(Some(system));
+        let result = authenticate_agent_request_with_lookup(&old_key_headers, body, &lookup).await;
+
+        assert_eq!(
+            result.err(),
+            Some(StatusCode::UNAUTHORIZED),
+            "a request signed with the pre-rotation private key must be rejected immediately"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotating_the_public_key_accepts_the_newly_generated_private_key() {
+        let (old_signing_key, mut system) = create_test_system("rotating-host");
+        let body = Bytes::from(b"heartbeat payload".to_vec());
+
+        let (new_signing_key, new_verifying_key) = generate_keypair();
+        system.public_key = PublicKey::from_verifying_key(new_verifying_key);
+
+        let new_key_headers = create_signed_headers("rotating-host", &body, &new_signing_key);
+        let lookup = MockSystemLookup::new(Some(system));
+
+        let verified =
+            authenticate_agent_request_with_lookup(&new_key_headers, body.clone(), &lookup)
+                .await
+                .expect("newly rotated key must be accepted");
+        assert_eq!(verified.key_id, "rotating-host");
+
+        // Sanity: the old key really is a different key, so the acceptance above
+        // is not an artefact of the two keypairs coinciding.
+        assert_ne!(
+            old_signing_key.verifying_key().to_bytes(),
+            new_signing_key.verifying_key().to_bytes()
+        );
+    }
+
     #[tokio::test]
     async fn test_authenticate_with_invalid_signature() {
         // Create a system with one key

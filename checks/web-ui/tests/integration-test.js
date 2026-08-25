@@ -1889,6 +1889,9 @@ async function routeSystemsWarningData(page) {
     },
     created_at: "2026-04-01T00:00:00Z",
     updated_at: "2026-04-07T00:00:00Z",
+    // Well-formed synthetic fingerprint in the exact shape the server derives
+    // from systems.public_key ("SHA256:" + unpadded base64 of a SHA256 digest).
+    public_key_fingerprint: "SHA256:S7Bvjk46dxXSAdVz0KpCN2LlXavWGiwCJ4+lbMbSlOA",
   };
 
   const historyEntries = [
@@ -4462,7 +4465,11 @@ const steps = [
           throw new Error("Expected system detail request to succeed before opening Edit modal");
         }
 
-      const editModal = page.getByText("Update system registration, flake assignment, and deployment policy.").first();
+      // Subtitle text last changed in e6dd5014 (TASK-394); keep this selector in
+      // sync with EditSystemModal's modal-head copy.
+      const editModal = page
+        .getByText("Update system registration, flake assignment, deployment policy, and security settings.")
+        .first();
       await assertVisible(editModal, "Expected Edit System modal to be visible", 15000);
       const warningBanner = page
         .getByText(/not linked to a flake and won't be included in evaluations/i)
@@ -4582,6 +4589,228 @@ const steps = [
         await page
           .unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1")
           .catch(() => {});
+        await unrouteSystemsWarningData(page);
+      }
+    },
+  },
+  {
+    name: "12e2-systems-edit-modal-key-rotation",
+    description: "Agent identity key rotation from the edit modal Security tab",
+    designRef: "docs/design/CrystalForge/components/EditSystemModal.jsx",
+    action: async (page) => {
+      const systemId = "00000000-0000-0000-0000-0000000000a1";
+      const seededFingerprint = "SHA256:S7Bvjk46dxXSAdVz0KpCN2LlXavWGiwCJ4+lbMbSlOA";
+      const publicKeyRoute = `**/api/v1/systems/${systemId}/public-key`;
+
+      await routeSystemsWarningData(page);
+      try {
+        // Registered after routeSystemsWarningData so this narrower route wins.
+        let capturedKeyRequests = [];
+        let failNextRotation = true;
+        await page.route(publicKeyRoute, async (route) => {
+          if (route.request().method() !== "PUT") {
+            await route.fallback();
+            return;
+          }
+          capturedKeyRequests.push(route.request().postDataJSON());
+          if (failNextRotation) {
+            // First attempt fails: the UI must not claim success and must keep
+            // the generated key on screen for retry.
+            failNextRotation = false;
+            await route.fulfill({
+              status: 500,
+              contentType: "application/json",
+              body: JSON.stringify({
+                error: "internal_error",
+                message: "Failed to update public key",
+              }),
+            });
+            return;
+          }
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              status: "success",
+              message: "Public key updated for warning-system-01",
+            }),
+          });
+        });
+
+        await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+        await page.waitForTimeout(2200);
+        await page.getByRole("button", { name: "Table" }).first().click();
+        await page.waitForTimeout(300);
+        const systemRow = page.locator("tr").filter({ hasText: "warning-system-01" }).first();
+        await assertVisible(systemRow, "Expected warning-system-01 row to be visible", 15000);
+        await systemRow.getByRole("button", { name: "Edit" }).first().click({ force: true });
+
+        const modal = page.locator(".modal").filter({ hasText: "Edit warning-system-01" }).first();
+        await assertVisible(modal, "Expected edit modal to open", 15000);
+
+        await modal.getByRole("button", { name: "Security" }).first().click();
+        const section = modal.locator("[data-testid='agent-identity-section']").first();
+        await assertVisible(section, "Expected Agent identity section on the Security tab", 10000);
+
+        // The placeholder callout must be gone entirely.
+        const placeholderCount = await section
+          .getByText(/SSH key rotation is unavailable in this modal/i)
+          .count();
+        if (placeholderCount > 0) {
+          throw new Error("Expected the 'rotation is unavailable' placeholder to be removed");
+        }
+
+        const fingerprint = section.locator("[data-testid='agent-key-fingerprint']").first();
+        await assertVisible(fingerprint, "Expected the current key fingerprint to be shown", 10000);
+        const initialFingerprint = (await fingerprint.textContent())?.trim();
+        if (initialFingerprint !== seededFingerprint) {
+          throw new Error(
+            `Expected seeded fingerprint ${seededFingerprint}, got ${initialFingerprint}`,
+          );
+        }
+
+        // Cancelling before confirm must not send anything.
+        await section.locator("[data-testid='rotate-key-button']").first().click();
+        await assertVisible(
+          section.locator("[data-testid='key-mode-generate']").first(),
+          "Expected the generate/paste mode toggle after starting a rotation",
+          10000,
+        );
+        await section.locator("[data-testid='rotate-cancel-button']").first().click();
+        await assertVisible(
+          section.locator("[data-testid='rotate-key-button']").first(),
+          "Expected cancel to return to the initial fingerprint view",
+          10000,
+        );
+        if (capturedKeyRequests.length !== 0) {
+          throw new Error("Cancelling before confirm must not issue a public-key request");
+        }
+
+        // Generate mode: one-time private key display.
+        await section.locator("[data-testid='rotate-key-button']").first().click();
+        const confirmButton = section.locator("[data-testid='rotate-confirm-button']").first();
+        if (await confirmButton.isEnabled()) {
+          throw new Error("Confirm must stay disabled until a valid key exists");
+        }
+        await section.locator("[data-testid='generate-keypair-button']").first().click();
+        const generatedPublicKey = section.locator("[data-testid='generated-public-key']").first();
+        await assertVisible(generatedPublicKey, "Expected the generated public key", 10000);
+        await assertVisible(
+          section.locator("[data-testid='generated-private-key']").first(),
+          "Expected the generated private key to be shown once",
+          10000,
+        );
+        const publicKeyText = (await generatedPublicKey.textContent())?.trim();
+        const privateKeyText = (
+          await section.locator("[data-testid='generated-private-key']").first().textContent()
+        )?.trim();
+        if (!publicKeyText || publicKeyText === privateKeyText) {
+          throw new Error("Expected distinct generated public and private keys");
+        }
+
+        // First confirm fails: no success state, key material retained.
+        await confirmButton.click();
+        await page.waitForTimeout(900);
+        await assertVisible(
+          section.locator("[data-testid='rotate-error-callout']").first(),
+          "Expected a failed rotation to surface an error",
+          10000,
+        );
+        if ((await section.locator("[data-testid='rotate-success-callout']").count()) > 0) {
+          throw new Error("A failed rotation must never render the success state");
+        }
+        const retainedPublicKey = (
+          await section.locator("[data-testid='generated-public-key']").first().textContent()
+        )?.trim();
+        if (retainedPublicKey !== publicKeyText) {
+          throw new Error("A failed rotation must keep the generated keypair for retry");
+        }
+
+        // Retry succeeds.
+        await section.locator("[data-testid='rotate-confirm-button']").first().click();
+        await assertVisible(
+          section.locator("[data-testid='rotate-success-callout']").first(),
+          "Expected the success callout after a successful rotation",
+          10000,
+        );
+
+        if (capturedKeyRequests.length !== 2) {
+          throw new Error(
+            `Expected exactly two public-key requests, got ${capturedKeyRequests.length}`,
+          );
+        }
+        for (const payload of capturedKeyRequests) {
+          if (Object.keys(payload).length !== 1 || payload.public_key !== publicKeyText) {
+            throw new Error(
+              `Rotation must send only the generated public key, got ${JSON.stringify(payload)}`,
+            );
+          }
+          if (privateKeyText && JSON.stringify(payload).includes(privateKeyText)) {
+            throw new Error("The private key must never be sent to the server");
+          }
+        }
+
+        // Fingerprint updates in place, and the private key is gone for good.
+        const updatedFingerprint = (
+          await section.locator("[data-testid='agent-key-fingerprint']").first().textContent()
+        )?.trim();
+        if (!updatedFingerprint || !updatedFingerprint.startsWith("SHA256:")) {
+          throw new Error(`Expected an updated SHA256 fingerprint, got ${updatedFingerprint}`);
+        }
+        if (updatedFingerprint === seededFingerprint) {
+          throw new Error("Expected the fingerprint to update in place after rotation");
+        }
+        if ((await section.locator("[data-testid='generated-private-key']").count()) > 0) {
+          throw new Error("The private key must not remain visible after a successful rotation");
+        }
+
+        // Paste mode validation is the shared validator: reject the OpenSSH shape.
+        await page.reload({ timeout: LOAD_TIMEOUT });
+        await page.waitForTimeout(2200);
+        await page.getByRole("button", { name: "Table" }).first().click();
+        await page.waitForTimeout(300);
+        await page
+          .locator("tr")
+          .filter({ hasText: "warning-system-01" })
+          .first()
+          .getByRole("button", { name: "Edit" })
+          .first()
+          .click({ force: true });
+        const reopened = page.locator(".modal").filter({ hasText: "Edit warning-system-01" }).first();
+        await assertVisible(reopened, "Expected the edit modal to reopen", 15000);
+        await reopened.getByRole("button", { name: "Security" }).first().click();
+        const reopenedSection = reopened.locator("[data-testid='agent-identity-section']").first();
+        await assertVisible(reopenedSection, "Expected Agent identity section after reopen", 10000);
+        if ((await reopenedSection.locator("[data-testid='generated-private-key']").count()) > 0) {
+          throw new Error("A previously generated private key must not be retrievable after reopen");
+        }
+
+        await reopenedSection.locator("[data-testid='rotate-key-button']").first().click();
+        await reopenedSection.locator("[data-testid='key-mode-paste']").first().click();
+        const pasteInput = reopenedSection.locator("[data-testid='paste-public-key-input']").first();
+        await fillDioxusInput(pasteInput, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA");
+        await assertVisible(
+          reopenedSection.locator("[data-testid='paste-key-invalid']").first(),
+          "Expected shared paste validation to reject a non-base64 key",
+          10000,
+        );
+        const pasteConfirm = reopenedSection.locator("[data-testid='rotate-confirm-button']").first();
+        if (await pasteConfirm.isEnabled()) {
+          throw new Error("Confirm must stay disabled while the pasted key is invalid");
+        }
+
+        // A valid base64 key enables confirm and previews its fingerprint.
+        await fillDioxusInput(pasteInput, publicKeyText);
+        await assertVisible(
+          reopenedSection.locator("[data-testid='new-key-fingerprint']").first(),
+          "Expected a new-fingerprint preview for a valid pasted key",
+          10000,
+        );
+        if (!(await pasteConfirm.isEnabled())) {
+          throw new Error("Confirm must be enabled once a valid key is pasted");
+        }
+      } finally {
+        await page.unroute(publicKeyRoute).catch(() => {});
         await unrouteSystemsWarningData(page);
       }
     },

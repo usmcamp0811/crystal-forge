@@ -924,6 +924,20 @@
       "baseline": "advisory"
     },
     {
+      "name": "12e2-systems-edit-modal-key-rotation",
+      "description": "Agent identity key rotation from the edit modal Security tab",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/EditSystemModal.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
       "name": "12f-systems-deploy-modal",
       "description": "Systems deploy modal with commit selector",
       "route": "/systems",

@@ -600,6 +600,7 @@ pub fn fallback_system_detail() -> SystemDetail {
         boot_id: None,
         restart_type: None,
         last_restart_at: None,
+        public_key_fingerprint: None,
     }
 }
 
