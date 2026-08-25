@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-25 01:16'
+updated_date: '2026-08-25 01:17'
 labels:
   - design-parity
   - policy
@@ -112,6 +112,8 @@ Metadata-authority review follow-up completed in commit `5c0a1ac4` and pushed to
 Maintainer remediation implementation is complete and independently reviewed with no remaining P0/P1/P2 findings. Packaged metadata was removed from CRUD, CF-native, and generic interchange persistence decisions while structural validation remains enforced. UI hydration now enriches metadata without rewriting persisted UUID/path/type/operator/value/order and renders type/enum differences as non-blocking advisories. Added real query-layer persistence coverage for known-path unknown and out-of-baseline enum semantics; the browser workflow now persists enum-domain skew through the real PUT API before reload/reorder/reserialization.
 
 Verified locally: full default Rust suite passed (1474 passed, 0 failed; plus all subsidiary targets/doc tests); full Web UI Rust suite passed; SQLx workspace preparation passed; targeted query-layer target-semantics regression passed; metadata package/check built; server package built; server-regressions check built; Rust formatting, Web UI rustfmt, JavaScript syntax, and git diff checks passed. The local authoritative Web UI Nix/browser check and `nix flake check --keep-going` are intentionally deferred to CI at the user's direction because intermittent host instability powered off the machine during the Web UI check. Do not check ACs or return to Review until CI confirms those remaining gates.
+
+Pushed remediation commit `34ceb84a` to MR !318 and added the remediation/verification note: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/318#note_3729117397. MR is conflict-free. Pipeline https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2787525864 is running at the pushed head. Task remains In Progress and AC1-AC3 remain unchecked pending CI browser/flake results.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
