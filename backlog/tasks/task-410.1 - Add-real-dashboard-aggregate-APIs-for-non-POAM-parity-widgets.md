@@ -1,9 +1,11 @@
 ---
 id: TASK-410.1
 title: Add real dashboard aggregate APIs for non-POA&M parity widgets
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@opencode-agent'
 created_date: '2026-08-23 20:32'
+updated_date: '2026-08-25 02:31'
 labels:
   - dashboard
   - api
@@ -80,3 +82,11 @@ Targeted query/model/handler tests including visibility and empty states; server
 - [ ] #8 Existing dashboard and API consumers remain backward compatible
 - [ ] #9 Targeted Rust tests and applicable Nix server/integration checks pass and exact commands are recorded
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-agent on reckless in /home/mcamp/code/crystal-forge/TASK-410.1-dashboard-aggregates
+
+Preflight: dedicated branch/worktree `TASK-410.1-dashboard-aggregates` at current `dev` commit `cebc4ce5`; worktree verified clean and based on `dev`. The `main` integration worktree is clean. Per the user's prior authorization and instruction to continue, the two unrelated untracked compliance audit files in the `dev` integration worktree remain untouched. Scope is limited to real authenticated dashboard aggregates and client contracts named by TASK-410.1; no POA&M, approval/attestation, compliance, or speculative telemetry work. Verification will use focused Rust tests/checks and applicable server checks; per user instruction the web-ui check will be left to CI.
+<!-- SECTION:NOTES:END -->
