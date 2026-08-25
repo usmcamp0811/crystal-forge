@@ -1,10 +1,11 @@
 ---
 id: TASK-435
 title: Implement System Agent Key Rotation from the Agent Identity Section
-status: Review
-assignee: []
+status: In Progress
+assignee:
+  - opencode
 created_date: '2026-08-25 03:12'
-updated_date: '2026-08-25 07:52'
+updated_date: '2026-08-25 15:05'
 labels:
   - web-ui
   - server
@@ -179,6 +180,19 @@ Worktree: `/home/mcamp/code/crystal-forge/TASK-435-system-agent-key-rotation`, b
 
 ### Known adjacent risk to confirm on CI
 `checks/web-ui/tests/integration-test.js` scenario `12e-systems-edit-modal` asserts the modal subtitle "Update system registration, flake assignment, and deployment policy." while the component has said "…flake assignment, deployment policy, and security settings." since commit e6dd5014 (TASK-394, 2026-07-20). This looks like a pre-existing stale selector, not something this task introduces. Plan: leave it untouched initially, confirm against the CI run, and only then decide (with the user) whether to fix the selector in this MR.
+
+## Review remediation plan for !319
+
+Review target: `34a1133d`; work continues in the existing clean worktree/branch.
+
+1. **Canonical reconciliation and parent synchronization:** preserve structured public-key update errors. After every 200 and every ambiguous 5xx/network/deserialize outcome, GET the authoritative `SystemDetail` and compare its persisted fingerprint with the submitted key. Treat a matching fingerprint as rotated, a confirmed non-match after 200 as an error, and an unresolved/mismatched ambiguous outcome as unknown state with explicit operator guidance while retaining generated key material. Add an `on_key_rotated(SystemDetail)` callback so both Systems list and System Detail update their parent-owned detail without page reload.
+2. **Whole-modal mutation lock:** while rotation is in flight, block backdrop dismissal, footer Cancel/Save, tab switching, rotation mode changes, and Escape/dismiss paths supported by this modal. Add stable test hooks where needed.
+3. **Truthful clipboard state:** await `navigator.clipboard.writeText`; show `Copied` only on fulfillment and render an explicit error on rejection while preserving the private key.
+4. **Fail-closed generation:** change the single authoritative `generate_key_pair()` to return `Result`, require Web Crypto on WASM, remove `Math.random`, propagate actionable errors in Add System and Edit System, and keep native compilation/testability through a deterministic seed-to-keypair helper.
+5. **Validation parity:** run `ed25519_dalek::VerifyingKey::from_bytes()` in the shared frontend validator and replace arbitrary-byte valid fixtures with real deterministic Ed25519 keys.
+6. **Entry-point regression:** expose the already-wired Update Key action in the currently rendered SystemCardV2/SystemsTable action surfaces, then add browser coverage for a valid PUT through `UpdatePublicKeyModal`.
+7. **Browser hardening coverage:** extend the focused key-rotation scenario(s) for ambiguous committed-then-500 reconciliation, stalled PUT egress locking, clipboard resolve/reject, direct System Detail close/reopen without page reload and persisted fingerprint, secure-RNG failure, and the Systems-list Update Key flow.
+8. **Verification:** run focused formatting, native/wasm checks, web-ui unit tests, relevant server tests, SQLx check if query shapes change, JS/manifest/diff checks. Per the prior user instruction, leave `nix build .#checks.x86_64-linux.web-ui` to MR CI, then inspect its result and screenshot before returning the task to Review.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -220,4 +234,6 @@ Acceptance-criteria evidence status at Review time (deliberately conservative):
 - DoD #1/#2/#3 checked (proven by tests). DoD #4/#5 left unchecked pending the pipeline.
 
 LOCK STATUS: awaiting review. Lock retained on /home/mcamp/code/crystal-forge/TASK-435-system-agent-key-rotation because MR !319 review feedback will be implemented in this same worktree. Worktree is clean at 34a1133d and matches origin.
+
+Review changes requested on MR !319 at 34a1133d. Task moved from Review back to In Progress. Scope accepted from the user's review verdict: P1 ambiguous-state recovery, whole-modal in-flight lock, truthful async clipboard, canonical parent refresh, fail-closed CSPRNG; P2 validation parity, Systems-list Update Key browser regression, and expanded browser coverage. The existing worktree is clean and tracks origin at the reviewed commit.
 <!-- SECTION:NOTES:END -->
