@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode
 created_date: '2026-08-25 03:12'
-updated_date: '2026-08-25 16:31'
+updated_date: '2026-08-25 16:32'
 labels:
   - web-ui
   - server
@@ -31,6 +31,7 @@ references:
   - checks/web-ui/tests/integration-test.js
   - task-244
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2789565632'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2789739702'
 documentation:
   - docs/design/CrystalForge/components/EditSystemModal.jsx
 modified_files:
@@ -247,4 +248,6 @@ Remediation committed and pushed as `0af481fa` (`TASK-435: Harden system key rot
 Re-review of `0af481fa` requested one focused remediation: preserve ambiguous mutation context when canonical GET confirms the replacement key, render confirmed-active-with-warning instead of ordinary green success for committed-then-500/audit-failure responses, and browser-test the separate non-confirmed outcome-unknown recovery path with retained keypair and retry. No backend transaction changes requested.
 
 Focused remediation implemented in four frontend/test files. Added `SystemPublicKeyRotationOutcome::{Confirmed, ConfirmedAfterAmbiguousResponse}`; EditSystemModal renders a warning for canonically confirmed keys after ambiguous responses and ordinary green success only for acknowledged responses; Systems-list Update Key surfaces the same warning in its action notice. `12e2` now asserts committed-then-500 warning semantics and separately exercises ambiguous 500 + non-matching canonical GET, retained generated pair, no success state, and successful retry. Verification passed: native web-ui cargo check; wasm32 web-ui cargo check; web-ui tests (203 passed, 1 ignored); changed-file rustfmt check; JS syntax; manifest parse; and git diff check. The authoritative Nix web-ui/browser artifact remains delegated to MR CI.
+
+Focused re-review remediation committed and pushed as `169dc027` (`TASK-435: Preserve rotation audit warnings`) to MR !319. Worktree is clean and matches origin. Replacement MR pipeline 2789739702 was created for this commit and is pending; task remains In Progress until the web-ui browser/screenshot gate completes.
 <!-- SECTION:NOTES:END -->
