@@ -1,11 +1,11 @@
 ---
 id: TASK-433.4
 title: 'TASK-433 Phase 3: NixOS option metadata and composite policy serializer'
-status: In Progress
+status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-25 01:17'
+updated_date: '2026-08-25 01:57'
 labels:
   - design-parity
   - policy
@@ -68,9 +68,9 @@ nix build .#checks.x86_64-linux.server-regressions --no-link
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 NixOS option editor supports boolean, enum, numeric, short, multiline and unknown/custom fallback from real metadata or safe fallback.
-- [ ] #2 Long semantic values round-trip exact difficult strings including the DoD multiline banner.
-- [ ] #3 Composite and legacy policy representations have deterministic digest/round-trip and preserve immutable history.
+- [x] #1 NixOS option editor supports boolean, enum, numeric, short, multiline and unknown/custom fallback from real metadata or safe fallback.
+- [x] #2 Long semantic values round-trip exact difficult strings including the DoD multiline banner.
+- [x] #3 Composite and legacy policy representations have deterministic digest/round-trip and preserve immutable history.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -114,6 +114,8 @@ Maintainer remediation implementation is complete and independently reviewed wit
 Verified locally: full default Rust suite passed (1474 passed, 0 failed; plus all subsidiary targets/doc tests); full Web UI Rust suite passed; SQLx workspace preparation passed; targeted query-layer target-semantics regression passed; metadata package/check built; server package built; server-regressions check built; Rust formatting, Web UI rustfmt, JavaScript syntax, and git diff checks passed. The local authoritative Web UI Nix/browser check and `nix flake check --keep-going` are intentionally deferred to CI at the user's direction because intermittent host instability powered off the machine during the Web UI check. Do not check ACs or return to Review until CI confirms those remaining gates.
 
 Pushed remediation commit `34ceb84a` to MR !318 and added the remediation/verification note: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/318#note_3729117397. MR is conflict-free. Pipeline https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2787525864 is running at the pushed head. Task remains In Progress and AC1-AC3 remain unchecked pending CI browser/flake results.
+
+Exact remediation head `34ceb84ac7fc71d4920af287b52f7229a6889200` was independently verified in GitLab pipeline https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2787525864. Pipeline source was MR !318, exact SHA matched, and final status was `success` (finished 2026-08-25T01:52:47Z). The reviewed remediation and prior Phase-3 evidence prove AC1-AC3; TASK-433.4 is returned to Review. No new Phase-3 implementation changes were made during this closeout.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
