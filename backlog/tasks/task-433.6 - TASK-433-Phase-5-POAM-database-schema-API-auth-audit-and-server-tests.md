@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-26 04:09'
+updated_date: '2026-08-26 13:00'
 labels:
   - design-parity
   - poam
@@ -68,6 +68,23 @@ nix build .#checks.x86_64-linux.integration --no-link
 - [ ] #5 Closure is authoritative and race-safe, requires current Pass or documented accepted waiver for all linked findings, stores verification and rejects failing/error/unknown/not-checked/stale findings.
 - [ ] #6 POAM server tests cover real finding creation, multi-finding links, invalid links, active invariant, milestones, activity, transitions, overdue, closure rejection/acceptance, verification storage, reopen, filters, auth and concurrency.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Phase 5 implementation plan
+
+1. Introduce a stable persisted finding lineage keyed by `(system_id, policy_lineage_id)`; keep exact policy version, effective-set/config digest, derivation/store path, assessment/result and requirement/bundle/assignment context as observation or verification references rather than finding identity.
+2. Add additive migrations after current 0233 for normalized POA&M core, sequence-backed human IDs, active/historical finding links, immutable activity, stable milestones, assignment-version references, verification attempts/items, and the minimal generic accepted finding-waiver foundation authorized by the user. Add DB constraints, composite FKs, partial uniqueness for one active remediation per finding, and indexes matching actual filters/rollups.
+3. Add typed POA&M domain/DTO/query/service modules and canonical batch current-finding resolution. Keep evaluation/composite rows read-only: creation, linking, lifecycle, milestones, notes, verification attempts and unlinking must never mutate compliance outcomes.
+4. Implement authenticated REST APIs for create/detail/list/filter/search/update, explicit transitions, milestone lifecycle, immutable notes, finding/assignment link management, compatible search, verify/close/reopen, batched system/bundle rollups, dashboard summary and watchlist. Use bounded pagination and typed machine-readable errors.
+5. Enforce existing session/role, environment membership/system visibility and CSRF conventions. Hide a multi-finding POA&M unless every linked context is visible; require mutation access to every affected context. Use transactional POA&M activity plus existing admin audit rows.
+6. Use POA&M revisions on every lifecycle-sensitive mutation. Enforce compatibility by shared policy lineage (same canonical control across systems), never title. Require at least one real finding; assignment references are supplemental and never mutate immutable assignment versions.
+7. Implement closure/reopen as serializable, retryable transactions with deterministic finding locks, POA&M/link/result rechecks, exact structural freshness tokens, current Pass or exact accepted non-expired/non-revoked finding waiver per link, immutable verification attempts/items, active-link retirement/reactivation and atomic activity/audit.
+8. Add real migrated-DB/API/concurrency regressions for AC1-AC6, including human-ID and active-link races, closure versus superseding Fail, waiver applicability lifecycle, FAIL byte/semantic preservation, assignment immutability, overdue boundaries, all filters/rollups/dashboard sources, auth/CSRF and audit payloads.
+9. Refresh SQLx metadata only against the repository isolated PostgreSQL workflow. Run all six required verification commands plus focused tests and `git diff --check`.
+10. Stop coding for independent requirements, integrity, authorization, closure, N+1/error and regression review. Resolve all P0/P1/P2, then check exactly AC1-AC6, move TASK-433.6 to Review, update MR !318, commit/push and stop before Phase 6.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
