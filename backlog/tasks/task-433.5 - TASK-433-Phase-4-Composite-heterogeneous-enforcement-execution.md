@@ -1,7 +1,7 @@
 ---
 id: TASK-433.5
 title: 'TASK-433 Phase 4: Composite heterogeneous enforcement execution'
-status: In Progress
+status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
@@ -18,6 +18,7 @@ references:
   - TASK-433
   - TASK-433.1
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/318'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2791038401'
 documentation:
   - docs/design/CrystalForge/data-enforcement.js
 parent_task_id: TASK-433
@@ -104,4 +105,6 @@ Phase 4 implemented all eight exposed kinds (`nixos_option`, `packages_installed
 Final independent requirements/security review found no remaining P0/P1/P2. Final remediation requires completed cache-push evidence for the exact derivation and exact store path, blocks known uncached targets for both set and claim paths, and preserves only genuinely absent historical store-path fallback when no composite policy is enforced.
 
 Verified locally on 2026-08-26: `cargo fmt --manifest-path packages/default/Cargo.toml --all --check`; server package tests (1218 unit tests plus integration suites, including composite 18/18); Web UI tests (223 passed, 1 ignored); SQLx prepare check for the workspace/all targets; server package build; `checks.x86_64-linux.server-regressions`; focused Web UI workflows `20ab2` and `29b` (2/2 screenshots); and `nix flake check --keep-going -L` exit 0. The full Web UI profile internally reported unrelated failed manifest steps while the derivation returned success; TASK-438 tracks making that check fail correctly.
+
+Phase-4 implementation committed as `ed822ee470599defa9e716b3c6028201d848115b` (`TASK-433.5: enforce composite policies end to end`) and pushed to MR !318. Exact-head pipeline 2791038401 started for that SHA and was running when the task moved to Review; CI will provide the final remote result.
 <!-- SECTION:NOTES:END -->
