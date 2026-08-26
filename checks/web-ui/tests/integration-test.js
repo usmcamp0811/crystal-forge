@@ -5078,6 +5078,7 @@ const steps = [
 
       try {
         await page.goto(`${baseUrl}/systems/${systemId}`, { timeout: LOAD_TIMEOUT });
+        await collapseOnboardingCoach(page);
         const editButton = page.getByRole("button", { name: "Edit", exact: true }).first();
         await assertVisible(editButton, "Expected System Detail Edit action", 15000);
         await editButton.click();
@@ -5177,7 +5178,11 @@ const steps = [
           validPublicKey,
         );
         await updateModal.getByRole("button", { name: "Update Key", exact: true }).click();
-        await assertHidden(updateModal, "Expected Update Public Key modal to close after reconciliation");
+        await updateModal
+          .waitFor({ state: "hidden", timeout: 10000 })
+          .catch(() => {
+            throw new Error("Expected Update Public Key modal to close after reconciliation");
+          });
         if (!capturedPayload || capturedPayload.public_key !== validPublicKey) {
           throw new Error(`Unexpected Update Key payload: ${JSON.stringify(capturedPayload)}`);
         }
