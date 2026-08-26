@@ -1,7 +1,7 @@
 ---
 id: TASK-410.1
 title: Add real dashboard aggregate APIs for non-POA&M parity widgets
-status: Review
+status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 20:32'
