@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-26 03:19'
+updated_date: '2026-08-26 03:22'
 labels:
   - design-parity
   - policy
@@ -109,4 +109,8 @@ Final independent requirements/security review found no remaining P0/P1/P2. Fina
 Verified locally on 2026-08-26: `cargo fmt --manifest-path packages/default/Cargo.toml --all --check`; server package tests (1218 unit tests plus integration suites, including composite 18/18); Web UI tests (223 passed, 1 ignored); SQLx prepare check for the workspace/all targets; server package build; `checks.x86_64-linux.server-regressions`; focused Web UI workflows `20ab2` and `29b` (2/2 screenshots); and `nix flake check --keep-going -L` exit 0. The full Web UI profile internally reported unrelated failed manifest steps while the derivation returned success; TASK-438 tracks making that check fail correctly.
 
 Phase-4 implementation committed as `ed822ee470599defa9e716b3c6028201d848115b` (`TASK-433.5: enforce composite policies end to end`) and pushed to MR !318. Exact-head pipeline 2791038401 started for that SHA and was running when the task moved to Review; CI will provide the final remote result.
+
+Conflict-resolution synchronization (2026-08-26): fetched `origin/dev` at `50a7dafb1a2ca8c300a5a2d02db9f2d64cc65b49` and merged it into the dedicated TASK-433 worktree. The only textual conflict was TASK-433.4's backlog record; each status/plan/notes/final-summary section was inspected and resolved to the later canonical Review state. All unrelated incoming backlog files exactly match `origin/dev`; TASK-433.5 preserves the current canonical `dev` Review state and all three checked ACs. No application, Web UI, coverage-manifest, or browser-test file conflicted, and no TASK-422/TASK-432 file appears in the branch diff against `origin/dev`.
+
+Post-resolution semantic inspection confirmed `composite_enforcement.rs` is unchanged from the reviewed Phase-4 implementation: exact derivation/store-path completed-cache evidence remains required; known uncached targets fail; only genuinely absent historical paths retain the no-policy compatibility bridge; auto-latest, manual deploy, commit rollback, generation rollback, and heartbeat delivery still use the centralized atomic authorization/claim path. Focused `nix build .#checks.x86_64-linux.server-regressions --no-link -L` passed after resolution. Composite Web UI workflows were not rerun because no relevant UI/test file conflicted, per the explicit conditional verification instruction.
 <!-- SECTION:NOTES:END -->
