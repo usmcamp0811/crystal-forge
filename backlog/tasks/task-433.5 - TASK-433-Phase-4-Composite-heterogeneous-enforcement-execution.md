@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-26 03:07'
+updated_date: '2026-08-26 03:19'
 labels:
   - design-parity
   - policy
@@ -76,6 +76,8 @@ nix build .#checks.x86_64-linux.server-regressions --no-link
 10. Run all required server/Web UI/Nix/SQLx/browser/flake gates. Then stop coding for independent requirements, data integrity, performance, UI/error-state, E2E, and regression-adequacy review. Resolve every P0/P1/P2 before checking exactly AC1-AC3, moving TASK-433.5 to Review, updating MR !318, committing/pushing, and stopping before Phase 5.
 
 Independent evaluator/security review remediation (2026-08-25): keep changes limited to evaluator/domain backend files. Replace invalid option lookup with strict quoted-path parsing plus fold-based target config traversal; make bulk/standalone policy expressions share canonical `config`; contain malformed composite custom_eval by authoritative Nix parse validation and a static Error result rather than embedding invalid syntax; compare exact requested and Nix-resolved immutable revisions and fix flake rev replacement; derive eval_passed outcomes from terminal evaluation/error helpers; add a dedicated Nix string encoder and direct environment.systemPackages pname contract/validation; classify malformed enforced policy data as deterministic while DB/infrastructure loader failures remain transient and restore legacy conflict behavior. Verify with cargo fmt, focused CARGO_BUILD_JOBS=1 Rust tests, and ignored authoritative Nix evaluation tests.
+
+Review synchronization: fetch current `origin/dev`, merge it into the dedicated TASK-433 branch, resolve every conflicting file manually while preserving `origin/dev` backlog/task state outside TASK-433, verify no TASK-422/TASK-432 branch contamination, review enforcement mutation/delivery semantics, run focused server regressions and only rerun composite browser workflows if relevant UI/test files conflict, then update TASK-433.5/MR !318, commit, push, and leave exact-head CI running. No Phase-4 feature changes and no Phase 5.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
