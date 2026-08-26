@@ -1,9 +1,12 @@
 use dioxus::prelude::*;
 
 use crate::Route;
+#[cfg(test)]
+use crate::api::models::CompositeAssessmentRuleResult;
 use crate::api::models::{
     ComplianceBundleSummary, ComplianceControlEvidence, ComplianceControlStatus,
     ComplianceEvidenceResponse, ComplianceRollupTotals, ComplianceSystemRollup,
+    CompositeAssessmentResult,
 };
 use crate::components::icon::{Icon, IconName};
 
@@ -868,6 +871,58 @@ fn control_status_color(status: &ComplianceControlStatus) -> &'static str {
     }
 }
 
+fn composite_status_presentation(status: &str) -> (&'static str, &'static str) {
+    match status {
+        "pass" => ("Pass", "#34d399"),
+        "fail" => ("Fail", "#f87171"),
+        "error" => ("Error", "#f43f5e"),
+        "not_checked" => ("Not checked", "#94a3b8"),
+        _ => ("Unknown", "#64748b"),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompositePresentationState {
+    NoAssessment,
+    Pending,
+    Partial,
+    Complete,
+    Error,
+}
+
+fn composite_presentation_state(
+    expected: bool,
+    result: Option<&CompositeAssessmentResult>,
+) -> Option<CompositePresentationState> {
+    let Some(result) = result else {
+        return expected.then_some(CompositePresentationState::NoAssessment);
+    };
+    if result.overall_status == "error" {
+        return Some(CompositePresentationState::Error);
+    }
+    let unchecked = result
+        .rule_results
+        .iter()
+        .filter(|outcome| outcome.status == "not_checked")
+        .count();
+    Some(if unchecked == result.rule_results.len() {
+        CompositePresentationState::Pending
+    } else if unchecked > 0 {
+        CompositePresentationState::Partial
+    } else {
+        CompositePresentationState::Complete
+    })
+}
+
+fn composite_is_partial(result: &CompositeAssessmentResult) -> bool {
+    let unchecked = result
+        .rule_results
+        .iter()
+        .filter(|outcome| outcome.status == "not_checked")
+        .count();
+    unchecked > 0 && unchecked < result.rule_results.len()
+}
+
 #[derive(Props, Clone, PartialEq)]
 struct ControlEvidenceCardProps {
     control: ComplianceControlEvidence,
@@ -972,11 +1027,67 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
             ComplianceControlStatus::Error => rsx! {
                 div { class: "sd-callout sd-callout-danger",
                     div { style: "font-size:12px;",
-                        strong { "Evaluator error. " }
-                        "The control could not be evaluated. Check system logs for details."
+                        strong { "Assessment error. " }
+                        "The control could not be assessed in its required phase. Check system logs for details."
                     }
                 }
             },
+        }
+
+
+        if let Some(state) = composite_presentation_state(
+            props.control.composite_expected,
+            props.control.composite_result.as_ref(),
+        ) {
+            if state == CompositePresentationState::NoAssessment {
+                div { class: "sd-callout sd-callout-warn", "data-testid": "composite-no-assessment",
+                    strong { "No composite assessment. " }
+                    "No result exists for this exact system, target, policy version, and effective policy set."
+                }
+            }
+        }
+
+        if let Some(result) = props.control.composite_result.as_ref() {
+            {
+                let (overall_label, overall_color) = composite_status_presentation(&result.overall_status);
+                let state = composite_presentation_state(true, Some(result));
+                rsx! {
+                    div { "data-testid": "composite-assessment", style: "display:flex;flex-direction:column;gap:8px;",
+                        div { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;",
+                            h3 { style: "font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);margin:0;font-weight:600;", "Constituent outcomes" }
+                            span { class: "chip", "data-testid": "composite-overall-status", style: "color:{overall_color};border:1px solid {overall_color};", "Overall · {overall_label}" }
+                        }
+                        if composite_is_partial(result) {
+                            div { class: "sd-callout sd-callout-warn", "data-testid": "composite-partial", "Partial assessment. Completed outcomes are shown with the remaining expected phases as Not checked." }
+                        }
+                        match state {
+                            Some(CompositePresentationState::Pending) => rsx! { div { class: "sd-callout", "data-testid": "composite-pending", "Assessment pending. Every expected phase result is Not checked." } },
+                            Some(CompositePresentationState::Error) => rsx! { div { class: "sd-callout sd-callout-danger", "data-testid": "composite-error", "Composite assessment error. At least one constituent phase returned Error." } },
+                            _ => rsx! {},
+                        }
+                        for outcome in result.rule_results.iter() {
+                            {
+                                let (label, color) = composite_status_presentation(&outcome.status);
+                                let evidence = serde_json::to_string(&outcome.evidence).unwrap_or_else(|_| "null".to_string());
+                                rsx! {
+                                    div { "data-testid": "composite-rule-outcome", style: "padding:10px 12px;border:1px solid var(--cf-divider);border-radius:8px;background:var(--cf-subtle-bg);display:flex;flex-direction:column;gap:5px;",
+                                        div { style: "display:flex;align-items:center;gap:7px;flex-wrap:wrap;",
+                                            span { class: "mono", style: "font-size:11px;font-weight:700;", "{outcome.kind}" }
+                                            span { class: "chip chip-neutral", style: "font-size:9px;", "{outcome.phase}" }
+                                            span { class: "chip", "data-testid": "composite-rule-status", style: "font-size:9px;color:{color};border:1px solid {color};", "{label}" }
+                                            span { class: "mono", style: "font-size:9px;color:var(--cf-text-muted);", "{outcome.rule_id}" }
+                                        }
+                                        div { style: "font-size:11.5px;color:var(--cf-text-secondary);", "{outcome.detail}" }
+                                        if outcome.evidence != serde_json::json!({}) && !outcome.evidence.is_null() {
+                                            pre { style: "margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:10px;color:var(--cf-text-muted);", "{evidence}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Evidence items
@@ -1055,6 +1166,8 @@ mod tests {
             summary: String::new(),
             evidence_items: Vec::new(),
             framework_mapping: String::new(),
+            composite_result: None,
+            composite_expected: false,
             control_family: Some("AC".to_string()),
             cmmc_level,
             cis_section: cis_section.map(str::to_string),
@@ -1083,6 +1196,83 @@ mod tests {
             evidence_grouping(Some("Internal baseline")),
             EvidenceGrouping::Flat
         );
+    }
+
+    #[test]
+    fn constituent_result_statuses_have_distinct_presentations() {
+        let presentations =
+            ["pass", "fail", "not_checked", "error"].map(composite_status_presentation);
+        assert_eq!(
+            presentations.map(|item| item.0),
+            ["Pass", "Fail", "Not checked", "Error"]
+        );
+        assert_eq!(
+            presentations
+                .iter()
+                .map(|item| item.1)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            4
+        );
+    }
+
+    #[test]
+    fn composite_states_distinguish_absent_pending_partial_complete_and_error() {
+        assert_eq!(
+            composite_presentation_state(true, None),
+            Some(CompositePresentationState::NoAssessment)
+        );
+        assert_eq!(composite_presentation_state(false, None), None);
+
+        let assessment = |overall: &str, statuses: &[&str]| CompositeAssessmentResult {
+            assessment_id: Some(Uuid::new_v4()),
+            evaluation_attempt_id: None,
+            policy_version_id: Uuid::new_v4(),
+            target_store_path: Some("/nix/store/test-system".to_string()),
+            effective_set_digest: Some("set".to_string()),
+            effective_config_digest: Some("config".to_string()),
+            overall_status: overall.to_string(),
+            rule_results: statuses
+                .iter()
+                .map(|status| CompositeAssessmentRuleResult {
+                    rule_id: Uuid::new_v4(),
+                    kind: "nixos_option".to_string(),
+                    phase: "evaluation".to_string(),
+                    status: (*status).to_string(),
+                    detail: String::new(),
+                    evidence: serde_json::json!({}),
+                })
+                .collect(),
+        };
+        assert_eq!(
+            composite_presentation_state(true, Some(&assessment("not_checked", &["not_checked"]))),
+            Some(CompositePresentationState::Pending)
+        );
+        assert_eq!(
+            composite_presentation_state(
+                true,
+                Some(&assessment("not_checked", &["pass", "not_checked"]))
+            ),
+            Some(CompositePresentationState::Partial)
+        );
+        assert_eq!(
+            composite_presentation_state(true, Some(&assessment("pass", &["pass"]))),
+            Some(CompositePresentationState::Complete)
+        );
+        assert_eq!(
+            composite_presentation_state(true, Some(&assessment("error", &["error"]))),
+            Some(CompositePresentationState::Error)
+        );
+        let partial_error = assessment("error", &["error", "not_checked"]);
+        assert_eq!(
+            composite_presentation_state(true, Some(&partial_error)),
+            Some(CompositePresentationState::Error)
+        );
+        assert!(composite_is_partial(&partial_error));
+        assert!(!composite_is_partial(&assessment(
+            "not_checked",
+            &["not_checked"]
+        )));
     }
 
     #[test]

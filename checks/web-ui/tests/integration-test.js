@@ -21,10 +21,18 @@ const { chromium } = require("playwright");
 const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
+const { isDeepStrictEqual } = require("util");
 
 const baseUrl = process.argv[2] || "http://127.0.0.1:3000";
 const outputDir = process.argv[3] || "/tmp/screenshots";
 const apiBaseUrl = process.env.CF_UI_API_BASE_URL || baseUrl;
+
+function runFixtureSql(sql) {
+  const encoded = Buffer.from(sql, "utf8").toString("base64");
+  return execSync(`printf %s ${encoded} | base64 -d | sudo -u postgres psql -d crystal_forge -v ON_ERROR_STOP=1 -A -t -F '|'`, {
+    encoding: "utf8",
+  }).trim();
+}
 
 // ── Node.js 24 safety net ──────────────────────────────────────────────────
 // Node.js 24 treats unhandled promise rejections as fatal by default.  When a
@@ -7372,24 +7380,18 @@ const steps = [
       await page.getByPlaceholder("e.g. canary-25").fill(policyName);
       await page.getByTestId("policy-editor-tab-enforcement").click();
 
-      // ── Add Rule must only expose kinds Phase 2 can persist ─────────
+      // ── Add Rule exposes exactly the complete Phase 4 matrix ─────────
       const addRule = page.getByTestId("policy-editor-add-rule");
       const addRuleOptions = await addRule
         .locator("option")
         .evaluateAll((els) => els.map((e) => e.value));
-      const expectedAddable = ["packages_installed", "nixos_option", "custom_eval", "cve_block"];
+      const expectedAddable = ["nixos_option", "packages_installed", "packages_absent", "custom_eval", "cve_block", "eval_passed", "pin_required", "time_window"];
       for (const kind of expectedAddable) {
         if (!addRuleOptions.includes(kind)) {
           throw new Error(`Add Rule must offer the persistable kind ${kind}`);
         }
       }
-      const notAddable = [
-        "eval_passed",
-        "build_succeeded",
-        "time_window",
-        "approval_required",
-        "rollout_percent",
-      ];
+      const notAddable = ["build_succeeded", "approval_required", "rollout_percent"];
       for (const kind of notAddable) {
         if (addRuleOptions.includes(kind)) {
           throw new Error(`Add Rule must NOT offer the unsupported kind ${kind}`);
@@ -7403,7 +7405,7 @@ const steps = [
       await expressionField.fill(expression);
       const recommendationsBefore = await page.getByTestId("policy-enforcement-recommendations").innerText();
 
-      // ── Pipeline recommendations are limited to persistable kinds ──────
+      // ── Recommendations are suggestions from the same complete matrix ──
       await page.getByTestId("policy-editor-tab-details").click();
       await page.getByTestId("policy-category-pipeline").click();
       await page.getByTestId("policy-editor-tab-enforcement").click();
@@ -7411,23 +7413,20 @@ const steps = [
       if (!pipelineRec.includes("CVE gate")) {
         throw new Error(`Pipeline must recommend the CVE gate, got: ${pipelineRec}`);
       }
-      if (pipelineRec.includes("Eval must pass")) {
-        throw new Error("Pipeline must not recommend the unsupported Eval must pass kind");
+      if (!pipelineRec.includes("Eval must pass") || !pipelineRec.includes("Pinned commit required")) {
+        throw new Error(`Pipeline must recommend its complete eval/pin gates, got: ${pipelineRec}`);
       }
       if (pipelineRec.includes("Build must succeed")) {
         throw new Error("Pipeline must not recommend the unsupported Build must succeed kind");
       }
 
-      // ── Rollout has no currently persistable category-specific recs ────
+      // ── Rollout recommends the complete time-window gate only ──────────
       await page.getByTestId("policy-editor-tab-details").click();
       await page.getByTestId("policy-category-rollout").click();
       await page.getByTestId("policy-editor-tab-enforcement").click();
-      await assertVisible(
-        page.getByTestId("policy-enforcement-no-recommendations"),
-        "Rollout must show the no-current-recommendation notice",
-      );
       const rolloutRec = await page.getByTestId("policy-enforcement-recommendations").innerText();
-      for (const bad of ["Time window", "Approval required", "Canary rollout"]) {
+      if (!rolloutRec.includes("Time window")) throw new Error(`Rollout must recommend Time window, got: ${rolloutRec}`);
+      for (const bad of ["Approval required", "Canary rollout", "Build must succeed"]) {
         if (rolloutRec.includes(bad)) {
           throw new Error(`Rollout must not recommend the unsupported kind ${bad}`);
         }
@@ -7752,7 +7751,244 @@ By using this IS (which includes any device attached to this IS), you consent to
     },
   },
   {
-     name: "20ad-stig-nixos-assertion-roundtrip",
+    name: "20ab2-policy-editor-eight-kind-roundtrip",
+    description: "All eight exposed composite kinds author, persist, reload, and edit without exposing incomplete controls",
+    action: async (page) => {
+      await suppressOnboardingCoach(page);
+      await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+      await collapseOnboardingCoach(page);
+      const name = `UI eight-kind composite ${Date.now()}`;
+      await page.getByRole("button", { name: /New custom policy/i }).first().click();
+      await page.getByPlaceholder("e.g. canary-25").fill(name);
+      await page.getByTestId("policy-editor-tab-enforcement").click();
+      const add = page.getByTestId("policy-editor-add-rule");
+      const expectedKinds = ["nixos_option", "packages_installed", "packages_absent", "custom_eval", "cve_block", "eval_passed", "pin_required", "time_window"];
+      const options = await add.locator("option").evaluateAll((nodes) => nodes.map((node) => node.value).filter(Boolean));
+      if (JSON.stringify(options) !== JSON.stringify(expectedKinds)) throw new Error(`Unexpected exposed kinds: ${JSON.stringify(options)}`);
+      for (const hidden of ["approval_required", "rollout_percent", "build_succeeded"]) {
+        if (options.includes(hidden)) throw new Error(`Incomplete kind ${hidden} must remain hidden`);
+      }
+      for (const kind of expectedKinds) await add.selectOption(kind);
+
+      await assertVisible(page.getByRole("heading", { name: "Assertions & gate rules (8)" }), "Expected enforcement rules to have a semantic section heading");
+      await assertAttribute(add, "aria-label", "Add enforcement rule", "Expected the rule chooser to have an accessible name");
+      await assertVisible(page.getByText(/Guidance only\. Suggestions never add, remove, or restrict rules\./), "Expected recommendation guidance to remain explicitly non-authoritative");
+      for (const hiddenLabel of ["Approval required", "Rollout percent", "Build must succeed"]) {
+        if (await page.getByRole("dialog").getByText(hiddenLabel, { exact: false }).count()) {
+          throw new Error(`Hidden incomplete kind leaked into the policy editor: ${hiddenLabel}`);
+        }
+      }
+
+      const createButton = page.getByRole("button", { name: "Create policy", exact: true });
+      await page.getByTestId("policy-rule-packages-installed-1").fill("-openssh");
+      await assertDisabled(createButton, "Invalid package pname syntax must block authoring");
+      await assertVisible(page.getByText(/Package pnames must start with an ASCII letter or digit/), "Expected client pname syntax validation");
+      await page.getByTestId("policy-rule-packages-installed-1").fill("openssh, auditd");
+      await page.getByTestId("policy-rule-packages-absent-2").fill("a".repeat(256));
+      await assertDisabled(createButton, "Package pnames over 255 bytes must block authoring");
+      await assertVisible(page.getByText(/Package pnames must be between 1 and 255 bytes/), "Expected client pname length validation");
+      await page.getByTestId("policy-rule-packages-absent-2").fill("telnet, rsh");
+      await page.getByTestId("policy-rule-custom-eval-expr-3").fill("config.networking.firewall.enable && (true");
+      await assertDisabled(createButton, "Deterministically malformed custom Nix must block authoring");
+      await assertVisible(page.getByText("Rule 4: Custom Nix expression has unclosed delimiters.", { exact: true }), "Expected conservative custom_eval syntax guard");
+      await assertVisible(page.getByText(/server's Nix parser performs authoritative syntax validation/), "Expected clear server-parser fallback guidance");
+
+      await page.getByTestId("policy-rule-nixos-path-0").fill("services.crystalForge.exact");
+      await page.getByTestId("policy-rule-nixos-value-0").fill("enabled");
+      await page.getByTestId("policy-rule-packages-installed-1").fill("openssh, auditd");
+      await page.getByTestId("policy-rule-packages-absent-2").fill("telnet, rsh");
+      await page.getByTestId("policy-rule-custom-eval-expr-3").fill("config.networking.firewall.enable");
+      await page.getByTestId("policy-rule-cve-severity-4").selectOption("high");
+      await page.getByTestId("policy-rule-cve-max-4").fill("2");
+      await page.getByTestId("policy-rule-time-days-7").fill("mon,wed,fri");
+      await page.getByTestId("policy-rule-time-from-7").fill("22:30");
+      await page.getByTestId("policy-rule-time-to-7").fill("02:15");
+      await page.getByTestId("policy-rule-timezone-7").fill("America/Los_Angeles");
+
+      const createPromise = page.waitForResponse((response) => response.url().includes("/api/v1/deployment-policies") && response.request().method() === "POST");
+      await page.getByRole("button", { name: "Create policy", exact: true }).click();
+      const createResponse = await createPromise;
+      if (createResponse.status() !== 201) throw new Error(`Expected create 201, got ${createResponse.status()}`);
+      const created = await createResponse.json();
+      const sent = JSON.parse(createResponse.request().postData() || "{}");
+      if (sent.policy_type !== "composite" || JSON.stringify(sent.config.rules.map((rule) => rule.kind)) !== JSON.stringify(expectedKinds)) {
+        throw new Error(`Eight-kind order was not persisted: ${JSON.stringify(sent.config)}`);
+      }
+      const ids = sent.config.rules.map((rule) => rule.id);
+      if (new Set(ids).size !== 8) throw new Error(`Rule IDs are not stable unique identities: ${JSON.stringify(ids)}`);
+      const initialConfigs = [
+        { path: "services.crystalForge.exact", operator: "==", value_type: "unknown", value: "enabled" },
+        { packages: ["openssh", "auditd"] },
+        { packages: ["telnet", "rsh"] },
+        { expression: "config.networking.firewall.enable", message: "SSH must be enabled" },
+        { severity: "high", max_allowed: 2 },
+        {},
+        {},
+        { days: ["mon", "wed", "fri"], from: "22:30", to: "02:15", tz: "America/Los_Angeles" },
+      ];
+      if (!isDeepStrictEqual(sent.config.rules.map((rule) => rule.config), initialConfigs)) {
+        throw new Error(`Initial typed configs were not fully serialized: ${JSON.stringify(sent.config.rules)}`);
+      }
+
+      const persistedAfterCreate = await page.evaluate(async ({ base, id }) => {
+        const response = await fetch(`${base}/api/v1/deployment-policies/${id}`, { credentials: "include" });
+        return { status: response.status, body: await response.json() };
+      }, { base: apiBaseUrl, id: created.id });
+      if (persistedAfterCreate.status !== 200 || JSON.stringify(persistedAfterCreate.body.config) !== JSON.stringify(sent.config)) {
+        throw new Error(`Backend create read-back diverged: ${JSON.stringify(persistedAfterCreate)}`);
+      }
+
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await collapseOnboardingCoach(page);
+      await filterPolicyCatalog(page, name);
+      const card = page.locator(`[data-policy-card="true"][data-policy-id="${created.id}"]`);
+      await card.getByRole("button", { name: "Edit", exact: true }).click();
+      await page.getByTestId("policy-editor-tab-enforcement").click();
+      const hydratedRows = await page.locator('[data-testid^="policy-rule-row-"]').evaluateAll((rows) => rows.map((row) => ({ id: row.dataset.ruleId, kind: row.dataset.ruleKind })));
+      if (JSON.stringify(hydratedRows) !== JSON.stringify(expectedKinds.map((kind, index) => ({ id: ids[index], kind })))) {
+        throw new Error(`First reload changed rule identity/order: ${JSON.stringify(hydratedRows)}`);
+      }
+      const firstReloadValues = {
+        path: await page.getByTestId("policy-rule-nixos-path-0").inputValue(),
+        option: await page.getByTestId("policy-rule-nixos-value-0").inputValue(),
+        installed: await page.getByTestId("policy-rule-packages-installed-1").inputValue(),
+        absent: await page.getByTestId("policy-rule-packages-absent-2").inputValue(),
+        expression: await page.getByTestId("policy-rule-custom-eval-expr-3").inputValue(),
+        message: await page.getByTestId("policy-rule-custom-eval-message-3").inputValue(),
+        severity: await page.getByTestId("policy-rule-cve-severity-4").inputValue(),
+        maximum: await page.getByTestId("policy-rule-cve-max-4").inputValue(),
+        days: await page.getByTestId("policy-rule-time-days-7").inputValue(),
+        from: await page.getByTestId("policy-rule-time-from-7").inputValue(),
+        to: await page.getByTestId("policy-rule-time-to-7").inputValue(),
+        timezone: await page.getByTestId("policy-rule-timezone-7").inputValue(),
+      };
+      const expectedFirstReload = { path: "services.crystalForge.exact", option: "enabled", installed: "openssh, auditd", absent: "telnet, rsh", expression: "config.networking.firewall.enable", message: "SSH must be enabled", severity: "high", maximum: "2", days: "mon,wed,fri", from: "22:30", to: "02:15", timezone: "America/Los_Angeles" };
+      if (JSON.stringify(firstReloadValues) !== JSON.stringify(expectedFirstReload)) throw new Error(`First reload did not hydrate every typed config: ${JSON.stringify(firstReloadValues)}`);
+
+      // Edit every kind with configurable fields. eval_passed and pin_required
+      // intentionally have empty typed configs and are verified above/below.
+      await page.getByTestId("policy-rule-nixos-path-0").fill('environment.etc."issue".text');
+      await page.getByTestId("policy-rule-nixos-value-0").fill("authorized users only");
+      await page.getByTestId("policy-rule-packages-installed-1").fill("openssh, auditd, aide");
+      await page.getByTestId("policy-rule-packages-absent-2").fill("telnet");
+      await page.getByTestId("policy-rule-custom-eval-expr-3").fill("config.networking.firewall.enable == true");
+      await page.getByTestId("policy-rule-custom-eval-message-3").fill("Firewall must remain enabled");
+      await page.getByTestId("policy-rule-cve-severity-4").selectOption("critical");
+      await page.getByTestId("policy-rule-cve-max-4").fill("0");
+      await page.getByTestId("policy-rule-time-days-7").fill("sat,sun");
+      await page.getByTestId("policy-rule-time-from-7").fill("01:00");
+      await page.getByTestId("policy-rule-time-to-7").fill("03:00");
+      await page.getByTestId("policy-rule-timezone-7").fill("UTC");
+      const updatePromise = page.waitForResponse((response) => response.url().includes(`/api/v1/deployment-policies/${created.id}`) && response.request().method() === "PUT");
+      await page.getByRole("button", { name: "Save changes", exact: true }).click();
+      const updateResponse = await updatePromise;
+      if (updateResponse.status() !== 200) throw new Error(`Expected update 200, got ${updateResponse.status()}`);
+      const expectedEditedConfigs = [
+        { path: 'environment.etc."issue".text', operator: "==", value_type: "unknown", value: "authorized users only" },
+        { packages: ["openssh", "auditd", "aide"] },
+        { packages: ["telnet"] },
+        { expression: "config.networking.firewall.enable == true", message: "Firewall must remain enabled" },
+        { severity: "critical", max_allowed: 0 },
+        {},
+        {},
+        { days: ["sat", "sun"], from: "01:00", to: "03:00", tz: "UTC" },
+      ];
+      const persistedAfterEdit = await page.evaluate(async ({ base, id }) => {
+        const response = await fetch(`${base}/api/v1/deployment-policies/${id}`, { credentials: "include" });
+        return { status: response.status, body: await response.json() };
+      }, { base: apiBaseUrl, id: created.id });
+      const backendRules = persistedAfterEdit.body?.config?.rules || [];
+      if (persistedAfterEdit.status !== 200 || !isDeepStrictEqual(backendRules.map((rule) => rule.id), ids) || !isDeepStrictEqual(backendRules.map((rule) => rule.kind), expectedKinds) || !isDeepStrictEqual(backendRules.map((rule) => rule.config), expectedEditedConfigs)) {
+        throw new Error(`Backend edit read-back lost IDs/order/typed configs: ${JSON.stringify(persistedAfterEdit)}`);
+      }
+      const versionId = persistedAfterEdit.body.current_version_id;
+      const exports = await page.evaluate(async ({ base, versionId }) => {
+        const exportFormat = async (format) => {
+          const response = await fetch(`${base}/api/v1/policies/interchange/export`, {
+            method: "POST",
+            credentials: "include",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ policy_version_ids: [versionId], format }),
+          });
+          return { status: response.status, body: await response.text() };
+        };
+        return { json: await exportFormat("json"), toml: await exportFormat("toml") };
+      }, { base: apiBaseUrl, versionId });
+      for (const [format, exported] of Object.entries(exports)) {
+        if (exported.status !== 200) throw new Error(`${format} eight-kind export failed: ${exported.status} ${exported.body}`);
+        for (const kind of expectedKinds) {
+          if (!exported.body.includes(kind)) throw new Error(`${format} export omitted ${kind}`);
+        }
+        for (const id of ids) {
+          if (!exported.body.includes(id)) throw new Error(`${format} export omitted stable rule id ${id}`);
+        }
+      }
+
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await collapseOnboardingCoach(page);
+      await filterPolicyCatalog(page, name);
+      const editedCard = page.locator(`[data-policy-card="true"][data-policy-id="${created.id}"]`);
+      await editedCard.getByRole("button", { name: "Edit", exact: true }).click();
+      await page.getByTestId("policy-editor-tab-enforcement").click();
+      const secondRows = await page.locator('[data-testid^="policy-rule-row-"]').evaluateAll((rows) => rows.map((row) => ({ id: row.dataset.ruleId, kind: row.dataset.ruleKind })));
+      if (JSON.stringify(secondRows) !== JSON.stringify(expectedKinds.map((kind, index) => ({ id: ids[index], kind })))) throw new Error(`Second reload changed stable IDs/order: ${JSON.stringify(secondRows)}`);
+      const secondValues = [
+        await page.getByTestId("policy-rule-nixos-path-0").inputValue(),
+        await page.getByTestId("policy-rule-nixos-value-0").inputValue(),
+        await page.getByTestId("policy-rule-packages-installed-1").inputValue(),
+        await page.getByTestId("policy-rule-packages-absent-2").inputValue(),
+        await page.getByTestId("policy-rule-custom-eval-expr-3").inputValue(),
+        await page.getByTestId("policy-rule-custom-eval-message-3").inputValue(),
+        await page.getByTestId("policy-rule-cve-severity-4").inputValue(),
+        await page.getByTestId("policy-rule-cve-max-4").inputValue(),
+        await page.getByTestId("policy-rule-time-days-7").inputValue(),
+        await page.getByTestId("policy-rule-time-from-7").inputValue(),
+        await page.getByTestId("policy-rule-time-to-7").inputValue(),
+        await page.getByTestId("policy-rule-timezone-7").inputValue(),
+      ];
+      const expectedSecondValues = ['environment.etc."issue".text', "authorized users only", "openssh, auditd, aide", "telnet", "config.networking.firewall.enable == true", "Firewall must remain enabled", "critical", "0", "sat,sun", "01:00", "03:00", "UTC"];
+      if (JSON.stringify(secondValues) !== JSON.stringify(expectedSecondValues)) throw new Error(`Second backend reload lost edited typed configs: ${JSON.stringify(secondValues)}`);
+      await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
+      await editedCard.click();
+      const summaryDrawer = page.getByRole("dialog", { name: "Policy detail" });
+      await assertVisible(summaryDrawer.getByText("Deploy window: 01:00-03:00", { exact: true }), "Expected nested time_window config in the reloaded policy summary");
+      await summaryDrawer.getByRole("button", { name: "Close", exact: true }).click();
+
+      const opaqueConfig = {
+        schema_version: 1,
+        mode: "all",
+        rules: [
+          { id: crypto.randomUUID(), kind: "eval_passed", config: {} },
+          { id: crypto.randomUUID(), kind: "future_kind", config: { must_survive: true } },
+        ],
+      };
+      runFixtureSql(`
+        UPDATE deployment_policy_versions
+        SET config = $fixture$${JSON.stringify(opaqueConfig)}$fixture$::jsonb
+        WHERE id = (
+          SELECT current_draft_version_id FROM deployment_policies WHERE id = '${created.id}'::uuid
+        );
+        UPDATE deployment_policies
+        SET config = $fixture$${JSON.stringify(opaqueConfig)}$fixture$::jsonb
+        WHERE id = '${created.id}'::uuid;
+      `);
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await collapseOnboardingCoach(page);
+      await filterPolicyCatalog(page, name);
+      const opaqueCard = page.locator(`[data-policy-card="true"][data-policy-id="${created.id}"]`);
+      await opaqueCard.getByRole("button", { name: "Edit", exact: true }).click();
+      await page.getByTestId("policy-editor-tab-enforcement").click();
+      await assertVisible(page.getByTestId("policy-enforcement-opaque"), "Mixed opaque composite must display its fail-closed protection notice");
+      if (await page.locator('[data-testid^="policy-rule-row-"]').count() !== 0) {
+        throw new Error("Opaque composite must not expose a misleading known-rule subset");
+      }
+      await assertDisabled(page.getByRole("button", { name: "Save changes", exact: true }), "Opaque composite must remain read-only");
+      await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
+      await page.evaluate(async ({ base, id }) => fetch(`${base}/api/v1/deployment-policies/${id}`, { method: "DELETE", credentials: "include" }), { base: apiBaseUrl, id: created.id });
+    },
+  },
+  {
+    name: "20ad-stig-nixos-assertion-roundtrip",
      description: "STIG auditd assertions remain structured through refinement and import serialization",
      action: async (page) => {
        const auditdXccdf = Buffer.from(`<?xml version="1.0" encoding="utf-8"?>
@@ -9843,123 +10079,368 @@ security.audit.enable = true;</fixtext>
   },
   {
     name: "29b-compliance-evidence-drawer",
-    description: "Compliance evidence drawer opens and renders control evidence",
+    description: "Compliance evidence renders real persisted mixed composite outcomes with normalized missing rules",
     action: async (page) => {
-      const bundleId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-      const systemId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-      const envId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-      const policyId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+      await suppressOnboardingCoach(page);
+      await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+      const fixtureName = `UI persisted mixed composite ${Date.now()}`;
+      const systemId = crypto.randomUUID();
+      const assessmentId = crypto.randomUUID();
+      const fixtureStorePath = `/nix/store/00000000000000000000000000000000-cf-ui-${systemId}`;
+      const rules = [
+        { id: crypto.randomUUID(), kind: "nixos_option", config: { path: "networking.firewall.enable", operator: "==", value_type: "boolean", value: true } },
+        { id: crypto.randomUUID(), kind: "packages_absent", config: { packages: ["telnet"] } },
+        { id: crypto.randomUUID(), kind: "custom_eval", config: { expression: "config.example.nonBoolean", message: "Expression must return a boolean" } },
+        { id: crypto.randomUUID(), kind: "cve_block", config: { severity: "critical", max_allowed: 0 } },
+        { id: crypto.randomUUID(), kind: "time_window", config: { days: ["mon", "tue", "wed", "thu", "fri"], from: "09:00", to: "17:00", tz: "UTC" } },
+      ];
+      const config = { schema_version: 1, mode: "all", rules };
+      const target = runFixtureSql(`
+        WITH selected_environment AS (
+          SELECT id FROM environments ORDER BY created_at NULLS LAST, id LIMIT 1
+        ), selected_commit AS (
+          SELECT id FROM commits ORDER BY id LIMIT 1
+        ), inserted_derivation AS (
+          INSERT INTO derivations (
+            commit_id, derivation_type, derivation_name, derivation_path,
+            store_path, expected_store_path, status_id, attempt_count,
+            completed_at, policy_results
+          )
+          SELECT commit.id, 'nixos', $name$${fixtureName}$name$,
+                 $path$${fixtureStorePath}$path$, $path$${fixtureStorePath}$path$,
+                 $path$${fixtureStorePath}$path$, 10, 0, now(), '{}'::jsonb
+          FROM selected_commit commit
+          RETURNING id, store_path
+        ), inserted_system AS (
+          INSERT INTO systems (id, hostname, environment_id, is_active, public_key, derivation)
+          SELECT '${systemId}'::uuid, '${fixtureName}', environment.id, true,
+                  'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBrowserFixtureKey', derivation.store_path
+          FROM selected_environment environment CROSS JOIN inserted_derivation derivation
+          RETURNING id, hostname, environment_id
+        ), inserted_state AS (
+          INSERT INTO system_states (hostname, change_reason, store_path, generation, timestamp)
+          SELECT system.hostname, 'cf_deployment', derivation.store_path, 1, CURRENT_TIMESTAMP
+          FROM inserted_system system CROSS JOIN inserted_derivation derivation
+          RETURNING store_path
+        )
+        SELECT system.id, derivation.id, state.store_path
+        FROM inserted_system system
+        CROSS JOIN inserted_derivation derivation
+        CROSS JOIN inserted_state state;
+      `).split("|");
+      if (target.length !== 3 || !target[2]) {
+        throw new Error(`Could not create persisted composite target fixture: ${JSON.stringify(target)}`);
+      }
+      const [, derivationId, targetStorePath] = target;
 
-      const bundle = {
-        id: bundleId,
-        name: "NIST 800-53 High",
-        framework: "NIST 800-53",
-        version: "rev5",
-        description: "NIST 800-53 rev5 High baseline.",
-        layer: "fleet",
-        owner: "Platform Security",
-        last_review: new Date().toISOString(),
-        policy_ids: [policyId],
-        required_envs: [{ id: envId, name: "production", color_hex: "#3b82f6" }],
-        control_count: 1,
-        environment_count: 1,
+      const api = async (path, options = {}) => {
+        const response = await page.evaluate(async ({ base, path, options }) => {
+          const result = await fetch(`${base}${path}`, {
+            credentials: "include",
+            ...options,
+            headers: { "content-type": "application/json", ...(options.headers || {}) },
+          });
+          return { status: result.status, body: await result.text() };
+        }, { base: apiBaseUrl, path, options });
+        let body;
+        try { body = JSON.parse(response.body); } catch { body = response.body; }
+        if (response.status < 200 || response.status >= 300) {
+          throw new Error(`${options.method || "GET"} ${path} returned ${response.status}: ${response.body}`);
+        }
+        return body;
       };
 
-      await page.route("**/api/v1/compliance/bundles*", async (route) => {
-        if (route.request().method() === "GET" && !route.request().url().includes("/systems")) {
-          await route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify([bundle]),
-          });
-        } else {
-          await route.continue();
-        }
+      const policy = await api("/api/v1/deployment-policies", {
+        method: "POST",
+        body: JSON.stringify({
+          name: fixtureName,
+          description: "Real persisted mixed constituent browser fixture",
+          policy_type: "composite",
+          config,
+          enabled: true,
+          category: "security",
+          severity: "high",
+          srg_ids: [],
+          cci_ids: [],
+          evidence_specs: [],
+          requirement_mappings: [],
+        }),
+      });
+      const persistedPolicy = await api(`/api/v1/deployment-policies/${policy.id}`);
+      const policyVersionId = persistedPolicy.current_version_id;
+      if (!policyVersionId) throw new Error(`Created policy has no current version: ${JSON.stringify(persistedPolicy)}`);
+      await api(`/api/v1/policy-versions/${policyVersionId}/trust`, {
+        method: "POST",
+        body: JSON.stringify({ trusted: true, review_note: "web-ui persisted outcome fixture" }),
+      });
+      await api(`/api/v1/policy-versions/${policyVersionId}/publish`, {
+        method: "POST",
+        body: JSON.stringify({ expected_semantic_digest: null }),
       });
 
-      await page.route(`**/api/v1/compliance/bundles/${bundleId}/systems*`, async (route) => {
+      const bundle = await api("/api/v1/compliance/bundles", {
+        method: "POST",
+        body: JSON.stringify({
+          name: fixtureName,
+          framework: "Browser persisted outcomes",
+          version: "1",
+          description: "Real persisted mixed composite outcome fixture",
+          layer: "system",
+          required_envs: [],
+          policy_ids: [policy.id],
+          requirement_version_ids: [],
+        }),
+      });
+      const bundleVersionId = bundle.current_draft_version_id;
+      if (!bundleVersionId) throw new Error(`Created bundle has no draft version: ${JSON.stringify(bundle)}`);
+      await api(`/api/v1/compliance/bundle-versions/${bundleVersionId}/trust`, {
+        method: "POST",
+        body: JSON.stringify({ trusted: true, review_note: "web-ui persisted outcome fixture" }),
+      });
+      await api(`/api/v1/compliance/bundle-versions/${bundleVersionId}/publish`, {
+        method: "POST",
+        body: JSON.stringify({ auto_publish_draft_policies: false, expected_semantic_digest: null }),
+      });
+      await api("/api/v1/compliance/assignments", {
+        method: "POST",
+        body: JSON.stringify({
+          bundle_version_id: bundleVersionId,
+          scope_type: "system",
+          scope_id: systemId,
+          enforcement_mode: "enforce",
+          exclusions: [],
+          additions: [],
+          value_overrides: [],
+          reason: "Persisted mixed constituent browser proof",
+        }),
+      });
+      const effective = await api(`/api/v1/systems/${systemId}/effective-policies`);
+      if (effective.policies.length !== 1 || effective.policies[0].policy_version_id !== policyVersionId) {
+        throw new Error(`Unexpected effective composite set: ${JSON.stringify(effective)}`);
+      }
+      if (!effective.effective_set_digest) {
+        throw new Error(`Effective composite set has no digest: ${JSON.stringify(effective)}`);
+      }
+
+      runFixtureSql(`
+        INSERT INTO composite_policy_derivation_targets (derivation_id, target_store_path)
+        VALUES (${Number(derivationId)}, $path$${targetStorePath}$path$);
+        INSERT INTO composite_policy_assessments (
+          id, system_id, derivation_id, target_store_path, policy_lineage_id,
+          policy_version_id, effective_set_digest, effective_config_digest,
+          effective_config, overall_outcome
+        ) VALUES (
+          '${assessmentId}'::uuid, '${systemId}'::uuid, ${Number(derivationId)},
+          $path$${targetStorePath}$path$, '${policy.id}'::uuid, '${policyVersionId}'::uuid,
+          '${effective.effective_set_digest}', 'browser-fixture-config',
+          $fixture$${JSON.stringify(config)}$fixture$::jsonb, 'error'
+        );
+        INSERT INTO composite_policy_rule_results
+          (assessment_id, rule_id, ordinal, kind, phase, outcome, blocking, detail, evidence)
+        VALUES
+          ('${assessmentId}'::uuid, '${rules[0].id}'::uuid, 0, 'nixos_option', 'evaluation', 'pass', false,
+           'Firewall option matched', '{"path":"networking.firewall.enable","actual":true}'::jsonb),
+          ('${assessmentId}'::uuid, '${rules[1].id}'::uuid, 1, 'packages_absent', 'evaluation', 'fail', true,
+           'Forbidden package telnet was present', '{"packages":["telnet"]}'::jsonb),
+          ('${assessmentId}'::uuid, '${rules[2].id}'::uuid, 2, 'custom_eval', 'evaluation', 'error', true,
+           'Expression did not return a boolean', '{"value_type":"string"}'::jsonb);
+      `);
+
+      const evidencePath = `/api/v1/compliance/bundles/${bundle.id}/systems/${systemId}/evidence`;
+      const persistedEvidence = await api(evidencePath);
+      const evidenceForState = (compositeResult) => {
+        const body = structuredClone(persistedEvidence);
+        const control = body.controls.find((candidate) => candidate.policy_id === policy.id);
+        if (!control) throw new Error(`Persisted evidence omitted policy ${policy.id}`);
+        control.composite_expected = true;
+        control.composite_result = compositeResult;
+        return body;
+      };
+      const selectCompositeEvidenceControl = async () => {
+        const controlButton = page.locator("aside.fl-tray nav button").filter({ hasText: policy.name }).first();
+        await assertVisible(controlButton, "Expected the composite policy in the evidence navigator");
+        await controlButton.click();
+      };
+
+      await page.route(`**/api/v1/compliance/bundles/${bundle.id}/systems?*`, async (route) => {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
           body: JSON.stringify({
-            bundle_id: bundleId,
-            systems: [{ system_id: systemId, hostname: "prod-web-01", environment: "production", applies: true, total: 1, pass: 0, warn: 0, fail: 1, waiver: 0, score: 0, resolution_state: "resolved" }],
-            totals: { system_count: 1, fully_compliant_count: 0, pass: 0, warn: 0, fail: 1, waiver: 0, total_controls: 1, overall_score: 0 },
-          }),
-        });
-      });
-
-      await page.route(`**/api/v1/compliance/bundles/${bundleId}/systems/${systemId}/evidence*`, async (route) => {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            bundle_id: bundleId,
-            system_id: systemId,
-            hostname: "prod-web-01",
-            controls: [
-              {
-                policy_id: policyId,
-                policy_name: "require_no_critical_cves",
-                status: "fail",
-                severity: "high",
-                summary: "prod-web-01 violates require_no_critical_cves according to current Crystal Forge data.",
-                evidence_items: [
-                  {
-                    kind: "cve_scan",
-                    label: "CVE scan result",
-                    body: "critical_cves=3 threshold=0",
-                    artifact: { artifact_type: "cve_scan", title: "Authoritative Crystal Forge signal", body: "3 critical CVEs detected" },
-                  },
-                ],
-                framework_mapping: "require_cve_check → require_no_critical_cves",
-              },
-            ],
+            bundle_id: bundle.id,
+            bundle_version_id: bundleVersionId,
+            systems: [{
+              system_id: systemId,
+              hostname: fixtureName,
+              environment: null,
+              applies: true,
+              total: 1,
+              evaluated_total: 1,
+              pass: 0,
+              warn: 0,
+              fail: 0,
+              waiver: 0,
+              not_checked: 0,
+              not_applicable: 0,
+              error: 1,
+              report_only: 0,
+              score: 0,
+              resolution_state: "resolved",
+              assignment_status: "current",
+              assignment_reason: "Persisted mixed constituent browser proof",
+              assignment_approved_by: null,
+            }],
+            totals: {
+              system_count: 1,
+              fully_compliant_count: 0,
+              pass: 0,
+              warn: 0,
+              fail: 0,
+              waiver: 0,
+              total_controls: 1,
+              evaluated_controls: 1,
+              overall_score: 0,
+            },
           }),
         });
       });
 
       await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
+      await page.locator(`[data-testid="compliance-bundle-row"][data-bundle-id="${bundle.id}"]`).click();
+      await page.getByTestId("bundle-systems-card").waitFor({ state: "visible", timeout: 10000 });
 
-      await page.getByText("NIST 800-53 High").first().click();
-      await page.waitForTimeout(400);
-
-      // Click "View evidence" to open the drawer
       const evidenceBtn = page.getByRole("button", { name: /View evidence/i }).first();
-      await evidenceBtn.waitFor({ timeout: 5000 });
-      await evidenceBtn.click({ force: true });
-      await page.waitForTimeout(1200);
+      await evidenceBtn.waitFor({ timeout: 10000 });
 
-      // Evidence drawer assertions
-      await assertVisible(
-        page.getByText("prod-web-01", { exact: true }).last(),
-        "Expected evidence drawer header with hostname",
+      let releaseLoading;
+      const loadingGate = new Promise((resolve) => { releaseLoading = resolve; });
+      await page.route(`**${evidencePath}*`, async (route) => {
+        await loadingGate;
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(evidenceForState(null)) });
+      });
+      const noAssessmentResponsePromise = page.waitForResponse(
+        (response) => response.url().includes(evidencePath) && response.request().method() === "GET",
       );
-      await assertVisible(page.getByText("NIST 800-53 High", { exact: true }).last(), "Expected bundle context in evidence header");
-      await assertVisible(
-        page.getByText("require_no_critical_cves").first(),
-        "Expected policy name in evidence control card",
+      await evidenceBtn.click({ force: true });
+      await assertVisible(page.getByTestId("composite-assessment-loading"), "Expected evidence loading state while the transport is pending");
+      await assertVisible(page.getByText("Loading composite assessments and evidence…", { exact: true }), "Expected loading state to describe composite assessment work");
+      releaseLoading();
+      const noAssessmentResponse = await noAssessmentResponsePromise;
+      if (noAssessmentResponse.status() !== 200) throw new Error(`No-assessment fixture returned ${noAssessmentResponse.status()}`);
+      const noAssessmentDto = await noAssessmentResponse.json();
+      const noAssessmentControl = noAssessmentDto.controls.find((control) => control.policy_id === policy.id);
+      if (!noAssessmentControl?.composite_expected || noAssessmentControl.composite_result !== null) {
+        throw new Error(`No-assessment fixture was not preserved by the transport: ${JSON.stringify(noAssessmentControl)}`);
+      }
+      await selectCompositeEvidenceControl();
+      await assertVisible(page.getByTestId("composite-no-assessment"), "Expected explicit no-assessment state for an exact target with no result", 10000);
+      await page.getByRole("button", { name: /Close/i }).first().click({ force: true });
+      await page.unroute(`**${evidencePath}*`);
+
+      await page.route(`**${evidencePath}*`, async (route) => {
+        await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "assessment transport unavailable" }) });
+      });
+      await evidenceBtn.click({ force: true });
+      await assertVisible(page.getByTestId("composite-assessment-load-error"), "Expected evidence transport error state");
+      await assertVisible(page.getByText("Failed to load evidence", { exact: true }), "Expected transport error heading");
+      await page.getByRole("button", { name: "Dismiss", exact: true }).click();
+      await page.unroute(`**${evidencePath}*`);
+
+      const explicitPartial = {
+        assessment_id: assessmentId,
+        policy_version_id: policyVersionId,
+        overall_status: "not_checked",
+        rule_results: [
+          { rule_id: rules[0].id, kind: "nixos_option", phase: "evaluation", status: "pass", detail: "Evaluation completed", evidence: {} },
+          { rule_id: rules[3].id, kind: "cve_block", phase: "scan", status: "not_checked", detail: "Scan pending", evidence: {} },
+        ],
+      };
+      await page.route(`**${evidencePath}*`, async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(evidenceForState(explicitPartial)) });
+      });
+      await evidenceBtn.click({ force: true });
+      await selectCompositeEvidenceControl();
+      await assertVisible(page.getByTestId("composite-partial"), "Expected explicit partial assessment state");
+      if (JSON.stringify(await page.getByTestId("composite-rule-status").allInnerTexts()) !== JSON.stringify(["Pass", "Not checked"])) {
+        throw new Error("Explicit partial fixture did not render completed and pending constituents");
+      }
+      await page.getByRole("button", { name: /Close/i }).first().click({ force: true });
+      await page.unroute(`**${evidencePath}*`);
+
+      const pending = {
+        assessment_id: assessmentId,
+        policy_version_id: policyVersionId,
+        overall_status: "not_checked",
+        rule_results: rules.map((rule) => ({ rule_id: rule.id, kind: rule.kind, phase: "evaluation", status: "not_checked", detail: "Phase pending", evidence: {} })),
+      };
+      await page.route(`**${evidencePath}*`, async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(evidenceForState(pending)) });
+      });
+      await evidenceBtn.click({ force: true });
+      await selectCompositeEvidenceControl();
+      await assertVisible(page.getByTestId("composite-pending"), "Expected all-not-checked assessment to render pending");
+      await assertHidden(page.getByTestId("composite-partial"), "A wholly pending assessment must not claim partial completion");
+      await page.getByRole("button", { name: /Close/i }).first().click({ force: true });
+      await page.unroute(`**${evidencePath}*`);
+
+      const evidenceResponsePromise = page.waitForResponse(
+        (response) => response.url().includes(`/api/v1/compliance/bundles/${bundle.id}/systems/${systemId}/evidence`) && response.request().method() === "GET",
       );
-      await assertVisible(
-        page.getByText(/3 critical CVEs detected/i).first(),
-        "Expected artifact body in evidence item",
-      );
-      await assertVisible(page.getByText("production").last(), "Expected selected-system environment in evidence header");
-      await assertVisible(page.getByText("resolved").last(), "Expected authoritative resolver state in evidence header");
+      await evidenceBtn.click({ force: true });
+      const evidenceResponse = await evidenceResponsePromise;
+      if (evidenceResponse.status() !== 200) throw new Error(`Persisted evidence endpoint returned ${evidenceResponse.status()}`);
+      const evidenceDto = await evidenceResponse.json();
+      await selectCompositeEvidenceControl();
+      const aggregate = evidenceDto.controls.find((control) => control.policy_id === policy.id)?.composite_result;
+      const exactDto = aggregate && {
+        assessment_id: aggregate.assessment_id,
+        policy_version_id: aggregate.policy_version_id,
+        overall_status: aggregate.overall_status,
+        rule_results: aggregate.rule_results,
+      };
+      const expectedDto = {
+        assessment_id: assessmentId,
+        policy_version_id: policyVersionId,
+        overall_status: "error",
+        rule_results: [
+          { rule_id: rules[0].id, kind: "nixos_option", phase: "evaluation", status: "pass", detail: "Firewall option matched", evidence: { path: "networking.firewall.enable", actual: true } },
+          { rule_id: rules[1].id, kind: "packages_absent", phase: "evaluation", status: "fail", detail: "Forbidden package telnet was present", evidence: { packages: ["telnet"] } },
+          { rule_id: rules[2].id, kind: "custom_eval", phase: "evaluation", status: "error", detail: "Expression did not return a boolean", evidence: { value_type: "string" } },
+          { rule_id: rules[3].id, kind: "cve_block", phase: "scan", status: "not_checked", detail: "Phase has not completed", evidence: {} },
+          { rule_id: rules[4].id, kind: "time_window", phase: "deployment", status: "not_checked", detail: "Phase has not completed", evidence: {} },
+        ],
+      };
+      if (!isDeepStrictEqual(exactDto, expectedDto)) {
+        throw new Error(`Normalized aggregate DTO mismatch: expected=${JSON.stringify(expectedDto)} actual=${JSON.stringify(exactDto)}`);
+      }
+
+      await assertVisible(page.getByText(fixtureName, { exact: true }).last(), "Expected persisted system/bundle context in evidence drawer");
+      await assertVisible(page.getByText(fixtureName, { exact: true }).first(), "Expected persisted composite policy name");
+      await assertVisible(page.getByText("current", { exact: true }).last(), "Expected authoritative assignment state in evidence header");
       await assertVisible(page.getByRole("link", { name: /Open system/i }), "Expected system-detail navigation from evidence header");
+      await assertVisible(page.getByTestId("composite-assessment"), "Expected persisted composite assessment outcomes");
+      await assertVisible(page.getByTestId("composite-error"), "Expected persisted constituent error callout");
+      await assertVisible(page.getByTestId("composite-partial"), "Expected persisted Error assessment with missing phases to also report Partial");
+      if (await page.getByTestId("composite-overall-status").innerText() !== "Overall · Error") {
+        throw new Error("Expected normalized error aggregate status");
+      }
+      const constituentStatuses = await page.getByTestId("composite-rule-status").allInnerTexts();
+      if (JSON.stringify(constituentStatuses) !== JSON.stringify(["Pass", "Fail", "Error", "Not checked", "Not checked"])) {
+        throw new Error(`Unexpected ordered constituent statuses: ${JSON.stringify(constituentStatuses)}`);
+      }
+      await assertVisible(page.getByText("Firewall option matched", { exact: true }), "Expected constituent result detail");
+      await assertVisible(page.getByText(/"packages":\["telnet"\]/), "Expected constituent result evidence");
+      if (await page.getByText("Phase has not completed", { exact: true }).count() !== 2) {
+        throw new Error("Both missing scan/deployment outcomes must render as ordered Not checked results");
+      }
+      await assertVisible(page.getByText("Expression did not return a boolean", { exact: true }), "Expected error constituent detail");
       await assertVisible(
         page.getByRole("button", { name: /Close/i }).first(),
         "Expected Close button in evidence drawer",
       );
 
-      // Close drawer
       await page.getByRole("button", { name: /Close/i }).first().click({ force: true });
-      await page.waitForTimeout(500);
-
-      await page.unroute("**/api/v1/compliance/bundles*");
-      await page.unroute(`**/api/v1/compliance/bundles/${bundleId}/systems*`);
-      await page.unroute(`**/api/v1/compliance/bundles/${bundleId}/systems/${systemId}/evidence*`);
     },
   },
   {

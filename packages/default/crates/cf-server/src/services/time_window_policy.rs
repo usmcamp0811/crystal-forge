@@ -60,8 +60,7 @@ pub fn check_time_window_at(
         }
     };
 
-    let current_time =
-        NaiveTime::from_hms_opt(now_local.hour(), now_local.minute(), now_local.second()).unwrap();
+    let current_time = now_local.time();
 
     // Helper to get short weekday name
     let weekday_name = |wd: chrono::Weekday| -> &str {
@@ -162,6 +161,41 @@ fn parse_time(time_str: &str) -> Result<NaiveTime, String> {
 
     NaiveTime::from_hms_opt(hour, minute, 0)
         .ok_or_else(|| format!("Hour {} or minute {} out of range", hour, minute))
+}
+
+pub fn validate_window_parts(
+    days: &[String],
+    start_time: &str,
+    end_time: &str,
+    timezone: &str,
+) -> Result<(), String> {
+    const WEEKDAYS: &[&str] = &["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+
+    if days.is_empty()
+        || days
+            .iter()
+            .any(|day| !WEEKDAYS.contains(&day.to_ascii_lowercase().as_str()))
+    {
+        return Err("days must contain only mon, tue, wed, thu, fri, sat, or sun".to_string());
+    }
+    parse_time(start_time).map_err(|error| format!("invalid start time: {error}"))?;
+    parse_time(end_time).map_err(|error| format!("invalid end time: {error}"))?;
+    timezone
+        .parse::<Tz>()
+        .map_err(|_| format!("invalid IANA timezone: {timezone}"))?;
+    Ok(())
+}
+
+pub fn validate_config(config: &TimeWindowConfig) -> Result<(), String> {
+    if !matches!(config.action.as_str(), "block" | "warn") {
+        return Err("action must be block or warn".to_string());
+    }
+    validate_window_parts(
+        &config.days,
+        &config.start_time,
+        &config.end_time,
+        &config.timezone,
+    )
 }
 
 #[cfg(test)]

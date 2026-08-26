@@ -25,6 +25,7 @@ pkgs.rustPlatform.buildRustPackage {
 
   nativeBuildInputs = with pkgs; [
     pkg-config
+    nix
     postgresql
     postgresqlTestHook
     sqlx-cli
@@ -67,6 +68,19 @@ pkgs.rustPlatform.buildRustPackage {
       --test policy_editor_phase2 \
       --test time_window_policy_test \
       -- --test-threads=1
+
+    echo "=== Composite AC3 pure validation and interchange matrix ==="
+    cargo test --offline --package cf-server --lib \
+      ac3_validation_matrix_accepts_and_rejects_each_exposed_kind_discriminately \
+      -- --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      composite_json_toml_and_cf_native_interchange_preserve_all_supported_rules \
+      -- --test-threads=1
+
+    echo "=== Composite AC3 authoritative Nix executor matrix ==="
+    cargo test --offline --package cf-server --lib \
+      ac3_actual_nix_executor_matrix_distinguishes_pass_fail_error_and_evidence \
+      -- --ignored --test-threads=1
 
     echo "=== Resolver exact-version/enforcement regressions ==="
     cargo test --offline --package cf-server \

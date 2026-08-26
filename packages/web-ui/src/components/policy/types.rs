@@ -230,10 +230,15 @@ impl PolicyCategory {
 /// nothing outside this list is removed, filtered, or blocked from saving.
 pub fn recommended_enforcement(category: PolicyCategory) -> &'static [&'static str] {
     match category {
-        PolicyCategory::Deployment => &["packages_installed", "custom_eval"],
-        PolicyCategory::Pipeline => &["cve_block", "eval_passed", "build_succeeded"],
-        PolicyCategory::Rollout => &["time_window", "approval_required", "rollout_percent"],
-        PolicyCategory::Security => &["nixos_option", "packages_installed", "custom_eval"],
+        PolicyCategory::Deployment => &["eval_passed", "time_window"],
+        PolicyCategory::Pipeline => &["eval_passed", "pin_required", "cve_block"],
+        PolicyCategory::Rollout => &["time_window"],
+        PolicyCategory::Security => &[
+            "nixos_option",
+            "packages_absent",
+            "cve_block",
+            "custom_eval",
+        ],
     }
 }
 
@@ -283,7 +288,10 @@ pub fn policy_category(policy: &PolicyDefinition) -> PolicyCategory {
                 .get("kind")
                 .and_then(|value| value.as_str())
                 .unwrap_or_default();
-            matches!(kind, "packages_installed" | "nixos_option" | "custom_eval")
+            matches!(
+                kind,
+                "packages_installed" | "packages_absent" | "nixos_option" | "custom_eval"
+            )
         }) {
             return PolicyCategory::Security;
         }
@@ -469,11 +477,11 @@ fn rule_summary_from_json(rule: &serde_json::Value) -> PolicyRuleSummary {
             format!("Block deploy when {severity} CVEs exceed {max}")
         }
         "time_window" => {
-            let from = rule
+            let from = config
                 .get("from")
                 .and_then(|value| value.as_str())
                 .unwrap_or("09:00");
-            let to = rule
+            let to = config
                 .get("to")
                 .and_then(|value| value.as_str())
                 .unwrap_or("17:00");
@@ -511,6 +519,21 @@ fn rule_summary_from_json(rule: &serde_json::Value) -> PolicyRuleSummary {
                 .unwrap_or_default();
             format!("Packages installed: {packages}")
         }
+        "packages_absent" => {
+            let packages = config
+                .get("packages")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            format!("Packages absent: {packages}")
+        }
+        "pin_required" => "Evaluated source must resolve to an immutable revision".to_string(),
         "nixos_option" => {
             let path = config
                 .get("path")
@@ -587,3 +610,40 @@ description = "SSH must be enabled"
 field_name = "sshEnabled"
 strict = true
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_window_summary_reads_nested_composite_config() {
+        let summary = rule_summary_from_json(&serde_json::json!({
+            "kind": "time_window",
+            "config": {
+                "days": ["sat", "sun"],
+                "from": "01:00",
+                "to": "03:00",
+                "tz": "UTC"
+            }
+        }));
+        assert_eq!(summary.label, "Deploy window: 01:00-03:00");
+    }
+
+    #[test]
+    fn exposed_package_absent_and_pin_rules_have_read_back_summaries() {
+        let absent = rule_summary_from_json(&serde_json::json!({
+            "kind": "packages_absent",
+            "config": { "packages": ["telnet", "rsh"] }
+        }));
+        assert_eq!(absent.label, "Packages absent: telnet, rsh");
+
+        let pin = rule_summary_from_json(&serde_json::json!({
+            "kind": "pin_required",
+            "config": {}
+        }));
+        assert_eq!(
+            pin.label,
+            "Evaluated source must resolve to an immutable revision"
+        );
+    }
+}

@@ -1,12 +1,13 @@
 use crate::compliance::resolver::{
-    AssignmentMode, EffectivePolicy, ResolutionOutcome, resolve_system_effective_policies,
+    AssignmentMode, EffectivePolicy, ResolutionOutcome,
+    resolve_systems_effective_policies_for_deployment_batch,
 };
 use crate::config::CrystalForgeConfig;
 use crate::models::deployment_policies::{
     ApprovalConfig, CanaryConfig, CveThresholdConfig, DeploymentPolicyRecord, TimeWindowConfig,
 };
 use crate::models::systems::DeploymentPolicy;
-use crate::queries::deployment::{get_systems_with_auto_latest_policy, update_desired_target};
+use crate::queries::deployment::get_systems_with_auto_latest_policy;
 use crate::queries::deployment_policies::get_deployment_policies_by_versions;
 use crate::queries::derivations::get_latest_deployable_targets_for_flake_hosts;
 use crate::server::load_cve_policies;
@@ -216,16 +217,21 @@ impl DeploymentPolicyManager {
             HashMap::new();
         let mut all_policy_version_ids: HashSet<uuid::Uuid> = HashSet::new();
         let mut failed_policy_lookup_systems: HashSet<uuid::Uuid> = HashSet::new();
+        let system_ids = systems.iter().map(|system| system.id).collect::<Vec<_>>();
+        let mut resolved_by_system =
+            resolve_systems_effective_policies_for_deployment_batch(&self.pool, &system_ids)
+                .await
+                .context("Failed to batch-resolve effective deployment policies")?;
         for system in &systems {
-            let policy_ids = match resolve_system_effective_policies(&self.pool, system.id).await {
-                Ok(ResolutionOutcome::Resolved(set)) => set
+            let policy_ids = match resolved_by_system.remove(&system.id) {
+                Some(ResolutionOutcome::Resolved(set)) => set
                     .policies
                     .into_iter()
                     // Report-only policies are evaluated by compliance paths but
                     // must never block or alter deployment configuration.
                     .filter(|policy| matches!(policy.effective_mode, AssignmentMode::Enforce))
                     .collect::<Vec<EffectivePolicy>>(),
-                Ok(ResolutionOutcome::Conflict(conflicts)) => {
+                Some(ResolutionOutcome::Conflict(conflicts)) => {
                     warn!(
                         "Effective policy conflict for {} ({}): {}; skipping deployment update",
                         system.hostname,
@@ -239,17 +245,22 @@ impl DeploymentPolicyManager {
                     failed_policy_lookup_systems.insert(system.id);
                     continue;
                 }
-                Err(err) => {
+                None => {
                     warn!(
-                        "Failed to load effective deployment policies for {} ({}): {:#}; skipping deployment update",
-                        system.hostname, system.id, err
+                        "Effective deployment policy batch omitted {} ({}); skipping deployment update",
+                        system.hostname, system.id
                     );
                     failed_policy_lookup_systems.insert(system.id);
                     continue;
                 }
             };
             for policy in &policy_ids {
-                all_policy_version_ids.insert(policy.policy_version_id);
+                // Composite policy records are decoded and freshness-checked by
+                // the final serializable authorization transaction. Do not load
+                // them a second time for the legacy advanced-gate pass.
+                if policy.policy_type != "composite" {
+                    all_policy_version_ids.insert(policy.policy_version_id);
+                }
             }
             effective_policies_by_system.insert(system.id, policy_ids);
         }
@@ -263,6 +274,7 @@ impl DeploymentPolicyManager {
             .into_iter()
             .filter(|version_id| !policies_by_id.contains_key(version_id))
             .collect::<HashSet<_>>();
+        let cve_policies = load_cve_policies(&self.pool).await;
 
         let mut updated_count = 0;
 
@@ -355,7 +367,6 @@ impl DeploymentPolicyManager {
             }
 
             // Preserve legacy CVE gate behavior for require_cve_check policies.
-            let cve_policies = load_cve_policies(&self.pool).await;
             if !cve_policies.is_empty() {
                 match check_cve_policies(
                     &self.pool,
@@ -384,21 +395,31 @@ impl DeploymentPolicyManager {
                 }
             }
 
-            if let Err(e) =
-                update_desired_target(&self.pool, &system.hostname, Some(store_path)).await
+            match crate::services::composite_enforcement::authorize_and_set_system_target(
+                &self.pool,
+                system.id,
+                store_path,
+                "auto_desired_target",
+            )
+            .await
             {
-                error!(
-                    "Failed to set desired_target for {} -> {}: {:#}",
+                Ok(authorization) if authorization.allowed() => {
+                    info!(
+                        "📋 Updated desired target for {}: {:?} -> {}",
+                        system.hostname,
+                        system.desired_target.as_deref(),
+                        store_path
+                    );
+                    updated_count += 1;
+                }
+                Ok(authorization) => warn!(
+                    "🛑 Composite policy blocked atomic target update for {} -> {}: {}",
+                    system.hostname, store_path, authorization.detail
+                ),
+                Err(e) => error!(
+                    "Failed atomic composite authorization/target update for {} -> {}: {:#}",
                     system.hostname, store_path, e
-                );
-            } else {
-                info!(
-                    "📋 Updated desired target for {}: {:?} -> {}",
-                    system.hostname,
-                    system.desired_target.as_deref(),
-                    store_path
-                );
-                updated_count += 1;
+                ),
             }
         }
 
@@ -419,6 +440,9 @@ impl DeploymentPolicyManager {
         };
 
         for effective_policy in effective_policies {
+            if effective_policy.policy_type == "composite" {
+                continue;
+            }
             let policy_id = &effective_policy.policy_version_id;
             if failed_policy_loads.contains(policy_id) {
                 return AdvancedGateDecision::Block(format!(
@@ -588,12 +612,9 @@ impl DeploymentPolicyManager {
                         }
                     }
                 }
-                "composite" => {
-                    return AdvancedGateDecision::Block(format!(
-                        "Composite policy {} cannot be enforced before composite execution support is implemented",
-                        policy.id
-                    ));
-                }
+                // Composite policies are authorized once for the complete set
+                // in the atomic desired-target update below.
+                "composite" => {}
                 _ => {}
             }
         }
@@ -691,5 +712,26 @@ mod tests {
             AdvancedGateDecision::Block(reason) => assert!(reason.contains("critical")),
             _ => panic!("expected block decision"),
         }
+    }
+
+    #[test]
+    fn auto_latest_uses_batch_policy_and_global_cve_queries() {
+        let source = include_str!("mod.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("deployment module has production source");
+        assert_eq!(
+            production_source
+                .matches("resolve_systems_effective_policies_for_deployment_batch(&self.pool")
+                .count(),
+            1
+        );
+        assert_eq!(
+            production_source
+                .matches("load_cve_policies(&self.pool).await")
+                .count(),
+            1
+        );
     }
 }

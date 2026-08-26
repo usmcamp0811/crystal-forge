@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            m.id,\n            m.policy_version_id,\n            m.requirement_version_id,\n            m.relationship,\n            m.coverage,\n            m.rationale,\n            m.provenance,\n            m.trust_state,\n            f.id   AS \"framework_id!\",\n            f.name AS \"framework_name!\",\n            fv.id  AS \"framework_version_id!\",\n            fv.version AS \"framework_version!\",\n            rv.external_id AS \"requirement_external_id!\",\n            rv.title AS requirement_title\n        FROM policy_requirement_mappings m\n        JOIN compliance_requirement_versions rv ON rv.id = m.requirement_version_id\n        JOIN compliance_framework_versions fv ON fv.id = rv.framework_version_id\n        JOIN compliance_frameworks f ON f.id = fv.framework_id\n        WHERE m.policy_version_id = $1\n        ORDER BY f.name, rv.external_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "policy_version_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "requirement_version_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "relationship",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "coverage",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "rationale",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "provenance",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "trust_state",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "framework_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 9,
+        "name": "framework_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "framework_version_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 11,
+        "name": "framework_version!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "requirement_external_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "requirement_title",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "5e900542d9e4554dca7156995dbb9c72b55d5a8be5d7eff740b12d5c37beecb9"
+}

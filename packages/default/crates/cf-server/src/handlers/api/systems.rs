@@ -42,7 +42,7 @@ use crate::queries::systems::{
     find_system_deployment_derivation, get_system_detail_by_id,
     get_user_environment_membership_ids, list_recent_commits_for_system, list_system_access_rows,
     list_system_agent_event_rows, list_system_history_rows, touch_system_updated_at,
-    update_public_key, update_system_desired_target_with_source, update_system_metadata,
+    update_public_key, update_system_metadata,
 };
 use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
 use crate::services::systems::SystemsListContext;
@@ -981,7 +981,7 @@ pub async fn rollback_system(
         return not_found();
     }
 
-    if let Err(error) = update_system_desired_target_with_source(
+    match crate::services::composite_enforcement::authorize_and_set_system_target(
         &pool,
         system_id,
         target_commit,
@@ -989,10 +989,19 @@ pub async fn rollback_system(
     )
     .await
     {
-        if is_uncached_deployment_target_error(&error) {
-            return deployment_target_unavailable(&error.to_string());
+        Ok(authorization) if authorization.allowed() => {}
+        Ok(authorization) => return bad_request(&authorization.detail),
+        Err(error) => {
+            if is_uncached_deployment_target_error(&error) {
+                return deployment_target_unavailable(&error.to_string());
+            }
+            tracing::warn!(
+                system_id = %system_id,
+                target = %target_commit,
+                "Composite commit rollback authorization failed closed: {error:#}"
+            );
+            return internal_error("Composite deployment authorization failed");
         }
-        return internal_error("Failed to request rollback");
     }
 
     if record_system_mutation_audit(
@@ -1057,16 +1066,27 @@ pub async fn rollback_system_generation(
         return not_found();
     }
 
-    if update_system_desired_target_with_source(
+    match crate::services::composite_enforcement::authorize_and_set_system_target(
         &pool,
         system_id,
         store_path,
         "manual_rollback_generation",
     )
     .await
-    .is_err()
     {
-        return internal_error("Failed to request generation rollback");
+        Ok(authorization) if authorization.allowed() => {}
+        Ok(authorization) => return bad_request(&authorization.detail),
+        Err(error) => {
+            if is_uncached_deployment_target_error(&error) {
+                return deployment_target_unavailable(&error.to_string());
+            }
+            tracing::warn!(
+                system_id = %system_id,
+                target = %store_path,
+                "Composite generation rollback authorization failed closed: {error:#}"
+            );
+            return internal_error("Composite deployment authorization failed");
+        }
     }
 
     if record_system_mutation_audit(
@@ -1689,16 +1709,29 @@ pub async fn deploy_system(
         return bad_request("Requested commit is not available for this system");
     }
 
-    // Set the desired_target to trigger deployment
-    if let Err(error) =
-        update_system_desired_target_with_source(&pool, system_id, commit_sha, "manual_deploy")
-            .await
+    match crate::services::composite_enforcement::authorize_and_set_system_target(
+        &pool,
+        system_id,
+        commit_sha,
+        "manual_deploy",
+    )
+    .await
     {
-        if is_uncached_deployment_target_error(&error) {
-            let message = queue_deployment_target_prerequisite(&state, system_id, commit_sha).await;
-            return deployment_target_unavailable(&message);
+        Ok(authorization) if authorization.allowed() => {}
+        Ok(authorization) => return bad_request(&authorization.detail),
+        Err(error) => {
+            if is_uncached_deployment_target_error(&error) {
+                let message =
+                    queue_deployment_target_prerequisite(&state, system_id, commit_sha).await;
+                return deployment_target_unavailable(&message);
+            }
+            tracing::warn!(
+                system_id = %system_id,
+                target = %commit_sha,
+                "Composite manual deployment authorization failed closed: {error:#}"
+            );
+            return internal_error("Composite deployment authorization failed");
         }
-        return internal_error("Failed to request deployment");
     }
 
     if record_system_mutation_audit(

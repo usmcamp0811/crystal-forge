@@ -11,7 +11,6 @@ use crate::queries::systems::{
 };
 use crate::queries::{
     agent_heartbeat::insert_agent_heartbeat,
-    system_events::mark_pending_deployment_delivered,
     system_events::{lock_observed_system_state_by_hostname_tx, record_report_events_tx},
     system_states::insert_system_state,
 };
@@ -304,7 +303,7 @@ pub async fn log(
     // Fetch desired target for this system. Manual systems only receive fresh,
     // explicit one-shot targets; stale manual targets are suppressed so agents
     // cannot revert hosts after an out-of-band/manual nixos-rebuild.
-    let desired_target =
+    let mut desired_target =
         match get_agent_desired_target_by_hostname(&pool, &agent_request.system.hostname).await {
             Ok(target) => target,
             Err(e) => {
@@ -313,16 +312,35 @@ pub async fn log(
             }
         };
 
-    if let Some(target) = desired_target.as_deref() {
-        if let Err(error) =
-            mark_pending_deployment_delivered(&pool, agent_request.system.id, target).await
+    if let Some(target) = desired_target.clone() {
+        match crate::services::composite_enforcement::authorize_and_claim_desired_target(
+            &pool,
+            agent_request.system.id,
+            &target,
+        )
+        .await
         {
-            warn!(
-                hostname = %agent_request.system.hostname,
-                target = %target,
-                ?error,
-                "Failed to mark pending deployment delivered; continuing heartbeat"
-            );
+            Ok(delivery) if delivery.target.is_some() => {
+                desired_target = delivery.target;
+            }
+            Ok(delivery) => {
+                warn!(
+                    hostname = %agent_request.system.hostname,
+                    target = %target,
+                    outcome = ?delivery.authorization.outcome,
+                    detail = %delivery.authorization.detail,
+                    "Composite policy or desired-target guard blocked final deployment target delivery"
+                );
+                desired_target = None;
+            }
+            Err(error) => {
+                warn!(
+                    hostname = %agent_request.system.hostname,
+                    target = %target,
+                    "Composite final deployment authorization failed closed: {error:#}"
+                );
+                desired_target = None;
+            }
         }
     }
 

@@ -143,9 +143,8 @@ const MAPPING_RELATIONSHIPS: [(&str, &str, &str); 3] = [
 
 /// A single assertion / gate rule in the builder.
 ///
-/// `persisted` indicates whether this rule kind can currently be encoded into the
-/// real policy API `config` payload. Non-persisted kinds are still shown so the
-/// modal matches the design, but are flagged in the UI.
+/// `persisted` indicates whether this rule kind can be encoded into the real
+/// policy API `config` payload.
 #[derive(Clone, Debug, PartialEq)]
 struct PolicyRule {
     /// Persisted identity. New IDs are allocated only by `new`, when the user
@@ -159,6 +158,7 @@ struct PolicyRule {
     from: String,
     to: String,
     days: String,
+    tz: String,
     // approval_required
     count: String,
     role: String,
@@ -195,6 +195,7 @@ impl PolicyRule {
             from: "09:00".to_string(),
             to: "17:00".to_string(),
             days: "mon,tue,wed,thu,fri".to_string(),
+            tz: "America/New_York".to_string(),
             count: "2".to_string(),
             role: "admin".to_string(),
             percent: "25".to_string(),
@@ -213,6 +214,8 @@ impl PolicyRule {
         };
         if kind == "packages_installed" {
             rule.packages = "openssh, auditd".to_string();
+        } else if kind == "packages_absent" {
+            rule.packages = "telnet".to_string();
         }
         rule
     }
@@ -462,19 +465,20 @@ impl PolicyEvidence {
     }
 }
 
-const RULE_OPTIONS: [(&str, &str, bool); 9] = [
-    ("packages_installed", "Packages installed", true),
+const RULE_OPTIONS: [(&str, &str, bool); 8] = [
     ("nixos_option", "NixOS option equals", true),
+    ("packages_installed", "Packages installed", true),
+    ("packages_absent", "Packages absent", true),
     ("custom_eval", "Custom nix expression", true),
-    ("eval_passed", "Eval must pass", false),
-    ("build_succeeded", "Build must succeed", false),
     ("cve_block", "CVE gate", true),
-    ("time_window", "Time window", false),
-    ("approval_required", "Approval required", false),
-    ("rollout_percent", "Canary rollout", false),
+    ("eval_passed", "Eval must pass", true),
+    ("pin_required", "Pinned commit required", true),
+    ("time_window", "Time window", true),
 ];
 
-/// Whether a rule kind can be persisted by Phase 2.
+const MAX_CUSTOM_EVAL_EXPRESSION_BYTES: usize = 16 * 1024;
+
+/// Whether a rule kind is complete and persistable in the Phase 4 editor.
 ///
 /// This is the single source of truth for persistence capability, derived from
 /// the third field of `RULE_OPTIONS`. The Add Rule control, the per-rule
@@ -487,7 +491,7 @@ fn rule_kind_is_persisted(kind: &str) -> bool {
         .is_some_and(|(_, _, persisted)| *persisted)
 }
 
-/// Category recommendations filtered to the kinds Phase 2 can actually persist.
+/// Category recommendations filtered to the complete, persistable kinds.
 ///
 /// `recommended_enforcement` stays the full conceptual model; this narrows it so
 /// the editor never suggests a rule type it cannot save.
@@ -527,12 +531,26 @@ fn rule_label(kind: &str) -> &'static str {
         .unwrap_or("Rule")
 }
 
+fn rule_blurb(kind: &str) -> &'static str {
+    match kind {
+        "nixos_option" => "Compare a typed value from the target NixOS configuration.",
+        "packages_installed" => "Require package pnames in environment.systemPackages.",
+        "packages_absent" => "Reject package pnames in environment.systemPackages.",
+        "custom_eval" => "Evaluate a contained boolean Nix expression against config.",
+        "cve_block" => "Gate promotion on the latest scan for the exact derivation.",
+        "eval_passed" => "Require the target evaluation to finish successfully.",
+        "pin_required" => "Require the evaluated source to resolve to an immutable revision.",
+        "time_window" => "Restrict deployment to weekdays and times in an IANA timezone.",
+        _ => "",
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Payload mapping (UI rules → real API config)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Build the persisted `(policy_type, config)` from the persistable rules.
-/// Empty remains the Phase-2 zero-enforcement legacy representation; every
+/// Empty retains the zero-enforcement legacy representation; every
 /// authored rule set uses the versioned composite representation.
 fn build_persisted_payload(rules: &[PolicyRule]) -> Option<(String, serde_json::Value)> {
     let persistable: Vec<&PolicyRule> = rules.iter().filter(|r| r.is_persisted()).collect();
@@ -589,6 +607,9 @@ fn rule_to_composite_entry(rule: &PolicyRule) -> Option<serde_json::Value> {
         "packages_installed" => serde_json::json!({
             "packages": split_packages(&rule.packages),
         }),
+        "packages_absent" => serde_json::json!({
+            "packages": split_packages(&rule.packages),
+        }),
         "custom_eval" => serde_json::json!({
             "expression": rule.expr,
             "message": rule.message,
@@ -596,6 +617,13 @@ fn rule_to_composite_entry(rule: &PolicyRule) -> Option<serde_json::Value> {
         "cve_block" => serde_json::json!({
             "severity": rule.severity,
             "max_allowed": rule.max_allowed.parse::<u32>().ok()?,
+        }),
+        "eval_passed" | "pin_required" => serde_json::json!({}),
+        "time_window" => serde_json::json!({
+            "days": split_days(&rule.days),
+            "from": rule.from,
+            "to": rule.to,
+            "tz": rule.tz,
         }),
         _ => return None,
     };
@@ -752,8 +780,11 @@ fn composite_config_is_representable(config: &serde_json::Value) -> bool {
                 let allowed = match kind {
                     "nixos_option" => &["path", "operator", "value_type", "value"][..],
                     "packages_installed" => &["packages"][..],
+                    "packages_absent" => &["packages"][..],
                     "custom_eval" => &["expression", "message"][..],
                     "cve_block" => &["severity", "max_allowed"][..],
+                    "eval_passed" | "pin_required" => &[][..],
+                    "time_window" => &["days", "from", "to", "tz"][..],
                     _ => return false,
                 };
                 object_keys_are_subset(rule_config, allowed)
@@ -777,8 +808,8 @@ fn composite_config_is_representable(config: &serde_json::Value) -> bool {
 fn rule_validation_error(rule: &PolicyRule) -> Option<String> {
     match rule.kind.as_str() {
         "nixos_option" => {
-            if rule.path.trim().is_empty() {
-                return Some("NixOS option path is required.".to_string());
+            if let Err(error) = validate_nixos_option_path(&rule.path) {
+                return Some(error.to_string());
             }
             let valid_operator = match normalize_option_type(&rule.option_type) {
                 "integer" => matches!(rule.op.as_str(), "==" | "!=" | ">=" | "<="),
@@ -802,15 +833,12 @@ fn rule_validation_error(rule: &PolicyRule) -> Option<String> {
                 _ => None,
             }
         }
-        "packages_installed" if split_packages(&rule.packages).is_empty() => {
-            Some("Enter at least one required package.".to_string())
-        }
-        "custom_eval" if rule.expr.trim().is_empty() => {
-            Some("Custom Nix expression is required.".to_string())
-        }
+        "packages_installed" | "packages_absent" => validate_package_list(&rule.packages),
+        "custom_eval" => validate_custom_eval_client(&rule.expr),
         "cve_block" if rule.max_allowed.parse::<u32>().is_err() => {
             Some("CVE maximum must be a non-negative integer.".to_string())
         }
+        "time_window" => validate_time_window(rule),
         _ => None,
     }
 }
@@ -986,6 +1014,194 @@ fn split_packages(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn validate_package_pname(pname: &str) -> Result<(), &'static str> {
+    if pname.is_empty() || pname.len() > 255 {
+        return Err("Package pnames must be between 1 and 255 bytes.");
+    }
+    if !pname
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        || !pname
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.' | b'_'))
+    {
+        return Err(
+            "Package pnames must start with an ASCII letter or digit and contain only letters, digits, +, -, ., or _.",
+        );
+    }
+    Ok(())
+}
+
+fn validate_package_list(raw: &str) -> Option<String> {
+    let packages = split_packages(raw);
+    if packages.is_empty() {
+        return Some("Enter at least one package.".to_string());
+    }
+    packages
+        .iter()
+        .find_map(|package| validate_package_pname(package).err().map(str::to_string))
+}
+
+fn validate_custom_eval_client(expression: &str) -> Option<String> {
+    let expression = expression.trim();
+    if expression.is_empty() {
+        return Some("Custom Nix expression is required.".to_string());
+    }
+    if expression.len() > MAX_CUSTOM_EVAL_EXPRESSION_BYTES {
+        return Some(format!(
+            "Custom Nix expression exceeds the {MAX_CUSTOM_EVAL_EXPRESSION_BYTES}-byte limit."
+        ));
+    }
+
+    let mut delimiters = Vec::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut comment = false;
+    for byte in expression.bytes() {
+        if comment {
+            if byte == b'\n' {
+                comment = false;
+            }
+            continue;
+        }
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match byte {
+            b'#' => comment = true,
+            b'"' => quoted = true,
+            b'(' | b'[' | b'{' => delimiters.push(byte),
+            b')' | b']' | b'}' => {
+                let expected = match byte {
+                    b')' => b'(',
+                    b']' => b'[',
+                    _ => b'{',
+                };
+                if delimiters.pop() != Some(expected) {
+                    return Some("Custom Nix expression has mismatched delimiters.".to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    if quoted {
+        return Some("Custom Nix expression has an unterminated quoted string.".to_string());
+    }
+    if !delimiters.is_empty() {
+        return Some("Custom Nix expression has unclosed delimiters.".to_string());
+    }
+    None
+}
+
+fn split_days(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|day| day.trim().to_ascii_lowercase())
+        .filter(|day| !day.is_empty())
+        .collect()
+}
+
+fn validate_nixos_option_path(path: &str) -> Result<(), &'static str> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("NixOS option path is required.");
+    }
+    let bytes = path.as_bytes();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if bytes[offset] == b'"' {
+            let start = offset;
+            offset += 1;
+            let mut escaped = false;
+            while offset < bytes.len() {
+                let byte = bytes[offset];
+                offset += 1;
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    break;
+                }
+            }
+            if bytes.get(offset.saturating_sub(1)) != Some(&b'"') {
+                return Err("NixOS option path has an unterminated quoted segment.");
+            }
+            let segment = serde_json::from_str::<String>(&path[start..offset])
+                .map_err(|_| "NixOS option path has an invalid quoted segment.")?;
+            if segment.is_empty() {
+                return Err("NixOS option path segments cannot be empty.");
+            }
+        } else {
+            let start = offset;
+            while offset < bytes.len() && bytes[offset] != b'.' {
+                let byte = bytes[offset];
+                if byte == b'"'
+                    || byte == b'\\'
+                    || byte.is_ascii_whitespace()
+                    || byte.is_ascii_control()
+                {
+                    return Err(
+                        "Bare NixOS option path segments cannot contain quotes, escapes, whitespace, or control characters.",
+                    );
+                }
+                offset += 1;
+            }
+            if start == offset {
+                return Err("NixOS option path segments cannot be empty.");
+            }
+        }
+        if offset == bytes.len() {
+            break;
+        }
+        if bytes[offset] != b'.' {
+            return Err("Quoted NixOS option path segments must be separated by dots.");
+        }
+        offset += 1;
+        if offset == bytes.len() {
+            return Err("NixOS option path segments cannot be empty.");
+        }
+    }
+    Ok(())
+}
+
+fn validate_hh_mm(value: &str) -> bool {
+    let mut parts = value.split(':');
+    let (Some(hour), Some(minute), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    hour.parse::<u32>().is_ok_and(|hour| hour < 24)
+        && minute.parse::<u32>().is_ok_and(|minute| minute < 60)
+}
+
+fn validate_time_window(rule: &PolicyRule) -> Option<String> {
+    const WEEKDAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+    let days = split_days(&rule.days);
+    if days.is_empty() || days.iter().any(|day| !WEEKDAYS.contains(&day.as_str())) {
+        return Some("Days must contain only mon, tue, wed, thu, fri, sat, or sun.".to_string());
+    }
+    if !validate_hh_mm(&rule.from) {
+        return Some("Start time must be a valid 24-hour HH:MM value.".to_string());
+    }
+    if !validate_hh_mm(&rule.to) {
+        return Some("End time must be a valid 24-hour HH:MM value.".to_string());
+    }
+    if rule.tz.parse::<chrono_tz::Tz>().is_err() {
+        return Some(format!(
+            "Timezone must be a valid IANA timezone: {}.",
+            rule.tz
+        ));
+    }
+    None
+}
+
 fn non_empty(value: String) -> Option<String> {
     (!value.trim().is_empty()).then(|| value.trim().to_string())
 }
@@ -1106,7 +1322,7 @@ fn rules_from_policy(policy_type: &str, config: &serde_json::Value) -> Vec<Polic
                         rule.option_type = normalize_option_type(value_type).to_string();
                         true
                     }
-                    "packages_installed" => rule_config
+                    "packages_installed" | "packages_absent" => rule_config
                         .get("packages")
                         .and_then(|value| value.as_array())
                         .filter(|values| values.iter().all(|value| value.as_str().is_some()))
@@ -1118,6 +1334,7 @@ fn rules_from_policy(policy_type: &str, config: &serde_json::Value) -> Vec<Polic
                                 .join(", ");
                         })
                         .is_some(),
+                    "eval_passed" | "pin_required" => rule_config.is_empty(),
                     "custom_eval" => rule_config
                         .get("expression")
                         .and_then(|value| value.as_str())
@@ -1144,6 +1361,36 @@ fn rules_from_policy(policy_type: &str, config: &serde_json::Value) -> Vec<Polic
                         };
                         rule.severity = severity.to_string();
                         rule.max_allowed = max_allowed.to_string();
+                        true
+                    }
+                    "time_window" => {
+                        let Some(days) = rule_config.get("days").and_then(|value| value.as_array())
+                        else {
+                            continue;
+                        };
+                        let Some(from) = rule_config.get("from").and_then(|value| value.as_str())
+                        else {
+                            continue;
+                        };
+                        let Some(to) = rule_config.get("to").and_then(|value| value.as_str())
+                        else {
+                            continue;
+                        };
+                        let Some(tz) = rule_config.get("tz").and_then(|value| value.as_str())
+                        else {
+                            continue;
+                        };
+                        if !days.iter().all(|day| day.as_str().is_some()) {
+                            continue;
+                        }
+                        rule.days = days
+                            .iter()
+                            .filter_map(|day| day.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        rule.from = from.to_string();
+                        rule.to = to.to_string();
+                        rule.tz = tz.to_string();
                         true
                     }
                     _ => false,
@@ -1715,8 +1962,9 @@ pub fn PolicyEditorModal(
     let is_security = selected_category == PolicyCategory::Security;
     // Guidance derived from the selected category. Recommendations and the
     // off-category notice are informational only; `rules` is never filtered.
-    // Only kinds Phase 2 can actually persist are surfaced as suggestions.
-    let recommended_labels = actionable_recommended_enforcement(selected_category)
+    // Only complete, persistable kinds are surfaced as suggestions.
+    let recommended_kinds = actionable_recommended_enforcement(selected_category);
+    let recommended_labels = recommended_kinds
         .iter()
         .map(|kind| rule_label(kind))
         .collect::<Vec<_>>()
@@ -2122,29 +2370,49 @@ pub fn PolicyEditorModal(
                         if *active_tab.read() == PolicyEditorTab::Enforcement {
                         div { style: "margin-top:6px;",
                             div { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;",
-                                label { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);", "Assertions & gate rules ({rule_count})" }
+                                h3 { style: "margin:0;font-size:12px;font-weight:600;color:var(--cf-text-primary);", "Assertions & gate rules ({rule_count})" }
                                 span { style: "font-size:11px;color:var(--cf-text-muted);", "All must hold — each compiles to a policy check." }
                             }
-                            if rule_count == 0 {
+                            if enforcement_opaque {
+                                div { class: "sd-callout sd-callout-warn", "data-testid": "policy-enforcement-opaque", style: "margin-bottom:8px;font-size:12px;",
+                                    strong { "Enforcement preserved but unavailable. " }
+                                    "This composite contains unsupported, malformed, or partially hydrated data. Known-looking rows are intentionally hidden because showing only a subset would be misleading. The complete stored configuration remains read-only."
+                                }
+                            } else if rule_count == 0 {
                                 div { class: if is_imported { "sd-callout sd-callout-warn" } else { "sd-callout sd-callout-info" }, "data-testid": "policy-enforcement-empty", style: "margin-bottom:8px;font-size:12px;",
-                                    if enforcement_opaque {
-                                        span { strong { "Enforcement preserved but unavailable." } " This policy uses an unsupported or opaque representation. It is not a zero-enforcement policy, and this form will not rewrite it." }
-                                    } else if is_imported {
+                                    if is_imported {
                                         span { strong { "Enforcement needs refinement." } " This control was imported with its compliance mappings and provenance, but no assertion was inferred. Until one exists it asserts nothing." }
                                     } else {
                                         span { strong { "No enforcement defined." } " Add at least one requirement for this policy to have an effect. Saving with none is valid; the policy simply asserts nothing." }
                                     }
                                 }
                             }
-                            div { class: "sd-callout sd-callout-info", "data-testid": "policy-enforcement-recommendations", style: "margin-bottom:8px;font-size:11px;",
-                                "Suggested for " strong { "{selected_category.label()}" } ": "
+                            div { class: "sd-callout sd-callout-info", "data-testid": "policy-enforcement-recommendations", style: "margin-bottom:8px;font-size:11px;display:flex;flex-direction:column;gap:7px;",
+                                div {
+                                    h4 { style: "margin:0;font-size:11px;display:inline;", "Suggested for {selected_category.label()}" }
+                                    span { " · Guidance only. Suggestions never add, remove, or restrict rules." }
+                                }
                                 if recommended_labels.is_empty() {
                                     span { "data-testid": "policy-enforcement-no-recommendations",
-                                        "No rollout-specific enforcement is available in this editor yet. Existing cross-category rules are preserved."
+                                        "No category-specific suggestions are available. All eight complete kinds remain available below."
                                     }
                                 } else {
-                                    span { class: "mono", "{recommended_labels}" }
-                                    span { " · Suggestions follow the category; they are never restrictions." }
+                                    div { "data-testid": "policy-enforcement-suggestion-cards", style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:6px;",
+                                        for kind in recommended_kinds.iter() {
+                                            div { style: "padding:7px 8px;border:1px solid var(--cf-divider);border-radius:7px;background:var(--cf-subtle-bg);",
+                                                div { style: "font-weight:650;color:var(--cf-text-primary);", "{rule_label(kind)}" }
+                                                div { style: "margin-top:2px;color:var(--cf-text-muted);line-height:1.35;", "{rule_blurb(kind)}" }
+                                            }
+                                        }
+                                    }
+                                }
+                                details { "data-testid": "policy-enforcement-alternatives",
+                                    summary { style: "cursor:pointer;font-weight:600;", "All available alternatives · 8" }
+                                    div { style: "margin-top:5px;display:flex;gap:5px;flex-wrap:wrap;",
+                                        for (kind, label, persisted) in RULE_OPTIONS {
+                                            if persisted { span { class: "chip chip-neutral", title: "{rule_blurb(kind)}", "{label}" } }
+                                        }
+                                    }
                                 }
                             }
                             if !off_category_labels.is_empty() {
@@ -2153,10 +2421,14 @@ pub fn PolicyEditorModal(
                                     " unusual for " strong { "{selected_category.label()}" } ". Nothing was changed or removed."
                                 }
                             }
-                            div { style: "display:flex;flex-direction:column;gap:6px;",
-                                for (index, rule) in rules.read().iter().cloned().enumerate() {
+                            if !enforcement_opaque {
+                                div { style: "display:flex;flex-direction:column;gap:6px;",
+                                    for (index, rule) in rules.read().iter().cloned().enumerate() {
                                     div {
                                         key: "rule-{rule.id}",
+                                        "data-testid": "policy-rule-row-{index}",
+                                        "data-rule-id": "{rule.id}",
+                                        "data-rule-kind": "{rule.kind}",
                                         style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:8px 10px;background:var(--cf-subtle-bg);border-radius:8px;",
                                         RuleEditorRow { index, rule: rule.clone(), rules, enforcement_changed }
                                         div { style: "display:flex;flex-direction:column;gap:3px;",
@@ -2178,12 +2450,15 @@ pub fn PolicyEditorModal(
                                             }
                                         }
                                     }
+                                    }
                                 }
                             }
-                            div { style: "margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;",
+                            if !enforcement_opaque {
+                                div { style: "margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;",
                                 select {
                                     class: "input focus-ring",
                                     "data-testid": "policy-editor-add-rule",
+                                    aria_label: "Add enforcement rule",
                                     style: "max-width:260px;font-size:12px;",
                                     value: "{add_rule_kind}",
                                     onchange: move |event| {
@@ -2205,6 +2480,7 @@ pub fn PolicyEditorModal(
                                             option { value: "{kind}", "{label}" }
                                         }
                                     }
+                                }
                                 }
                             }
                         }
@@ -2636,12 +2912,12 @@ fn RuleEditorRow(
 
             match kind.as_str() {
                 "eval_passed" => rsx! { span { style: "color:var(--cf-text-secondary);", "Evaluation must pass" } },
-                "build_succeeded" => rsx! { span { style: "color:var(--cf-text-secondary);", "Build must succeed" } },
+                "pin_required" => rsx! { span { style: "color:var(--cf-text-secondary);", "The evaluated flake source must resolve to an immutable revision" } },
                 "cve_block" => rsx! {
                     div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
                         span { "Block deploy when" }
                         select {
-                            "data-testid": "policy-evidence-log-source-{index}",
+                            "data-testid": "policy-rule-cve-severity-{index}",
                             class: "input focus-ring",
                             style: "width:auto;font-size:12px;padding:4px 8px;",
                             value: "{rule.severity}",
@@ -2649,9 +2925,11 @@ fn RuleEditorRow(
                             option { value: "critical", "critical" }
                             option { value: "high", "high" }
                             option { value: "medium", "medium" }
+                            option { value: "low", "low" }
                         }
                         span { "CVEs exceed" }
                         input {
+                            "data-testid": "policy-rule-cve-max-{index}",
                             r#type: "number", min: "0",
                             class: "input focus-ring mono",
                             style: "width:60px;font-size:12px;padding:4px 8px;",
@@ -2662,9 +2940,20 @@ fn RuleEditorRow(
                 },
                 "packages_installed" => rsx! {
                     input {
+                        "data-testid": "policy-rule-packages-installed-{index}",
                         class: "input focus-ring mono",
                         style: "font-size:12px;padding:5px 8px;",
                         placeholder: "openssh, auditd, aide",
+                        value: "{rule.packages}",
+                        oninput: move |event| set_rule_field!(packages, event.value()),
+                    }
+                },
+                "packages_absent" => rsx! {
+                    input {
+                        "data-testid": "policy-rule-packages-absent-{index}",
+                        class: "input focus-ring mono",
+                        style: "font-size:12px;padding:5px 8px;",
+                        placeholder: "telnet, rsh",
                         value: "{rule.packages}",
                         oninput: move |event| set_rule_field!(packages, event.value()),
                     }
@@ -2788,22 +3077,24 @@ fn RuleEditorRow(
                         oninput: move |event| set_rule_field!(expr, event.value()),
                     }
                     input {
+                        "data-testid": "policy-rule-custom-eval-message-{index}",
                         class: "input focus-ring",
                         style: "font-size:11px;padding:5px 8px;",
                         placeholder: "Failure message shown when assertion fails",
                         value: "{rule.message}",
                         oninput: move |event| set_rule_field!(message, event.value()),
                     }
+                    span { class: "help", "The browser checks size, quoted strings, and delimiters. The server's Nix parser performs authoritative syntax validation when you save." }
                 },
                 "time_window" => rsx! {
                     div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
                         span { "Only between" }
-                        input { class: "input focus-ring mono", style: "width:70px;font-size:12px;padding:4px 8px;", value: "{rule.from}", oninput: move |event| set_rule_field!(from, event.value()) }
+                        input { "data-testid": "policy-rule-time-from-{index}", class: "input focus-ring mono", style: "width:70px;font-size:12px;padding:4px 8px;", value: "{rule.from}", oninput: move |event| set_rule_field!(from, event.value()) }
                         span { "–" }
-                        input { class: "input focus-ring mono", style: "width:70px;font-size:12px;padding:4px 8px;", value: "{rule.to}", oninput: move |event| set_rule_field!(to, event.value()) }
+                        input { "data-testid": "policy-rule-time-to-{index}", class: "input focus-ring mono", style: "width:70px;font-size:12px;padding:4px 8px;", value: "{rule.to}", oninput: move |event| set_rule_field!(to, event.value()) }
                         span { "on" }
-                        input { class: "input focus-ring mono", style: "width:140px;font-size:12px;padding:4px 8px;", value: "{rule.days}", oninput: move |event| set_rule_field!(days, event.value()) }
-                        span { class: "mono", style: "color:var(--cf-text-muted);font-size:11px;", "America/New_York" }
+                        input { "data-testid": "policy-rule-time-days-{index}", class: "input focus-ring mono", style: "width:140px;font-size:12px;padding:4px 8px;", value: "{rule.days}", oninput: move |event| set_rule_field!(days, event.value()) }
+                        input { "data-testid": "policy-rule-timezone-{index}", class: "input focus-ring mono", style: "width:170px;font-size:12px;padding:4px 8px;", value: "{rule.tz}", oninput: move |event| set_rule_field!(tz, event.value()) }
                     }
                 },
                 "approval_required" => rsx! {
@@ -3103,10 +3394,10 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_rules_block_save_instead_of_creating_noop_policy() {
+    fn hidden_unsupported_rules_block_save_instead_of_creating_noop_policy() {
         let rules = vec![
-            PolicyRule::new("eval_passed"),
-            PolicyRule::new("build_succeeded"),
+            PolicyRule::new("approval_required"),
+            PolicyRule::new("rollout_percent"),
         ];
 
         assert!(build_persisted_payload(&rules).is_none());
@@ -3207,8 +3498,7 @@ mod tests {
     }
 
     #[test]
-    fn addable_rules_are_exactly_the_persistable_kinds() {
-        // The Add Rule control must only offer kinds Phase 2 can persist.
+    fn addable_rules_are_exactly_the_eight_complete_kinds() {
         let addable: Vec<&str> = RULE_OPTIONS
             .iter()
             .filter(|(_, _, persisted)| *persisted)
@@ -3217,10 +3507,14 @@ mod tests {
         assert_eq!(
             addable,
             vec![
-                "packages_installed",
                 "nixos_option",
+                "packages_installed",
+                "packages_absent",
                 "custom_eval",
-                "cve_block"
+                "cve_block",
+                "eval_passed",
+                "pin_required",
+                "time_window"
             ]
         );
         // Every addable kind must be reported persistable by the capability fn,
@@ -3234,14 +3528,8 @@ mod tests {
     }
 
     #[test]
-    fn known_unsupported_rule_kinds_are_not_addable() {
-        for kind in [
-            "eval_passed",
-            "build_succeeded",
-            "time_window",
-            "approval_required",
-            "rollout_percent",
-        ] {
+    fn incomplete_approval_and_rollout_rule_kinds_are_not_addable() {
+        for kind in ["approval_required", "rollout_percent", "build_succeeded"] {
             assert!(
                 !rule_kind_is_persisted(kind),
                 "{kind} must not be persistable, so Add Rule must not offer it"
@@ -3250,7 +3538,7 @@ mod tests {
     }
 
     #[test]
-    fn actionable_recommendations_are_all_persistable_and_rollout_is_empty() {
+    fn recommendations_are_suggestions_for_complete_kinds_only() {
         for category in POLICY_CATEGORIES {
             let actionable = actionable_recommended_enforcement(category);
             for kind in &actionable {
@@ -3261,26 +3549,16 @@ mod tests {
             }
         }
 
-        // Pipeline must recommend the CVE gate but never the UI-only pipeline gates.
         let pipeline = actionable_recommended_enforcement(PolicyCategory::Pipeline);
-        assert!(
-            pipeline.contains(&"cve_block"),
-            "Pipeline must recommend cve_block"
+        assert_eq!(pipeline, vec!["eval_passed", "pin_required", "cve_block"]);
+        assert_eq!(
+            actionable_recommended_enforcement(PolicyCategory::Rollout),
+            vec!["time_window"]
         );
-        assert!(
-            !pipeline.contains(&"eval_passed"),
-            "Pipeline must not recommend eval_passed"
-        );
-        assert!(
-            !pipeline.contains(&"build_succeeded"),
-            "Pipeline must not recommend build_succeeded"
-        );
-
-        // Rollout has no currently persistable category-specific recommendation.
-        assert!(
-            actionable_recommended_enforcement(PolicyCategory::Rollout).is_empty(),
-            "Rollout must not surface unsupported rollout gates as recommendations"
-        );
+        assert!(!RULE_OPTIONS.iter().any(|(kind, _, _)| matches!(
+            *kind,
+            "approval_required" | "rollout_percent" | "build_succeeded"
+        )));
     }
 
     #[test]
@@ -3322,8 +3600,7 @@ mod tests {
         assert_eq!(rules[2].kind, "packages_installed");
         assert_eq!(rules[2].packages, "auditd".to_string());
 
-        // Saving is only ever blocked by genuinely unpersistable rule kinds,
-        // never by a rule being off-category.
+        // Saving is never blocked merely because a complete rule is off-category.
         let representable = serde_json::json!({"mode": "all", "rules": []});
         assert!(
             save_blocker(
@@ -3333,8 +3610,8 @@ mod tests {
                 &representable,
                 &rules
             )
-            .is_some_and(|blocker| blocker.contains("UI-only")),
-            "the only blocker here must be the UI-only time-window rule"
+            .is_none(),
+            "time-window and custom rules must save regardless of category"
         );
 
         let on_category_only = vec![PolicyRule::new("custom_eval")];
@@ -3505,6 +3782,171 @@ mod tests {
     }
 
     #[test]
+    fn all_eight_complete_rule_kinds_round_trip_and_remain_editable() {
+        let mut option = PolicyRule::new("nixos_option");
+        option.path = "networking.firewall.enable".into();
+        option.option_type = "boolean".into();
+        option.value = serde_json::json!(true);
+        let mut installed = PolicyRule::new("packages_installed");
+        installed.packages = "openssh, auditd".into();
+        let mut absent = PolicyRule::new("packages_absent");
+        absent.packages = "telnet, rsh".into();
+        let mut custom = PolicyRule::new("custom_eval");
+        custom.expr = "config.networking.firewall.enable".into();
+        custom.message = "Firewall required".into();
+        let mut cve = PolicyRule::new("cve_block");
+        cve.severity = "high".into();
+        cve.max_allowed = "3".into();
+        let eval = PolicyRule::new("eval_passed");
+        let pin = PolicyRule::new("pin_required");
+        let mut window = PolicyRule::new("time_window");
+        window.days = "mon,wed,fri".into();
+        window.from = "22:30".into();
+        window.to = "02:15".into();
+        window.tz = "America/Los_Angeles".into();
+        let rules = vec![option, installed, absent, custom, cve, eval, pin, window];
+        let ids = rules.iter().map(|rule| rule.id).collect::<Vec<_>>();
+
+        let (policy_type, config) = build_persisted_payload(&rules).expect("serialize");
+        assert_eq!(policy_type, "composite");
+        assert_eq!(
+            config["rules"][2]["config"]["packages"],
+            serde_json::json!(["telnet", "rsh"])
+        );
+        assert_eq!(config["rules"][5]["config"], serde_json::json!({}));
+        assert_eq!(config["rules"][6]["config"], serde_json::json!({}));
+        assert_eq!(config["rules"][7]["config"]["tz"], "America/Los_Angeles");
+
+        let mut reopened = rules_from_policy(&policy_type, &config);
+        assert_eq!(reopened, rules);
+        assert_eq!(reopened.iter().map(|rule| rule.id).collect::<Vec<_>>(), ids);
+        assert!(
+            reopened
+                .iter()
+                .all(|rule| rule_validation_error(rule).is_none())
+        );
+
+        reopened[0].path = r#"environment.etc."issue".text"#.into();
+        reopened[0].option_type = "lines".into();
+        reopened[0].value = serde_json::json!("authorized users only");
+        reopened[1].packages = "openssh, auditd, aide".into();
+        reopened[2].packages = "telnet".into();
+        reopened[3].expr = "config.networking.firewall.enable == true".into();
+        reopened[3].message = "Firewall must remain enabled".into();
+        reopened[4].severity = "critical".into();
+        reopened[4].max_allowed = "0".into();
+        reopened[7].days = "sat,sun".into();
+        reopened[7].from = "01:00".into();
+        reopened[7].to = "03:00".into();
+        reopened[7].tz = "UTC".into();
+        let (_, edited) = build_persisted_payload(&reopened).expect("edit serialization");
+        assert_eq!(
+            edited["rules"][0]["config"]["path"],
+            r#"environment.etc."issue".text"#
+        );
+        assert_eq!(
+            edited["rules"][1]["config"]["packages"],
+            serde_json::json!(["openssh", "auditd", "aide"])
+        );
+        assert_eq!(
+            edited["rules"][2]["config"]["packages"],
+            serde_json::json!(["telnet"])
+        );
+        assert_eq!(edited["rules"][7]["config"]["tz"], "UTC");
+        assert_eq!(
+            edited["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|rule| rule["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ids.iter().map(Uuid::to_string).collect::<Vec<_>>()
+        );
+        assert!(composite_config_is_representable(&edited));
+    }
+
+    #[test]
+    fn option_path_and_time_window_validation_matches_server_contract() {
+        for valid in [
+            "networking.firewall.enable",
+            r#"environment.etc."issue".text"#,
+            r#"services."quoted\"name\\suffix".enable"#,
+        ] {
+            assert!(validate_nixos_option_path(valid).is_ok(), "{valid}");
+        }
+        for invalid in [
+            "",
+            ".services.foo",
+            "services..foo",
+            "services.foo.",
+            "services. bad",
+            r#"services."unterminated"#,
+        ] {
+            assert!(validate_nixos_option_path(invalid).is_err(), "{invalid}");
+        }
+
+        let mut window = PolicyRule::new("time_window");
+        assert!(validate_time_window(&window).is_none());
+        window.days = "mon,funday".into();
+        assert_eq!(
+            validate_time_window(&window).unwrap(),
+            "Days must contain only mon, tue, wed, thu, fri, sat, or sun."
+        );
+        window.days = "mon".into();
+        window.from = "25:00".into();
+        assert_eq!(
+            validate_time_window(&window).unwrap(),
+            "Start time must be a valid 24-hour HH:MM value."
+        );
+        window.from = "09:00".into();
+        window.tz = "Mars/Olympus".into();
+        assert_eq!(
+            validate_time_window(&window).unwrap(),
+            "Timezone must be a valid IANA timezone: Mars/Olympus."
+        );
+    }
+
+    #[test]
+    fn package_and_custom_eval_authoring_validation_matches_client_contract() {
+        let mut packages = PolicyRule::new("packages_installed");
+        packages.packages = "openssl, libcap-ng_2.0+test".into();
+        assert!(rule_validation_error(&packages).is_none());
+
+        packages.packages = "-openssl".into();
+        assert_eq!(
+            rule_validation_error(&packages).unwrap(),
+            "Package pnames must start with an ASCII letter or digit and contain only letters, digits, +, -, ., or _."
+        );
+        packages.packages = "a".repeat(256);
+        assert_eq!(
+            rule_validation_error(&packages).unwrap(),
+            "Package pnames must be between 1 and 255 bytes."
+        );
+        packages.packages = "caf\u{e9}".into();
+        assert!(rule_validation_error(&packages).is_some());
+
+        let mut custom = PolicyRule::new("custom_eval");
+        custom.expr = "config.services.openssh.enable && (true".into();
+        assert_eq!(
+            rule_validation_error(&custom).unwrap(),
+            "Custom Nix expression has unclosed delimiters."
+        );
+        custom.expr = "config.example == \"unterminated".into();
+        assert_eq!(
+            rule_validation_error(&custom).unwrap(),
+            "Custom Nix expression has an unterminated quoted string."
+        );
+        custom.expr = "x".repeat(MAX_CUSTOM_EVAL_EXPRESSION_BYTES + 1);
+        assert!(
+            rule_validation_error(&custom)
+                .unwrap()
+                .contains("16384-byte limit")
+        );
+        custom.expr = "config.services.openssh.enable # { ignored comment".into();
+        assert!(rule_validation_error(&custom).is_none());
+    }
+
+    #[test]
     fn metadata_enrichment_preserves_persisted_target_semantics() {
         let mut rule = PolicyRule::new("nixos_option");
         rule.path = "networking.firewall.backend".into();
@@ -3571,6 +4013,31 @@ mod tests {
             }]
         });
         assert!(!composite_config_is_representable(&whitespace_package));
+
+        let partial = serde_json::json!({
+            "schema_version": 1,
+            "mode": "all",
+            "rules": [
+                {"id": "10000000-0000-4000-8000-000000000003", "kind": "eval_passed", "config": {}},
+                {"id": "10000000-0000-4000-8000-000000000004", "kind": "future_kind", "config": {"must_survive": true}}
+            ]
+        });
+        assert_eq!(rules_from_policy("composite", &partial).len(), 1);
+        assert!(existing_enforcement_is_opaque(
+            PolicyFormat::Json,
+            "composite",
+            &partial
+        ));
+        assert!(
+            save_blocker(
+                true,
+                PolicyFormat::Json,
+                "composite",
+                &partial,
+                &rules_from_policy("composite", &partial)
+            )
+            .is_some()
+        );
     }
 
     #[test]

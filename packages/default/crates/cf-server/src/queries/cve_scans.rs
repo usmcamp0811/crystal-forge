@@ -140,6 +140,7 @@ pub async fn create_cve_scan(
     scanner_version: Option<String>,
 ) -> Result<CreateCveScanOutcome> {
     let scan_id = Uuid::new_v4();
+    let mut tx = pool.begin().await?;
 
     let result = sqlx::query!(
         r#"
@@ -165,7 +166,7 @@ pub async fn create_cve_scan(
         0i32,
         1i32
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
     if result.rows_affected() == 0 {
@@ -186,7 +187,7 @@ pub async fn create_cve_scan(
             "#,
             derivation_id
         )
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -194,25 +195,32 @@ pub async fn create_cve_scan(
                 derivation_id
             )
         })?;
+        tx.commit().await?;
         return Ok(CreateCveScanOutcome::Existing(existing));
     }
 
+    crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, scan_id).await?;
+    tx.commit().await?;
     Ok(CreateCveScanOutcome::Created(scan_id))
 }
 
 /// Update CVE scan to in-progress status
 pub async fn mark_scan_in_progress(pool: &PgPool, scan_id: Uuid) -> Result<()> {
-    sqlx::query!(
+    let mut tx = pool.begin().await?;
+    sqlx::query(
         r#"
         UPDATE cve_scans 
-        SET status = $1, attempts = attempts + 1
-        WHERE id = $2
+        SET status = 'in_progress', attempts = attempts + 1
+        WHERE id = $1
+          AND status IN ('pending', 'in_progress')
         "#,
-        "in_progress" as &str,
-        scan_id
     )
-    .execute(pool)
+    .bind(scan_id)
+    .execute(&mut *tx)
     .await?;
+
+    crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, scan_id).await?;
+    tx.commit().await?;
 
     Ok(())
 }
@@ -230,35 +238,39 @@ pub async fn complete_cve_scan(
     scan_duration_ms: Option<i32>,
     scan_metadata: Option<serde_json::Value>,
 ) -> Result<()> {
-    sqlx::query!(
+    let mut tx = pool.begin().await?;
+    sqlx::query(
         r#"
         UPDATE cve_scans 
         SET 
-            status = $1,
+            status = 'completed',
             completed_at = NOW(),
-            total_packages = $2,
-            total_vulnerabilities = $3,
-            critical_count = $4,
-            high_count = $5,
-            medium_count = $6,
-            low_count = $7,
-            scan_duration_ms = $8,
-            scan_metadata = $9
-        WHERE id = $10
+            total_packages = $1,
+            total_vulnerabilities = $2,
+            critical_count = $3,
+            high_count = $4,
+            medium_count = $5,
+            low_count = $6,
+            scan_duration_ms = $7,
+            scan_metadata = $8
+        WHERE id = $9
+          AND status IN ('pending', 'in_progress')
         "#,
-        "completed" as &str,
-        total_packages,
-        total_vulnerabilities,
-        critical_count,
-        high_count,
-        medium_count,
-        low_count,
-        scan_duration_ms,
-        scan_metadata,
-        scan_id
     )
-    .execute(pool)
+    .bind(total_packages)
+    .bind(total_vulnerabilities)
+    .bind(critical_count)
+    .bind(high_count)
+    .bind(medium_count)
+    .bind(low_count)
+    .bind(scan_duration_ms)
+    .bind(scan_metadata)
+    .bind(scan_id)
+    .execute(&mut *tx)
     .await?;
+
+    crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, scan_id).await?;
+    tx.commit().await?;
 
     Ok(())
 }
@@ -277,22 +289,28 @@ pub async fn mark_cve_scan_failed(
         "derivation_path": target.derivation_path
     });
 
-    sqlx::query!(
+    let mut tx = pool.begin().await?;
+    sqlx::query(
         r#"
         UPDATE cve_scans 
         SET 
-            status = $1,
+            status = 'failed',
             completed_at = NOW(),
             attempts = attempts + 1,
-            scan_metadata = $2
-        WHERE id = $3
+            scan_metadata = $1
+        WHERE id = $2
+          AND derivation_id = $3
+          AND status IN ('pending', 'in_progress')
         "#,
-        "failed" as &str,
-        metadata,
-        scan_id
     )
-    .execute(pool)
+    .bind(metadata)
+    .bind(scan_id)
+    .bind(target.id)
+    .execute(&mut *tx)
     .await?;
+
+    crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, scan_id).await?;
+    tx.commit().await?;
 
     Ok(())
 }
@@ -310,21 +328,27 @@ pub async fn mark_cve_scan_failed_by_id(
         "derivation_id": derivation_id,
     });
 
-    sqlx::query!(
+    let mut tx = pool.begin().await?;
+    sqlx::query(
         r#"
         UPDATE cve_scans
         SET
-            status = $1,
+            status = 'failed',
             completed_at = NOW(),
-            scan_metadata = $2
-        WHERE id = $3
+            scan_metadata = $1
+        WHERE id = $2
+          AND derivation_id = $3
+          AND status IN ('pending', 'in_progress')
         "#,
-        "failed" as &str,
-        metadata,
-        scan_id
     )
-    .execute(pool)
+    .bind(metadata)
+    .bind(scan_id)
+    .bind(derivation_id)
+    .execute(&mut *tx)
     .await?;
+
+    crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, scan_id).await?;
+    tx.commit().await?;
 
     Ok(())
 }
@@ -485,33 +509,36 @@ pub(crate) async fn save_scan_results_with_store_path_override(
     let mut tx = pool.begin().await?;
 
     // 3a. Mark scan complete
-    sqlx::query!(
+    let transition = sqlx::query(
         r#"
         UPDATE cve_scans
         SET
-            status = $1,
+            status = 'completed',
             completed_at = NOW(),
-            total_packages = $2,
-            total_vulnerabilities = $3,
-            critical_count = $4,
-            high_count = $5,
-            medium_count = $6,
-            low_count = $7,
-            scan_duration_ms = $8
-        WHERE id = $9
+            total_packages = $1,
+            total_vulnerabilities = $2,
+            critical_count = $3,
+            high_count = $4,
+            medium_count = $5,
+            low_count = $6,
+            scan_duration_ms = $7
+        WHERE id = $8
+          AND status IN ('pending', 'in_progress')
         "#,
-        "completed" as &str,
-        stats.total_packages as i32,
-        stats.total_vulnerabilities as i32,
-        stats.critical_count as i32,
-        stats.high_count as i32,
-        stats.medium_count as i32,
-        stats.low_count as i32,
-        scan_duration_ms,
-        scan_id
     )
+    .bind(stats.total_packages as i32)
+    .bind(stats.total_vulnerabilities as i32)
+    .bind(stats.critical_count as i32)
+    .bind(stats.high_count as i32)
+    .bind(stats.medium_count as i32)
+    .bind(stats.low_count as i32)
+    .bind(scan_duration_ms)
+    .bind(scan_id)
     .execute(&mut *tx)
     .await?;
+    if transition.rows_affected() != 1 {
+        anyhow::bail!("CVE scan result write lost its active-state compare-and-set");
+    }
 
     // 3b. Bulk-insert new package derivations without rewriting unchanged rows.
     // Uses sqlx::query (not sqlx::query!) because UNNEST with multi-column SELECT
@@ -700,6 +727,8 @@ pub(crate) async fn save_scan_results_with_store_path_override(
     for cve_id in &affected_cve_ids {
         attention::reconcile_cve_attention_subject_tx(&mut tx, cve_id).await?;
     }
+
+    crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, scan_id).await?;
 
     tx.commit().await?;
 
@@ -978,7 +1007,8 @@ pub async fn recover_stale_scans(
     pool: &PgPool,
     stale_threshold: std::time::Duration,
 ) -> Result<i64> {
-    let result = sqlx::query!(
+    let mut tx = pool.begin().await?;
+    let recovered_ids = sqlx::query_scalar::<_, Uuid>(
         r#"
         UPDATE cve_scans
         SET status = 'failed',
@@ -989,13 +1019,19 @@ pub async fn recover_stale_scans(
                                               'stale_recovery_reason', 'server-crash-recovery')
         WHERE status = 'in_progress'
           AND created_at < NOW() - $1 * INTERVAL '1 second'
+        RETURNING id
         "#,
-        stale_threshold.as_secs() as i64
     )
-    .execute(pool)
+    .bind(stale_threshold.as_secs() as i64)
+    .fetch_all(&mut *tx)
     .await?;
 
-    Ok(result.rows_affected() as i64)
+    for scan_id in &recovered_ids {
+        crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, *scan_id).await?;
+    }
+
+    tx.commit().await?;
+    Ok(recovered_ids.len() as i64)
 }
 
 /// Get derivations whose most recent completed CVE scan is stale according to

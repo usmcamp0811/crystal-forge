@@ -1948,6 +1948,11 @@ pub struct ComplianceControlEvidence {
     pub summary: String,
     pub evidence_items: Vec<ComplianceEvidenceItem>,
     pub framework_mapping: String,
+    #[serde(default)]
+    pub composite_result: Option<CompositeAssessmentResult>,
+    /// True when this control is composite even if no exact assessment exists yet.
+    #[serde(default)]
+    pub composite_expected: bool,
     /// Grouping metadata from the exact policy version used for this control.
     #[serde(default)]
     pub control_family: Option<String>,
@@ -1955,6 +1960,33 @@ pub struct ComplianceControlEvidence {
     pub cmmc_level: Option<i32>,
     #[serde(default)]
     pub cis_section: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompositeAssessmentResult {
+    #[serde(default)]
+    pub assessment_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub evaluation_attempt_id: Option<uuid::Uuid>,
+    pub policy_version_id: uuid::Uuid,
+    #[serde(default)]
+    pub target_store_path: Option<String>,
+    #[serde(default)]
+    pub effective_set_digest: Option<String>,
+    #[serde(default)]
+    pub effective_config_digest: Option<String>,
+    pub overall_status: String,
+    pub rule_results: Vec<CompositeAssessmentRuleResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompositeAssessmentRuleResult {
+    pub rule_id: uuid::Uuid,
+    pub kind: String,
+    pub phase: String,
+    pub status: String,
+    pub detail: String,
+    pub evidence: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1074,6 +1074,16 @@ pub async fn resolve_system_effective_policies(
     resolve_system_effective_policies_with_options(pool, system_id, false).await
 }
 
+/// Resolve the exact effective policy set through a caller-owned transaction.
+/// Callers that authorize a target use this to keep policy resolution, target
+/// validation, assessment merges, and the guarded target write atomic.
+pub async fn resolve_system_effective_policies_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+) -> Result<ResolutionOutcome> {
+    resolve_system_effective_policies_with_options_in_tx(tx, system_id, false).await
+}
+
 /// Resolve only the policy semantics relevant to Nix evaluation while still
 /// retaining the complete resolver for compliance and deployment consumers.
 /// Conflicts between two non-Nix policy versions at the same specificity are
@@ -1118,6 +1128,21 @@ pub async fn resolve_systems_effective_policies_for_evaluation_batch(
             } else {
                 None
             }
+        })
+        .collect())
+}
+
+/// Resolve complete compliance and deployment semantics for many systems in one
+/// repeatable-read snapshot.
+pub async fn resolve_systems_effective_policies_for_deployment_batch(
+    pool: &PgPool,
+    system_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, ResolutionOutcome>> {
+    let keyed = resolve_systems_effective_policies_batch(pool, system_ids, None, false).await?;
+    Ok(keyed
+        .into_iter()
+        .filter_map(|((bundle_version_id, system_id), outcome)| {
+            bundle_version_id.is_none().then_some((system_id, outcome))
         })
         .collect())
 }
@@ -2144,11 +2169,26 @@ async fn resolve_system_effective_policies_with_options(
         .await
         .context("set repeatable read")?;
 
+    let outcome = resolve_system_effective_policies_with_options_in_tx(
+        &mut tx,
+        system_id,
+        ignore_non_evaluation_conflicts,
+    )
+    .await?;
+    tx.commit().await.context("commit resolution transaction")?;
+    Ok(outcome)
+}
+
+async fn resolve_system_effective_policies_with_options_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+    ignore_non_evaluation_conflicts: bool,
+) -> Result<ResolutionOutcome> {
     // Load the system's environment inside the snapshot.
     let env_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT environment_id FROM systems WHERE id = $1")
             .bind(system_id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await
             .context("load system environment")?;
 
@@ -2177,7 +2217,7 @@ async fn resolve_system_effective_policies_with_options(
         )
         .bind(system_id)
         .bind(env_id)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("load bundle assignments for system")?;
 
@@ -2207,7 +2247,7 @@ async fn resolve_system_effective_policies_with_options(
                  )"#,
         )
         .bind(eid)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("load environment direct policies")?;
 
@@ -2256,7 +2296,7 @@ async fn resolve_system_effective_policies_with_options(
                  )"#,
         )
         .bind(system_id)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("load system direct policies")?;
 
@@ -2311,7 +2351,7 @@ async fn resolve_system_effective_policies_with_options(
              "SELECT policy_version_id FROM compliance_assignment_exclusions WHERE assignment_version_id = $1",
         )
         .bind(assignment_version_id)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("load assignment exclusions")?;
 
@@ -2319,7 +2359,7 @@ async fn resolve_system_effective_policies_with_options(
              "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_version_id = $1 ORDER BY addition_order",
         )
         .bind(assignment_version_id)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("load assignment additions")?;
 
@@ -2327,7 +2367,7 @@ async fn resolve_system_effective_policies_with_options(
             "SELECT policy_version_id, value_path, value FROM compliance_assignment_value_overrides WHERE assignment_version_id = $1",
         )
         .bind(assignment_version_id)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("load assignment overrides")?
         .into_iter()
@@ -2362,7 +2402,7 @@ async fn resolve_system_effective_policies_with_options(
             specificity,
         };
 
-        let outcome = resolve_effective_policy_set_with_options(&mut tx, &input).await?;
+        let outcome = resolve_effective_policy_set_with_options(tx, &input).await?;
 
         match outcome {
             ResolutionOutcome::Resolved(set) => {
@@ -2394,7 +2434,6 @@ async fn resolve_system_effective_policies_with_options(
                         ignore_non_evaluation_conflicts,
                     ) {
                         MergeOutcome::Conflict(conflict) => {
-                            let _ = tx.rollback().await;
                             return Ok(ResolutionOutcome::Conflict(vec![conflict]));
                         }
                         _ => {}
@@ -2402,7 +2441,6 @@ async fn resolve_system_effective_policies_with_options(
                 }
             }
             ResolutionOutcome::Conflict(conflicts) => {
-                let _ = tx.rollback().await;
                 return Ok(ResolutionOutcome::Conflict(conflicts));
             }
         }
@@ -2437,7 +2475,6 @@ async fn resolve_system_effective_policies_with_options(
             ignore_non_evaluation_conflicts,
         ) {
             MergeOutcome::Conflict(conflict) => {
-                let _ = tx.rollback().await;
                 return Ok(ResolutionOutcome::Conflict(vec![conflict]));
             }
             _ => {}
@@ -2446,8 +2483,6 @@ async fn resolve_system_effective_policies_with_options(
 
     // The final all_policies preserves insertion order (first seen wins position).
     let all_policies = staging;
-
-    tx.commit().await.context("commit resolution transaction")?;
 
     // ── Canonical combined target digest ──────────────────────────────────────
     //

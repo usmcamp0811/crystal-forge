@@ -1604,6 +1604,20 @@
       "baseline": "advisory"
     },
     {
+      "name": "20ab2-policy-editor-eight-kind-roundtrip",
+      "description": "All eight exposed composite kinds author, persist, reload, and edit while incomplete approval, rollout, and build controls remain hidden",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/data-enforcement.js",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
       "name": "20ac-policy-editor-category-and-imported-provenance",
       "description": "Category change preserves rules, and imported policies show read-only provenance tab",
       "route": "/deployment-policies",
@@ -1914,7 +1928,7 @@
     },
     {
       "name": "29b-compliance-evidence-drawer",
-      "description": "Compliance evidence drawer opens and renders control evidence",
+      "description": "Evidence loading, absent, transport-error, pending, and partial states precede a real persisted aggregate with concurrent Error and Partial presentation",
       "route": "/compliance",
       "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
       "profiles": [

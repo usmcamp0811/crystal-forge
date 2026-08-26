@@ -87,6 +87,22 @@ fn normalize_required_packages(packages: &[Value]) -> Result<Vec<String>, (Statu
                 ))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(invalid) = normalized.iter().find(|pname| {
+        !pname
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+            || !pname.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.' | b'_')
+            })
+    }) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "config.packages entry {invalid:?} is not a package pname; checks apply only to direct config.environment.systemPackages entries"
+            ),
+        ));
+    }
     normalized.sort();
     normalized.dedup();
     if normalized.is_empty() {
@@ -354,13 +370,19 @@ fn validate_policy_config(
         }
         "time_window" => {
             // Validate by attempting deserialization
-            serde_json::from_value::<crate::models::deployment_policies::TimeWindowConfig>(
-                config.clone(),
-            )
+            let parsed = serde_json::from_value::<
+                crate::models::deployment_policies::TimeWindowConfig,
+            >(config.clone())
             .map_err(|e| {
                 (
                     StatusCode::BAD_REQUEST,
                     format!("Invalid time_window config: {}", e),
+                )
+            })?;
+            crate::services::time_window_policy::validate_config(&parsed).map_err(|message| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid time_window config: {message}"),
                 )
             })?;
 
@@ -1253,6 +1275,27 @@ mod tests {
             .expect_err("missing packages must be rejected");
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("config.packages"));
+    }
+
+    #[test]
+    fn validate_policy_config_enforces_pname_only_package_contract() {
+        let validated = validate_policy_config(
+            "require_packages",
+            &serde_json::json!({"packages": ["openssh", "curl", "openssh"]}),
+        )
+        .expect("direct package pnames must be accepted");
+        assert_eq!(
+            validated["packages"],
+            serde_json::json!(["curl", "openssh"])
+        );
+
+        let err = validate_policy_config(
+            "require_packages",
+            &serde_json::json!({"packages": ["nixpkgs#openssh"]}),
+        )
+        .expect_err("flake references must not be accepted as package pnames");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("package pname"));
     }
 
     #[test]

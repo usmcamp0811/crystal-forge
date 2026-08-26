@@ -430,7 +430,7 @@ fn write_implementation(
         // prevents XCCDF round-trips from downgrading the policy type without
         // introducing Phase-4 execution semantics.
         "composite" => {
-            crate::models::deployment_policies::validate_policy_type_config(
+            crate::models::deployment_policies::deserialize_policy_type_config(
                 &pv.policy_type,
                 &pv.config,
             )

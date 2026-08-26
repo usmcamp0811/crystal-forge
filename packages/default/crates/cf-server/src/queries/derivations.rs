@@ -150,12 +150,19 @@ pub async fn record_synthetic_eval_failure(
             .await?;
 
             match existing {
-                Some((id, status_id)) => match status_id {
-                    3 | 4 | 5 | 6 => {
-                        // Dry-run evaluation states → DryRunFailed.
-                        // Also normalize stale evaluation fields (clear them).
-                        sqlx::query(
-                            r#"
+                Some((id, status_id)) => {
+                    sqlx::query(
+                        "DELETE FROM composite_policy_assessments WHERE derivation_id = $1",
+                    )
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+                    match status_id {
+                        3 | 4 | 5 | 6 => {
+                            // Dry-run evaluation states → DryRunFailed.
+                            // Also normalize stale evaluation fields (clear them).
+                            sqlx::query(
+                                r#"
                             UPDATE derivations
                             SET status_id = $1,
                                 error_message = $2,
@@ -167,24 +174,32 @@ pub async fn record_synthetic_eval_failure(
                                 policy_requirements_met = FALSE,
                                 policy_results = '{}'::jsonb
                             WHERE id = $3
-                            "#,
-                        )
-                        .bind(EvaluationStatus::DryRunFailed.as_id())
-                        .bind(error_message)
-                        .bind(id)
-                        .execute(&mut *tx)
-                        .await?;
+                                "#,
+                            )
+                            .bind(EvaluationStatus::DryRunFailed.as_id())
+                            .bind(error_message)
+                            .bind(id)
+                            .execute(&mut *tx)
+                            .await?;
 
-                        SyntheticFailureWrite::UpdatedPendingEvaluation { derivation_id: id }
-                    }
-                    _ => {
-                        // All other statuses — preserve unchanged.
-                        SyntheticFailureWrite::PreservedExisting {
-                            derivation_id: id,
-                            status_id,
+                            SyntheticFailureWrite::UpdatedPendingEvaluation { derivation_id: id }
+                        }
+                        _ => {
+                            sqlx::query(
+                                "UPDATE derivations SET policy_requirements_met = FALSE, policy_results = '{}'::jsonb WHERE id = $1",
+                            )
+                            .bind(id)
+                            .execute(&mut *tx)
+                            .await?;
+                            // Preserve build state while invalidating the failed
+                            // reevaluation's deployment authorization state.
+                            SyntheticFailureWrite::PreservedExisting {
+                                derivation_id: id,
+                                status_id,
+                            }
                         }
                     }
-                },
+                }
                 None => {
                     // This should not happen — the CONFLICT proved someone else
                     // inserted, so the row must exist. Defensively bail.
@@ -457,37 +472,44 @@ pub async fn record_successful_eval_result(
             .await?;
 
             match existing {
-                Some((id, status_id)) => match status_id {
-                    // Build-active or build-terminal: preserve the build
-                    // status but still refresh policy metadata so that
-                    // re-evaluation after a policy change produces
-                    // up-to-date matrix results.
-                    7 | 8 | 10 | 12 => {
-                        sqlx::query(
-                            r#"
+                Some((id, status_id)) => {
+                    sqlx::query(
+                        "DELETE FROM composite_policy_assessments WHERE derivation_id = $1",
+                    )
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+                    match status_id {
+                        // Build-active or build-terminal: preserve the build
+                        // status but still refresh policy metadata so that
+                        // re-evaluation after a policy change produces
+                        // up-to-date matrix results.
+                        7 | 8 | 10 | 12 => {
+                            sqlx::query(
+                                r#"
                             UPDATE derivations
                             SET cf_agent_enabled = $1,
                                 policy_requirements_met = $2,
                                 policy_results = $3
                             WHERE id = $4
                             "#,
-                        )
-                        .bind(cf_agent_enabled)
-                        .bind(policy_requirements_met)
-                        .bind(policy_results)
-                        .bind(id)
-                        .execute(&mut *tx)
-                        .await?;
-                        SuccessfulEvalWrite::PreservedBuildState {
-                            derivation_id: id,
-                            status_id,
+                            )
+                            .bind(cf_agent_enabled)
+                            .bind(policy_requirements_met)
+                            .bind(policy_results)
+                            .bind(id)
+                            .execute(&mut *tx)
+                            .await?;
+                            SuccessfulEvalWrite::PreservedBuildState {
+                                derivation_id: id,
+                                status_id,
+                            }
                         }
-                    }
-                    // DryRunPending (3), DryRunInProgress (4), DryRunFailed (6),
-                    // DryRunComplete (5): update to DryRunComplete with fresh data,
-                    // clearing any stale error.
-                    _ => {
-                        sqlx::query(
+                        // DryRunPending (3), DryRunInProgress (4), DryRunFailed (6),
+                        // DryRunComplete (5): update to DryRunComplete with fresh data,
+                        // clearing any stale error.
+                        _ => {
+                            sqlx::query(
                             r#"
                             UPDATE derivations
                             SET status_id = $1,
@@ -515,9 +537,10 @@ pub async fn record_successful_eval_result(
                         .execute(&mut *tx)
                         .await?;
 
-                        SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id: id }
+                            SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id: id }
+                        }
                     }
-                },
+                }
                 None => {
                     // Row disappeared between our INSERT and the SELECT — should not
                     // happen in practice, but bail rather than silently dropping data.
@@ -610,16 +633,23 @@ pub async fn record_successful_eval_result_in_tx(
             .await?;
 
             match existing {
-                Some((id, status_id)) => match status_id {
-                    // Build-active or build-terminal: preserve the build
-                    // status but still refresh policy metadata so that
-                    // re-evaluation after a policy change produces
-                    // up-to-date matrix results. Without this, a build
-                    // that was queued under old policy assignments would
-                    // retain stale policy_results forever.
-                    7 | 8 | 10 | 12 => {
-                        sqlx::query(
-                            r#"
+                Some((id, status_id)) => {
+                    sqlx::query(
+                        "DELETE FROM composite_policy_assessments WHERE derivation_id = $1",
+                    )
+                    .bind(id)
+                    .execute(&mut **tx)
+                    .await?;
+                    match status_id {
+                        // Build-active or build-terminal: preserve the build
+                        // status but still refresh policy metadata so that
+                        // re-evaluation after a policy change produces
+                        // up-to-date matrix results. Without this, a build
+                        // that was queued under old policy assignments would
+                        // retain stale policy_results forever.
+                        7 | 8 | 10 | 12 => {
+                            sqlx::query(
+                                r#"
                             UPDATE derivations
                             SET cf_agent_enabled = $1,
                                 policy_requirements_met = $2,
@@ -632,20 +662,20 @@ pub async fn record_successful_eval_result_in_tx(
                                 -- time reporting and history ordering.
                             WHERE id = $4
                             "#,
-                        )
-                        .bind(cf_agent_enabled)
-                        .bind(policy_requirements_met)
-                        .bind(policy_results)
-                        .bind(id)
-                        .execute(&mut **tx)
-                        .await?;
-                        Ok(SuccessfulEvalWrite::PreservedBuildState {
-                            derivation_id: id,
-                            status_id,
-                        })
-                    }
-                    _ => {
-                        sqlx::query(
+                            )
+                            .bind(cf_agent_enabled)
+                            .bind(policy_requirements_met)
+                            .bind(policy_results)
+                            .bind(id)
+                            .execute(&mut **tx)
+                            .await?;
+                            Ok(SuccessfulEvalWrite::PreservedBuildState {
+                                derivation_id: id,
+                                status_id,
+                            })
+                        }
+                        _ => {
+                            sqlx::query(
                             r#"
                             UPDATE derivations
                             SET status_id = $1,
@@ -672,9 +702,10 @@ pub async fn record_successful_eval_result_in_tx(
                         .bind(id)
                         .execute(&mut **tx)
                         .await?;
-                        Ok(SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id: id })
+                            Ok(SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id: id })
+                        }
                     }
-                },
+                }
                 None => anyhow::bail!(
                     "Concurrent race: row disappeared after INSERT ON CONFLICT DO NOTHING for {}",
                     derivation_name
@@ -743,10 +774,17 @@ pub async fn record_synthetic_eval_failure_in_tx(
             .await?;
 
             match existing {
-                Some((id, status_id)) => match status_id {
-                    3 | 4 | 5 | 6 => {
-                        sqlx::query(
-                            r#"
+                Some((id, status_id)) => {
+                    sqlx::query(
+                        "DELETE FROM composite_policy_assessments WHERE derivation_id = $1",
+                    )
+                    .bind(id)
+                    .execute(&mut **tx)
+                    .await?;
+                    match status_id {
+                        3 | 4 | 5 | 6 => {
+                            sqlx::query(
+                                r#"
                             UPDATE derivations
                             SET status_id = $1,
                                 error_message = $2,
@@ -758,20 +796,31 @@ pub async fn record_synthetic_eval_failure_in_tx(
                                 policy_requirements_met = FALSE,
                                 policy_results = '{}'::jsonb
                             WHERE id = $3
-                            "#,
-                        )
-                        .bind(EvaluationStatus::DryRunFailed.as_id())
-                        .bind(error_message)
-                        .bind(id)
-                        .execute(&mut **tx)
-                        .await?;
-                        Ok(SyntheticFailureWrite::UpdatedPendingEvaluation { derivation_id: id })
+                                "#,
+                            )
+                            .bind(EvaluationStatus::DryRunFailed.as_id())
+                            .bind(error_message)
+                            .bind(id)
+                            .execute(&mut **tx)
+                            .await?;
+                            Ok(SyntheticFailureWrite::UpdatedPendingEvaluation {
+                                derivation_id: id,
+                            })
+                        }
+                        _ => {
+                            sqlx::query(
+                                "UPDATE derivations SET policy_requirements_met = FALSE, policy_results = '{}'::jsonb WHERE id = $1",
+                            )
+                            .bind(id)
+                            .execute(&mut **tx)
+                            .await?;
+                            Ok(SyntheticFailureWrite::PreservedExisting {
+                                derivation_id: id,
+                                status_id,
+                            })
+                        }
                     }
-                    _ => Ok(SyntheticFailureWrite::PreservedExisting {
-                        derivation_id: id,
-                        status_id,
-                    }),
-                },
+                }
                 None => anyhow::bail!(
                     "Concurrent race: row disappeared after INSERT ON CONFLICT DO NOTHING for {}",
                     derivation_name

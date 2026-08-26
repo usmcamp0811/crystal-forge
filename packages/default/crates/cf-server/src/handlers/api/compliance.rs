@@ -3368,6 +3368,7 @@ pub async fn get_system_effective_policies(
                 &pool,
                 &system,
                 &set.policies,
+                &set.effective_set_digest,
                 assignment_status,
             )
             .await
@@ -15559,6 +15560,130 @@ packages = ["git"]
 
         validate_imported_policy_configs(&records)
             .expect("CF-native validation must not enforce the CF baseline type");
+    }
+
+    fn all_supported_composite_rules() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "mode": "all",
+            "rules": [
+                {"id": "50000000-0000-0000-0000-000000000001", "kind": "nixos_option", "config": {"path": "networking.firewall.enable", "operator": "==", "value_type": "boolean", "value": true}},
+                {"id": "50000000-0000-0000-0000-000000000002", "kind": "packages_installed", "config": {"packages": ["openssh"]}},
+                {"id": "50000000-0000-0000-0000-000000000003", "kind": "packages_absent", "config": {"packages": ["telnet"]}},
+                {"id": "50000000-0000-0000-0000-000000000004", "kind": "custom_eval", "config": {"expression": "config.networking.firewall.enable", "message": "firewall required"}},
+                {"id": "50000000-0000-0000-0000-000000000005", "kind": "cve_block", "config": {"severity": "critical", "max_allowed": 0}},
+                {"id": "50000000-0000-0000-0000-000000000006", "kind": "eval_passed", "config": {}},
+                {"id": "50000000-0000-0000-0000-000000000007", "kind": "pin_required", "config": {}},
+                {"id": "50000000-0000-0000-0000-000000000008", "kind": "time_window", "config": {"days": ["mon"], "from": "09:00", "to": "17:00", "tz": "UTC"}}
+            ]
+        })
+    }
+
+    #[test]
+    fn composite_json_toml_and_cf_native_interchange_preserve_all_supported_rules() {
+        let config = all_supported_composite_rules();
+        let expected_kinds = [
+            "nixos_option",
+            "packages_installed",
+            "packages_absent",
+            "custom_eval",
+            "cve_block",
+            "eval_passed",
+            "pin_required",
+            "time_window",
+        ];
+        let document = serde_json::json!({
+            "name": "all composite rules",
+            "policy_type": "composite",
+            "execution_phase": "multi-phase",
+            "config": config,
+        });
+        for (filename, bytes) in [
+            (
+                "policy.json",
+                serde_json::to_vec(&document).expect("JSON serialization"),
+            ),
+            (
+                "policy.toml",
+                json_to_toml(&document)
+                    .expect("TOML serialization")
+                    .into_bytes(),
+            ),
+        ] {
+            let parsed = parse_policy_interchange_upload(&MultipartUpload {
+                bytes,
+                filename: Some(filename.to_string()),
+            })
+            .expect("interchange parse");
+            validate_policy_interchange_document(&parsed).expect("interchange validation");
+            assert_eq!(parsed[0].config, config);
+            for (rule, expected_kind) in parsed[0].config["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(expected_kinds)
+            {
+                assert_eq!(
+                    rule["kind"], expected_kind,
+                    "AC3 import/export [{expected_kind}] via {filename}"
+                );
+            }
+        }
+
+        let records = vec![
+            crate::compliance::xccdf::import_models::ImportedPolicyRecord {
+                policy_id: Uuid::new_v4(),
+                policy_version_id: Uuid::new_v4(),
+                source_rule_id: "all-composite-rules".into(),
+                source_rule_order: 0,
+                implementation_state: "native".into(),
+                policy_type: "composite".into(),
+                version: Some("1.0".into()),
+                execution_phase: "multi-phase".into(),
+                config: config.clone(),
+                dependencies: serde_json::json!([]),
+                enabled_by_default: false,
+                portable: true,
+                semantic_digest: None,
+                selected: true,
+                policy_order: 0,
+                name: "all composite rules".into(),
+                description: None,
+                compliance_metadata: serde_json::json!({}),
+                opaque_xml: None,
+                mapped_policy_version_id: None,
+                mapped_policy_proof: None,
+                mapping_semantics: None,
+                evidence_requirements: vec![],
+            },
+        ];
+        validate_imported_policy_configs(&records).expect("CF-native validation");
+        assert_eq!(records[0].config, config);
+        for (rule, expected_kind) in records[0].config["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(expected_kinds)
+        {
+            assert_eq!(
+                rule["kind"], expected_kind,
+                "AC3 CF-native import/export [{expected_kind}]"
+            );
+        }
+    }
+
+    #[test]
+    fn composite_interchange_rejects_unsupported_approval_and_rollout_rules() {
+        for kind in ["approval_required", "rollout_percent"] {
+            let mut config = all_supported_composite_rules();
+            config["rules"][0]["kind"] = serde_json::json!(kind);
+            let error = crate::models::deployment_policies::validate_policy_type_config(
+                "composite",
+                &config,
+            )
+            .unwrap_err();
+            assert!(error.contains("unknown variant"), "{kind}: {error}");
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────────────────

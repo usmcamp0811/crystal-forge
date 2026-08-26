@@ -627,6 +627,25 @@ pub async fn mark_commit_evaluation_failed(
         return Ok(EvalFailureOutcome::SupersededOrCancelled);
     };
 
+    sqlx::query(
+        r#"
+        UPDATE composite_eval_attempt_rule_results
+        SET outcome = 'error', detail = $2,
+            evidence = evidence || jsonb_build_object(
+                'terminal_outcome', 'error', 'failure_class', $3
+            ),
+            evaluated_at = NOW()
+        WHERE evaluation_attempt_id = $1
+          AND outcome = 'not_checked'
+          AND superseded_at IS NULL
+        "#,
+    )
+    .bind(failed.id)
+    .bind(error)
+    .bind(class_name)
+    .execute(&mut *tx)
+    .await?;
+
     let policy = sqlx::query_as::<_, AutomaticRetryPolicy>(
         "SELECT max_build_retries, max_evaluation_retries, backoff_seconds, transient_only FROM automatic_retry_policy WHERE id = 1",
     )

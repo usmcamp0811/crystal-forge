@@ -1,5 +1,4 @@
 use crate::models::systems::System;
-use crate::queries::system_events::set_pending_deployment_target_tx;
 use anyhow::Result;
 use chrono::Duration as ChronoDuration;
 use chrono::{DateTime, Utc};
@@ -326,10 +325,9 @@ const INSERT_SYSTEM_SQL: &str = r#"
         flake_id = EXCLUDED.flake_id,
         derivation = EXCLUDED.derivation,
         system_configuration_name = EXCLUDED.system_configuration_name,
-        desired_target = EXCLUDED.desired_target,
+        desired_target = systems.desired_target,
         desired_target_set_at = CASE
-            WHEN EXCLUDED.desired_target IS NULL THEN NULL
-            WHEN systems.desired_target IS DISTINCT FROM EXCLUDED.desired_target THEN NOW()
+            WHEN systems.desired_target IS NULL THEN NULL
             WHEN EXCLUDED.deployment_policy = 'manual'
                  AND systems.deployment_policy IS DISTINCT FROM 'manual' THEN NULL
             ELSE systems.desired_target_set_at
@@ -724,30 +722,13 @@ pub async fn update_system_desired_target_with_source(
     target: &str,
     source: &str,
 ) -> Result<()> {
-    let desired_target = resolve_system_deployment_target(pool, system_id, target)
-        .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No cached NixOS store path is available for deployment target {target} on system {system_id}"
-            )
-        })?;
-
-    let mut tx = pool.begin().await?;
-
-    sqlx::query(
-        "UPDATE systems
-         SET desired_target = $1, desired_target_set_at = NOW(), updated_at = NOW()
-         WHERE id = $2",
+    let authorization = crate::services::composite_enforcement::authorize_and_set_system_target(
+        pool, system_id, target, source,
     )
-    .bind(&desired_target)
-    .bind(system_id)
-    .execute(&mut *tx)
     .await?;
-
-    set_pending_deployment_target_tx(&mut tx, system_id, Some(desired_target.as_str()), source)
-        .await?;
-
-    tx.commit().await?;
+    if !authorization.allowed() {
+        anyhow::bail!(authorization.detail);
+    }
     Ok(())
 }
 
@@ -2294,10 +2275,9 @@ mod tests {
     }
 
     #[test]
-    fn upsert_clears_target_freshness_when_entering_manual_without_target_change() {
-        assert!(INSERT_SYSTEM_SQL.contains(
-            "WHEN systems.desired_target IS DISTINCT FROM EXCLUDED.desired_target THEN NOW()"
-        ));
+    fn startup_upsert_preserves_authorized_target_and_clears_manual_freshness() {
+        assert!(INSERT_SYSTEM_SQL.contains("desired_target = systems.desired_target"));
+        assert!(!INSERT_SYSTEM_SQL.contains("desired_target = EXCLUDED.desired_target"));
         assert!(INSERT_SYSTEM_SQL.contains("WHEN EXCLUDED.deployment_policy = 'manual'"));
         assert!(
             INSERT_SYSTEM_SQL

@@ -328,7 +328,7 @@ use crate::derivations::utils::{build_flake_reference, count_closure_packages};
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::{
-    AssignedPolicy, DeploymentPolicy, PoliciesByConfiguration, PolicyCheckResult,
+    AssignedPolicy, EvaluationTerminalOutcome, PoliciesByConfiguration, PolicyCheckResult,
     build_nix_eval_expression, policies_for_config, policy_requirements_met, policy_results_json,
 };
 use crate::models::flakes::Flake;
@@ -699,6 +699,8 @@ pub(crate) fn build_single_system_eval_expression(
     } else {
         format!("\n{}", field_lines.join("\n"))
     };
+    let requested_revision =
+        crate::derivations::utils::flake_reference_revision(flake_ref).unwrap_or("");
 
     format!(
         r#"
@@ -710,7 +712,9 @@ let
   policyResults = {{
     cfAgentEnabled = (config.systemd.services.crystal-forge-agent.enable or false)
       || ((config.services.crystal-forge.enable or false)
-          && (config.services.crystal-forge.client.enable or false));{policy_fields}
+          && (config.services.crystal-forge.client.enable or false));
+    requestedSourceRevision = {requested_revision};
+    resolvedSourceRevision = flake.sourceInfo.rev or null;{policy_fields}
   }};
 in {{
   drvPath = drv.drvPath;
@@ -720,6 +724,7 @@ in {{
 "#,
         flake_ref = nix_string_pub(flake_ref),
         system_name = nix_string_pub(system_name),
+        requested_revision = nix_string_pub(requested_revision),
         policy_fields = policy_fields,
     )
 }
@@ -1416,6 +1421,42 @@ pub async fn persist_evaluated_system(
         return Ok(SystemPersistenceOutcome::Cancelled);
     }
 
+    let system_id = sqlx::query_scalar::<_, uuid::Uuid>(
+        r#"
+        SELECT s.id
+        FROM systems s
+        JOIN commits c ON c.id = $1 AND c.flake_id = s.flake_id
+        WHERE COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) = $2
+        "#,
+    )
+    .bind(commit_id)
+    .bind(&result.system_name)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let resolved_policies = match system_id {
+        Some(system_id) => {
+            match crate::compliance::resolver::resolve_system_effective_policies_in_tx(
+                &mut tx, system_id,
+            )
+            .await?
+            {
+                crate::compliance::resolver::ResolutionOutcome::Resolved(resolved) => {
+                    Some((system_id, resolved))
+                }
+                crate::compliance::resolver::ResolutionOutcome::Conflict(conflicts) => bail!(
+                    "Effective policy conflict while persisting {}: {}",
+                    result.system_name,
+                    conflicts
+                        .into_iter()
+                        .map(|conflict| conflict.message)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            }
+        }
+        None => None,
+    };
+
     let drv_path = result.drv_path.clone();
     let policy_requirements_met = policy_requirements_met(policy_check);
     let policy_results = policy_results_json(policy_check, assigned_policies);
@@ -1433,6 +1474,46 @@ pub async fn persist_evaluated_system(
     )
     .await
     .with_context(|| format!("Failed to write derivation for {}", result.system_name))?;
+
+    let assessment_derivation_id = match &write {
+        SuccessfulEvalWrite::Inserted { derivation_id }
+        | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => *derivation_id,
+    };
+    if let Some((system_id, resolved)) = resolved_policies.as_ref() {
+        crate::services::composite_enforcement::persist_eval_passed_for_system_in_tx(
+            &mut tx,
+            commit_id,
+            expected_attempt,
+            *system_id,
+            &result.system_name,
+            assigned_policies,
+            crate::models::deployment_policies::EnforcementOutcome::Pass,
+            "Configuration evaluation completed",
+        )
+        .await?;
+        let has_composite = resolved.policies.iter().any(|policy| {
+            policy.policy_type == "composite"
+                && matches!(
+                    policy.effective_mode,
+                    crate::compliance::resolver::AssignmentMode::Enforce
+                )
+        });
+        if has_composite {
+            let target_store_path = result.expected_store_path.as_deref().context(
+                "Composite assessment requires the evaluator's exact expected store path",
+            )?;
+            crate::services::composite_enforcement::persist_evaluation_assessments_in_tx(
+                &mut tx,
+                *system_id,
+                assessment_derivation_id,
+                target_store_path,
+                &policy_results,
+                resolved,
+            )
+            .await?;
+        }
+    }
 
     let derivation_id = match write {
         SuccessfulEvalWrite::Inserted { derivation_id }
@@ -2300,6 +2381,15 @@ pub async fn finalize_evaluation_attempt(
     .await
     .context("Failed to update commit metadata cache")?;
 
+    crate::services::composite_enforcement::persist_eval_passed_terminal_checks_in_tx(
+        &mut tx,
+        commit_id,
+        expected_attempt,
+        &plan.policy_checks,
+    )
+    .await
+    .context("Failed to persist terminal eval_passed outcomes")?;
+
     // Mark the commit complete inside the same transaction.
     let rows = sqlx::query(
         r#"
@@ -2910,7 +3000,10 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                 let mut cf_agent_enabled = None;
                                 let mut policy_check_for_system: Option<PolicyCheckResult> = None;
                                 let mut policy_metadata_error: Option<String> = None;
-                                if let Some(meta) = &result.meta {
+                                if has_error {
+                                    // Error lines are converted to confirmed target failures below.
+                                    // They have no successful policy metadata contract to parse.
+                                } else if let Some(meta) = &result.meta {
                                     if let Some(policies_json) = meta.get("policies") {
                                         // Parse policy results using this configuration's assigned
                                         // policies only (stable-key path).
@@ -2992,6 +3085,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                 // is not incorrectly persisted with a null cf_agent_enabled.
                                 if policy_check_for_system.is_none()
                                     && policy_metadata_error.is_none()
+                                    && !has_error
                                     && assigned_policies.is_empty()
                                 {
                                     let cf_agent_enabled = result
@@ -3439,21 +3533,61 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                             &commit.git_commit_hash,
                                             system_name,
                                         );
-                                        crate::queries::derivations::record_synthetic_eval_failure(
-                                            pool,
-                                            Some(commit.id),
-                                            system_name,
-                                            "nixos",
-                                            Some(&derivation_target),
+                                        let error_check = PolicyCheckResult::for_evaluation_terminal(
+                                            system_name.clone(),
+                                            assigned_policies,
+                                            EvaluationTerminalOutcome::Error,
                                             metadata_error,
-                                        )
-                                        .await
-                                        .with_context(|| {
-                                            format!(
-                                                "Failed to record policy metadata failure for {}",
-                                                system_name
+                                        );
+                                        if let Some(drv_path) = drv_path.clone() {
+                                            let failed = SuccessfulSystemResult {
+                                                system_name: system_name.clone(),
+                                                derivation_target,
+                                                drv_path,
+                                                expected_store_path: expected_store_path.clone(),
+                                                cf_agent_enabled: None,
+                                                build_eligible: false,
+                                            };
+                                            match persist_evaluated_system(
+                                                pool,
+                                                commit.id,
+                                                expected_attempt,
+                                                &failed,
+                                                &error_check,
+                                                assigned_policies,
                                             )
-                                        })?;
+                                            .await?
+                                            {
+                                                SystemPersistenceOutcome::RecordedWithoutBuild { .. }
+                                                | SystemPersistenceOutcome::ExistingBuildJob { .. } => {}
+                                                SystemPersistenceOutcome::Cancelled => {
+                                                    return Err(EvaluationCancelled.into());
+                                                }
+                                                SystemPersistenceOutcome::Superseded => {
+                                                    bail!("evaluation attempt was superseded while recording policy parser failure for {system_name}");
+                                                }
+                                                SystemPersistenceOutcome::NeedsBuildPreparation { .. } => {
+                                                    bail!("policy parser failure unexpectedly authorized build preparation for {system_name}");
+                                                }
+                                            }
+                                        } else {
+                                            crate::queries::derivations::record_synthetic_eval_failure(
+                                                pool,
+                                                Some(commit.id),
+                                                system_name,
+                                                "nixos",
+                                                Some(&derivation_target),
+                                                metadata_error,
+                                            )
+                                            .await
+                                            .with_context(|| {
+                                                format!(
+                                                    "Failed to record policy metadata failure for {}",
+                                                    system_name
+                                                )
+                                            })?;
+                                        }
+                                        policy_checks.push(error_check);
                                     } else {
                                         if has_error {
                                             debug!("⚠️  {} has evaluation error, will not be persisted as success", system_name);
@@ -3954,19 +4088,44 @@ async fn evaluate_with_nix_eval_jobs_inner(
                 meta: None,
             });
 
-            policy_checks.push(PolicyCheckResult {
-                system_name: failure.system_name.clone(),
-                cf_agent_enabled: None,
-                assigned_results: BTreeMap::new(),
-                has_required_packages: None,
-                custom_checks: HashMap::new(),
-                meets_requirements: false,
-                warnings: vec![
-                    "System failed to evaluate (no output from nix-eval-jobs)".to_string(),
-                ],
-                failed_policies: vec![],
-                cve_checks: vec![],
+            policy_checks.push(PolicyCheckResult::for_evaluation_terminal(
+                failure.system_name.clone(),
+                policies_for_config(policies_by_configuration, &failure.system_name),
+                EvaluationTerminalOutcome::ConfirmedFailure,
+                &failure.error,
+            ));
+        }
+    }
+
+    // Error-line failures do not enter the fallback block when no system was
+    // silently dropped. Account for them here as well so terminal rule evidence
+    // is complete for every confirmed target evaluation failure.
+    for failure in &confirmed_failures {
+        if !results
+            .iter()
+            .any(|result| result.attr == failure.system_name)
+        {
+            results.push(NixEvalJobResult {
+                attr: failure.system_name.clone(),
+                attr_path: vec![failure.system_name.clone()],
+                name: Some(failure.system_name.clone()),
+                drv_path: None,
+                error: Some(failure.error.clone()),
+                cache_status: None,
+                outputs: None,
+                meta: None,
             });
+        }
+        if !policy_checks
+            .iter()
+            .any(|check| check.system_name == failure.system_name)
+        {
+            policy_checks.push(PolicyCheckResult::for_evaluation_terminal(
+                failure.system_name.clone(),
+                policies_for_config(policies_by_configuration, &failure.system_name),
+                EvaluationTerminalOutcome::ConfirmedFailure,
+                &failure.error,
+            ));
         }
     }
 

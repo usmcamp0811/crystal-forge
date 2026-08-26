@@ -868,7 +868,7 @@ fn parse_deployment_policy_record(
             }
         }
         "composite" => {
-            match crate::models::deployment_policies::validate_policy_type_config(
+            match crate::models::deployment_policies::deserialize_policy_type_config(
                 &record.policy_type,
                 cfg,
             ) {
@@ -1921,6 +1921,26 @@ async fn process_pending_commits(
                     return Ok(());
                 }
             };
+
+        if let Err(error) = crate::services::composite_enforcement::initialize_eval_passed_attempt(
+            pool,
+            commit.id,
+            attempt,
+            &policies_by_configuration,
+        )
+        .await
+        {
+            let error = error.context("Failed to initialize evaluation-phase policy evidence");
+            return handle_evaluation_attempt_failure(
+                pool,
+                &cf_state,
+                &commit,
+                attempt,
+                &format!("{error:#}"),
+                crate::models::retry_policy::RetryFailureClass::Transient,
+            )
+            .await;
+        }
 
         // CRITICAL: Create broadcast channel BEFORE eval starts
         // This ensures WebSocket clients can subscribe before messages are sent

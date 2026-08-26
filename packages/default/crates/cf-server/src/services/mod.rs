@@ -6,6 +6,7 @@
 
 pub mod approval_policy;
 pub mod canary_rollout;
+pub mod composite_enforcement;
 pub mod cve_policy_gate;
 pub mod cve_scans;
 pub mod cve_threshold_policy;

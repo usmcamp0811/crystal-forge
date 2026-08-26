@@ -64,6 +64,7 @@ pub fn ComplianceView() -> Element {
     // Separate Ok/Err state for evidence.
     let mut evidence = use_signal(|| None::<ComplianceEvidenceResponse>);
     let mut evidence_error = use_signal(|| None::<String>);
+    let mut evidence_loading = use_signal(|| false);
     let mut show_export = use_signal(|| false);
     let mut show_new_bundle = use_signal(|| false);
     let mut show_edit_bundle = use_signal(|| false);
@@ -322,6 +323,7 @@ pub fn ComplianceView() -> Element {
         if let Some(bundle_id) = *selected_bundle_id.read() {
             evidence.set(None);
             evidence_error.set(None);
+            evidence_loading.set(true);
             let gen_id = *evidence_gen.read() + 1;
             evidence_gen.set(gen_id);
             let version_id = *selected_bundle_version_id.read();
@@ -332,11 +334,13 @@ pub fn ComplianceView() -> Element {
                     Ok(resp) => {
                         if *evidence_gen.read() == gen_id {
                             evidence.set(Some(resp));
+                            evidence_loading.set(false);
                         }
                     }
                     Err(err) => {
                         if *evidence_gen.read() == gen_id {
                             evidence_error.set(Some(err.to_string()));
+                            evidence_loading.set(false);
                         }
                     }
                 }
@@ -747,7 +751,12 @@ pub fn ComplianceView() -> Element {
         }
 
         // ── Evidence drawer ────────────────────────────────────────────────
-        if let Some(ev) = evidence.read().as_ref() {
+        if *evidence_loading.read() {
+            div { class: "fl-tray-backdrop" }
+            aside { class: "fl-tray", "data-testid": "composite-assessment-loading", style: "width:min(480px,96vw);padding:24px;",
+                DashboardLoadingSpinner { label: "Loading composite assessments and evidence…".to_string() }
+            }
+        } else if let Some(ev) = evidence.read().as_ref() {
             EvidenceDrawer {
                 evidence: ev.clone(),
                 bundle_name: selected_bundle_id.read()
@@ -767,6 +776,7 @@ pub fn ComplianceView() -> Element {
             }
             aside {
                 class: "fl-tray",
+                "data-testid": "composite-assessment-load-error",
                 style: "width:min(480px,96vw);",
                 header { class: "fl-tray-head",
                     span { style: "font-weight:600;", "Failed to load evidence" }
