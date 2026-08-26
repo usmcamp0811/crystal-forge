@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-26 13:00'
+updated_date: '2026-08-26 18:21'
 labels:
   - design-parity
   - poam
@@ -84,6 +84,12 @@ nix build .#checks.x86_64-linux.integration --no-link
 8. Add real migrated-DB/API/concurrency regressions for AC1-AC6, including human-ID and active-link races, closure versus superseding Fail, waiver applicability lifecycle, FAIL byte/semantic preservation, assignment immutability, overdue boundaries, all filters/rollups/dashboard sources, auth/CSRF and audit payloads.
 9. Refresh SQLx metadata only against the repository isolated PostgreSQL workflow. Run all six required verification commands plus focused tests and `git diff --check`.
 10. Stop coding for independent requirements, integrity, authorization, closure, N+1/error and regression review. Resolve all P0/P1/P2, then check exactly AC1-AC6, move TASK-433.6 to Review, update MR !318, commit/push and stop before Phase 6.
+
+Independent-review remediation checkpoint: move canonical effective-policy resolution into the serializable closure transaction; acquire deterministic finding locks before every scan/deployment rule-result mutation; decouple immutable verification snapshots from mutable assessment/derivation rows and preserve Phase-4 cleanup semantics; bind accepted waivers to exact Fail observations and expire/uniqueness-map them transactionally.
+
+Complete all-context visibility and attribution for assignment references; distinguish active, explicitly unlinked, and closure-retired finding links; use authoritative exact current/closure context for detail/search/filter/system/bundle rollups; expose complete bounded verification/history and assignment/bundle/requirement navigation DTOs; validate and bound list/batch inputs with typed errors.
+
+Make activity/audit history truthful and reconstructable, enforce completed/active-link invariants, return revisions on rejected closure, make duplicate links idempotent or typed conflicts, improve query/index plans, and add forced-concurrency plus exact semantic regressions for every review finding before rerunning independent review and required verification.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
