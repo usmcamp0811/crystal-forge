@@ -1,11 +1,11 @@
 ---
 id: TASK-410.1
 title: Add real dashboard aggregate APIs for non-POA&M parity widgets
-status: In Progress
+status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 20:32'
-updated_date: '2026-08-26 03:49'
+updated_date: '2026-08-26 05:04'
 labels:
   - dashboard
   - api
@@ -142,4 +142,6 @@ MR !320 second-pass review found one additional P2 compatibility defect: scoped 
 Second-pass compatibility fix implemented locally: `fetch_deployment_status_for_user` now preserves the legacy raw `ahead` -> `Up to Date` normalization. Added `visibility_deployment_status_preserves_ahead_as_up_to_date`, which constructs visible and hidden ahead systems and proves the unscoped aggregate adds both to `up_to_date` with no `unknown` increase while the viewer-scoped aggregate includes only the visible system.
 
 Second-pass targeted verification passed without running web-ui locally: `nix run .#devScripts.dashboard-visibility-test -- up --tui=false` (query visibility 2/2 including ahead; authenticated handler visibility 2/2); non-visibility dashboard tests (8 passed, 2 ignored); Rust formatting; `git diff --check`; and `nix build .#packages.x86_64-linux.server --no-link`. Existing repository warnings remain. The earlier sentence about staying In Progress described the prior review cycle and is superseded by subsequent status transitions.
+
+Exact-head CI pipeline 2735 passed at `bbfa2e37`: dashboard visibility, web-ui, server regressions, integration, OIDC auth, state-machine, CVE processing, complexity, coverage, and screenshot comment jobs all succeeded. The ahead compatibility fix is ready for re-review. No web-ui check was run locally.
 <!-- SECTION:NOTES:END -->
