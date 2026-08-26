@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 20:32'
-updated_date: '2026-08-26 03:40'
+updated_date: '2026-08-26 03:49'
 labels:
   - dashboard
   - api
@@ -138,4 +138,8 @@ Additional review-fix verification passed: `cargo test --manifest-path packages/
 CI pipeline 2725 passed for MR !320 at commit `fe0615dd`: dashboard-visibility-tests, web-ui, server-regressions, integration, OIDC auth, state-machine, CVE processing, complexity, coverage, and screenshot comment jobs all succeeded. The first web-ui attempt produced no result/fatal/exit marker and hit GitLab's 60-minute server timeout; retry job 16103032928 passed in 22m16s without code changes, confirming a transient harness/runner hang rather than a dashboard assertion failure. Review fixes are pushed and ready for re-review.
 
 MR !320 second-pass review found one additional P2 compatibility defect: scoped deployment aggregation mapped raw `ahead` to Unknown instead of preserving the legacy `Up to Date` normalization. Resuming in the existing dedicated worktree. No local web-ui check will be run; CI owns that verification.
+
+Second-pass compatibility fix implemented locally: `fetch_deployment_status_for_user` now preserves the legacy raw `ahead` -> `Up to Date` normalization. Added `visibility_deployment_status_preserves_ahead_as_up_to_date`, which constructs visible and hidden ahead systems and proves the unscoped aggregate adds both to `up_to_date` with no `unknown` increase while the viewer-scoped aggregate includes only the visible system.
+
+Second-pass targeted verification passed without running web-ui locally: `nix run .#devScripts.dashboard-visibility-test -- up --tui=false` (query visibility 2/2 including ahead; authenticated handler visibility 2/2); non-visibility dashboard tests (8 passed, 2 ignored); Rust formatting; `git diff --check`; and `nix build .#packages.x86_64-linux.server --no-link`. Existing repository warnings remain. The earlier sentence about staying In Progress described the prior review cycle and is superseded by subsequent status transitions.
 <!-- SECTION:NOTES:END -->
