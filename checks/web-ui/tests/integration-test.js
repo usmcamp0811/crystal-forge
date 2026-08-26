@@ -6305,16 +6305,32 @@ const steps = [
       const fleetRescanRelease = new Promise((resolve) => {
         releaseFleetRescan = resolve;
       });
+      // The endpoint enqueues work rather than executing it, and distinguishes
+      // "queued N" from "everything already had an active scan". Both are 202
+      // successes, so the UI must render them differently from an error.
+      const fleetRescanResponses = [
+        { enqueued_count: 3, message: "Queued 3 CVE scan(s)." },
+        {
+          enqueued_count: 0,
+          message:
+            "All 4 eligible system configuration(s) already have a scan pending or in progress.",
+        },
+      ];
       await page.route("**/api/v1/cves/rescan-fleet", async (route) => {
+        const payload =
+          fleetRescanResponses[
+            Math.min(fleetRescanRequests, fleetRescanResponses.length - 1)
+          ];
         fleetRescanRequests += 1;
-        await fleetRescanRelease;
+        // Only the first request is held open, so the in-flight disabled state
+        // can be observed deterministically.
+        if (fleetRescanRequests === 1) {
+          await fleetRescanRelease;
+        }
         await route.fulfill({
           status: 202,
           contentType: "application/json",
-          body: JSON.stringify({
-            enqueued_count: 3,
-            message: "Queued 3 fleet CVE scan(s).",
-          }),
+          body: JSON.stringify(payload),
         });
       });
 
@@ -6347,11 +6363,24 @@ const steps = [
       );
       releaseFleetRescan();
       await assertVisible(
-        page.getByText("Queued 3 fleet CVE scan(s)."),
+        page.getByText("Queued 3 CVE scan(s)."),
         "Expected fleet rescan success feedback",
       );
       if (fleetRescanRequests !== 1) {
         throw new Error(`Expected exactly one fleet rescan request, got ${fleetRescanRequests}`);
+      }
+
+      // A no-op result is still a success and must not be reported as a
+      // failure: every eligible target already had an active scan.
+      await fleetRescanButton.click();
+      await assertVisible(
+        page.getByText("already have a scan pending or in progress"),
+        "Expected fleet rescan no-op feedback to be distinct from an error",
+      );
+      if (fleetRescanRequests !== 2) {
+        throw new Error(
+          `Expected exactly two fleet rescan requests, got ${fleetRescanRequests}`,
+        );
       }
 
       // Assert summary stat cards are rendered.

@@ -661,7 +661,13 @@ let
           --lib queries::cve_scans::tests::get_targets_needing_cve_rescan_selects_stale_scan
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
-          --lib queries::cve_scans::tests::fleet_targets_only_include_distinct_eligible_active_system_derivations
+          --lib queries::cve_scans::tests::fleet_targets_track_running_generation_and_deduplicate
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --lib handlers::api::cves::fleet_rescan_authorization_tests -- --test-threads=1
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --lib queries::cve_scans::tests::fleet_enqueue_creates_pending_rows_and_skips_active_scans
         DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib queries::cve_scans_tests::create_cve_scan_reuses_existing_active_scan

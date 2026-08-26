@@ -1,9 +1,7 @@
 use crate::queries::cve_scans::{
-    CreateCveScanOutcome, create_cve_scan, mark_scan_in_progress,
-    save_scan_results_with_store_path_override,
+    CreateCveScanOutcome, create_cve_scan, save_scan_results_with_store_path_override,
 };
 use crate::queries::derivations::insert_derivation;
-use crate::services::cve_scans::trigger_immediate_cve_scan_with_outcome;
 use crate::vulnix::vulnix_parser::VulnixEntry;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -132,24 +130,6 @@ async fn create_cve_scan_reuses_existing_active_scan() {
     .expect("should count active scans");
 
     assert_eq!(active_count, 1, "only one active scan row should exist");
-
-    let service_outcome = trigger_immediate_cve_scan_with_outcome(pool.clone(), target.id)
-        .await
-        .expect("immediate scan service should reuse the active claim");
-    assert_eq!(service_outcome.scan_id, first.id());
-    assert!(
-        !service_outcome.was_created,
-        "an existing pending scan must be reported as a no-op"
-    );
-
-    mark_scan_in_progress(&pool, first.id())
-        .await
-        .expect("scan should transition to in-progress");
-    let in_progress_outcome = trigger_immediate_cve_scan_with_outcome(pool.clone(), target.id)
-        .await
-        .expect("immediate scan service should reuse the in-progress claim");
-    assert_eq!(in_progress_outcome.scan_id, first.id());
-    assert!(!in_progress_outcome.was_created);
 }
 
 #[tokio::test]

@@ -21,12 +21,6 @@ pub enum CveScanError {
     Internal(anyhow::Error),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ImmediateCveScanOutcome {
-    pub scan_id: Uuid,
-    pub was_created: bool,
-}
-
 impl std::fmt::Display for CveScanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -51,23 +45,11 @@ pub async fn trigger_immediate_cve_scan(
     pool: PgPool,
     derivation_id: i32,
 ) -> Result<Uuid, CveScanError> {
-    Ok(trigger_immediate_cve_scan_with_outcome(pool, derivation_id)
-        .await?
-        .scan_id)
-}
-
-pub async fn trigger_immediate_cve_scan_with_outcome(
-    pool: PgPool,
-    derivation_id: i32,
-) -> Result<ImmediateCveScanOutcome, CveScanError> {
     if let Some(existing_scan_id) = get_active_scan_for_derivation(&pool, derivation_id)
         .await
         .map_err(CveScanError::Internal)?
     {
-        return Ok(ImmediateCveScanOutcome {
-            scan_id: existing_scan_id,
-            was_created: false,
-        });
+        return Ok(existing_scan_id);
     }
 
     if !VulnixRunner::check_vulnix_available().await {
@@ -80,10 +62,7 @@ pub async fn trigger_immediate_cve_scan_with_outcome(
         .map_err(CveScanError::Internal)?;
     let scan_id = scan_claim.id();
     if !scan_claim.was_created() {
-        return Ok(ImmediateCveScanOutcome {
-            scan_id,
-            was_created: false,
-        });
+        return Ok(scan_id);
     }
 
     let spawn_pool = pool.clone();
@@ -134,8 +113,5 @@ pub async fn trigger_immediate_cve_scan_with_outcome(
         }
     });
 
-    Ok(ImmediateCveScanOutcome {
-        scan_id,
-        was_created: true,
-    })
+    Ok(scan_id)
 }

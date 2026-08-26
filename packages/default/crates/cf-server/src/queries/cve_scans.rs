@@ -968,61 +968,61 @@ pub async fn resolve_system_cve_scan_target(
     }))
 }
 
-/// Resolve one eligible CVE scan target per distinct derivation deployed to an
-/// active system. Systems sharing the same derivation are deliberately
-/// collapsed so a fleet request cannot enqueue duplicate work.
+/// Selects the derivation currently *running* on each active system.
+///
+/// "Deployed" here means the same thing it means in
+/// [`get_targets_needing_cve_rescan`]: the derivation's `store_path` equals the
+/// latest `system_states.store_path` reported for that hostname. This
+/// deliberately excludes newer builds that have not been activated and older
+/// historical generations, so a fleet rescan reports on what is actually
+/// running rather than on what would ship next.
+///
+/// Systems sharing a derivation are collapsed to a single row so a fleet
+/// request cannot enqueue duplicate work for the same store path.
+const FLEET_TARGET_SELECT: &str = r#"
+    SELECT DISTINCT ON (d.id)
+        d.id AS derivation_id,
+        d.derivation_name AS config_name,
+        s.hostname
+    FROM systems s
+    JOIN commits c ON c.flake_id = s.flake_id
+    JOIN derivations d ON d.commit_id = c.id
+    WHERE s.is_active = TRUE
+      AND d.derivation_type = 'nixos'
+      AND d.store_path IS NOT NULL
+      AND COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
+          = d.derivation_name
+      AND d.store_path = (
+          SELECT ss.store_path
+          FROM system_states ss
+          WHERE ss.hostname = s.hostname
+            AND ss.store_path IS NOT NULL
+            AND BTRIM(ss.store_path) <> ''
+          ORDER BY ss.timestamp DESC
+          LIMIT 1
+      )
+    ORDER BY d.id, s.hostname
+"#;
+
+/// Outcome of an atomic fleet enqueue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FleetEnqueueOutcome {
+    /// Distinct derivations currently running across active systems.
+    pub eligible: i64,
+    /// Rows newly inserted as `pending` by this request.
+    pub created: i64,
+}
+
+impl FleetEnqueueOutcome {
+    /// Targets skipped because a pending or in-progress scan already existed.
+    pub fn reused(self) -> i64 {
+        (self.eligible - self.created).max(0)
+    }
+}
+
+/// Resolve the distinct derivations currently running on active systems.
 pub async fn get_fleet_cve_scan_targets(pool: &PgPool) -> Result<Vec<CveScanEligibleTarget>> {
-    let rows = sqlx::query(
-        r#"
-        WITH active_system_targets AS (
-            SELECT
-                s.hostname,
-                target.derivation_id,
-                target.config_name
-            FROM systems s
-            JOIN LATERAL (
-                SELECT
-                    d.id AS derivation_id,
-                    d.derivation_name AS config_name
-                FROM commits c
-                JOIN derivations d ON d.commit_id = c.id
-                WHERE c.flake_id = s.flake_id
-                  AND d.derivation_type = 'nixos'
-                  AND d.derivation_name = COALESCE(
-                      NULLIF(BTRIM(s.system_configuration_name), ''),
-                      s.hostname
-                  )
-                ORDER BY
-                    (
-                        SELECT MAX(cpj.completed_at)
-                        FROM cache_push_jobs cpj
-                        WHERE cpj.derivation_id = d.id
-                          AND cpj.status = 'completed'
-                    ) DESC NULLS LAST,
-                    d.completed_at DESC NULLS LAST,
-                    d.id DESC
-                LIMIT 1
-            ) target ON TRUE
-            WHERE s.is_active = TRUE
-        )
-        SELECT DISTINCT ON (ast.derivation_id)
-            ast.derivation_id,
-            ast.config_name,
-            ast.hostname
-        FROM active_system_targets ast
-        JOIN derivations d ON d.id = ast.derivation_id
-        WHERE d.store_path IS NOT NULL
-          AND EXISTS (
-              SELECT 1
-              FROM cache_push_jobs cpj
-              WHERE cpj.derivation_id = ast.derivation_id
-                AND cpj.status = 'completed'
-          )
-        ORDER BY ast.derivation_id, ast.hostname
-        "#,
-    )
-    .fetch_all(pool)
-    .await?;
+    let rows = sqlx::query(FLEET_TARGET_SELECT).fetch_all(pool).await?;
 
     Ok(rows
         .into_iter()
@@ -1032,6 +1032,94 @@ pub async fn get_fleet_cve_scan_targets(pool: &PgPool) -> Result<Vec<CveScanElig
             hostname: row.get("hostname"),
             blocked_reason: None,
         })
+        .collect())
+}
+
+/// Atomically enqueue `pending` CVE scans for every currently running
+/// derivation across the active fleet.
+///
+/// This performs the whole operation in a single statement so the request has
+/// no partial-failure window: either the enqueue succeeds and the returned
+/// counts describe exactly what happened, or nothing is written at all. That is
+/// why the handler can report an accurate count instead of failing after having
+/// already started work.
+///
+/// Deduplication is provided by the partial unique index
+/// `idx_cve_scans_unique_active`, which covers `pending` and `in_progress`, so
+/// a derivation with an active scan is skipped rather than duplicated. No
+/// scan is executed here; the worker drains queued rows at its own bounded
+/// rate.
+pub async fn enqueue_fleet_cve_scans(
+    pool: &PgPool,
+    scanner_name: &str,
+    scanner_version: Option<String>,
+) -> Result<FleetEnqueueOutcome> {
+    let sql = format!(
+        r#"
+        WITH targets AS (
+            {FLEET_TARGET_SELECT}
+        ),
+        inserted AS (
+            INSERT INTO cve_scans (
+                id, derivation_id, scanner_name, scanner_version,
+                status, total_packages, total_vulnerabilities,
+                critical_count, high_count, medium_count, low_count,
+                attempts
+            )
+            SELECT
+                gen_random_uuid(), t.derivation_id, $1, $2,
+                'pending', 0, 0,
+                0, 0, 0, 0,
+                0
+            FROM targets t
+            ON CONFLICT (derivation_id) WHERE status IN ('pending', 'in_progress')
+            DO NOTHING
+            RETURNING 1
+        )
+        SELECT
+            (SELECT COUNT(*) FROM targets)::bigint  AS eligible,
+            (SELECT COUNT(*) FROM inserted)::bigint AS created
+        "#
+    );
+
+    let row = sqlx::query(&sql)
+        .bind(scanner_name)
+        .bind(scanner_version)
+        .fetch_one(pool)
+        .await?;
+
+    Ok(FleetEnqueueOutcome {
+        eligible: row.get("eligible"),
+        created: row.get("created"),
+    })
+}
+
+/// Fetch queued (`pending`) CVE scan claims in FIFO order.
+///
+/// Queued claims are created by operator-initiated fleet requests, which
+/// deliberately do not execute scans inline. The worker drains them at its own
+/// bounded per-cycle rate so a fleet-wide request cannot start an unbounded
+/// number of concurrent vulnix processes or monopolize the database.
+///
+/// Returns `(scan_id, derivation_id)` pairs. The caller resolves the derivation
+/// itself so this query does not duplicate the full derivation column mapping.
+pub async fn get_queued_cve_scans(pool: &PgPool, limit: i64) -> Result<Vec<(Uuid, i32)>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT cs.id AS scan_id, cs.derivation_id
+        FROM cve_scans cs
+        WHERE cs.status = 'pending'
+        ORDER BY cs.created_at ASC, cs.id ASC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.get("scan_id"), row.get("derivation_id")))
         .collect())
 }
 
@@ -1391,8 +1479,11 @@ mod tests {
         );
     }
 
+    /// Fleet targets must track the generation each active system is actually
+    /// running, taken from the latest `system_states` row — not merely the
+    /// newest successful build for that system's configuration.
     #[tokio::test]
-    async fn fleet_targets_only_include_distinct_eligible_active_system_derivations() {
+    async fn fleet_targets_track_running_generation_and_deduplicate() {
         let Ok(database_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
             return;
         };
@@ -1424,38 +1515,39 @@ mod tests {
             .await
             .expect("commit model should resolve");
 
-        let eligible = insert_derivation(&pool, Some(&commit), "shared-config", "nixos")
-            .await
-            .expect("eligible derivation should be inserted");
-        sqlx::query(
-            "UPDATE derivations SET status_id = $2, completed_at = NOW(), store_path = $3 WHERE id = $1",
-        )
-        .bind(eligible.id)
-        .bind(EvaluationStatus::BuildComplete.as_id())
-        .bind(format!("/nix/store/{suffix}-eligible"))
-        .execute(&pool)
-        .await
-        .expect("eligible derivation should be completed");
-        sqlx::query(
-            "INSERT INTO cache_push_jobs (derivation_id, status, completed_at) VALUES ($1, 'completed', NOW())",
-        )
-        .bind(eligible.id)
-        .execute(&pool)
-        .await
-        .expect("eligible cache push should be completed");
+        let config_name = format!("shared-config-{suffix}");
+        let running_path = format!("/nix/store/{suffix}-running");
+        let newer_path = format!("/nix/store/{suffix}-newer");
 
-        let blocked = insert_derivation(&pool, Some(&commit), "blocked-config", "nixos")
+        // The generation the fleet is actually running.
+        let running = insert_derivation(&pool, Some(&commit), &config_name, "nixos")
             .await
-            .expect("blocked derivation should be inserted");
+            .expect("running derivation should be inserted");
+        sqlx::query(
+            "UPDATE derivations SET status_id = $2, completed_at = NOW() - INTERVAL '1 day', store_path = $3 WHERE id = $1",
+        )
+        .bind(running.id)
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .bind(&running_path)
+        .execute(&pool)
+        .await
+        .expect("running derivation should be build-complete");
+
+        // A newer successful build of the same configuration that has NOT been
+        // activated on any system. It must never be selected, because the fleet
+        // action reports on what is running, not on what would ship next.
+        let newer = insert_derivation(&pool, Some(&commit), &config_name, "nixos")
+            .await
+            .expect("newer derivation should be inserted");
         sqlx::query(
             "UPDATE derivations SET status_id = $2, completed_at = NOW(), store_path = $3 WHERE id = $1",
         )
-        .bind(blocked.id)
+        .bind(newer.id)
         .bind(EvaluationStatus::BuildComplete.as_id())
-        .bind(format!("/nix/store/{suffix}-blocked"))
+        .bind(&newer_path)
         .execute(&pool)
         .await
-        .expect("blocked derivation should be completed");
+        .expect("newer derivation should be build-complete");
 
         let environment_id = Uuid::new_v4();
         sqlx::query("INSERT INTO environments (id, name, is_active) VALUES ($1, $2, TRUE)")
@@ -1464,12 +1556,18 @@ mod tests {
             .execute(&pool)
             .await
             .expect("environment should be inserted");
-        for (hostname, config_name, is_active) in [
-            (format!("active-a-{suffix}"), "shared-config", true),
-            (format!("active-b-{suffix}"), "shared-config", true),
-            (format!("blocked-{suffix}"), "blocked-config", true),
-            (format!("inactive-{suffix}"), "shared-config", false),
-        ] {
+
+        // Two active systems running the SAME generation (must collapse to a
+        // single target), one inactive system (excluded), and one active system
+        // that has never reported state, whose running generation is therefore
+        // unknown (also excluded).
+        let hosts = [
+            (format!("active-a-{suffix}"), true, true),
+            (format!("active-b-{suffix}"), true, true),
+            (format!("inactive-{suffix}"), false, true),
+            (format!("nostate-{suffix}"), true, false),
+        ];
+        for (hostname, is_active, has_state) in &hosts {
             sqlx::query(
                 r#"
                 INSERT INTO systems (
@@ -1484,20 +1582,110 @@ mod tests {
             .bind(environment_id)
             .bind(is_active)
             .bind(flake.id)
-            .bind(config_name)
+            .bind(&config_name)
             .execute(&pool)
             .await
             .expect("system should be inserted");
+
+            if !has_state {
+                continue;
+            }
+
+            // An older state row pointing at a different store path proves the
+            // query uses the LATEST reported generation rather than any
+            // historical one.
+            sqlx::query(
+                "INSERT INTO system_states (hostname, store_path, change_reason, timestamp)
+                 VALUES ($1, $2, 'task-325-test', NOW() - INTERVAL '2 days')",
+            )
+            .bind(hostname)
+            .bind(&newer_path)
+            .execute(&pool)
+            .await
+            .expect("older system state should be inserted");
+
+            sqlx::query(
+                "INSERT INTO system_states (hostname, store_path, change_reason, timestamp)
+                 VALUES ($1, $2, 'task-325-test', NOW())",
+            )
+            .bind(hostname)
+            .bind(&running_path)
+            .execute(&pool)
+            .await
+            .expect("latest system state should be inserted");
         }
 
         let targets = get_fleet_cve_scan_targets(&pool)
             .await
             .expect("fleet targets should resolve");
+        let selected: Vec<i32> = targets.iter().map(|t| t.derivation_id).collect();
 
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].derivation_id, eligible.id);
-        assert_eq!(targets[0].config_name, "shared-config");
-        assert!(targets[0].blocked_reason.is_none());
+        assert!(
+            selected.contains(&running.id),
+            "the currently running generation must be selected"
+        );
+        assert!(
+            !selected.contains(&newer.id),
+            "a newer but unactivated build must not be selected"
+        );
+        assert_eq!(
+            selected.iter().filter(|id| **id == running.id).count(),
+            1,
+            "systems sharing a running generation must collapse to one target"
+        );
+    }
+
+    /// The fleet enqueue must be atomic and must not double-claim derivations
+    /// that already have an active scan.
+    #[tokio::test]
+    async fn fleet_enqueue_creates_pending_rows_and_skips_active_scans() {
+        let Ok(database_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("dedicated CVE test database should be reachable");
+
+        let before = get_fleet_cve_scan_targets(&pool)
+            .await
+            .expect("fleet targets should resolve");
+
+        let first = enqueue_fleet_cve_scans(&pool, "vulnix", None)
+            .await
+            .expect("fleet enqueue should succeed");
+        assert_eq!(
+            first.eligible,
+            before.len() as i64,
+            "enqueue must consider exactly the resolved fleet targets"
+        );
+        assert_eq!(
+            first.created, first.eligible,
+            "a clean fleet should queue every eligible target"
+        );
+        assert_eq!(first.reused(), 0);
+
+        // Immediately re-running must be a no-op: every target now has a
+        // pending scan, and the partial unique index prevents duplicates.
+        let second = enqueue_fleet_cve_scans(&pool, "vulnix", None)
+            .await
+            .expect("second fleet enqueue should succeed");
+        assert_eq!(second.eligible, first.eligible);
+        assert_eq!(
+            second.created, 0,
+            "a second fleet request must not duplicate active scans"
+        );
+        assert_eq!(second.reused(), second.eligible);
+
+        // Queued rows must be visible to the worker drain query.
+        if first.created > 0 {
+            let queued = get_queued_cve_scans(&pool, 1000)
+                .await
+                .expect("queued scans should resolve");
+            assert!(
+                !queued.is_empty(),
+                "enqueued fleet scans must be drainable by the worker"
+            );
+        }
     }
 
     /// recover_stale_scans should mark old in_progress scans as failed,

@@ -14,9 +14,8 @@ use crate::api::models::{
 };
 use crate::auth::extractors::{RequireAdmin, RequireAuth};
 use crate::handlers::agent_request::CFState;
-use crate::queries::cve_scans::get_fleet_cve_scan_targets;
+use crate::queries::cve_scans::{FleetEnqueueOutcome, enqueue_fleet_cve_scans};
 use crate::queries::cves;
-use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan_with_outcome};
 
 /// GET /api/v1/cves
 /// List CVEs with filters.
@@ -232,56 +231,50 @@ pub async fn list_justifications(
 /// POST /api/v1/cves/rescan-fleet
 /// Trigger CVE scans for all active systems (admin only).
 ///
+/// Enqueues scans; it does not execute them. The CVE worker drains queued rows
+/// at its own bounded per-cycle rate, which is what prevents a fleet-wide
+/// request from starting an unbounded number of concurrent vulnix processes and
+/// ensures queued scans get the worker's cache-materialization path.
+///
+/// vulnix availability is intentionally not checked here: execution is
+/// deferred, so the relevant question is whether vulnix exists when the worker
+/// runs the scan, not when the request is made.
 pub async fn trigger_fleet_rescan(
     State(state): State<CFState>,
     _user: RequireAdmin,
 ) -> Result<(StatusCode, Json<FleetRescanResponse>), (StatusCode, String)> {
-    let targets = get_fleet_cve_scan_targets(&state.pool)
+    let outcome = enqueue_fleet_cve_scans(&state.pool, "vulnix", None)
         .await
         .map_err(|err| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to resolve fleet CVE scan targets: {err}"),
+                format!("Failed to enqueue fleet CVE scans: {err:#}"),
             )
         })?;
 
-    let mut enqueued_count = 0_i64;
-    for target in targets {
-        match trigger_immediate_cve_scan_with_outcome(state.pool.clone(), target.derivation_id)
-            .await
-        {
-            Ok(outcome) if outcome.was_created => enqueued_count += 1,
-            Ok(_) => {}
-            Err(CveScanError::VulnixUnavailable) => {
-                return Err((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "vulnix is not available on this node; fleet rescan cannot start".to_string(),
-                ));
-            }
-            Err(CveScanError::Internal(err)) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to enqueue fleet CVE scan: {err:#}"),
-                ));
-            }
-        }
-    }
-
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(fleet_rescan_response(enqueued_count)),
-    ))
+    Ok((StatusCode::ACCEPTED, Json(fleet_rescan_response(outcome))))
 }
 
-fn fleet_rescan_response(enqueued_count: i64) -> FleetRescanResponse {
-    let message = if enqueued_count == 0 {
-        "No eligible systems require a new CVE scan.".to_string()
+fn fleet_rescan_response(outcome: FleetEnqueueOutcome) -> FleetRescanResponse {
+    let reused = outcome.reused();
+    let message = if outcome.eligible == 0 {
+        "No active systems are reporting a running configuration to scan.".to_string()
+    } else if outcome.created == 0 {
+        format!(
+            "All {eligible} eligible system configuration(s) already have a scan pending or in progress.",
+            eligible = outcome.eligible
+        )
+    } else if reused > 0 {
+        format!(
+            "Queued {created} CVE scan(s); {reused} already had an active scan.",
+            created = outcome.created
+        )
     } else {
-        format!("Queued {enqueued_count} fleet CVE scan(s).")
+        format!("Queued {created} CVE scan(s).", created = outcome.created)
     };
 
     FleetRescanResponse {
-        enqueued_count,
+        enqueued_count: outcome.created,
         message,
     }
 }
@@ -381,9 +374,11 @@ use serde::Serialize;
 mod tests {
     use super::*;
 
-    // Admin enforcement for save_justification and trigger_fleet_rescan is handled
-    // declaratively by the RequireAdmin extractor — covered by extractors.rs tests.
-    // Here we test pure business logic that requires no DB.
+    // Admin enforcement for trigger_fleet_rescan is exercised end-to-end against
+    // the real route below, because the extractor is what actually rejects a
+    // caller. `extractors::test_role_checks` only asserts helper methods such as
+    // `is_admin()` on a hand-built AuthenticatedUser; it never runs the
+    // RequireAdmin extractor and therefore proves nothing about this endpoint.
 
     // ── Validation unit tests (pure logic, no DB) ──
 
@@ -492,13 +487,192 @@ mod tests {
     }
 
     #[test]
-    fn fleet_rescan_response_reports_created_count_and_noop() {
-        let enqueued = fleet_rescan_response(3);
-        assert_eq!(enqueued.enqueued_count, 3);
-        assert_eq!(enqueued.message, "Queued 3 fleet CVE scan(s).");
+    fn fleet_rescan_response_distinguishes_queued_reused_and_empty_fleet() {
+        // All eligible targets newly queued.
+        let queued = fleet_rescan_response(FleetEnqueueOutcome {
+            eligible: 3,
+            created: 3,
+        });
+        assert_eq!(queued.enqueued_count, 3);
+        assert_eq!(queued.message, "Queued 3 CVE scan(s).");
 
-        let noop = fleet_rescan_response(0);
-        assert_eq!(noop.enqueued_count, 0);
-        assert_eq!(noop.message, "No eligible systems require a new CVE scan.");
+        // Partially deduplicated against already-active scans.
+        let partial = fleet_rescan_response(FleetEnqueueOutcome {
+            eligible: 5,
+            created: 2,
+        });
+        assert_eq!(partial.enqueued_count, 2);
+        assert_eq!(
+            partial.message,
+            "Queued 2 CVE scan(s); 3 already had an active scan."
+        );
+
+        // Every eligible target already had an active scan: a real no-op, but
+        // distinct from "nothing was eligible".
+        let all_active = fleet_rescan_response(FleetEnqueueOutcome {
+            eligible: 4,
+            created: 0,
+        });
+        assert_eq!(all_active.enqueued_count, 0);
+        assert_eq!(
+            all_active.message,
+            "All 4 eligible system configuration(s) already have a scan pending or in progress."
+        );
+
+        // No active system is reporting a running configuration at all.
+        let empty = fleet_rescan_response(FleetEnqueueOutcome {
+            eligible: 0,
+            created: 0,
+        });
+        assert_eq!(empty.enqueued_count, 0);
+        assert_eq!(
+            empty.message,
+            "No active systems are reporting a running configuration to scan."
+        );
+    }
+
+    #[test]
+    fn fleet_enqueue_outcome_reused_never_goes_negative() {
+        // Defensive: created should never exceed eligible, but the response
+        // text must not render a negative count if it somehow does.
+        let outcome = FleetEnqueueOutcome {
+            eligible: 0,
+            created: 2,
+        };
+        assert_eq!(outcome.reused(), 0);
+    }
+}
+
+#[cfg(test)]
+mod fleet_rescan_authorization_tests {
+    //! Route-level authorization coverage for `POST /api/v1/cves/rescan-fleet`.
+    //!
+    //! These drive a real axum route so the `RequireAdmin` extractor actually
+    //! executes. Asserting on `AuthenticatedUser` helper methods alone would
+    //! not prove that the endpoint rejects unauthorized callers.
+
+    use super::trigger_fleet_rescan;
+    use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
+    use crate::config::ServerConfig;
+    use crate::handlers::agent_request::CFState;
+    use crate::models::auth_identity::AuthRole;
+    use crate::queries::auth_identity::{create_user_session, sync_user_role};
+    use crate::queries::users::insert_user;
+    use crate::queue::QueueNotifier;
+    use axum::Router;
+    use axum::routing::post;
+    use chrono::Utc;
+    use sqlx::PgPool;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    async fn test_pool() -> Option<PgPool> {
+        let url = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL").ok()?;
+        PgPool::connect(&url).await.ok()
+    }
+
+    async fn spawn_fleet_server(pool: PgPool) -> String {
+        let state = CFState::new(
+            pool,
+            ServerConfig::default(),
+            Arc::new(QueueNotifier::new()),
+            crate::server::jobs::BackgroundJobRegistry::new(),
+        );
+        let app = Router::new()
+            .route("/api/v1/cves/rescan-fleet", post(trigger_fleet_rescan))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve fleet app");
+        });
+        format!("http://{addr}")
+    }
+
+    async fn session_token_for_role(pool: &PgPool, role: AuthRole) -> String {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let user = insert_user(
+            pool,
+            &format!("{suffix}@example.com"),
+            Some("TASK-325 Fleet Test User"),
+        )
+        .await
+        .expect("insert_user");
+        sync_user_role(pool, user.id, role)
+            .await
+            .expect("sync_user_role");
+        let token = format!("session-{suffix}");
+        create_user_session(
+            pool,
+            user.id,
+            hash_token(&token),
+            Utc::now() + chrono::Duration::hours(1),
+            Some("task-325-test".to_string()),
+            Some("127.0.0.1".to_string()),
+            "local".to_string(),
+        )
+        .await
+        .expect("create_user_session");
+        token
+    }
+
+    async fn post_fleet_rescan(base: &str, token: Option<&str>) -> u16 {
+        let mut request = reqwest::Client::new().post(format!("{base}/api/v1/cves/rescan-fleet"));
+        if let Some(token) = token {
+            request = request.header("cookie", format!("{SESSION_COOKIE_NAME}={token}"));
+        }
+        request.send().await.expect("send").status().as_u16()
+    }
+
+    #[tokio::test]
+    async fn fleet_rescan_rejects_unauthenticated_caller() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let base = spawn_fleet_server(pool).await;
+
+        assert_eq!(
+            post_fleet_rescan(&base, None).await,
+            401,
+            "an unauthenticated caller must not reach the fleet enqueue"
+        );
+    }
+
+    #[tokio::test]
+    async fn fleet_rescan_rejects_viewer_and_operator() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let viewer = session_token_for_role(&pool, AuthRole::Viewer).await;
+        let operator = session_token_for_role(&pool, AuthRole::Operator).await;
+        let base = spawn_fleet_server(pool).await;
+
+        assert_eq!(
+            post_fleet_rescan(&base, Some(&viewer)).await,
+            403,
+            "Viewer must be forbidden from triggering a fleet rescan"
+        );
+        assert_eq!(
+            post_fleet_rescan(&base, Some(&operator)).await,
+            403,
+            "Operator must be forbidden from triggering a fleet rescan"
+        );
+    }
+
+    #[tokio::test]
+    async fn fleet_rescan_accepts_admin() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let admin = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_fleet_server(pool).await;
+
+        assert_eq!(
+            post_fleet_rescan(&base, Some(&admin)).await,
+            202,
+            "Admin must be accepted and the request acknowledged as queued"
+        );
     }
 }

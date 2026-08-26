@@ -28,9 +28,11 @@ use crate::log::{WorkerState, WorkerStatus, get_cve_status};
 use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::get_cache_destination;
 use crate::queries::cve_scans::{
-    create_cve_scan, get_targets_needing_cve_rescan, get_targets_needing_cve_scan,
-    mark_cve_scan_failed, recover_stale_scans, save_scan_results,
+    create_cve_scan, get_queued_cve_scans, get_targets_needing_cve_rescan,
+    get_targets_needing_cve_scan, mark_cve_scan_failed, mark_cve_scan_failed_by_id,
+    mark_scan_in_progress, recover_stale_scans, save_scan_results,
 };
+use crate::queries::derivations::get_derivation_by_id;
 use crate::queries::scanning::get_scan_schedule_policy;
 use crate::server::jobs::BackgroundJobHandle;
 use crate::vulnix::vulnix_runner::VulnixRunner;
@@ -345,6 +347,82 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
         Err(e) => error!("Failed to recover stale CVE scans: {e}"),
     }
 
+    // --- Phase 0: operator-queued scans (bounded) ---
+    //
+    // Fleet rescan requests enqueue `pending` claims rather than executing
+    // scans inline, so this phase is what actually runs them. It is bounded by
+    // the same per-cycle budget as the other phases, which is the mechanism
+    // that prevents a single fleet-wide request from starting an unbounded
+    // number of concurrent vulnix processes.
+    //
+    // This runs before the policy load on purpose: a queued scan is an explicit
+    // operator request and should not be suppressed by a scan-policy read
+    // failure or by `on_build` being disabled.
+    match get_queued_cve_scans(pool, MAX_SCANS_PER_CYCLE).await {
+        Ok(queued) if !queued.is_empty() => {
+            info!(
+                "📥 [queued] Draining {} operator-requested scan(s) this cycle (limit {})",
+                queued.len(),
+                MAX_SCANS_PER_CYCLE
+            );
+            for (scan_id, derivation_id) in queued {
+                if !*enabled_rx.read().await {
+                    info!("🛑 CVE scan loop disabled — stopping queued phase");
+                    return Ok(());
+                }
+
+                let derivation = match get_derivation_by_id(pool, derivation_id).await {
+                    Ok(derivation) => derivation,
+                    Err(e) => {
+                        error!("❌ [queued] Could not load derivation {derivation_id}: {e}");
+                        if let Err(mark_err) = mark_cve_scan_failed_by_id(
+                            pool,
+                            scan_id,
+                            derivation_id,
+                            &format!("Could not load derivation: {e}"),
+                        )
+                        .await
+                        {
+                            error!("❌ [queued] Failed to mark scan {scan_id} failed: {mark_err}");
+                        }
+                        continue;
+                    }
+                };
+
+                set_cve_status_working(&format!("scanning {}", derivation.derivation_name)).await;
+                if let Err(e) = mark_scan_in_progress(pool, scan_id).await {
+                    error!("❌ [queued] Could not claim scan {scan_id}: {e}");
+                    continue;
+                }
+
+                info!(
+                    "📥 [queued] Scanning operator-requested derivation: {}",
+                    derivation.derivation_name
+                );
+                if let Err(e) = execute_scan(
+                    pool,
+                    vulnix_runner,
+                    vulnix_version.clone(),
+                    &derivation,
+                    scan_id,
+                )
+                .await
+                {
+                    error!(
+                        "❌ [queued] Scan failed for {}: {e}",
+                        derivation.derivation_name
+                    );
+                }
+            }
+        }
+        Ok(_) => {
+            debug!("📥 No queued scan targets this cycle");
+        }
+        Err(e) => {
+            error!("❌ Failed to get queued scan targets: {e}");
+        }
+    }
+
     // Read scan schedule policy. Fail closed: if the policy cannot be loaded
     // we skip this cycle rather than applying aggressive hardcoded defaults.
     // This prevents a database configuration failure from silently triggering
@@ -518,6 +596,28 @@ async fn scan_one<R: CveScanRunner + Sync>(
         scan_id
     };
 
+    execute_scan(pool, vulnix_runner, vulnix_version, derivation, scan_id).await
+}
+
+/// Execute a CVE scan for an already-claimed `cve_scans` row.
+///
+/// Shared by worker-initiated scans (via [`scan_one`], which creates the claim
+/// itself) and by queued scans created by an operator fleet request (which
+/// adopt a pre-existing `pending` claim). Both therefore inherit the same
+/// lifecycle: local store-path presence check, cache materialization fallback,
+/// vulnix invocation, and result persistence.
+///
+/// Keeping this as the single execution path is deliberate. A caller that
+/// invokes vulnix directly would skip cache materialization and fail for
+/// derivations whose store path has been garbage-collected locally but is still
+/// available from a completed cache push.
+async fn execute_scan<R: CveScanRunner + Sync>(
+    pool: &PgPool,
+    vulnix_runner: &R,
+    vulnix_version: Option<String>,
+    derivation: &crate::derivations::Derivation,
+    scan_id: uuid::Uuid,
+) -> Result<()> {
     let Some(ref path) = derivation.store_path else {
         warn!(
             "❌ No store_path set for derivation {}",
@@ -1067,6 +1167,23 @@ mod tests {
         .execute(&pool)
         .await
         .expect("prior scan-cycle fixtures should be made ineligible");
+
+        // Phase 0 drains operator-queued scans before the post-build phase, so
+        // any `pending` rows left behind by the fleet-enqueue tests would
+        // consume this cycle's budget and make the assertions below observe the
+        // wrong target. Retire them first so this test controls the queue.
+        sqlx::query(
+            r#"
+            UPDATE cve_scans
+            SET status = 'failed',
+                completed_at = NOW(),
+                error_message = 'retired by scan_cycle test setup'
+            WHERE status = 'pending'
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("pre-existing queued scans should be retired");
 
         sqlx::query(
             r#"
