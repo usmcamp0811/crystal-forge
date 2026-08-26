@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-25 13:08'
+updated_date: '2026-08-26 03:07'
 labels:
   - design-parity
   - policy
@@ -17,6 +17,7 @@ dependencies:
 references:
   - TASK-433
   - TASK-433.1
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/318'
 documentation:
   - docs/design/CrystalForge/data-enforcement.js
 parent_task_id: TASK-433
@@ -52,9 +53,9 @@ nix build .#checks.x86_64-linux.server-regressions --no-link
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Every visible enforcement control has a complete DTO, validation, storage, execution, result/evidence, read-back and import/export path or is hidden.
-- [ ] #2 Mixed Nix/evaluation-phase plus non-Nix rule sets persist and evaluate with all semantics and visible constituent outcomes.
-- [ ] #3 For every exposed enforcement kind tests cover create, validate, persist, reload, correct phase, pass, fail, error/not-checked, edit, evidence and import/export.
+- [x] #1 Every visible enforcement control has a complete DTO, validation, storage, execution, result/evidence, read-back and import/export path or is hidden.
+- [x] #2 Mixed Nix/evaluation-phase plus non-Nix rule sets persist and evaluate with all semantics and visible constituent outcomes.
+- [x] #3 For every exposed enforcement kind tests cover create, validate, persist, reload, correct phase, pass, fail, error/not-checked, edit, evidence and import/export.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -97,4 +98,10 @@ Phase-4 preflight began from clean shared task worktree `/home/mcamp/code/crysta
 | rollout_percent | hidden UI-only | legacy standalone config only | legacy envelope only | canary state scaffolding exists but `complete_phase` has no production caller, so rollout cannot advance | remain hidden; document architecture gap, do not fabricate completion |
 
 Cross-cutting findings to correct: current composite loader errors are caught and replaced with an empty policy set; persisted evaluation results use policy-version UUIDs while compliance lookup uses lineage UUIDs; deployment-phase outcomes are transient; derivation-only result JSON is not safe for system-specific multi-phase accumulation; manual/rollback target writes bypass advanced gates; no existing constituent outcome model distinguishes Fail/Error/NotChecked. No production code was modified before recording this matrix and plan.
+
+Phase 4 implemented all eight exposed kinds (`nixos_option`, `packages_installed`, `packages_absent`, `custom_eval`, `cve_block`, `eval_passed`, `pin_required`, `time_window`) across typed DTO/validation, normalized persistence, phase execution, deterministic all-semantics aggregation, evidence/read-back, interchange, and UI authoring. `approval_required`, `rollout_percent`, and `build_succeeded` remain hidden because no complete authoritative workflow exists.
+
+Final independent requirements/security review found no remaining P0/P1/P2. Final remediation requires completed cache-push evidence for the exact derivation and exact store path, blocks known uncached targets for both set and claim paths, and preserves only genuinely absent historical store-path fallback when no composite policy is enforced.
+
+Verified locally on 2026-08-26: `cargo fmt --manifest-path packages/default/Cargo.toml --all --check`; server package tests (1218 unit tests plus integration suites, including composite 18/18); Web UI tests (223 passed, 1 ignored); SQLx prepare check for the workspace/all targets; server package build; `checks.x86_64-linux.server-regressions`; focused Web UI workflows `20ab2` and `29b` (2/2 screenshots); and `nix flake check --keep-going -L` exit 0. The full Web UI profile internally reported unrelated failed manifest steps while the derivation returned success; TASK-438 tracks making that check fail correctly.
 <!-- SECTION:NOTES:END -->
