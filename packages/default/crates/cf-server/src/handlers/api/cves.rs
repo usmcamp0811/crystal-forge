@@ -591,7 +591,7 @@ mod fleet_rescan_authorization_tests {
         format!("http://{addr}")
     }
 
-    async fn session_token_for_role(pool: &PgPool, role: AuthRole) -> String {
+    async fn session_token_for_role(pool: &PgPool, role: AuthRole) -> (String, Uuid) {
         let suffix = Uuid::new_v4().simple().to_string();
         let user = insert_user(
             pool,
@@ -615,7 +615,15 @@ mod fleet_rescan_authorization_tests {
         )
         .await
         .expect("create_user_session");
-        token
+        (token, user.id)
+    }
+
+    async fn cleanup_test_user(pool: &PgPool, user_id: Uuid) {
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .expect("test user and session should be deleted");
     }
 
     async fn post_fleet_rescan(base: &str, token: Option<&str>) -> u16 {
@@ -631,7 +639,7 @@ mod fleet_rescan_authorization_tests {
         let Some(pool) = test_pool().await else {
             return;
         };
-        let base = spawn_fleet_server(pool).await;
+        let base = spawn_fleet_server(pool.clone()).await;
 
         assert_eq!(
             post_fleet_rescan(&base, None).await,
@@ -645,18 +653,21 @@ mod fleet_rescan_authorization_tests {
         let Some(pool) = test_pool().await else {
             return;
         };
-        let viewer = session_token_for_role(&pool, AuthRole::Viewer).await;
-        let operator = session_token_for_role(&pool, AuthRole::Operator).await;
-        let base = spawn_fleet_server(pool).await;
+        let (viewer, viewer_id) = session_token_for_role(&pool, AuthRole::Viewer).await;
+        let (operator, operator_id) = session_token_for_role(&pool, AuthRole::Operator).await;
+        let base = spawn_fleet_server(pool.clone()).await;
+
+        let viewer_status = post_fleet_rescan(&base, Some(&viewer)).await;
+        let operator_status = post_fleet_rescan(&base, Some(&operator)).await;
+        cleanup_test_user(&pool, viewer_id).await;
+        cleanup_test_user(&pool, operator_id).await;
 
         assert_eq!(
-            post_fleet_rescan(&base, Some(&viewer)).await,
-            403,
+            viewer_status, 403,
             "Viewer must be forbidden from triggering a fleet rescan"
         );
         assert_eq!(
-            post_fleet_rescan(&base, Some(&operator)).await,
-            403,
+            operator_status, 403,
             "Operator must be forbidden from triggering a fleet rescan"
         );
     }
@@ -666,12 +677,31 @@ mod fleet_rescan_authorization_tests {
         let Some(pool) = test_pool().await else {
             return;
         };
-        let admin = session_token_for_role(&pool, AuthRole::Admin).await;
-        let base = spawn_fleet_server(pool).await;
+        let (admin, admin_id) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_fleet_server(pool.clone()).await;
+
+        let before: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM cve_scans")
+            .fetch_all(&pool)
+            .await
+            .expect("existing scan IDs should resolve");
+        let status = post_fleet_rescan(&base, Some(&admin)).await;
+        let after: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM cve_scans")
+            .fetch_all(&pool)
+            .await
+            .expect("post-request scan IDs should resolve");
+        let created: Vec<Uuid> = after
+            .into_iter()
+            .filter(|id| !before.contains(id))
+            .collect();
+        sqlx::query("DELETE FROM cve_scans WHERE id = ANY($1)")
+            .bind(&created)
+            .execute(&pool)
+            .await
+            .expect("admin route scan side effects should be deleted");
+        cleanup_test_user(&pool, admin_id).await;
 
         assert_eq!(
-            post_fleet_rescan(&base, Some(&admin)).await,
-            202,
+            status, 202,
             "Admin must be accepted and the request acknowledged as queued"
         );
     }

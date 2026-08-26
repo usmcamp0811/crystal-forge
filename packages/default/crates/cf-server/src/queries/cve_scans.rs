@@ -200,23 +200,6 @@ pub async fn create_cve_scan(
     Ok(CreateCveScanOutcome::Created(scan_id))
 }
 
-/// Update CVE scan to in-progress status
-pub async fn mark_scan_in_progress(pool: &PgPool, scan_id: Uuid) -> Result<()> {
-    sqlx::query!(
-        r#"
-        UPDATE cve_scans 
-        SET status = $1, attempts = attempts + 1
-        WHERE id = $2
-        "#,
-        "in_progress" as &str,
-        scan_id
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
 /// Complete a CVE scan with results
 pub async fn complete_cve_scan(
     pool: &PgPool,
@@ -1094,23 +1077,44 @@ pub async fn enqueue_fleet_cve_scans(
     })
 }
 
-/// Fetch queued (`pending`) CVE scan claims in FIFO order.
+/// Atomically claim queued CVE scans for execution.
 ///
-/// Queued claims are created by operator-initiated fleet requests, which
-/// deliberately do not execute scans inline. The worker drains them at its own
-/// bounded per-cycle rate so a fleet-wide request cannot start an unbounded
-/// number of concurrent vulnix processes or monopolize the database.
+/// Selecting and claiming must happen in one statement. A plain `SELECT`
+/// followed by a separate `UPDATE` lets two `cf-server` processes sharing a
+/// database read the same `pending` row and both execute it: the partial unique
+/// index does not help, because both workers operate on the *same* row rather
+/// than inserting competing ones.
 ///
-/// Returns `(scan_id, derivation_id)` pairs. The caller resolves the derivation
-/// itself so this query does not duplicate the full derivation column mapping.
-pub async fn get_queued_cve_scans(pool: &PgPool, limit: i64) -> Result<Vec<(Uuid, i32)>> {
+/// `FOR UPDATE SKIP LOCKED` gives each caller a disjoint set of rows, and the
+/// `status = 'pending'` predicate in the UPDATE is a second guard so a row that
+/// changed state between planning and execution is not claimed twice. Only rows
+/// actually transitioned by this call are returned, so a caller may execute
+/// exactly what it received.
+///
+/// The claim timestamp is recorded in `scan_metadata.execution_started_at` so
+/// stale recovery can age a scan from when execution started rather than from
+/// when it entered the queue. Those are the same instant for worker-created
+/// scans, but can be far apart for operator-queued fleet scans.
+pub async fn claim_queued_cve_scans(pool: &PgPool, limit: i64) -> Result<Vec<(Uuid, i32)>> {
     let rows = sqlx::query(
         r#"
-        SELECT cs.id AS scan_id, cs.derivation_id
-        FROM cve_scans cs
-        WHERE cs.status = 'pending'
-        ORDER BY cs.created_at ASC, cs.id ASC
-        LIMIT $1
+        WITH candidates AS (
+            SELECT id
+            FROM cve_scans
+            WHERE status = 'pending'
+            ORDER BY created_at ASC, id ASC
+            LIMIT $1
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE cve_scans cs
+        SET status = 'in_progress',
+            attempts = cs.attempts + 1,
+            scan_metadata = COALESCE(cs.scan_metadata, '{}'::jsonb)
+                || jsonb_build_object('execution_started_at', NOW())
+        FROM candidates c
+        WHERE cs.id = c.id
+          AND cs.status = 'pending'
+        RETURNING cs.id AS scan_id, cs.derivation_id
         "#,
     )
     .bind(limit)
@@ -1125,28 +1129,38 @@ pub async fn get_queued_cve_scans(pool: &PgPool, limit: i64) -> Result<Vec<(Uuid
 
 /// Mark scans that have been stuck `in_progress` for more than the given
 /// threshold as `failed` so the derivation becomes eligible for re-scanning.
-/// This prevents a server crash between `mark_scan_in_progress` and
-/// `save_scan_results` from permanently poisoning a derivation.
+/// This prevents a server crash between claiming/creating an in-progress scan
+/// and `save_scan_results` from permanently poisoning a derivation.
 ///
 /// Returns the number of scans that were recovered so callers can log the event.
 pub async fn recover_stale_scans(
     pool: &PgPool,
     stale_threshold: std::time::Duration,
 ) -> Result<i64> {
-    let result = sqlx::query!(
+    // Age from when execution actually started, not from when the row was
+    // created. Operator-queued fleet scans can sit in the queue for a long time
+    // before a worker claims them, so aging from `created_at` would let a
+    // second process classify a scan that just began as already stale and fail
+    // it out from under the worker running it. `execution_started_at` is written
+    // by `claim_queued_cve_scans`; rows created directly as `in_progress` have
+    // no claim marker and correctly fall back to `created_at`.
+    let result = sqlx::query(
         r#"
         UPDATE cve_scans
         SET status = 'failed',
             completed_at = NOW(),
             attempts = attempts + 1,
-            scan_metadata = COALESCE(scan_metadata, '{}'::jsonb) || 
+            scan_metadata = COALESCE(scan_metadata, '{}'::jsonb) ||
                            jsonb_build_object('stale_recovered_at', NOW()::text,
                                               'stale_recovery_reason', 'server-crash-recovery')
         WHERE status = 'in_progress'
-          AND created_at < NOW() - $1 * INTERVAL '1 second'
+          AND COALESCE(
+                  (scan_metadata ->> 'execution_started_at')::timestamptz,
+                  created_at
+              ) < NOW() - ($1::bigint) * INTERVAL '1 second'
         "#,
-        stale_threshold.as_secs() as i64
     )
+    .bind(stale_threshold.as_secs() as i64)
     .execute(pool)
     .await?;
 
@@ -1372,50 +1386,224 @@ mod tests {
     use crate::queries::derivations::{EvaluationStatus, insert_derivation};
     use crate::queries::flakes::insert_flake;
 
-    /// Helper to create a minimal flake, commit, and derivation for testing.
-    async fn setup_test_derivation(pool: &PgPool) -> (i32, String) {
+    struct FleetFixture {
+        flake_id: i32,
+        environment_id: Uuid,
+        derivation_ids: Vec<i32>,
+        hosts: Vec<String>,
+        running_id: i32,
+        newer_id: i32,
+    }
+
+    impl FleetFixture {
+        async fn cleanup(&self, pool: &PgPool) {
+            sqlx::query("DELETE FROM cve_scans WHERE derivation_id = ANY($1)")
+                .bind(&self.derivation_ids)
+                .execute(pool)
+                .await
+                .expect("fixture CVE scans should be deleted");
+            sqlx::query("DELETE FROM system_states WHERE hostname = ANY($1)")
+                .bind(&self.hosts)
+                .execute(pool)
+                .await
+                .expect("fixture system states should be deleted");
+            sqlx::query("DELETE FROM systems WHERE environment_id = $1")
+                .bind(self.environment_id)
+                .execute(pool)
+                .await
+                .expect("fixture systems should be deleted");
+            sqlx::query("DELETE FROM derivations WHERE id = ANY($1)")
+                .bind(&self.derivation_ids)
+                .execute(pool)
+                .await
+                .expect("fixture derivations should be deleted");
+            sqlx::query("DELETE FROM commits WHERE flake_id = $1")
+                .bind(self.flake_id)
+                .execute(pool)
+                .await
+                .expect("fixture commits should be deleted");
+            sqlx::query("DELETE FROM flakes WHERE id = $1")
+                .bind(self.flake_id)
+                .execute(pool)
+                .await
+                .expect("fixture flake should be deleted");
+            sqlx::query("DELETE FROM environments WHERE id = $1")
+                .bind(self.environment_id)
+                .execute(pool)
+                .await
+                .expect("fixture environment should be deleted");
+        }
+    }
+
+    async fn setup_fleet_fixture(pool: &PgPool) -> FleetFixture {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let repo_url = format!("https://example.com/task-325-{suffix}.git");
         let flake = insert_flake(
             pool,
-            "test-flake",
-            "https://example.com/test.git",
+            &format!("task-325-{suffix}"),
+            &repo_url,
             "main",
             "cf_systems_only",
         )
         .await
-        .expect("flake should be created");
+        .expect("flake should be inserted");
+        insert_commit(pool, &format!("{suffix}00000000"), &repo_url, Utc::now())
+            .await
+            .expect("commit should be inserted");
+        let commit_id: i32 = sqlx::query_scalar(
+            "SELECT id FROM commits WHERE flake_id = $1 ORDER BY id DESC LIMIT 1",
+        )
+        .bind(flake.id)
+        .fetch_one(pool)
+        .await
+        .expect("commit should resolve");
+        let commit = get_commit_by_id(pool, commit_id)
+            .await
+            .expect("commit model should resolve");
 
+        let config_name = format!("shared-config-{suffix}");
+        let running_path = format!("/nix/store/{suffix}-running");
+        let newer_path = format!("/nix/store/{suffix}-newer");
+        let running = insert_derivation(pool, Some(&commit), &config_name, "nixos")
+            .await
+            .expect("running derivation should be inserted");
+        sqlx::query(
+            "UPDATE derivations SET status_id = $2, completed_at = NOW() - INTERVAL '1 day', store_path = $3 WHERE id = $1",
+        )
+        .bind(running.id)
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .bind(&running_path)
+        .execute(pool)
+        .await
+        .expect("running derivation should be build-complete");
+
+        // A second commit is required because derivations are unique per
+        // commit/configuration. Reusing the first commit would make
+        // `insert_derivation` return the running row and overwrite its path,
+        // invalidating the fixture this test is meant to prove.
         insert_commit(
             pool,
-            "abcdef1234567890abcdef1234567890abcdef12",
-            "https://example.com/test.git",
-            chrono::Utc::now(),
+            &format!("{suffix}11111111"),
+            &repo_url,
+            Utc::now() + chrono::Duration::seconds(1),
         )
         .await
-        .expect("commit should be created");
+        .expect("newer commit should be inserted");
+        let newer_commit_id: i32 = sqlx::query_scalar(
+            "SELECT id FROM commits WHERE flake_id = $1 ORDER BY id DESC LIMIT 1",
+        )
+        .bind(flake.id)
+        .fetch_one(pool)
+        .await
+        .expect("newer commit should resolve");
+        let newer_commit = get_commit_by_id(pool, newer_commit_id)
+            .await
+            .expect("newer commit model should resolve");
+        let newer = insert_derivation(pool, Some(&newer_commit), &config_name, "nixos")
+            .await
+            .expect("newer derivation should be inserted");
+        sqlx::query(
+            "UPDATE derivations SET status_id = $2, completed_at = NOW(), store_path = $3 WHERE id = $1",
+        )
+        .bind(newer.id)
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .bind(&newer_path)
+        .execute(pool)
+        .await
+        .expect("newer derivation should be build-complete");
 
-        // Create a derivation with build-complete status
-        let derivation = insert_derivation(
-            pool,
-            None, // no commit needed for this test
-            "test-host",
-            "nixos",
-        )
-        .await
-        .expect("derivation should be created");
+        let environment_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name, is_active) VALUES ($1, $2, TRUE)")
+            .bind(environment_id)
+            .bind(format!("task-325-env-{suffix}"))
+            .execute(pool)
+            .await
+            .expect("environment should be inserted");
+
+        let hosts = vec![
+            format!("active-a-{suffix}"),
+            format!("active-b-{suffix}"),
+            format!("inactive-{suffix}"),
+            format!("nostate-{suffix}"),
+        ];
+        for (index, hostname) in hosts.iter().enumerate() {
+            let is_active = index != 2;
+            let has_state = index != 3;
+            sqlx::query(
+                r#"
+                INSERT INTO systems (
+                    id, hostname, environment_id, is_active, public_key, flake_id,
+                    derivation, system_configuration_name
+                )
+                VALUES ($1, $2, $3, $4, 'test-key', $5, 'test-derivation', $6)
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(hostname)
+            .bind(environment_id)
+            .bind(is_active)
+            .bind(flake.id)
+            .bind(&config_name)
+            .execute(pool)
+            .await
+            .expect("system should be inserted");
+
+            if has_state {
+                sqlx::query(
+                    "INSERT INTO system_states (hostname, store_path, change_reason, timestamp)
+                     VALUES ($1, $2, 'config_change', NOW() - INTERVAL '2 days')",
+                )
+                .bind(hostname)
+                .bind(&newer_path)
+                .execute(pool)
+                .await
+                .expect("older system state should be inserted");
+                sqlx::query(
+                    "INSERT INTO system_states (hostname, store_path, change_reason, timestamp)
+                     VALUES ($1, $2, 'config_change', NOW())",
+                )
+                .bind(hostname)
+                .bind(&running_path)
+                .execute(pool)
+                .await
+                .expect("latest system state should be inserted");
+            }
+        }
+
+        FleetFixture {
+            flake_id: flake.id,
+            environment_id,
+            derivation_ids: vec![running.id, newer.id],
+            hosts,
+            running_id: running.id,
+            newer_id: newer.id,
+        }
+    }
+
+    /// Helper to create a unique build-complete derivation for testing.
+    async fn setup_test_derivation(pool: &PgPool) -> (i32, String) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let derivation_name = format!("test-host-{suffix}");
+        let store_path = format!("/nix/store/{suffix}-test");
+        let derivation = insert_derivation(pool, None, &derivation_name, "nixos")
+            .await
+            .expect("derivation should be created");
 
         // Update to build-complete with a store path so the scan queries pick it up
         sqlx::query(
             r#"
             UPDATE derivations
             SET status_id = $1,
-                store_path = '/nix/store/00000000000000000000000000000000-test',
+                store_path = $3,
                 completed_at = NOW(),
-                derivation_path = '/nix/store/00000000000000000000000000000000-test.drv'
+                derivation_path = $4
             WHERE id = $2
             "#,
         )
         .bind(EvaluationStatus::BuildComplete.as_id())
         .bind(derivation.id)
+        .bind(&store_path)
+        .bind(format!("{store_path}.drv"))
         .execute(pool)
         .await
         .expect("derivation status should be updated");
@@ -1439,7 +1627,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires test database creation privileges"]
     async fn get_targets_needing_cve_scan_selects_unscanned_derivation(pool: PgPool) {
-        setup_test_derivation(&pool).await;
+        let (_, derivation_name) = setup_test_derivation(&pool).await;
 
         let targets = get_targets_needing_cve_scan(&pool, Some(10), &[], None)
             .await
@@ -1450,8 +1638,8 @@ mod tests {
             "unscanned derivation should be selected"
         );
         assert!(
-            targets.iter().any(|d| d.derivation_name == "test-host"),
-            "test-host should be among targets"
+            targets.iter().any(|d| d.derivation_name == derivation_name),
+            "the fixture derivation should be among targets"
         );
     }
 
@@ -1461,13 +1649,10 @@ mod tests {
     async fn get_targets_needing_cve_scan_excludes_in_progress(pool: PgPool) {
         let (derivation_id, _) = setup_test_derivation(&pool).await;
 
-        let scan_id = create_cve_scan(&pool, derivation_id, "vulnix", None)
+        let _scan_id = create_cve_scan(&pool, derivation_id, "vulnix", None)
             .await
             .expect("scan should be created")
             .id();
-        mark_scan_in_progress(&pool, scan_id)
-            .await
-            .expect("scan should be marked in_progress");
 
         let targets = get_targets_needing_cve_scan(&pool, Some(10), &[], None)
             .await
@@ -1490,130 +1675,7 @@ mod tests {
         let pool = PgPool::connect(&database_url)
             .await
             .expect("dedicated CVE test database should be reachable");
-        let suffix = Uuid::new_v4().simple().to_string();
-        let repo_url = format!("https://example.com/task-325-{suffix}.git");
-        let flake = insert_flake(
-            &pool,
-            &format!("task-325-{suffix}"),
-            &repo_url,
-            "main",
-            "cf_systems_only",
-        )
-        .await
-        .expect("flake should be inserted");
-        insert_commit(&pool, &format!("{suffix:0<40}"), &repo_url, Utc::now())
-            .await
-            .expect("commit should be inserted");
-        let commit_id: i32 = sqlx::query_scalar(
-            "SELECT id FROM commits WHERE flake_id = $1 ORDER BY id DESC LIMIT 1",
-        )
-        .bind(flake.id)
-        .fetch_one(&pool)
-        .await
-        .expect("commit should resolve");
-        let commit = get_commit_by_id(&pool, commit_id)
-            .await
-            .expect("commit model should resolve");
-
-        let config_name = format!("shared-config-{suffix}");
-        let running_path = format!("/nix/store/{suffix}-running");
-        let newer_path = format!("/nix/store/{suffix}-newer");
-
-        // The generation the fleet is actually running.
-        let running = insert_derivation(&pool, Some(&commit), &config_name, "nixos")
-            .await
-            .expect("running derivation should be inserted");
-        sqlx::query(
-            "UPDATE derivations SET status_id = $2, completed_at = NOW() - INTERVAL '1 day', store_path = $3 WHERE id = $1",
-        )
-        .bind(running.id)
-        .bind(EvaluationStatus::BuildComplete.as_id())
-        .bind(&running_path)
-        .execute(&pool)
-        .await
-        .expect("running derivation should be build-complete");
-
-        // A newer successful build of the same configuration that has NOT been
-        // activated on any system. It must never be selected, because the fleet
-        // action reports on what is running, not on what would ship next.
-        let newer = insert_derivation(&pool, Some(&commit), &config_name, "nixos")
-            .await
-            .expect("newer derivation should be inserted");
-        sqlx::query(
-            "UPDATE derivations SET status_id = $2, completed_at = NOW(), store_path = $3 WHERE id = $1",
-        )
-        .bind(newer.id)
-        .bind(EvaluationStatus::BuildComplete.as_id())
-        .bind(&newer_path)
-        .execute(&pool)
-        .await
-        .expect("newer derivation should be build-complete");
-
-        let environment_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO environments (id, name, is_active) VALUES ($1, $2, TRUE)")
-            .bind(environment_id)
-            .bind(format!("task-325-env-{suffix}"))
-            .execute(&pool)
-            .await
-            .expect("environment should be inserted");
-
-        // Two active systems running the SAME generation (must collapse to a
-        // single target), one inactive system (excluded), and one active system
-        // that has never reported state, whose running generation is therefore
-        // unknown (also excluded).
-        let hosts = [
-            (format!("active-a-{suffix}"), true, true),
-            (format!("active-b-{suffix}"), true, true),
-            (format!("inactive-{suffix}"), false, true),
-            (format!("nostate-{suffix}"), true, false),
-        ];
-        for (hostname, is_active, has_state) in &hosts {
-            sqlx::query(
-                r#"
-                INSERT INTO systems (
-                    id, hostname, environment_id, is_active, public_key, flake_id,
-                    derivation, system_configuration_name
-                )
-                VALUES ($1, $2, $3, $4, 'test-key', $5, 'test-derivation', $6)
-                "#,
-            )
-            .bind(Uuid::new_v4())
-            .bind(hostname)
-            .bind(environment_id)
-            .bind(is_active)
-            .bind(flake.id)
-            .bind(&config_name)
-            .execute(&pool)
-            .await
-            .expect("system should be inserted");
-
-            if !has_state {
-                continue;
-            }
-
-            // An older state row pointing at a different store path proves the
-            // query uses the LATEST reported generation rather than any
-            // historical one.
-            sqlx::query(
-                "INSERT INTO system_states (hostname, store_path, change_reason, timestamp)
-                 VALUES ($1, $2, 'task-325-test', NOW() - INTERVAL '2 days')",
-            )
-            .bind(hostname)
-            .bind(&newer_path)
-            .execute(&pool)
-            .await
-            .expect("older system state should be inserted");
-
-            sqlx::query(
-                "INSERT INTO system_states (hostname, store_path, change_reason, timestamp)
-                 VALUES ($1, $2, 'task-325-test', NOW())",
-            )
-            .bind(hostname)
-            .bind(&running_path)
-            .execute(&pool)
-            .await
-            .expect("latest system state should be inserted");
-        }
+        let fixture = setup_fleet_fixture(&pool).await;
 
         let targets = get_fleet_cve_scan_targets(&pool)
             .await
@@ -1621,18 +1683,23 @@ mod tests {
         let selected: Vec<i32> = targets.iter().map(|t| t.derivation_id).collect();
 
         assert!(
-            selected.contains(&running.id),
+            selected.contains(&fixture.running_id),
             "the currently running generation must be selected"
         );
         assert!(
-            !selected.contains(&newer.id),
+            !selected.contains(&fixture.newer_id),
             "a newer but unactivated build must not be selected"
         );
         assert_eq!(
-            selected.iter().filter(|id| **id == running.id).count(),
+            selected
+                .iter()
+                .filter(|id| **id == fixture.running_id)
+                .count(),
             1,
             "systems sharing a running generation must collapse to one target"
         );
+
+        fixture.cleanup(&pool).await;
     }
 
     /// The fleet enqueue must be atomic and must not double-claim derivations
@@ -1645,10 +1712,32 @@ mod tests {
         let pool = PgPool::connect(&database_url)
             .await
             .expect("dedicated CVE test database should be reachable");
+        let already_active = setup_fleet_fixture(&pool).await;
+        let available = setup_fleet_fixture(&pool).await;
+
+        create_cve_scan(&pool, already_active.running_id, "vulnix", None)
+            .await
+            .expect("one eligible target should already have an active scan");
+
+        // An active scan unrelated to the fleet must not affect either outcome
+        // count. This guards against the old test's broad assumption that the
+        // entire cve_scans table was empty.
+        let unrelated = insert_derivation(
+            &pool,
+            None,
+            &format!("unrelated-{}", Uuid::new_v4().simple()),
+            "nixos",
+        )
+        .await
+        .expect("unrelated derivation should be inserted");
+        create_cve_scan(&pool, unrelated.id, "vulnix", None)
+            .await
+            .expect("unrelated active scan should be inserted");
 
         let before = get_fleet_cve_scan_targets(&pool)
             .await
             .expect("fleet targets should resolve");
+        assert_eq!(before.len(), 2, "the test owns exactly two fleet targets");
 
         let first = enqueue_fleet_cve_scans(&pool, "vulnix", None)
             .await
@@ -1659,10 +1748,10 @@ mod tests {
             "enqueue must consider exactly the resolved fleet targets"
         );
         assert_eq!(
-            first.created, first.eligible,
-            "a clean fleet should queue every eligible target"
+            first.created, 1,
+            "only the eligible target without an active scan should be queued"
         );
-        assert_eq!(first.reused(), 0);
+        assert_eq!(first.reused(), 1);
 
         // Immediately re-running must be a no-op: every target now has a
         // pending scan, and the partial unique index prevents duplicates.
@@ -1676,16 +1765,191 @@ mod tests {
         );
         assert_eq!(second.reused(), second.eligible);
 
-        // Queued rows must be visible to the worker drain query.
-        if first.created > 0 {
-            let queued = get_queued_cve_scans(&pool, 1000)
-                .await
-                .expect("queued scans should resolve");
-            assert!(
-                !queued.is_empty(),
-                "enqueued fleet scans must be drainable by the worker"
-            );
-        }
+        // Queued rows must be atomically claimable by the worker.
+        let claimed = claim_queued_cve_scans(&pool, 1000)
+            .await
+            .expect("queued scans should be claimable");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].1, available.running_id);
+
+        sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+            .bind(unrelated.id)
+            .execute(&pool)
+            .await
+            .expect("unrelated scan should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(unrelated.id)
+            .execute(&pool)
+            .await
+            .expect("unrelated derivation should be deleted");
+        already_active.cleanup(&pool).await;
+        available.cleanup(&pool).await;
+    }
+
+    /// Two server processes racing to drain the same queue must not both own
+    /// the same row. The atomic claim returns it to exactly one caller.
+    #[tokio::test]
+    async fn concurrent_queue_claim_has_exactly_one_winner() {
+        let Ok(database_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
+            return;
+        };
+        let setup_pool = PgPool::connect(&database_url)
+            .await
+            .expect("dedicated CVE test database should be reachable");
+        let derivation = insert_derivation(
+            &setup_pool,
+            None,
+            &format!("claim-race-{}", Uuid::new_v4().simple()),
+            "nixos",
+        )
+        .await
+        .expect("claim-race derivation should be inserted");
+        let scan_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO cve_scans (
+                id, derivation_id, scanner_name, status, attempts,
+                total_packages, total_vulnerabilities,
+                critical_count, high_count, medium_count, low_count,
+                created_at
+            )
+            VALUES ($1, $2, 'vulnix', 'pending', 0, 0, 0, 0, 0, 0, 0,
+                    NOW() - INTERVAL '1 day')
+            "#,
+        )
+        .bind(scan_id)
+        .bind(derivation.id)
+        .execute(&setup_pool)
+        .await
+        .expect("pending scan should be inserted");
+
+        let worker_a = PgPool::connect(&database_url)
+            .await
+            .expect("first worker pool should connect");
+        let worker_b = PgPool::connect(&database_url)
+            .await
+            .expect("second worker pool should connect");
+        let (claimed_a, claimed_b) = tokio::join!(
+            claim_queued_cve_scans(&worker_a, 1),
+            claim_queued_cve_scans(&worker_b, 1)
+        );
+        let claimed_a = claimed_a.expect("first worker claim should succeed");
+        let claimed_b = claimed_b.expect("second worker claim should succeed");
+        let winners = claimed_a
+            .iter()
+            .chain(&claimed_b)
+            .filter(|(id, _)| *id == scan_id)
+            .count();
+        assert_eq!(winners, 1, "a pending row must have one execution owner");
+
+        let (status, attempts, execution_started): (String, i32, bool) = sqlx::query_as(
+            r#"
+            SELECT status, attempts,
+                   scan_metadata ? 'execution_started_at' AS execution_started
+            FROM cve_scans
+            WHERE id = $1
+            "#,
+        )
+        .bind(scan_id)
+        .fetch_one(&setup_pool)
+        .await
+        .expect("claimed scan should resolve");
+        assert_eq!(status, "in_progress");
+        assert_eq!(attempts, 1, "the winning claim increments attempts once");
+        assert!(execution_started, "the claim records execution start time");
+
+        sqlx::query("DELETE FROM cve_scans WHERE id = $1")
+            .bind(scan_id)
+            .execute(&setup_pool)
+            .await
+            .expect("claim-race scan should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(derivation.id)
+            .execute(&setup_pool)
+            .await
+            .expect("claim-race derivation should be deleted");
+    }
+
+    /// Queue age is not execution age: a row may wait longer than the stale
+    /// threshold and still be fresh immediately after a worker claims it.
+    #[tokio::test]
+    async fn stale_recovery_uses_execution_start_not_queue_time() {
+        let Ok(database_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("dedicated CVE test database should be reachable");
+        let derivation = insert_derivation(
+            &pool,
+            None,
+            &format!("stale-claim-{}", Uuid::new_v4().simple()),
+            "nixos",
+        )
+        .await
+        .expect("stale-claim derivation should be inserted");
+        let scan_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO cve_scans (
+                id, derivation_id, scanner_name, status, attempts,
+                total_packages, total_vulnerabilities,
+                critical_count, high_count, medium_count, low_count,
+                created_at
+            )
+            VALUES ($1, $2, 'vulnix', 'pending', 0, 0, 0, 0, 0, 0, 0,
+                    NOW() - INTERVAL '2 hours')
+            "#,
+        )
+        .bind(scan_id)
+        .bind(derivation.id)
+        .execute(&pool)
+        .await
+        .expect("old pending scan should be inserted");
+
+        let claimed = claim_queued_cve_scans(&pool, 1)
+            .await
+            .expect("old pending scan should be claimed");
+        assert_eq!(claimed, vec![(scan_id, derivation.id)]);
+
+        let recovered = recover_stale_scans(&pool, std::time::Duration::from_secs(1800))
+            .await
+            .expect("freshly claimed scan recovery should succeed");
+        assert_eq!(
+            recovered, 0,
+            "an old queue entry must not be stale immediately after execution starts"
+        );
+
+        sqlx::query(
+            r#"
+            UPDATE cve_scans
+            SET scan_metadata = jsonb_set(
+                scan_metadata,
+                '{execution_started_at}',
+                to_jsonb((NOW() - INTERVAL '2 hours')::text)
+            )
+            WHERE id = $1
+            "#,
+        )
+        .bind(scan_id)
+        .execute(&pool)
+        .await
+        .expect("execution start should be aged");
+        let recovered = recover_stale_scans(&pool, std::time::Duration::from_secs(1800))
+            .await
+            .expect("genuinely stale scan recovery should succeed");
+        assert_eq!(recovered, 1, "a genuinely stale execution is recovered");
+
+        sqlx::query("DELETE FROM cve_scans WHERE id = $1")
+            .bind(scan_id)
+            .execute(&pool)
+            .await
+            .expect("stale-claim scan should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("stale-claim derivation should be deleted");
     }
 
     /// recover_stale_scans should mark old in_progress scans as failed,
@@ -1700,9 +1964,6 @@ mod tests {
             .await
             .expect("scan should be created")
             .id();
-        mark_scan_in_progress(&pool, scan_id)
-            .await
-            .expect("scan should be marked in_progress");
 
         // Artificially age the scan so it appears stale.
         sqlx::query(
@@ -1792,5 +2053,16 @@ mod tests {
             targets.iter().any(|d| d.id == derivation_id),
             "stale completed scan should be selected for rescan"
         );
+
+        sqlx::query("DELETE FROM cve_scans WHERE id = $1")
+            .bind(scan_id)
+            .execute(&pool)
+            .await
+            .expect("stale rescan fixture scan should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("stale rescan fixture derivation should be deleted");
     }
 }

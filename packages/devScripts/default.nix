@@ -648,7 +648,7 @@ let
       set -euo pipefail
 
       REPO_ROOT="''${PROJECT_ROOT:-$PWD}"
-      DB_URL="postgresql://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge"
+      DB_URL="''${CRYSTAL_FORGE_CVE_TEST_DATABASE_URL:-postgresql://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge}"
 
       nix develop "$REPO_ROOT#sqlx" -c bash -euo pipefail -c "
         cd \"$REPO_ROOT/packages/default\"
@@ -668,6 +668,12 @@ let
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib queries::cve_scans::tests::fleet_enqueue_creates_pending_rows_and_skips_active_scans
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --lib queries::cve_scans::tests::concurrent_queue_claim_has_exactly_one_winner
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --lib queries::cve_scans::tests::stale_recovery_uses_execution_start_not_queue_time
         DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib queries::cve_scans_tests::create_cve_scan_reuses_existing_active_scan
@@ -1283,7 +1289,7 @@ let
   };
 in full-stack.config.outputs.package // {
   inherit runServer runAgent runBuilder simulatePush startBuilderApi
-    runUiDev runUiFrontend bootstrapDevBuilder envExports;
+    runUiDev runUiFrontend runCveProcessingTest bootstrapDevBuilder envExports;
   cve-test = cveTest.config.outputs.package;
   state-machine-test = stateMachineTest.config.outputs.package;
   db-only = dbOnly.config.outputs.package;

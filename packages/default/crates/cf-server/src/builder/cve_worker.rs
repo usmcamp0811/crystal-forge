@@ -28,9 +28,9 @@ use crate::log::{WorkerState, WorkerStatus, get_cve_status};
 use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::get_cache_destination;
 use crate::queries::cve_scans::{
-    create_cve_scan, get_queued_cve_scans, get_targets_needing_cve_rescan,
+    claim_queued_cve_scans, create_cve_scan, get_targets_needing_cve_rescan,
     get_targets_needing_cve_scan, mark_cve_scan_failed, mark_cve_scan_failed_by_id,
-    mark_scan_in_progress, recover_stale_scans, save_scan_results,
+    recover_stale_scans, save_scan_results,
 };
 use crate::queries::derivations::get_derivation_by_id;
 use crate::queries::scanning::get_scan_schedule_policy;
@@ -358,7 +358,7 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
     // This runs before the policy load on purpose: a queued scan is an explicit
     // operator request and should not be suppressed by a scan-policy read
     // failure or by `on_build` being disabled.
-    match get_queued_cve_scans(pool, MAX_SCANS_PER_CYCLE).await {
+    match claim_queued_cve_scans(pool, MAX_SCANS_PER_CYCLE).await {
         Ok(queued) if !queued.is_empty() => {
             info!(
                 "📥 [queued] Draining {} operator-requested scan(s) this cycle (limit {})",
@@ -390,11 +390,6 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                 };
 
                 set_cve_status_working(&format!("scanning {}", derivation.derivation_name)).await;
-                if let Err(e) = mark_scan_in_progress(pool, scan_id).await {
-                    error!("❌ [queued] Could not claim scan {scan_id}: {e}");
-                    continue;
-                }
-
                 info!(
                     "📥 [queued] Scanning operator-requested derivation: {}",
                     derivation.derivation_name
@@ -1156,37 +1151,6 @@ mod tests {
 
         sqlx::query(
             r#"
-            UPDATE derivations
-            SET status_id = (
-                SELECT id FROM derivation_statuses WHERE name = 'build-failed'
-            )
-            WHERE derivation_name LIKE 'task-396-cycle-%'
-               OR derivation_name LIKE 'task-325-disabled-cycle-%'
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .expect("prior scan-cycle fixtures should be made ineligible");
-
-        // Phase 0 drains operator-queued scans before the post-build phase, so
-        // any `pending` rows left behind by the fleet-enqueue tests would
-        // consume this cycle's budget and make the assertions below observe the
-        // wrong target. Retire them first so this test controls the queue.
-        sqlx::query(
-            r#"
-            UPDATE cve_scans
-            SET status = 'failed',
-                completed_at = NOW(),
-                error_message = 'retired by scan_cycle test setup'
-            WHERE status = 'pending'
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .expect("pre-existing queued scans should be retired");
-
-        sqlx::query(
-            r#"
             INSERT INTO scan_schedule_policy (id, on_build, deployed_interval, recent_interval, archived_interval, archived_enabled)
             VALUES (1, true, '24h', '24h', '168h', true)
             ON CONFLICT (id) DO UPDATE
@@ -1314,6 +1278,22 @@ mod tests {
             1,
             "on_build=false must not process a new post-build target"
         );
+
+        let derivation_ids = vec![derivation.id, disabled_derivation.id];
+        sqlx::query("DELETE FROM cve_scans WHERE derivation_id = ANY($1)")
+            .bind(&derivation_ids)
+            .execute(&pool)
+            .await
+            .expect("scan-cycle scans should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = ANY($1)")
+            .bind(&derivation_ids)
+            .execute(&pool)
+            .await
+            .expect("scan-cycle derivations should be deleted");
+        sqlx::query("UPDATE scan_schedule_policy SET on_build = TRUE WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("scan policy should be restored");
     }
 
     /// Confirms that [`BackgroundJobHandle`] state machine correctly reports
