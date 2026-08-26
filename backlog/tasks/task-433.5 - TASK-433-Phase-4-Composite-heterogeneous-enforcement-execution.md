@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-25 02:06'
+updated_date: '2026-08-25 13:08'
 labels:
   - design-parity
   - policy
@@ -72,6 +72,8 @@ nix build .#checks.x86_64-linux.server-regressions --no-link
 8. Preserve JSON/TOML/CF-native interchange envelopes and add exact round-trip tests for every exposed kind. Add create/validate/persist/reload/edit/phase/pass/fail/error-or-notchecked/evidence/import-export coverage, plus the central mixed `nixos_option + cve_block + time_window` lifecycle regression and failure permutations.
 9. Update enforcement architecture documentation, SQLx metadata if schema/checked queries change, authoritative browser workflow, and the task's per-kind coverage matrix.
 10. Run all required server/Web UI/Nix/SQLx/browser/flake gates. Then stop coding for independent requirements, data integrity, performance, UI/error-state, E2E, and regression-adequacy review. Resolve every P0/P1/P2 before checking exactly AC1-AC3, moving TASK-433.5 to Review, updating MR !318, committing/pushing, and stopping before Phase 5.
+
+Independent evaluator/security review remediation (2026-08-25): keep changes limited to evaluator/domain backend files. Replace invalid option lookup with strict quoted-path parsing plus fold-based target config traversal; make bulk/standalone policy expressions share canonical `config`; contain malformed composite custom_eval by authoritative Nix parse validation and a static Error result rather than embedding invalid syntax; compare exact requested and Nix-resolved immutable revisions and fix flake rev replacement; derive eval_passed outcomes from terminal evaluation/error helpers; add a dedicated Nix string encoder and direct environment.systemPackages pname contract/validation; classify malformed enforced policy data as deterministic while DB/infrastructure loader failures remain transient and restore legacy conflict behavior. Verify with cargo fmt, focused CARGO_BUILD_JOBS=1 Rust tests, and ignored authoritative Nix evaluation tests.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
