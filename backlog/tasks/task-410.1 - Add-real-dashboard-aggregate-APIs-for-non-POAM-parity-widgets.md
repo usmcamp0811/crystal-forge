@@ -1,11 +1,11 @@
 ---
 id: TASK-410.1
 title: Add real dashboard aggregate APIs for non-POA&M parity widgets
-status: Review
+status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 20:32'
-updated_date: '2026-08-25 21:14'
+updated_date: '2026-08-26 03:40'
 labels:
   - dashboard
   - api
@@ -100,6 +100,8 @@ Targeted query/model/handler tests including visibility and empty states; server
 3. Add authenticated dashboard handler regressions for viewer-scoped and no-membership empty states.
 4. Add a repository-owned process-compose/Nix CI target that runs the ignored database regressions automatically on merge requests.
 5. Run targeted non-web-ui verification, update committed task metadata, push review fixes, and confirm GitLab starts the required pipeline.
+
+Address second-pass review: preserve legacy `ahead` deployment normalization as `Up to Date`; add repository-owned DB coverage proving unscoped compatibility, visible viewer scoping, and hidden-environment exclusion; run targeted non-web-ui verification; push and require exact-head CI before returning to Review.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -134,4 +136,6 @@ Review-fix verification so far: `SQLX_OFFLINE=true cargo check --manifest-path p
 Additional review-fix verification passed: `cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib queries::dashboard::tests -- --skip visibility_` (8 passed, 2 ignored); `cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib handlers::api::dashboard::tests -- --skip visibility_` (8 passed); and `nix build .#packages.x86_64-linux.server --no-link`. Existing repository warnings remain. The task stays In Progress until the pushed MR pipeline, including web-ui, is green.
 
 CI pipeline 2725 passed for MR !320 at commit `fe0615dd`: dashboard-visibility-tests, web-ui, server-regressions, integration, OIDC auth, state-machine, CVE processing, complexity, coverage, and screenshot comment jobs all succeeded. The first web-ui attempt produced no result/fatal/exit marker and hit GitLab's 60-minute server timeout; retry job 16103032928 passed in 22m16s without code changes, confirming a transient harness/runner hang rather than a dashboard assertion failure. Review fixes are pushed and ready for re-review.
+
+MR !320 second-pass review found one additional P2 compatibility defect: scoped deployment aggregation mapped raw `ahead` to Unknown instead of preserving the legacy `Up to Date` normalization. Resuming in the existing dedicated worktree. No local web-ui check will be run; CI owns that verification.
 <!-- SECTION:NOTES:END -->
