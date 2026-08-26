@@ -81,7 +81,8 @@ pub async fn fetch_deployment_status_for_user(
 ) -> Result<DeploymentStatusSummary> {
     let rows = sqlx::query_as::<_, (i64, String)>(
         "SELECT COUNT(*)::bigint, CASE v.deployment_status \
-           WHEN 'up_to_date' THEN 'Up to Date' WHEN 'behind' THEN 'Behind' \
+           WHEN 'up_to_date' THEN 'Up to Date' WHEN 'ahead' THEN 'Up to Date' \
+           WHEN 'behind' THEN 'Behind' \
            WHEN 'no_deployment' THEN 'No Deployment' ELSE 'Unknown' END \
          FROM view_system_deployment_status v JOIN systems s ON s.hostname = v.hostname \
          WHERE ($1::uuid IS NULL OR EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $1 AND uem.environment_id = s.environment_id)) \
@@ -1925,6 +1926,147 @@ mod tests {
                 - scoped_active_builds_before,
             1
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn visibility_deployment_status_preserves_ahead_as_up_to_date() {
+        let pool = visibility_test_pool().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let visible_env = Uuid::new_v4();
+        let hidden_env = Uuid::new_v4();
+        for (environment_id, label) in [(visible_env, "visible"), (hidden_env, "hidden")] {
+            sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+                .bind(environment_id)
+                .bind(format!("ahead-{label}-{}", &suffix[..12]))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, username, first_name, last_name, email, user_type) \
+             VALUES ($1, $2, 'Ahead', 'Viewer', $3, 'human')",
+        )
+        .bind(user_id)
+        .bind(format!("ahead-viewer-{suffix}"))
+        .bind(format!("ahead-viewer-{suffix}@example.invalid"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO user_environment_memberships (user_id, environment_id) VALUES ($1, $2)",
+        )
+        .bind(user_id)
+        .bind(visible_env)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let expected_flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("ahead-expected-{suffix}"))
+        .bind(format!(
+            "https://example.invalid/ahead-expected-{suffix}.git"
+        ))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) \
+             VALUES ($1, $2, NOW() - INTERVAL '1 day')",
+        )
+        .bind(expected_flake_id)
+        .bind(format!("ahead-expected-commit-{suffix}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let deployed_flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("ahead-deployed-{suffix}"))
+        .bind(format!(
+            "https://example.invalid/ahead-deployed-{suffix}.git"
+        ))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let deployed_commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) \
+             VALUES ($1, $2, NOW()) RETURNING id",
+        )
+        .bind(deployed_flake_id)
+        .bind(format!("ahead-deployed-commit-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let unscoped_before = fetch_deployment_status(&pool).await.unwrap();
+        let scoped_before = fetch_deployment_status_for_user(&pool, Some(user_id))
+            .await
+            .unwrap();
+        assert_eq!(scoped_before.total(), 0);
+
+        for (environment_id, label, key_byte) in [
+            (visible_env, "visible", 61_u8),
+            (hidden_env, "hidden", 62_u8),
+        ] {
+            let hostname = format!("ahead-{label}-{}", &suffix[..12]);
+            let store_path = format!("/nix/store/ahead-{label}-{suffix}");
+            sqlx::query(
+                "INSERT INTO systems (id, hostname, system_configuration_name, public_key, is_active, derivation, deployment_policy, environment_id, flake_id) \
+                 VALUES ($1, $2, $2, $3, TRUE, '', 'manual', $4, $5)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&hostname)
+            .bind(vec![key_byte; 32])
+            .bind(environment_id)
+            .bind(expected_flake_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO derivations (commit_id, derivation_name, derivation_target, derivation_type, status_id, expected_store_path) \
+                 VALUES ($1, $2, $2, 'nixos', 5, $3)",
+            )
+            .bind(deployed_commit_id)
+            .bind(&hostname)
+            .bind(&store_path)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO system_states (hostname, change_reason, store_path, timestamp) \
+                 VALUES ($1, 'startup', $2, NOW())",
+            )
+            .bind(&hostname)
+            .bind(&store_path)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let unscoped_after = fetch_deployment_status(&pool).await.unwrap();
+        assert_eq!(
+            unscoped_after.up_to_date - unscoped_before.up_to_date,
+            2,
+            "legacy unscoped aggregation must normalize ahead systems as up to date"
+        );
+        assert_eq!(
+            unscoped_after.unknown - unscoped_before.unknown,
+            0,
+            "ahead systems must not move into the unknown bucket"
+        );
+
+        let scoped_after = fetch_deployment_status_for_user(&pool, Some(user_id))
+            .await
+            .unwrap();
+        assert_eq!(scoped_after.up_to_date, 1);
+        assert_eq!(scoped_after.unknown, 0);
+        assert_eq!(scoped_after.total(), 1);
     }
 
     // ── TASK-272: dashboard summary scope tests ──────────────────────────────
