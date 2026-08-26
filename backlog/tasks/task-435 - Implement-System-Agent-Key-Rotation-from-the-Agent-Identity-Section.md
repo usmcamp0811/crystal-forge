@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode
 created_date: '2026-08-25 03:12'
-updated_date: '2026-08-25 16:32'
+updated_date: '2026-08-26 03:33'
 labels:
   - web-ui
   - server
@@ -32,6 +32,7 @@ references:
   - task-244
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2789565632'
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2789739702'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/16107564223'
 documentation:
   - docs/design/CrystalForge/components/EditSystemModal.jsx
 modified_files:
@@ -250,4 +251,6 @@ Re-review of `0af481fa` requested one focused remediation: preserve ambiguous mu
 Focused remediation implemented in four frontend/test files. Added `SystemPublicKeyRotationOutcome::{Confirmed, ConfirmedAfterAmbiguousResponse}`; EditSystemModal renders a warning for canonically confirmed keys after ambiguous responses and ordinary green success only for acknowledged responses; Systems-list Update Key surfaces the same warning in its action notice. `12e2` now asserts committed-then-500 warning semantics and separately exercises ambiguous 500 + non-matching canonical GET, retained generated pair, no success state, and successful retry. Verification passed: native web-ui cargo check; wasm32 web-ui cargo check; web-ui tests (203 passed, 1 ignored); changed-file rustfmt check; JS syntax; manifest parse; and git diff check. The authoritative Nix web-ui/browser artifact remains delegated to MR CI.
 
 Focused re-review remediation committed and pushed as `169dc027` (`TASK-435: Preserve rotation audit warnings`) to MR !319. Worktree is clean and matches origin. Replacement MR pipeline 2789739702 was created for this commit and is pending; task remains In Progress until the web-ui browser/screenshot gate completes.
+
+Final code re-review at `169dc027` reported no remaining P0/P1/P2 findings; only AC #18 / DoD #4 CI and screenshot evidence remain. Pipeline 2789739702 completed with all required non-web-ui checks green: server-regressions, integration, OIDC auth, state-machine tests, and CVE processing. Its web-ui job 16098458866 failed with GitLab runner reason `no_updates_running` after 3552 seconds, not a reported test assertion; screenshot/coverage jobs were consequently skipped. Per user instruction, the web-ui check was not run locally. Retried only the failed CI web-ui job as 16107564223; pipeline is running again.
 <!-- SECTION:NOTES:END -->
