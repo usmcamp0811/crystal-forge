@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode
 created_date: '2026-08-25 03:12'
-updated_date: '2026-08-26 03:33'
+updated_date: '2026-08-26 04:06'
 labels:
   - web-ui
   - server
@@ -33,6 +33,7 @@ references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2789565632'
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2789739702'
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/16107564223'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2791142401'
 documentation:
   - docs/design/CrystalForge/components/EditSystemModal.jsx
 modified_files:
@@ -253,4 +254,6 @@ Focused remediation implemented in four frontend/test files. Added `SystemPublic
 Focused re-review remediation committed and pushed as `169dc027` (`TASK-435: Preserve rotation audit warnings`) to MR !319. Worktree is clean and matches origin. Replacement MR pipeline 2789739702 was created for this commit and is pending; task remains In Progress until the web-ui browser/screenshot gate completes.
 
 Final code re-review at `169dc027` reported no remaining P0/P1/P2 findings; only AC #18 / DoD #4 CI and screenshot evidence remain. Pipeline 2789739702 completed with all required non-web-ui checks green: server-regressions, integration, OIDC auth, state-machine tests, and CVE processing. Its web-ui job 16098458866 failed with GitLab runner reason `no_updates_running` after 3552 seconds, not a reported test assertion; screenshot/coverage jobs were consequently skipped. Per user instruction, the web-ui check was not run locally. Retried only the failed CI web-ui job as 16107564223; pipeline is running again.
+
+Retried web-ui job 16107564223 passed at `169dc027`; final artifacts showed `12e2-systems-edit-modal-key-rotation` passed and produced reviewed dark/light screenshots with the canonical updated fingerprint and normal success state. Artifact inspection also exposed that non-critical scenarios `12e3` and `12e4` were recorded as failed even though the Nix job was green: 12e3's System Detail Edit click was intercepted by the onboarding coach, and 12e4 used the non-waiting `assertHidden` immediately after asynchronous reconciliation. Fixed only those test synchronization defects by collapsing the coach before the 12e3 click and waiting up to 10 seconds for the 12e4 modal to become hidden. `nix develop -c node --check checks/web-ui/tests/integration-test.js` and `git diff --check` passed. Per user instruction, no local Nix web-ui build was run. Committed/pushed as `13ee1cef` (`TASK-435: Stabilize rotation browser regressions`); replacement pipeline 2791142401 is pending.
 <!-- SECTION:NOTES:END -->
