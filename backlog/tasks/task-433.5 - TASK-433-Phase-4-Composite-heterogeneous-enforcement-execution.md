@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-26 03:24'
+updated_date: '2026-08-26 04:09'
 labels:
   - design-parity
   - policy
@@ -116,4 +116,6 @@ Conflict-resolution synchronization (2026-08-26): fetched `origin/dev` at `50a7d
 Post-resolution semantic inspection confirmed `composite_enforcement.rs` is unchanged from the reviewed Phase-4 implementation: exact derivation/store-path completed-cache evidence remains required; known uncached targets fail; only genuinely absent historical paths retain the no-policy compatibility bridge; auto-latest, manual deploy, commit rollback, generation rollback, and heartbeat delivery still use the centralized atomic authorization/claim path. Focused `nix build .#checks.x86_64-linux.server-regressions --no-link -L` passed after resolution. Composite Web UI workflows were not rerun because no relevant UI/test file conflicted, per the explicit conditional verification instruction.
 
 Conflict-resolution merge committed and pushed as `b238ff9e969b525aa44d46ef27beb4faefc30e12` (`Merge origin/dev into TASK-433 policy work`). Local HEAD and the remote branch match; `origin/dev` is an ancestor; MR !318 reports `has_conflicts: false`. Exact-head pipeline 2791067463 started for SHA `b238ff9e969b525aa44d46ef27beb4faefc30e12` and is running. CI is intentionally left to complete remotely; Phase 5 has not started.
+
+Exact-head Phase-4 dependency gate confirmed successful: GitLab pipeline 2791067463 completed successfully for `b238ff9e969b525aa44d46ef27beb4faefc30e12` at 2026-08-26 04:09 UTC. MR !318 is conflict-free and mergeable. TASK-433.5 remains in Review with AC1-AC3 checked; it is not moved to Done.
 <!-- SECTION:NOTES:END -->
