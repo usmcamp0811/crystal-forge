@@ -1,9 +1,11 @@
 ---
 id: TASK-433.6
 title: 'TASK-433 Phase 5: POA&M database schema, API, auth/audit, and server tests'
-status: Backlog
-assignee: []
+status: In Progress
+assignee:
+  - '@opencode-agent'
 created_date: '2026-08-23 01:43'
+updated_date: '2026-08-26 04:09'
 labels:
   - design-parity
   - poam
@@ -15,6 +17,7 @@ dependencies:
 references:
   - TASK-433
   - TASK-433.1
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/318'
 documentation:
   - docs/design/CrystalForge/components/PoamViews.jsx
   - docs/design/CrystalForge/data-poam.js
@@ -65,3 +68,9 @@ nix build .#checks.x86_64-linux.integration --no-link
 - [ ] #5 Closure is authoritative and race-safe, requires current Pass or documented accepted waiver for all linked findings, stores verification and rejects failing/error/unknown/not-checked/stale findings.
 - [ ] #6 POAM server tests cover real finding creation, multi-finding links, invalid links, active invariant, milestones, activity, transitions, overdue, closure rejection/acceptance, verification storage, reopen, filters, auth and concurrency.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Phase-5 lock/preflight: implementation is active in dedicated worktree `/home/mcamp/code/crystal-forge/TASK-433-policy-poam-workflows` on branch `TASK-433-policy-poam-workflows`, based on successful Phase-4 exact head `b238ff9e969b525aa44d46ef27beb4faefc30e12`. Pipeline 2791067463 is green and MR !318 is conflict-free. Scope is server/database POA&M foundation only; Phase 6 UI and Phase 7 consumers are not started. Acceptance criteria remain unchecked until full implementation, verification, and independent review pass.
+<!-- SECTION:NOTES:END -->
