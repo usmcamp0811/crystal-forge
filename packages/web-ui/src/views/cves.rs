@@ -21,6 +21,8 @@ use crate::components::layout::Card;
 use crate::components::notifications::Toast;
 use crate::environments::adapter::load_environment_colors_with_fallback;
 use crate::routes::Route;
+use crate::state::app_state::AppState;
+use crate::state::auth;
 use crate::theme;
 
 /// Derive fg / bg / border for an environment name from the live color map.
@@ -137,6 +139,8 @@ fn sync_cve_url_query(
 
 #[component]
 pub fn CvesView() -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let is_admin_user = auth::is_admin(&app_state.read().auth);
     let initial_severity = query_param("severity");
     let initial_fix = query_param("fix_status").or_else(|| query_param("fix"));
     let initial_triage = query_param("triage_status").or_else(|| query_param("triage"));
@@ -156,6 +160,7 @@ pub fn CvesView() -> Element {
     let mut view_mode = use_signal(move || initial_view.clone()); // "flat" or "grouped"
     let mut selected_cve_id = use_signal(move || initial_cve.clone());
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None);
+    let mut fleet_rescan_pending = use_signal(|| false);
 
     // Attention flash signal for the Critical stat card (set by the use_effect after stats resolves).
     let mut flash_crit_signal = use_signal(|| false);
@@ -255,24 +260,46 @@ pub fn CvesView() -> Element {
                 }
                 div {
                     style: "display: flex; gap: 8px;",
-                    button {
-                        class: "btn btn-ghost focus-ring",
-                        disabled: true,
-                        title: "Fleet rescan enqueue path is not wired yet",
-                        style: "opacity: 0.6; cursor: not-allowed;",
-                        // Sync icon
-                        svg {
-                            width: "14",
-                            height: "14",
-                            view_box: "0 0 24 24",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                            path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                    if is_admin_user {
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            disabled: fleet_rescan_pending(),
+                            onclick: move |_| {
+                                if fleet_rescan_pending() {
+                                    return;
+                                }
+                                fleet_rescan_pending.set(true);
+                                spawn(async move {
+                                    let result = client::trigger_cve_fleet_rescan().await;
+                                    fleet_rescan_pending.set(false);
+                                    match result {
+                                        Ok(response) => {
+                                            toast_message.set(Some((response.message, true)));
+                                            gloo_timers::future::TimeoutFuture::new(4000).await;
+                                            toast_message.set(None);
+                                        }
+                                        Err(err) => {
+                                            toast_message.set(Some((format!("Fleet rescan failed: {err}"), false)));
+                                            gloo_timers::future::TimeoutFuture::new(5000).await;
+                                            toast_message.set(None);
+                                        }
+                                    }
+                                });
+                            },
+                            // Sync icon
+                            svg {
+                                width: "14",
+                                height: "14",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                            }
+                            if fleet_rescan_pending() { " Rescanning…" } else { " Rescan fleet" }
                         }
-                        " Rescan fleet"
                     }
                     button {
                         class: "btn btn-ghost focus-ring",

@@ -356,8 +356,6 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
             return Ok(());
         }
     };
-    let mut scans_remaining = MAX_SCANS_PER_CYCLE;
-
     // --- Phase 1: post-build scans (bounded — at most MAX_SCANS_PER_CYCLE per cycle) ---
     //
     // We intentionally do NOT loop until the queue is empty. A large historical
@@ -408,7 +406,6 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                             derivation.derivation_name
                         );
                     }
-                    scans_remaining = scans_remaining.saturating_sub(1);
                 }
             }
             Ok(_) => {
@@ -422,11 +419,6 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
         debug!("🔍 on_build = false — skipping post-build phase");
     }
 
-    if scans_remaining == 0 {
-        debug!("🔍 Per-cycle CVE scan budget exhausted — deferring rescans");
-        return Ok(());
-    }
-
     // Check enabled before entering Phase 2.
     if !*enabled_rx.read().await {
         info!("🛑 CVE scan loop disabled — skipping periodic rescan phase");
@@ -434,7 +426,7 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
     }
 
     // --- Phase 2: periodic rescan (stale completed scans, bounded) ---
-    match get_targets_needing_cve_rescan(pool, Some(scans_remaining)).await {
+    match get_targets_needing_cve_rescan(pool, Some(MAX_SCANS_PER_CYCLE)).await {
         Ok(targets) if !targets.is_empty() => {
             info!(
                 "🔄 [rescan] Re-scanning {} stale derivation(s)",
@@ -1064,6 +1056,20 @@ mod tests {
 
         sqlx::query(
             r#"
+            UPDATE derivations
+            SET status_id = (
+                SELECT id FROM derivation_statuses WHERE name = 'build-failed'
+            )
+            WHERE derivation_name LIKE 'task-396-cycle-%'
+               OR derivation_name LIKE 'task-325-disabled-cycle-%'
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("prior scan-cycle fixtures should be made ineligible");
+
+        sqlx::query(
+            r#"
             INSERT INTO scan_schedule_policy (id, on_build, deployed_interval, recent_interval, archived_interval, archived_enabled)
             VALUES (1, true, '24h', '24h', '168h', true)
             ON CONFLICT (id) DO UPDATE
@@ -1148,6 +1154,49 @@ mod tests {
 
         assert_eq!(status, Some("completed".to_string()));
         assert!(completed_at.is_some(), "scan should be terminal");
+
+        sqlx::query("UPDATE scan_schedule_policy SET on_build = FALSE WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("on-build scanning should be disabled");
+        let disabled_derivation = insert_derivation(
+            &pool,
+            None,
+            &format!("task-325-disabled-cycle-{}", Uuid::new_v4()),
+            "nixos",
+        )
+        .await
+        .expect("disabled-cycle derivation should be inserted");
+        sqlx::query(
+            r#"
+            UPDATE derivations
+            SET status_id = $2,
+                completed_at = NOW(),
+                store_path = $3
+            WHERE id = $1
+            "#,
+        )
+        .bind(disabled_derivation.id)
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .bind(store_path.to_string_lossy().to_string())
+        .execute(&pool)
+        .await
+        .expect("disabled-cycle derivation should be marked build-complete");
+
+        scan_cycle_with_runner(
+            &pool,
+            &vulnix_config,
+            &runner,
+            Some("test".to_string()),
+            &enabled_rx,
+        )
+        .await
+        .expect("disabled on-build scan cycle should succeed");
+        assert_eq!(
+            runner.calls.load(Ordering::SeqCst),
+            1,
+            "on_build=false must not process a new post-build target"
+        );
     }
 
     /// Confirms that [`BackgroundJobHandle`] state machine correctly reports

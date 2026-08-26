@@ -968,6 +968,73 @@ pub async fn resolve_system_cve_scan_target(
     }))
 }
 
+/// Resolve one eligible CVE scan target per distinct derivation deployed to an
+/// active system. Systems sharing the same derivation are deliberately
+/// collapsed so a fleet request cannot enqueue duplicate work.
+pub async fn get_fleet_cve_scan_targets(pool: &PgPool) -> Result<Vec<CveScanEligibleTarget>> {
+    let rows = sqlx::query(
+        r#"
+        WITH active_system_targets AS (
+            SELECT
+                s.hostname,
+                target.derivation_id,
+                target.config_name
+            FROM systems s
+            JOIN LATERAL (
+                SELECT
+                    d.id AS derivation_id,
+                    d.derivation_name AS config_name
+                FROM commits c
+                JOIN derivations d ON d.commit_id = c.id
+                WHERE c.flake_id = s.flake_id
+                  AND d.derivation_type = 'nixos'
+                  AND d.derivation_name = COALESCE(
+                      NULLIF(BTRIM(s.system_configuration_name), ''),
+                      s.hostname
+                  )
+                ORDER BY
+                    (
+                        SELECT MAX(cpj.completed_at)
+                        FROM cache_push_jobs cpj
+                        WHERE cpj.derivation_id = d.id
+                          AND cpj.status = 'completed'
+                    ) DESC NULLS LAST,
+                    d.completed_at DESC NULLS LAST,
+                    d.id DESC
+                LIMIT 1
+            ) target ON TRUE
+            WHERE s.is_active = TRUE
+        )
+        SELECT DISTINCT ON (ast.derivation_id)
+            ast.derivation_id,
+            ast.config_name,
+            ast.hostname
+        FROM active_system_targets ast
+        JOIN derivations d ON d.id = ast.derivation_id
+        WHERE d.store_path IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM cache_push_jobs cpj
+              WHERE cpj.derivation_id = ast.derivation_id
+                AND cpj.status = 'completed'
+          )
+        ORDER BY ast.derivation_id, ast.hostname
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| CveScanEligibleTarget {
+            derivation_id: row.get("derivation_id"),
+            config_name: row.get("config_name"),
+            hostname: row.get("hostname"),
+            blocked_reason: None,
+        })
+        .collect())
+}
+
 /// Mark scans that have been stuck `in_progress` for more than the given
 /// threshold as `failed` so the derivation becomes eligible for re-scanning.
 /// This prevents a server crash between `mark_scan_in_progress` and
@@ -1213,7 +1280,7 @@ pub async fn get_targets_needing_cve_rescan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::queries::commits::insert_commit;
+    use crate::queries::commits::{get_commit_by_id, insert_commit};
     use crate::queries::derivations::{EvaluationStatus, insert_derivation};
     use crate::queries::flakes::insert_flake;
 
@@ -1224,7 +1291,7 @@ mod tests {
             "test-flake",
             "https://example.com/test.git",
             "main",
-            "nixos",
+            "cf_systems_only",
         )
         .await
         .expect("flake should be created");
@@ -1324,6 +1391,115 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn fleet_targets_only_include_distinct_eligible_active_system_derivations() {
+        let Ok(database_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("dedicated CVE test database should be reachable");
+        let suffix = Uuid::new_v4().simple().to_string();
+        let repo_url = format!("https://example.com/task-325-{suffix}.git");
+        let flake = insert_flake(
+            &pool,
+            &format!("task-325-{suffix}"),
+            &repo_url,
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("flake should be inserted");
+        insert_commit(&pool, &format!("{suffix:0<40}"), &repo_url, Utc::now())
+            .await
+            .expect("commit should be inserted");
+        let commit_id: i32 = sqlx::query_scalar(
+            "SELECT id FROM commits WHERE flake_id = $1 ORDER BY id DESC LIMIT 1",
+        )
+        .bind(flake.id)
+        .fetch_one(&pool)
+        .await
+        .expect("commit should resolve");
+        let commit = get_commit_by_id(&pool, commit_id)
+            .await
+            .expect("commit model should resolve");
+
+        let eligible = insert_derivation(&pool, Some(&commit), "shared-config", "nixos")
+            .await
+            .expect("eligible derivation should be inserted");
+        sqlx::query(
+            "UPDATE derivations SET status_id = $2, completed_at = NOW(), store_path = $3 WHERE id = $1",
+        )
+        .bind(eligible.id)
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .bind(format!("/nix/store/{suffix}-eligible"))
+        .execute(&pool)
+        .await
+        .expect("eligible derivation should be completed");
+        sqlx::query(
+            "INSERT INTO cache_push_jobs (derivation_id, status, completed_at) VALUES ($1, 'completed', NOW())",
+        )
+        .bind(eligible.id)
+        .execute(&pool)
+        .await
+        .expect("eligible cache push should be completed");
+
+        let blocked = insert_derivation(&pool, Some(&commit), "blocked-config", "nixos")
+            .await
+            .expect("blocked derivation should be inserted");
+        sqlx::query(
+            "UPDATE derivations SET status_id = $2, completed_at = NOW(), store_path = $3 WHERE id = $1",
+        )
+        .bind(blocked.id)
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .bind(format!("/nix/store/{suffix}-blocked"))
+        .execute(&pool)
+        .await
+        .expect("blocked derivation should be completed");
+
+        let environment_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name, is_active) VALUES ($1, $2, TRUE)")
+            .bind(environment_id)
+            .bind(format!("task-325-env-{suffix}"))
+            .execute(&pool)
+            .await
+            .expect("environment should be inserted");
+        for (hostname, config_name, is_active) in [
+            (format!("active-a-{suffix}"), "shared-config", true),
+            (format!("active-b-{suffix}"), "shared-config", true),
+            (format!("blocked-{suffix}"), "blocked-config", true),
+            (format!("inactive-{suffix}"), "shared-config", false),
+        ] {
+            sqlx::query(
+                r#"
+                INSERT INTO systems (
+                    id, hostname, environment_id, is_active, public_key, flake_id,
+                    derivation, system_configuration_name
+                )
+                VALUES ($1, $2, $3, $4, 'test-key', $5, 'test-derivation', $6)
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(hostname)
+            .bind(environment_id)
+            .bind(is_active)
+            .bind(flake.id)
+            .bind(config_name)
+            .execute(&pool)
+            .await
+            .expect("system should be inserted");
+        }
+
+        let targets = get_fleet_cve_scan_targets(&pool)
+            .await
+            .expect("fleet targets should resolve");
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].derivation_id, eligible.id);
+        assert_eq!(targets[0].config_name, "shared-config");
+        assert!(targets[0].blocked_reason.is_none());
+    }
+
     /// recover_stale_scans should mark old in_progress scans as failed,
     /// making the derivation eligible again.
     #[sqlx::test]
@@ -1391,9 +1567,14 @@ mod tests {
 
     /// A stale completed scan should be selected for rescan when the policy
     /// interval has elapsed.
-    #[sqlx::test]
-    #[ignore = "requires test database creation privileges"]
-    async fn get_targets_needing_cve_rescan_selects_stale_scan(pool: PgPool) {
+    #[tokio::test]
+    async fn get_targets_needing_cve_rescan_selects_stale_scan() {
+        let Ok(database_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("dedicated CVE test database should be reachable");
         let (derivation_id, _) = setup_test_derivation(&pool).await;
 
         // Create a completed scan that is old enough to be stale.

@@ -6300,6 +6300,23 @@ const steps = [
           body: JSON.stringify([cveRowFixture]),
         });
       });
+      let fleetRescanRequests = 0;
+      let releaseFleetRescan;
+      const fleetRescanRelease = new Promise((resolve) => {
+        releaseFleetRescan = resolve;
+      });
+      await page.route("**/api/v1/cves/rescan-fleet", async (route) => {
+        fleetRescanRequests += 1;
+        await fleetRescanRelease;
+        await route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({
+            enqueued_count: 3,
+            message: "Queued 3 fleet CVE scan(s).",
+          }),
+        });
+      });
 
       await page.goto(`${baseUrl}/cves`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
@@ -6314,6 +6331,28 @@ const steps = [
       // Assert the page heading is present.
       const heading = page.locator("main h1:has-text('CVEs')");
       await assertVisible(heading, "Expected CVEs heading");
+
+      const fleetRescanButton = page.getByRole("button", { name: "Rescan fleet" });
+      await assertVisible(fleetRescanButton, "Expected admin fleet rescan action");
+      const fleetRescanRequest = page.waitForRequest(
+        (request) =>
+          request.url().includes("/api/v1/cves/rescan-fleet") &&
+          request.method() === "POST",
+      );
+      await fleetRescanButton.click();
+      await fleetRescanRequest;
+      await assertDisabled(
+        page.getByRole("button", { name: "Rescanning…" }),
+        "Fleet rescan action should be disabled while its request is pending",
+      );
+      releaseFleetRescan();
+      await assertVisible(
+        page.getByText("Queued 3 fleet CVE scan(s)."),
+        "Expected fleet rescan success feedback",
+      );
+      if (fleetRescanRequests !== 1) {
+        throw new Error(`Expected exactly one fleet rescan request, got ${fleetRescanRequests}`);
+      }
 
       // Assert summary stat cards are rendered.
       const patchableCard = page.locator("main").getByText("Patchable now");
@@ -6382,6 +6421,7 @@ const steps = [
       await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/systems$/);
       await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/justifications$/);
       await page.unroute(/\/api\/v1\/cves(?:\?.*)?$/);
+      await page.unroute("**/api/v1/cves/rescan-fleet");
     },
   },
   {

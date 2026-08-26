@@ -12,9 +12,11 @@ use crate::api::models::{
     CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveJustification,
     CveJustificationInput, CveListItem, CvePackageGroup,
 };
-use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireAuth};
+use crate::auth::extractors::{RequireAdmin, RequireAuth};
 use crate::handlers::agent_request::CFState;
+use crate::queries::cve_scans::get_fleet_cve_scan_targets;
 use crate::queries::cves;
+use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan_with_outcome};
 
 /// GET /api/v1/cves
 /// List CVEs with filters.
@@ -230,19 +232,58 @@ pub async fn list_justifications(
 /// POST /api/v1/cves/rescan-fleet
 /// Trigger CVE scans for all active systems (admin only).
 ///
-/// Currently returns 501 Not Implemented: the enqueue path to the builder
-/// queue is not yet wired. The button in the UI is intentionally non-functional
-/// until this endpoint is fully implemented.
 pub async fn trigger_fleet_rescan(
-    _state: State<CFState>,
+    State(state): State<CFState>,
     _user: RequireAdmin,
-) -> Result<Json<FleetRescanResponse>, (StatusCode, String)> {
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        "Fleet CVE rescan is not yet wired to the builder queue. \
-         Implement enqueue_scan_for_system() and remove this stub."
-            .to_string(),
+) -> Result<(StatusCode, Json<FleetRescanResponse>), (StatusCode, String)> {
+    let targets = get_fleet_cve_scan_targets(&state.pool)
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to resolve fleet CVE scan targets: {err}"),
+            )
+        })?;
+
+    let mut enqueued_count = 0_i64;
+    for target in targets {
+        match trigger_immediate_cve_scan_with_outcome(state.pool.clone(), target.derivation_id)
+            .await
+        {
+            Ok(outcome) if outcome.was_created => enqueued_count += 1,
+            Ok(_) => {}
+            Err(CveScanError::VulnixUnavailable) => {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "vulnix is not available on this node; fleet rescan cannot start".to_string(),
+                ));
+            }
+            Err(CveScanError::Internal(err)) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to enqueue fleet CVE scan: {err:#}"),
+                ));
+            }
+        }
+    }
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(fleet_rescan_response(enqueued_count)),
     ))
+}
+
+fn fleet_rescan_response(enqueued_count: i64) -> FleetRescanResponse {
+    let message = if enqueued_count == 0 {
+        "No eligible systems require a new CVE scan.".to_string()
+    } else {
+        format!("Queued {enqueued_count} fleet CVE scan(s).")
+    };
+
+    FleetRescanResponse {
+        enqueued_count,
+        message,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -448,5 +489,16 @@ mod tests {
         assert!(f.package.is_none());
         assert!(f.search.is_none());
         assert!(f.sort.is_none());
+    }
+
+    #[test]
+    fn fleet_rescan_response_reports_created_count_and_noop() {
+        let enqueued = fleet_rescan_response(3);
+        assert_eq!(enqueued.enqueued_count, 3);
+        assert_eq!(enqueued.message, "Queued 3 fleet CVE scan(s).");
+
+        let noop = fleet_rescan_response(0);
+        assert_eq!(noop.enqueued_count, 0);
+        assert_eq!(noop.message, "No eligible systems require a new CVE scan.");
     }
 }
