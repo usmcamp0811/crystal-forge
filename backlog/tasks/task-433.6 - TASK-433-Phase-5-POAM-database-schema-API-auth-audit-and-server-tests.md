@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-27 01:48'
+updated_date: '2026-08-27 02:16'
 labels:
   - design-parity
   - poam
@@ -100,6 +100,8 @@ Phase-5 lock/preflight: implementation is active in dedicated worktree `/home/mc
 Implemented Phase 5 in dedicated worktree and pushed commit `68904343` to MR !318. Final closure/verification transactions acquire deterministic finding advisory locks before authoritative reads and intentionally use READ COMMITTED so statements after lock waits observe the committing writer; forced races cover superseding assessments, direct applicability, aggregate rule results, and waiver revocation. Added database-enforced immutable finding/link/evidence identity, sealed verification attempts, exact Pass/accepted-waiver closure constraints, all-history environment visibility, non-oracular authorization, bounded batch expansion, and keyset pagination for mutable history feeds.
 
 Verification completed against repository-isolated PostgreSQL on port 3042: fresh migration chain through 0234 and `cargo sqlx prepare --workspace` passed with no metadata delta; focused POA&M suite passed 13/13; full workspace Rust tests passed 1221 with 0 failures and 386 ignored; server package, server-regressions, and integration Nix builds passed; formatting and `git diff --check` passed. Final independent integrity, authorization, and correctness reviews found no remaining P0/P1/P2 issues.
+
+Exact-head GitLab pipeline 2794857147 passed for commit `68904343a488e6a5c909fa80c4bac16052814ff1`: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2794857147. MR !318 is conflict-free and remains open for review. Per repository lifecycle, the task remains Review until the MR is merged.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
