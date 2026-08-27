@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-27 03:24'
+updated_date: '2026-08-27 03:26'
 labels:
   - design-parity
   - poam
@@ -59,6 +59,23 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 - [ ] #3 Bundle compliance provides real open/on-POAM/no-POAM/overdue/awaiting-verification/closed rollups and no N+1 visible-list queries.
 - [ ] #4 Assignment POAM references are first-class relationships and do not mutate immutable assignment versions.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Phase 6 implementation plan
+
+1. Add the explicitly authorized minimal Phase-5 contract correction, preserving server authority and authorization: bounded batch finding-remediation lookup by authoritative assessment IDs (active plus completed history), server-filtered compatible POA&M search from an authoritative failing assessment, and bounded assignment-version relationship lookup. Reuse existing visibility, compatibility, one-active-remediation, list/detail summary, and pagination logic; add focused HTTP/DB tests and record the correction on TASK-433.6.
+2. Add one typed Web UI POA&M API module mirroring Phase-5 DTOs and error envelopes. Centralize authenticated GET and CSRF mutations, revisions, 403/404/409/412 mapping, bounded batch chunking (100 IDs), stale-response suppression, and authoritative-response reconciliation.
+3. Build a shared route/state-driven POA&M detail tray used by compliance, system, bundle, and assignment surfaces. Include metadata, lifecycle, verification/closure/reopen, findings, exact evidence navigation, assignment references, plan, milestones, activity/notes, and deliberate loading/not-visible/error/conflict states.
+4. Integrate failed evidence rows with a separate remediation dimension: active and historical POA&M lookup, real-context Create, server-compatible Link Existing, exact stable-ID navigation, and explicit copy/tests proving FAIL remains FAIL and waiver actions remain separate.
+5. Integrate System Detail compliance with committed server rollup counts and Open/Overdue/Closed/All filters, compact real POA&M rows, common detail, and exact linked-finding navigation. Use batched system rollups for visible lists rather than per-row calls.
+6. Integrate bundle compliance with authoritative open/on-POA&M/no-POA&M/overdue/awaiting-verification/completed rollups and filtered real rows. Chunk visible bundle IDs by 100 and add request-count instrumentation proving no N+1.
+7. Integrate immutable assignment-version relationships in the existing assignment surface using the separate relationship API only. Display and open referenced POA&Ms; link/unlink against exact assignment version/revision; prove assignment identity/digest/config and current-version pointer remain unchanged.
+8. Add pure DTO/presentation/navigation/error tests plus real server-backed browser workflows for finding create/link, detail edits/milestones/activity, closure rejection while FAIL, system integration, bundle rollups/no-N+1, and assignment link/unlink immutability. Extend the coverage manifest and critical Web UI checks; capture supported screenshots.
+9. Run exact TASK-433.7 verification, focused Phase-5 contract tests, syntax/diff checks, then perform independent requirements/API-authority/UI-state/E2E/performance/regression/design-comparison reviews. Resolve all P0/P1/P2.
+10. Only after AC1-AC4 are objectively proven: check exactly four ACs, move TASK-433.7 to Review, update TASK-433.6 correction evidence and MR !318, commit/push the rebased branch, confirm clean local/remote SHA and CI, then stop before Phase 7.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
