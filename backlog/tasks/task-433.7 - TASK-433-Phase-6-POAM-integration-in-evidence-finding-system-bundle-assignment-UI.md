@@ -3,9 +3,11 @@ id: TASK-433.7
 title: >-
   TASK-433 Phase 6: POA&M integration in evidence/finding, system, bundle,
   assignment UI
-status: Backlog
-assignee: []
+status: In Progress
+assignee:
+  - '@opencode-agent'
 created_date: '2026-08-23 01:43'
+updated_date: '2026-08-27 03:15'
 labels:
   - design-parity
   - poam
@@ -57,3 +59,9 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 - [ ] #3 Bundle compliance provides real open/on-POAM/no-POAM/overdue/awaiting-verification/closed rollups and no N+1 visible-list queries.
 - [ ] #4 Assignment POAM references are first-class relationships and do not mutate immutable assignment versions.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Preflight: rebased `TASK-433-policy-poam-workflows` onto current `origin/dev` (`79153f74`) without discarding later legitimate changes. Replayed Phase 1-5 implementation; Phase-5 commit is now `42488e89` (rebased equivalent of accepted `68904343`) and remains the branch head before Phase 6. TASK-433.6 is Review with all six ACs checked and successful exact-head pipeline 2794857147 recorded. Dedicated worktree is `/home/mcamp/code/crystal-forge/TASK-433-policy-poam-workflows`; scope is exactly AC1-AC4, with Phase 7 dashboard/notifications/coach explicitly excluded.
+<!-- SECTION:NOTES:END -->
